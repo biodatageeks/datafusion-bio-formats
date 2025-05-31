@@ -4,6 +4,14 @@ use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use opendal::services::{Gcs, S3};
 use opendal::{FuturesBytesStream, Operator};
 use tokio_util::io::StreamReader;
+
+pub struct ObjectStorageOptions {
+    pub chunk_size: Option<usize>,
+    pub concurrent_fetches: Option<usize>,
+    pub allow_anonymous: bool,
+    pub enable_request_payer: bool,
+}
+
 pub enum CompressionType {
     GZIP,
     BGZF,
@@ -114,7 +122,7 @@ pub async fn get_remote_stream(
 
     match storage_type {
         StorageType::S3 => {
-            let builder = S3::default()
+            let mut builder = S3::default()
                 .region(
                     &S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
                         .await
@@ -122,8 +130,7 @@ pub async fn get_remote_stream(
                 )
                 .bucket(bucket_name.as_str())
                 .disable_ec2_metadata()
-                .allow_anonymous();
-
+                .allow_anonymous(); // Enable request payer for S3 buckets
             let operator = Operator::new(builder)?
                 .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(300))) // 5 minutes
                 .layer(RetryLayer::new().with_max_times(5)) // Retry up to 5 times

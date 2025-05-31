@@ -2202,9 +2202,9 @@ dependencies = [
 
 [[package]]
 name = "noodles"
-version = "0.91.0"
+version = "0.93.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abe598fe237b539488e581c7ec5e6a8c253dfddce8425442ed3135adf8a779df"
+checksum = "74eea88cacba7e16cb6aff1bc3e077f3f9e036e59b9107a8415bf9242d0c2d97"
 dependencies = [
  "noodles-bam",
  "noodles-bcf",
@@ -2240,9 +2240,9 @@ dependencies = [
 
 [[package]]
 name = "noodles-bcf"
-version = "0.70.0"
+version = "0.71.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a54167971ced0f1bf609b350eb6a879438360ec17d833b37074205bc0c006e49"
+checksum = "c76d44299bdc4c950dcbbfeb87b99e79de9c4082f51d892a6d7aa194fba27613"
 dependencies = [
  "byteorder",
  "futures",
@@ -2284,15 +2284,14 @@ dependencies = [
 
 [[package]]
 name = "noodles-cram"
-version = "0.77.0"
+version = "0.79.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df750fe7f5ed0dc0dccccbcc099e503d37880eaed88c1b35849c5fa3c46075e3"
+checksum = "c75663c2a0d6f0142581f810702add845d99b89dea2e3b8b472f7a18b7ffc2c3"
 dependencies = [
  "async-compression",
  "bitflags 2.9.1",
  "bstr",
  "byteorder",
- "bytes",
  "bzip2 0.5.2",
  "flate2",
  "futures",
@@ -2565,9 +2564,9 @@ checksum = "a4895175b425cb1f87721b59f0f286c2092bd4af812243672510e1ac53e2e0ad"
 
 [[package]]
 name = "opendal"
-version = "0.51.2"
+version = "0.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b1063ea459fa9e94584115743b06330f437902dd1d9f692b863ef1875a20548"
+checksum = "f947c4efbca344c1a125753366033c8107f552b2e3f8251815ed1908f116ca3e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2579,11 +2578,11 @@ dependencies = [
  "futures",
  "getrandom 0.2.16",
  "http",
+ "http-body",
  "log",
  "md-5",
- "once_cell",
  "percent-encoding",
- "quick-xml 0.36.2",
+ "quick-xml",
  "reqsign",
  "reqwest",
  "serde",
@@ -2874,16 +2873,6 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
-dependencies = [
- "memchr",
- "serde",
-]
-
-[[package]]
-name = "quick-xml"
 version = "0.37.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "331e97a1af0bf59823e6eadffe373d7b27f485be8748f71471c662c1f269b7fb"
@@ -3078,7 +3067,7 @@ dependencies = [
  "jsonwebtoken",
  "log",
  "percent-encoding",
- "quick-xml 0.37.5",
+ "quick-xml",
  "rand 0.8.5",
  "reqwest",
  "rsa",
