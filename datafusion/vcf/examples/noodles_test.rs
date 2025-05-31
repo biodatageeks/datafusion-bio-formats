@@ -27,9 +27,13 @@ use opendal::services::S3;
 // const BUCKET: &str = "gcp-public-data--gnomad";
 const BUCKET: &str = "gnomad-public-us-east-1";
 const NAME: &str = "release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz";
+const BATCH_SIZE: usize = 100000;
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+    let start_time = std::time::Instant::now();
+
     let builder = S3::default()
         .region("us-east-1")
         .bucket(BUCKET)
@@ -40,37 +44,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(LoggingLayer::default())
         .finish();
 
+    let setup_time = start_time.elapsed();
+    println!("Setup time: {:?}", setup_time);
+
+    let stream_start = std::time::Instant::now();
     let stream = operator.reader_with(NAME)
         .chunk(16 * 1024 * 1024)
         .concurrent(2)
         .await?.into_bytes_stream(..).await?;
-    // let stream = operator.reader_with(NAME)
-    //     .concurrent(8)
-    //     .await?.into_bytes_stream(..).await?;
+    let stream_time = stream_start.elapsed();
+    println!("Stream setup time: {:?}", stream_time);
+
     let inner = bgzf::r#async::Reader::new(StreamReader::new(stream));
     let mut reader = vcf::r#async::io::Reader::new(inner);
-    //
-    info!("Reading header");
-    let mut  count = 0;
+
+    println!("Reading header");
+    let mut count = 0;
+    let mut batch_start = std::time::Instant::now();
+    let mut batch_count = 0;
+
     loop {
         let record = reader.records().next().await;
         if record.is_none() {
             break;
         };
         count += 1;
-        if count % 100000 == 0 {
-            info!("Number of records: {}", count);
+        batch_count += 1;
+
+        if batch_count == BATCH_SIZE {
+            let batch_time = batch_start.elapsed();
+            let records_per_sec = BATCH_SIZE as f64 / batch_time.as_secs_f64();
+            println!(
+                "Processed batch of {} records in {:?} ({:.2} records/sec). Total records: {}", 
+                BATCH_SIZE, batch_time, records_per_sec, count
+            );
+            batch_count = 0;
+            batch_start = std::time::Instant::now();
         }
     }
-    println!("Number of records: {}", count);
+
+    let total_time = start_time.elapsed();
+    let avg_speed = count as f64 / total_time.as_secs_f64();
+    println!("Total records processed: {}", count);
+    println!("Total time: {:?}", total_time);
+    println!("Average speed: {:.2} records/sec", avg_speed);
     Ok(())
 }
 
 
-let builder = Gcs::default()
-    .bucket(BUCKET)
-    .disable_vm_metadata()
-    .allow_anonymous();
+// let builder = Gcs::default()
+//     .bucket(BUCKET)
+//     .disable_vm_metadata()
+//     .allow_anonymous();
 //
 // let operator = Operator::new(builder)?.finish();
 //

@@ -2,13 +2,10 @@ use std::fs::File;
 use std::io::Error;
 use std::num::NonZero;
 use std::sync::Arc;
-use async_stream::stream;
 use bytes::Bytes;
 use datafusion::arrow;
 use datafusion::arrow::array::StringBuilder;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::ipc::RecordBatch;
-use datafusion::datasource::MemTable;
 use futures::{stream, StreamExt};
 use futures::stream::BoxStream;
 use log::debug;
@@ -86,8 +83,6 @@ fn get_file_path(file_path: String) -> String {
 }
 
 
-
-
 pub fn get_compression_type(file_path: String) -> CompressionType {
     //extract the file extension from path
     if file_path.to_lowercase().ends_with(".vcf") {
@@ -97,7 +92,6 @@ pub fn get_compression_type(file_path: String) -> CompressionType {
     //return the compression type
     CompressionType::from_string(file_extension.to_string())
 }
-
 
 
 pub async fn get_remote_stream_bgzf(file_path: String, chunk_size: usize, concurrent_fetches: usize) ->  Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
@@ -121,10 +115,6 @@ pub fn get_storage_type(file_path: String) -> StorageType {
 
 }
 
-
-
-
-
 fn get_bucket_name(file_path: String) -> String {
     //extract the bucket name from the file path
     let bucket_name = file_path.split("://").last().unwrap().split('/').next().unwrap();
@@ -132,11 +122,38 @@ fn get_bucket_name(file_path: String) -> String {
     bucket_name.to_string()
 }
 
-pub async fn get_remote_stream(file_path: String, chunk_size: usize, concurrent_fetches: usize) ->  Result<FuturesBytesStream, opendal::Error> {
+pub async fn get_remote_stream(file_path: String, chunk_size: usize, concurrent_fetches: usize) -> Result<FuturesBytesStream, opendal::Error> {
     let storage_type = get_storage_type(file_path.clone());
     let bucket_name = get_bucket_name(file_path.clone());
     let file_path = get_file_path(file_path.clone());
+    
     match storage_type {
+        StorageType::S3 => {
+            let builder = S3::default()
+                .region(&S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str()).await.unwrap())
+                .bucket(bucket_name.as_str())
+                .disable_ec2_metadata()
+                .allow_anonymous();
+                
+            let operator = Operator::new(builder)?
+                .layer(TimeoutLayer::new()
+                    .with_io_timeout(std::time::Duration::from_secs(300)))  // 5 minutes
+                .layer(RetryLayer::new()
+                    .with_max_times(5))  // Retry up to 5 times
+                .layer(LoggingLayer::default())
+                .finish();
+
+            // Reduce chunk size and increase concurrency for better reliability
+            let adjusted_chunk_size = chunk_size.min(8 * 1024 * 1024); // Max 8MB chunks
+            let adjusted_concurrency = concurrent_fetches.max(4); // Min 4 concurrent fetches
+
+            operator.reader_with(file_path.as_str())
+                .chunk(adjusted_chunk_size)
+                .concurrent(adjusted_concurrency)
+                .await?
+                .into_bytes_stream(..)
+                .await
+        }
         StorageType::GCS => {
             let builder = Gcs::default()
                 .bucket(bucket_name.as_str())
@@ -152,20 +169,6 @@ pub async fn get_remote_stream(file_path: String, chunk_size: usize, concurrent_
                 .concurrent(concurrent_fetches)
                 .await?.into_bytes_stream(..).await
         }
-        StorageType::S3 => {
-            let builder = S3::default()
-                .region(&S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str()).await.unwrap())
-                .bucket(bucket_name.as_str())
-                .disable_ec2_metadata()
-                .allow_anonymous();
-            let operator =  Operator::new(builder)?
-                .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(120)))
-                .layer(RetryLayer::new().with_max_times(3))
-                .layer(LoggingLayer::default())
-                .finish();
-            operator.reader_with(file_path.as_str()).concurrent(1).await?.into_bytes_stream(..).await
-        }
-
         _ => panic!("Invalid object storage type"),
     }
 }
@@ -182,16 +185,12 @@ pub async fn get_remote_vcf_reader(file_path: String, chunk_size: usize, concurr
     reader
 }
 
-
-
-
 pub fn get_local_vcf_bgzf_reader(file_path: String, thread_num: usize) -> Result<Reader<MultithreadedReader<File>>, Error> {
     debug!("Reading VCF file from local storage with {} threads", thread_num);
     File::open(file_path)
         .map(|f| noodles_bgzf::MultithreadedReader::with_worker_count(NonZero::new(thread_num).unwrap(), f))
         .map(vcf::io::Reader::new)
 }
-
 
 pub async fn get_local_vcf_reader(file_path: String) -> Result<vcf::r#async::io::Reader<BufReader<tokio::fs::File>>, Error> {
     debug!("Reading VCF file from local storage with async reader");
@@ -201,7 +200,6 @@ pub async fn get_local_vcf_reader(file_path: String) -> Result<vcf::r#async::io:
         .map(vcf::r#async::io::Reader::new)?;
     Ok(reader)
 }
-
 
 pub async fn get_local_vcf_header(file_path: String, thread_num: usize) -> Result<vcf::Header, Error> {
     let compression_type = get_compression_type(file_path.clone());
@@ -267,6 +265,7 @@ impl VcfRemoteReader {
             }
         }
     }
+    
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
             VcfRemoteReader::BGZF(reader) => {
@@ -277,6 +276,7 @@ impl VcfRemoteReader {
             }
         }
     }
+
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfRemoteReader::BGZF(reader) => {
@@ -323,6 +323,7 @@ impl VcfLocalReader {
             }
         }
     }
+
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
             VcfLocalReader::BGZF(reader) => {
@@ -344,6 +345,7 @@ impl VcfLocalReader {
             }
         }
     }
+
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfLocalReader::BGZF(reader) => {
@@ -413,6 +415,7 @@ impl VcfReader {
             }
         }
     }
+
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfReader::Local(reader) => {
@@ -423,6 +426,7 @@ impl VcfReader {
             }
         }
     }
+
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             VcfReader::Local(reader) => {
@@ -433,5 +437,4 @@ impl VcfReader {
             }
         }
     }
-
 }

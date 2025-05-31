@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-20.04
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+        with:
+          submodules: "recursive"
+          fetch-depth: 1
+
+      - name: Setup Rust
+        uses: actions/setup-rust@v2
+        with:
+          rust-version: 'stable'
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            datafusion/vcf/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('datafusion/vcf/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        working-directory: datafusion/vcf
+        run: cargo fmt --all -- --check
+
+      - name: Lint with Clippy
+        working-directory: datafusion/vcf
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        working-directory: datafusion/vcf
+        run: cargo test --all --verbose
+
+      - name: Build selected examples
+        working-directory: datafusion/vcf
+        run: |
+          cargo build --example datafusion_integration
+          cargo build --example noodles_test
+
+      - name: Run selected examples
+        working-directory: datafusion/vcf
+        run: |
+          examples=("datafusion_integration" "noodles_test")
+          for example in "${examples[@]}"; do
+            echo "Running example: $example"
+            cargo run --example "$example"
+          done
+
