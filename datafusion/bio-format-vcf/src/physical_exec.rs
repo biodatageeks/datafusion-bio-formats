@@ -2,7 +2,7 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use crate::storage::{StorageType, VcfLocalReader, VcfRemoteReader, get_storage_type};
+use crate::storage::{VcfLocalReader, VcfRemoteReader};
 use crate::table_provider::{OptionalField, info_to_arrow_type};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
@@ -12,6 +12,8 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_bio_format_core::object_storage::StorageType;
+use datafusion_bio_format_core::object_storage::get_storage_type;
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::{StreamExt, TryStreamExt};
 use log::debug;

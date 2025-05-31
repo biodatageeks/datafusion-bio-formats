@@ -2,12 +2,18 @@
 resolver = "2"
 
 members = [
-    "datafusion/vcf",
+    "datafusion/bio-format-core",
+    "datafusion/bio-format-vcf",
 ]
 
 [workspace.dependencies]
 datafusion = "43.0.0"
 datafusion-execution = "43.0.0"
 async-trait = "0.1.85"
-object_store = { version = "0.11"}
+opendal = { version = "0.51.2", features = ["services-gcs", "services-s3","layers-blocking"] }
+noodles = { version = "0.91.0",  features = ["bam", "sam", "vcf", "bgzf", "async"] }
+noodles-bgzf = { version = "0.36.0" ,features = ["libdeflate"] }
+tokio = { version = "1.43.0", features = ["rt-multi-thread", "rt", "macros"] }
+tokio-util = {  version="0.7.13", features = ["io-util", "compat"] }
+bytes = "1.10.0"
 
