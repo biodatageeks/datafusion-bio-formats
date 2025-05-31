@@ -1,3 +1,4 @@
+use log;
 use noodles::bgzf;
 use noodles_bgzf::AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
@@ -5,6 +6,7 @@ use opendal::services::{Gcs, S3};
 use opendal::{FuturesBytesStream, Operator};
 use tokio_util::io::StreamReader;
 
+#[derive(Clone, Debug)]
 pub struct ObjectStorageOptions {
     pub chunk_size: Option<usize>,
     pub concurrent_fetches: Option<usize>,
@@ -75,12 +77,10 @@ pub fn get_compression_type(file_path: String) -> CompressionType {
 
 pub async fn get_remote_stream_bgzf(
     file_path: String,
-    chunk_size: usize,
-    concurrent_fetches: usize,
+    object_storage_options: ObjectStorageOptions,
 ) -> Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
-    let remote_stream = StreamReader::new(
-        get_remote_stream(file_path.clone(), chunk_size, concurrent_fetches).await?,
-    );
+    let remote_stream =
+        StreamReader::new(get_remote_stream(file_path.clone(), object_storage_options).await?);
     Ok(bgzf::r#async::Reader::new(remote_stream))
 }
 
@@ -113,16 +113,22 @@ fn get_bucket_name(file_path: String) -> String {
 
 pub async fn get_remote_stream(
     file_path: String,
-    chunk_size: usize,
-    concurrent_fetches: usize,
+    object_storage_options: ObjectStorageOptions,
 ) -> Result<FuturesBytesStream, opendal::Error> {
     let storage_type = get_storage_type(file_path.clone());
     let bucket_name = get_bucket_name(file_path.clone());
     let file_path = get_file_path(file_path.clone());
+    let chunk_size = object_storage_options.clone().chunk_size.unwrap_or(64);
+    let concurrent_fetches = object_storage_options
+        .clone()
+        .concurrent_fetches
+        .unwrap_or(8);
+    let allow_anonymous = object_storage_options.allow_anonymous;
+    let _enable_request_payer = object_storage_options.enable_request_payer;
 
     match storage_type {
         StorageType::S3 => {
-            let mut builder = S3::default()
+            let builder = S3::default()
                 .region(
                     &S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
                         .await
@@ -150,6 +156,17 @@ pub async fn get_remote_stream(
                 .await
         }
         StorageType::GCS => {
+            log::info!(
+                "Using GCS storage type with parameters: \
+                bucket_name: {},\
+                chunk_size: {},\
+                concurrent_fetches: {},\
+                allow_anonymous: {},",
+                bucket_name,
+                chunk_size,
+                concurrent_fetches,
+                allow_anonymous
+            );
             let builder = Gcs::default()
                 .bucket(bucket_name.as_str())
                 .disable_vm_metadata()

@@ -11,6 +11,7 @@ use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{ExecutionMode, ExecutionPlan, PlanProperties};
+use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use futures::executor::block_on;
 use log::debug;
 use noodles::vcf::header::Formats;
@@ -25,8 +26,9 @@ async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
     format_fields: &Option<Vec<String>>,
+    object_storage_options: &Option<ObjectStorageOptions>,
 ) -> datafusion::common::Result<SchemaRef> {
-    let header = get_header(file_path.to_string()).await?;
+    let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
     let header_infos = header.infos();
     let header_formats = header.formats();
 
@@ -93,8 +95,7 @@ pub struct VcfTableProvider {
     format_fields: Option<Vec<String>>,
     schema: SchemaRef,
     thread_num: Option<usize>,
-    chunk_size: Option<usize>,
-    concurrent_fetches: Option<usize>,
+    object_storage_options: Option<ObjectStorageOptions>,
 }
 
 impl VcfTableProvider {
@@ -103,13 +104,13 @@ impl VcfTableProvider {
         info_fields: Option<Vec<String>>,
         format_fields: Option<Vec<String>>,
         thread_num: Option<usize>,
-        chunk_size: Option<usize>,
-        concurrent_fetches: Option<usize>,
+        object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
         let schema = block_on(determine_schema_from_header(
             &file_path,
             &info_fields,
             &format_fields,
+            &object_storage_options,
         ))?;
         Ok(Self {
             file_path,
@@ -117,8 +118,7 @@ impl VcfTableProvider {
             format_fields,
             schema,
             thread_num,
-            chunk_size,
-            concurrent_fetches,
+            object_storage_options,
         })
     }
 }
@@ -178,8 +178,7 @@ impl TableProvider for VcfTableProvider {
             projection: projection.cloned(),
             limit,
             thread_num: self.thread_num,
-            chunk_size: self.chunk_size,
-            concurrent_fetches: self.concurrent_fetches,
+            object_storage_options: self.object_storage_options.clone(),
         }))
     }
 }

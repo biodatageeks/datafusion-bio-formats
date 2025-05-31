@@ -10,3 +10,4 @@ noodles-bgzf.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
+log = "0.4.27"

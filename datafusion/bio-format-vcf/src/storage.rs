@@ -2,8 +2,8 @@ use bytes::Bytes;
 use datafusion::arrow;
 use datafusion::arrow::array::StringBuilder;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion_bio_format_core::object_storage::CompressionType;
 use datafusion_bio_format_core::object_storage::StorageType;
+use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use datafusion_bio_format_core::object_storage::{
     get_compression_type, get_remote_stream, get_remote_stream_bgzf, get_storage_type,
 };
@@ -24,10 +24,9 @@ use tokio_util::io::StreamReader;
 
 pub async fn get_remote_vcf_bgzf_reader(
     file_path: String,
-    chunk_size: usize,
-    concurrent_fetches: usize,
+    object_storage_options: ObjectStorageOptions,
 ) -> vcf::r#async::io::Reader<AsyncReader<StreamReader<FuturesBytesStream, Bytes>>> {
-    let inner = get_remote_stream_bgzf(file_path.clone(), chunk_size, concurrent_fetches)
+    let inner = get_remote_stream_bgzf(file_path.clone(), object_storage_options)
         .await
         .unwrap();
     let reader = vcf::r#async::io::Reader::new(inner);
@@ -36,11 +35,10 @@ pub async fn get_remote_vcf_bgzf_reader(
 
 pub async fn get_remote_vcf_reader(
     file_path: String,
-    chunk_size: usize,
-    concurrent_fetches: usize,
+    object_storage_options: ObjectStorageOptions,
 ) -> vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>> {
     let inner = StreamReader::new(
-        get_remote_stream(file_path.clone(), chunk_size, concurrent_fetches)
+        get_remote_stream(file_path.clone(), object_storage_options)
             .await
             .unwrap(),
     );
@@ -96,29 +94,30 @@ pub async fn get_local_vcf_header(
 
 pub async fn get_remote_vcf_header(
     file_path: String,
-    chunk_size: usize,
-    concurrent_fetches: usize,
+    object_storage_options: ObjectStorageOptions,
 ) -> Result<vcf::Header, Error> {
     let compression_type = get_compression_type(file_path.clone());
     let header = match compression_type {
         CompressionType::BGZF | CompressionType::GZIP => {
-            let mut reader =
-                get_remote_vcf_bgzf_reader(file_path, chunk_size, concurrent_fetches).await;
+            let mut reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
             reader.read_header().await?
         }
         CompressionType::NONE => {
-            let mut reader = get_remote_vcf_reader(file_path, chunk_size, concurrent_fetches).await;
+            let mut reader = get_remote_vcf_reader(file_path, object_storage_options).await;
             reader.read_header().await?
         }
     };
     Ok(header)
 }
 
-pub async fn get_header(file_path: String) -> Result<vcf::Header, Error> {
+pub async fn get_header(
+    file_path: String,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> Result<vcf::Header, Error> {
     let storage_type = get_storage_type(file_path.clone());
     let header = match storage_type {
         StorageType::LOCAL => get_local_vcf_header(file_path, 1).await?,
-        _ => get_remote_vcf_header(file_path, 64, 1).await?,
+        _ => get_remote_vcf_header(file_path, object_storage_options.unwrap().clone()).await?,
     };
     Ok(header)
 }
@@ -129,16 +128,15 @@ pub enum VcfRemoteReader {
 }
 
 impl VcfRemoteReader {
-    pub async fn new(file_path: String, chunk_size: usize, concurrent_fetches: usize) -> Self {
+    pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
         let compression_type = get_compression_type(file_path.clone());
         match compression_type {
             CompressionType::BGZF | CompressionType::GZIP => {
-                let reader =
-                    get_remote_vcf_bgzf_reader(file_path, chunk_size, concurrent_fetches).await;
+                let reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
                 VcfRemoteReader::BGZF(reader)
             }
             CompressionType::NONE => {
-                let reader = get_remote_vcf_reader(file_path, chunk_size, concurrent_fetches).await;
+                let reader = get_remote_vcf_reader(file_path, object_storage_options).await;
                 VcfRemoteReader::PLAIN(reader)
             }
         }
@@ -260,8 +258,7 @@ impl VcfReader {
     pub async fn new(
         file_path: String,
         thread_num: Option<usize>,
-        chunk_size: Option<usize>,
-        concurrency_fetches: Option<usize>,
+        object_storage_options: Option<ObjectStorageOptions>,
     ) -> Self {
         let storage_type = get_storage_type(file_path.clone());
         match storage_type {
@@ -269,12 +266,7 @@ impl VcfReader {
                 VcfReader::Local(VcfLocalReader::new(file_path, thread_num.unwrap_or(1)).await)
             }
             _ => VcfReader::Remote(
-                VcfRemoteReader::new(
-                    file_path,
-                    chunk_size.unwrap_or(64),
-                    concurrency_fetches.unwrap_or(8),
-                )
-                .await,
+                VcfRemoteReader::new(file_path, object_storage_options.unwrap()).await,
             ),
         }
     }
