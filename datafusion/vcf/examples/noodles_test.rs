@@ -1,27 +1,27 @@
-use std::io;
-use std::slice::SliceIndex;
-use std::sync::Arc;
-use bytes::Bytes;
-use datafusion::arrow::datatypes::DataType::Int64;
-use tokio_util::io::{StreamReader, SyncIoBridge};
-use noodles_bgzf as bgzf;
-use object_store::gcp::GoogleCloudStorageBuilder;
-use object_store::ObjectStore;
-use object_store::path::Path;
+// use bytes::Bytes;
 use datafusion::error::Result;
-use datafusion::parquet::arrow::async_reader::AsyncFileReader;
-use futures::{FutureExt, StreamExt, TryStreamExt};
-// use noodles_vcf as vcf;
-use object_store::buffered::BufReader;
-use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeek};
+use noodles_bgzf as bgzf;
+// use object_store::ObjectStore;
+// use object_store::gcp::GoogleCloudStorageBuilder;
+// use object_store::path::Path;
+// use std::io;
+// use std::slice::SliceIndex;
+// use std::sync::Arc;
+use futures::StreamExt;
+// use datafusion::arrow::datatypes::DataType::Int64;
+// use datafusion::parquet::arrow::async_reader::AsyncFileReader;
+use tokio_util::io::StreamReader;
+// use object_store::buffered::BufReader;
+// use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeek};
 
 // use opendal::Result;
-use opendal::layers::LoggingLayer;
-use opendal::services;
+// use log::{info, log};
+use noodles::vcf;
 use opendal::Operator;
-use opendal::services::Gcs;
-use noodles::{bam, sam, vcf};
-use log::{info, log};
+use opendal::layers::LoggingLayer;
+#[allow(unused_imports)]
+use opendal::services;
+// use opendal::services::Gcs;
 use opendal::services::S3;
 
 // const BUCKET: &str = "gcp-public-data--gnomad";
@@ -48,10 +48,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Setup time: {:?}", setup_time);
 
     let stream_start = std::time::Instant::now();
-    let stream = operator.reader_with(NAME)
+    let stream = operator
+        .reader_with(NAME)
         .chunk(16 * 1024 * 1024)
         .concurrent(2)
-        .await?.into_bytes_stream(..).await?;
+        .await?
+        .into_bytes_stream(..)
+        .await?;
     let stream_time = stream_start.elapsed();
     println!("Stream setup time: {:?}", stream_time);
 
@@ -75,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_time = batch_start.elapsed();
             let records_per_sec = BATCH_SIZE as f64 / batch_time.as_secs_f64();
             println!(
-                "Processed batch of {} records in {:?} ({:.2} records/sec). Total records: {}", 
+                "Processed batch of {} records in {:?} ({:.2} records/sec). Total records: {}",
                 BATCH_SIZE, batch_time, records_per_sec, count
             );
             batch_count = 0;
@@ -91,7 +94,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 // let builder = Gcs::default()
 //     .bucket(BUCKET)
 //     .disable_vm_metadata()
@@ -101,9 +103,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //
 // let stream = operator.reader(NAME).await?.into_bytes_stream(..).await?;
 // let inner = StreamReader::new(stream);
-
-
-
 
 // let stdout = io::stdout();
 // let mut writer = sam::r#async::io::Writer::new(stdout);

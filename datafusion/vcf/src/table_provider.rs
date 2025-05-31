@@ -1,8 +1,9 @@
-use std::any::Any;
-use std::fmt::Debug;
-use std::sync::Arc;
+use crate::physical_exec::VcfExec;
+use crate::storage::get_header;
 use async_trait::async_trait;
-use datafusion::arrow::array::{ArrayRef, BooleanBuilder, Float32Builder, Int32Builder, ListBuilder, StringBuilder};
+use datafusion::arrow::array::{
+    ArrayRef, BooleanBuilder, Float32Builder, Int32Builder, ListBuilder, StringBuilder,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::catalog::{Session, TableProvider};
@@ -12,19 +13,19 @@ use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{ExecutionMode, ExecutionPlan, PlanProperties};
 use futures::executor::block_on;
 use log::debug;
-use noodles::vcf::header::Infos;
-use noodles::vcf::header::record::value::map::info::{Number, Type as InfoType};
-use noodles::vcf::header::record::value::map::format::Type as FormatType;
 use noodles::vcf::header::Formats;
-use crate::physical_exec::VcfExec;
-use crate::storage::get_header;
+use noodles::vcf::header::Infos;
+use noodles::vcf::header::record::value::map::format::Type as FormatType;
+use noodles::vcf::header::record::value::map::info::{Number, Type as InfoType};
+use std::any::Any;
+use std::fmt::Debug;
+use std::sync::Arc;
 
 async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
     format_fields: &Option<Vec<String>>,
 ) -> datafusion::common::Result<SchemaRef> {
-
     let header = get_header(file_path.to_string()).await?;
     let header_infos = header.infos();
     let header_formats = header.formats();
@@ -32,7 +33,7 @@ async fn determine_schema_from_header(
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt32, false),
-        Field::new("end",DataType::UInt32, false),
+        Field::new("end", DataType::UInt32, false),
         Field::new("id", DataType::Utf8, true),
         Field::new("ref", DataType::Utf8, false),
         Field::new("alt", DataType::Utf8, false),
@@ -56,7 +57,11 @@ async fn determine_schema_from_header(
         Some(formats) => {
             for tag in formats {
                 let dtype = format_to_arrow_type(&header_formats, &tag);
-                fields.push(Field::new(format!("format_{}", tag.to_lowercase()), dtype, true));
+                fields.push(Field::new(
+                    format!("format_{}", tag.to_lowercase()),
+                    dtype,
+                    true,
+                ));
             }
         }
         _ => {}
@@ -78,7 +83,6 @@ fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
         FormatType::Float => DataType::Float32,
         FormatType::Character => DataType::Utf8,
         FormatType::String => DataType::Utf8,
-        _ => DataType::Utf8,
     }
 }
 
@@ -91,7 +95,6 @@ pub struct VcfTableProvider {
     thread_num: Option<usize>,
     chunk_size: Option<usize>,
     concurrent_fetches: Option<usize>,
-
 }
 
 impl VcfTableProvider {
@@ -103,7 +106,11 @@ impl VcfTableProvider {
         chunk_size: Option<usize>,
         concurrent_fetches: Option<usize>,
     ) -> datafusion::common::Result<Self> {
-        let schema = block_on(determine_schema_from_header(&file_path, &info_fields, &format_fields))?;
+        let schema = block_on(determine_schema_from_header(
+            &file_path,
+            &info_fields,
+            &format_fields,
+        ))?;
         Ok(Self {
             file_path,
             info_fields,
@@ -115,8 +122,6 @@ impl VcfTableProvider {
         })
     }
 }
-
-
 
 #[async_trait]
 impl TableProvider for VcfTableProvider {
@@ -135,7 +140,13 @@ impl TableProvider for VcfTableProvider {
         // todo!()
     }
 
-    async fn scan(&self, _state: &dyn Session, projection: Option<&Vec<usize>>, _filters: &[Expr], limit: Option<usize>) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        limit: Option<usize>,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         debug!("VcfTableProvider::scan");
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -144,7 +155,8 @@ impl TableProvider for VcfTableProvider {
                     Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
                 }
                 Some(indices) => {
-                    let projected_fields: Vec<Field> = indices.iter().map(|&i| schema.field(i).clone()).collect();
+                    let projected_fields: Vec<Field> =
+                        indices.iter().map(|&i| schema.field(i).clone()).collect();
                     Arc::new(Schema::new(projected_fields))
                 }
                 None => schema.clone(),
@@ -154,9 +166,11 @@ impl TableProvider for VcfTableProvider {
         let schema = project_schema(&self.schema, projection);
 
         Ok(Arc::new(VcfExec {
-            cache: PlanProperties::new( EquivalenceProperties::new(schema.clone()),
-                                        Partitioning::UnknownPartitioning(1),
-                                        ExecutionMode::Bounded),
+            cache: PlanProperties::new(
+                EquivalenceProperties::new(schema.clone()),
+                Partitioning::UnknownPartitioning(1),
+                ExecutionMode::Bounded,
+            ),
             file_path: self.file_path.clone(),
             schema: schema.clone(),
             info_fields: self.info_fields.clone(),
@@ -170,9 +184,6 @@ impl TableProvider for VcfTableProvider {
     }
 }
 
-
-
-
 pub fn info_to_arrow_type(infos: &Infos, field: &str) -> DataType {
     match infos.get(field) {
         Some(t) => {
@@ -185,13 +196,18 @@ pub fn info_to_arrow_type(infos: &Infos, field: &str) -> DataType {
 
             match t.number() {
                 Number::Count(0) | Number::Count(1) => inner,
-                Number::Count(_) | Number::Unknown | Number::AlternateBases | Number::ReferenceAlternateBases | Number::Samples => {
-                    DataType::List(Arc::new(Field::new("item", inner, true)))
-                }
+                Number::Count(_)
+                | Number::Unknown
+                | Number::AlternateBases
+                | Number::ReferenceAlternateBases
+                | Number::Samples => DataType::List(Arc::new(Field::new("item", inner, true))),
             }
         }
         None => {
-            log::warn!("VCF tag '{}' not found in header; defaulting to Utf8", field);
+            log::warn!(
+                "VCF tag '{}' not found in header; defaulting to Utf8",
+                field
+            );
             DataType::Utf8
         }
     }
@@ -210,21 +226,50 @@ pub enum OptionalField {
 }
 
 impl OptionalField {
-    pub(crate) fn new(data_type: &DataType, batch_size: usize) -> Result<OptionalField, ArrowError> {
+    pub(crate) fn new(
+        data_type: &DataType,
+        batch_size: usize,
+    ) -> Result<OptionalField, ArrowError> {
         match data_type {
-            DataType::Int32 => Ok(OptionalField::Int32Builder(Int32Builder::with_capacity(batch_size))),
-            DataType::Float32 => Ok(OptionalField::Float32Builder(Float32Builder::with_capacity(batch_size))),
-            DataType::Utf8 => Ok(OptionalField::Utf8Builder(StringBuilder::with_capacity(batch_size, batch_size * 10))),
-            DataType::Boolean => Ok(OptionalField::BooleanBuilder(BooleanBuilder::with_capacity(batch_size))),
-    
+            DataType::Int32 => Ok(OptionalField::Int32Builder(Int32Builder::with_capacity(
+                batch_size,
+            ))),
+            DataType::Float32 => Ok(OptionalField::Float32Builder(
+                Float32Builder::with_capacity(batch_size),
+            )),
+            DataType::Utf8 => Ok(OptionalField::Utf8Builder(StringBuilder::with_capacity(
+                batch_size,
+                batch_size * 10,
+            ))),
+            DataType::Boolean => Ok(OptionalField::BooleanBuilder(
+                BooleanBuilder::with_capacity(batch_size),
+            )),
+
             DataType::List(f) => match f.data_type() {
-                DataType::Int32 => Ok(OptionalField::ArrayInt32Builder(ListBuilder::with_capacity(Int32Builder::with_capacity(batch_size), batch_size))),
-                DataType::Float32 => Ok(OptionalField::ArrayFloat32Builder(ListBuilder::with_capacity(Float32Builder::with_capacity(batch_size), batch_size))),
-                DataType::Utf8 => Ok(OptionalField::ArrayUtf8Builder(ListBuilder::with_capacity(StringBuilder::with_capacity(batch_size, batch_size * 10), batch_size))),
-                DataType::Boolean => Ok(OptionalField::ArrayBooleanBuilder(ListBuilder::with_capacity(BooleanBuilder::with_capacity(batch_size), batch_size))),
-                _ => Err(ArrowError::SchemaError("Unsupported list inner data type".into())),
+                DataType::Int32 => Ok(OptionalField::ArrayInt32Builder(
+                    ListBuilder::with_capacity(Int32Builder::with_capacity(batch_size), batch_size),
+                )),
+                DataType::Float32 => Ok(OptionalField::ArrayFloat32Builder(
+                    ListBuilder::with_capacity(
+                        Float32Builder::with_capacity(batch_size),
+                        batch_size,
+                    ),
+                )),
+                DataType::Utf8 => Ok(OptionalField::ArrayUtf8Builder(ListBuilder::with_capacity(
+                    StringBuilder::with_capacity(batch_size, batch_size * 10),
+                    batch_size,
+                ))),
+                DataType::Boolean => Ok(OptionalField::ArrayBooleanBuilder(
+                    ListBuilder::with_capacity(
+                        BooleanBuilder::with_capacity(batch_size),
+                        batch_size,
+                    ),
+                )),
+                _ => Err(ArrowError::SchemaError(
+                    "Unsupported list inner data type".into(),
+                )),
             },
-    
+
             _ => Err(ArrowError::SchemaError("Unsupported data type".into())),
         }
     }
@@ -266,7 +311,9 @@ impl OptionalField {
                 builder.values().append_slice(&value);
                 Ok(builder.append(true))
             }
-            _ => Err(ArrowError::SchemaError("Expected ArrayFloat32Builder".into())),
+            _ => Err(ArrowError::SchemaError(
+                "Expected ArrayFloat32Builder".into(),
+            )),
         }
     }
 
@@ -303,17 +350,15 @@ impl OptionalField {
     }
 
     pub fn finish(&mut self) -> Result<ArrayRef, ArrowError> {
-    match self {
-        OptionalField::Int32Builder(builder) => Ok(Arc::new(builder.finish())),
-        OptionalField::ArrayInt32Builder(builder) => Ok(Arc::new(builder.finish())),
-        OptionalField::Utf8Builder(builder) => Ok(Arc::new(builder.finish())),
-        OptionalField::ArrayUtf8Builder(builder) => Ok(Arc::new(builder.finish())),
-        OptionalField::Float32Builder(builder) => Ok(Arc::new(builder.finish())),
-        OptionalField::ArrayFloat32Builder(builder) => Ok(Arc::new(builder.finish())),
-        OptionalField::BooleanBuilder(builder) => Ok(Arc::new(builder.finish())),
-        OptionalField::ArrayBooleanBuilder(builder) => Ok(Arc::new(builder.finish())),
+        match self {
+            OptionalField::Int32Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayInt32Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::Utf8Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayUtf8Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::Float32Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayFloat32Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::BooleanBuilder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayBooleanBuilder(builder) => Ok(Arc::new(builder.finish())),
+        }
     }
 }
-}
-
-

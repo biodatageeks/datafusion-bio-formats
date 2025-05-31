@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-test:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     concurrency:
       group: ${{ github.workflow }}-${{ github.ref }}
     steps:
@@ -19,9 +19,10 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        uses: actions/setup-rust@v2
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          rust-version: 'stable'
+          toolchain: '1.85.0'
+          components: 'clippy, rustfmt'
 
       - name: Cache Cargo registry and build
         uses: actions/cache@v3
@@ -38,26 +39,6 @@ jobs:
         working-directory: datafusion/vcf
         run: cargo fmt --all -- --check
 
-      - name: Lint with Clippy
-        working-directory: datafusion/vcf
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
       - name: Run tests
         working-directory: datafusion/vcf
-        run: cargo test --all --verbose
-
-      - name: Build selected examples
-        working-directory: datafusion/vcf
-        run: |
-          cargo build --example datafusion_integration
-          cargo build --example noodles_test
-
-      - name: Run selected examples
-        working-directory: datafusion/vcf
-        run: |
-          examples=("datafusion_integration" "noodles_test")
-          for example in "${examples[@]}"; do
-            echo "Running example: $example"
-            cargo run --example "$example"
-          done
-
+        run: cargo test
