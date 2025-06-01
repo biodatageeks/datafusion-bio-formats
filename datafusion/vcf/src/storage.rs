@@ -1,10 +1,7 @@
-use async_stream::stream;
 use bytes::Bytes;
 use datafusion::arrow;
 use datafusion::arrow::array::StringBuilder;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::ipc::RecordBatch;
-use datafusion::datasource::MemTable;
 use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
@@ -13,7 +10,7 @@ use noodles::vcf::{Header, Record};
 use noodles::{bgzf, vcf};
 use noodles_bgzf::{AsyncReader, MultithreadedReader};
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
-use opendal::services::{Gcs, S3};
+use opendal::services::{S3};
 use opendal::{FuturesBytesStream, Operator};
 use std::fs::File;
 use std::io::Error;
@@ -150,28 +147,6 @@ pub async fn get_remote_stream(
                 .reader_with(file_path.as_str())
                 .chunk(chunk_size * 1024 * 1024)
                 .concurrent(concurrent_fetches)
-                .await?
-                .into_bytes_stream(..)
-                .await
-        }
-        StorageType::S3 => {
-            let builder = S3::default()
-                .region(
-                    &S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
-                        .await
-                        .unwrap(),
-                )
-                .bucket(bucket_name.as_str())
-                .disable_ec2_metadata()
-                .allow_anonymous();
-            let operator = Operator::new(builder)?
-                .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(120)))
-                .layer(RetryLayer::new().with_max_times(3))
-                .layer(LoggingLayer::default())
-                .finish();
-            operator
-                .reader_with(file_path.as_str())
-                .concurrent(1)
                 .await?
                 .into_bytes_stream(..)
                 .await
