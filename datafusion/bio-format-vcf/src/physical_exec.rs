@@ -430,7 +430,7 @@ async fn get_stream(
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
         }
-        StorageType::GCS | StorageType::S3 => {
+        StorageType::GCS | StorageType::S3 | StorageType::AZBLOB | StorageType::HTTP => {
             let stream = get_remote_vcf_stream(
                 file_path.clone(),
                 schema.clone(),
@@ -442,7 +442,6 @@ async fn get_stream(
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
         }
-        _ => panic!("Unsupported storage type"),
     }
 }
 

@@ -10,6 +10,7 @@ use datafusion_bio_format_core::object_storage::{
 use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
+use log::info;
 use noodles::vcf;
 use noodles::vcf::io::Reader;
 use noodles::vcf::{Header, Record};
@@ -78,7 +79,7 @@ pub async fn get_local_vcf_header(
     file_path: String,
     thread_num: usize,
 ) -> Result<vcf::Header, Error> {
-    let compression_type = get_compression_type(file_path.clone());
+    let compression_type = get_compression_type(file_path.clone(), None);
     let header = match compression_type {
         CompressionType::BGZF | CompressionType::GZIP => {
             let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num)?;
@@ -88,6 +89,7 @@ pub async fn get_local_vcf_header(
             let mut reader = get_local_vcf_reader(file_path).await?;
             reader.read_header().await?
         }
+        _ => panic!("Compression type not supported."),
     };
     Ok(header)
 }
@@ -96,7 +98,14 @@ pub async fn get_remote_vcf_header(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<vcf::Header, Error> {
-    let compression_type = get_compression_type(file_path.clone());
+    info!(
+        "Getting remote VCF header with options: {}",
+        object_storage_options
+    );
+    let compression_type = get_compression_type(
+        file_path.clone(),
+        object_storage_options.clone().compression_type,
+    );
     let header = match compression_type {
         CompressionType::BGZF | CompressionType::GZIP => {
             let mut reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
@@ -106,6 +115,7 @@ pub async fn get_remote_vcf_header(
             let mut reader = get_remote_vcf_reader(file_path, object_storage_options).await;
             reader.read_header().await?
         }
+        _ => panic!("Compression type not supported."),
     };
     Ok(header)
 }
@@ -129,7 +139,11 @@ pub enum VcfRemoteReader {
 
 impl VcfRemoteReader {
     pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
-        let compression_type = get_compression_type(file_path.clone());
+        info!("Creating remote VCF reader: {}", object_storage_options);
+        let compression_type = get_compression_type(
+            file_path.clone(),
+            object_storage_options.clone().compression_type,
+        );
         match compression_type {
             CompressionType::BGZF | CompressionType::GZIP => {
                 let reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
@@ -139,6 +153,7 @@ impl VcfRemoteReader {
                 let reader = get_remote_vcf_reader(file_path, object_storage_options).await;
                 VcfRemoteReader::PLAIN(reader)
             }
+            _ => panic!("Compression type not supported."),
         }
     }
 
@@ -177,7 +192,7 @@ pub enum VcfLocalReader {
 
 impl VcfLocalReader {
     pub async fn new(file_path: String, thread_num: usize) -> Self {
-        let compression_type = get_compression_type(file_path.clone());
+        let compression_type = get_compression_type(file_path.clone(), None);
         match compression_type {
             CompressionType::BGZF | CompressionType::GZIP => {
                 let reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
@@ -187,6 +202,7 @@ impl VcfLocalReader {
                 let reader = get_local_vcf_reader(file_path).await.unwrap();
                 VcfLocalReader::PLAIN(reader)
             }
+            _ => panic!("Compression type not supported."),
         }
     }
 
@@ -261,6 +277,10 @@ impl VcfReader {
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> Self {
         let storage_type = get_storage_type(file_path.clone());
+        info!(
+            "Storage type for VCF file {}: {:?}",
+            file_path, storage_type
+        );
         match storage_type {
             StorageType::LOCAL => {
                 VcfReader::Local(VcfLocalReader::new(file_path, thread_num.unwrap_or(1)).await)
