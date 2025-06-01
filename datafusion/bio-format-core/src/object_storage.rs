@@ -4,6 +4,7 @@ use noodles_bgzf::AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use opendal::services::{Gcs, S3};
 use opendal::{FuturesBytesStream, Operator};
+use std::env;
 use tokio_util::io::StreamReader;
 
 #[derive(Clone, Debug)]
@@ -12,6 +13,8 @@ pub struct ObjectStorageOptions {
     pub concurrent_fetches: Option<usize>,
     pub allow_anonymous: bool,
     pub enable_request_payer: bool,
+    pub max_retries: Option<usize>,
+    pub timeout: Option<usize>,
 }
 
 pub enum CompressionType {
@@ -124,33 +127,58 @@ pub async fn get_remote_stream(
         .concurrent_fetches
         .unwrap_or(8);
     let allow_anonymous = object_storage_options.allow_anonymous;
-    let _enable_request_payer = object_storage_options.enable_request_payer;
+    let enable_request_payer = object_storage_options.enable_request_payer;
+    let max_retries = object_storage_options.max_retries.unwrap_or(5);
+    let timeout = object_storage_options.timeout.unwrap_or(300);
 
     match storage_type {
         StorageType::S3 => {
-            let builder = S3::default()
+            log::info!(
+                "Using S3 storage type with parameters: \
+                bucket_name: {}, \
+                allow_anonymous: {}, \
+                enable_request_payer: {}, \
+                max_retries: {}, \
+                timeout: {}",
+                bucket_name,
+                allow_anonymous,
+                enable_request_payer,
+                max_retries,
+                timeout
+            );
+            let mut builder = S3::default()
                 .region(
-                    &S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
-                        .await
-                        .unwrap(),
+                    &env::var("AWS_REGION").unwrap_or(
+                        S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
+                            .await
+                            .unwrap_or("us-east-1".to_string()),
+                    ),
                 )
                 .bucket(bucket_name.as_str())
-                .disable_ec2_metadata()
-                .allow_anonymous(); // Enable request payer for S3 buckets
+                .endpoint(&env::var("AWS_ENDPOINT_URL").unwrap_or_default());
+            if allow_anonymous {
+                builder = builder.disable_ec2_metadata().allow_anonymous();
+            };
+            if enable_request_payer {
+                builder = builder.enable_request_payer();
+            }
             let operator = Operator::new(builder)?
-                .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(300))) // 5 minutes
-                .layer(RetryLayer::new().with_max_times(5)) // Retry up to 5 times
+                .layer(
+                    TimeoutLayer::new()
+                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                ) // 5 minutes
+                .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
                 .layer(LoggingLayer::default())
                 .finish();
 
+            //FIXME: disable because of AWS S3 bug
             // Reduce chunk size and increase concurrency for better reliability
-            let adjusted_chunk_size = chunk_size.min(8 * 1024 * 1024); // Max 8MB chunks
-            let adjusted_concurrency = concurrent_fetches.max(4); // Min 4 concurrent fetches
+            // let adjusted_chunk_size = chunk_size.min(8 * 1024 * 1024); // Max 8MB chunks
+            // let adjusted_concurrency = concurrent_fetches.max(4); // Min 4 concurrent fetches
 
             operator
                 .reader_with(file_path.as_str())
-                .chunk(adjusted_chunk_size)
-                .concurrent(adjusted_concurrency)
+                .concurrent(1)
                 .await?
                 .into_bytes_stream(..)
                 .await
@@ -158,22 +186,29 @@ pub async fn get_remote_stream(
         StorageType::GCS => {
             log::info!(
                 "Using GCS storage type with parameters: \
-                bucket_name: {},\
-                chunk_size: {},\
-                concurrent_fetches: {},\
-                allow_anonymous: {},",
+                bucket_name: {}, \
+                chunk_size: {}, \
+                concurrent_fetches: {}, \
+                allow_anonymous: {}, \
+                max_retries: {}, \
+                timeout: {}",
                 bucket_name,
                 chunk_size,
                 concurrent_fetches,
-                allow_anonymous
+                allow_anonymous,
+                max_retries,
+                timeout,
             );
-            let builder = Gcs::default()
-                .bucket(bucket_name.as_str())
-                .disable_vm_metadata()
-                .allow_anonymous();
+            let mut builder = Gcs::default().bucket(bucket_name.as_str());
+            if allow_anonymous {
+                builder = builder.disable_vm_metadata().allow_anonymous();
+            };
             let operator = Operator::new(builder)?
-                .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(120)))
-                .layer(RetryLayer::new().with_max_times(3))
+                .layer(
+                    TimeoutLayer::new()
+                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                ) // 5 minutes
+                .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
                 .layer(LoggingLayer::default())
                 .finish();
             operator
