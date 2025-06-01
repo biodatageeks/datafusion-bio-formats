@@ -10,7 +10,7 @@ use noodles::vcf::{Header, Record};
 use noodles::{bgzf, vcf};
 use noodles_bgzf::{AsyncReader, MultithreadedReader};
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
-use opendal::services::{Gcs, S3};
+use opendal::services::S3;
 use opendal::{FuturesBytesStream, Operator};
 use std::fs::File;
 use std::io::Error;
@@ -138,30 +138,6 @@ pub async fn get_remote_stream(
                 .bucket(bucket_name.as_str())
                 .disable_ec2_metadata()
                 .allow_anonymous();
-
-            let operator = Operator::new(builder)?
-                .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(300))) // 5 minutes
-                .layer(RetryLayer::new().with_max_times(5)) // Retry up to 5 times
-                .layer(LoggingLayer::default())
-                .finish();
-
-            // Reduce chunk size and increase concurrency for better reliability
-            let adjusted_chunk_size = chunk_size.min(8 * 1024 * 1024); // Max 8MB chunks
-            let adjusted_concurrency = concurrent_fetches.max(4); // Min 4 concurrent fetches
-
-            operator
-                .reader_with(file_path.as_str())
-                .chunk(adjusted_chunk_size)
-                .concurrent(adjusted_concurrency)
-                .await?
-                .into_bytes_stream(..)
-                .await
-        }
-        StorageType::GCS => {
-            let builder = Gcs::default()
-                .bucket(bucket_name.as_str())
-                .disable_vm_metadata()
-                .allow_anonymous();
             let operator = Operator::new(builder)?
                 .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(120)))
                 .layer(RetryLayer::new().with_max_times(3))
@@ -201,7 +177,8 @@ pub async fn get_remote_vcf_reader(
             .await
             .unwrap(),
     );
-    vcf::r#async::io::Reader::new(inner)
+    let reader = vcf::r#async::io::Reader::new(inner);
+    reader
 }
 
 pub fn get_local_vcf_bgzf_reader(
@@ -455,5 +432,171 @@ impl VcfReader {
             VcfReader::Local(reader) => reader.read_records(),
             VcfReader::Remote(reader) => reader.read_records().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compression_type_from_string() {
+        assert!(matches!(
+            CompressionType::from_string("gz".to_string()),
+            CompressionType::GZIP
+        ));
+        assert!(matches!(
+            CompressionType::from_string("bgz".to_string()),
+            CompressionType::BGZF
+        ));
+        assert!(matches!(
+            CompressionType::from_string("none".to_string()),
+            CompressionType::NONE
+        ));
+    }
+
+    #[test]
+    fn test_get_file_path() {
+        let file_path = "s3://bucket/path/to/file.vcf.bgz".to_string();
+        assert_eq!(get_file_path(file_path), "path/to/file.vcf.bgz");
+    }
+
+    #[test]
+    fn test_get_compression_type() {
+        assert!(matches!(
+            get_compression_type("file.vcf".to_string()),
+            CompressionType::NONE
+        ));
+        assert!(matches!(
+            get_compression_type("file.vcf.gz".to_string()),
+            CompressionType::GZIP
+        ));
+        assert!(matches!(
+            get_compression_type("file.vcf.bgz".to_string()),
+            CompressionType::BGZF
+        ));
+    }
+
+    #[test]
+    fn test_get_storage_type_with_file_prefix() {
+        let file_path = "file://path/to/file".to_string();
+        assert!(matches!(get_storage_type(file_path), StorageType::LOCAL));
+    }
+
+    #[test]
+    fn test_get_bucket_name_with_gcs() {
+        let file_path = "gs://my-bucket/path/to/file".to_string();
+        let expected_bucket_name = "my-bucket";
+        assert_eq!(get_bucket_name(file_path), expected_bucket_name);
+    }
+
+    #[test]
+    fn test_get_bucket_name_with_azblob() {
+        let file_path = "abfs://my-container/path/to/file".to_string();
+        let expected_bucket_name = "my-container";
+        assert_eq!(get_bucket_name(file_path), expected_bucket_name);
+    }
+
+    #[test]
+    fn test_get_storage_type_local() {
+        let file_path = "local://path/to/file".to_string();
+        assert!(matches!(get_storage_type(file_path), StorageType::LOCAL));
+    }
+
+    #[test]
+    fn test_get_storage_type_remote() {
+        let file_path = "s3://bucket/path/to/file".to_string();
+        assert!(matches!(get_storage_type(file_path), StorageType::S3));
+    }
+
+    #[test]
+    fn test_get_bucket_name() {
+        let file_path = "s3://my-bucket/path/to/file".to_string();
+        let expected_bucket_name = "my-bucket";
+        assert_eq!(get_bucket_name(file_path), expected_bucket_name);
+    }
+
+    #[test]
+    fn test_get_local_vcf_bgzf_reader_local() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let thread_num = 1;
+        let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
+        let header = reader.read_header().unwrap();
+        assert!(header.infos().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_local_vcf_header_local() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let thread_num = 1;
+        let header = get_local_vcf_header(file_path, thread_num).await.unwrap();
+        assert!(header.infos().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_header_local() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let header = get_header(file_path).await.unwrap();
+        assert!(header.infos().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_vcf_local_reader_new_bgzf() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let thread_num = 2;
+        let vcf_reader = VcfLocalReader::new(file_path, thread_num).await;
+        assert!(matches!(vcf_reader, VcfLocalReader::BGZF(_)));
+    }
+
+    #[tokio::test]
+    async fn test_vcf_local_reader_read_header_bgzf() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let thread_num = 2;
+        let mut vcf_reader = VcfLocalReader::new(file_path, thread_num).await;
+        let header = vcf_reader.read_header().await.unwrap();
+        assert!(header.infos().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_vcf_local_reader_describe_bgzf() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let thread_num = 2;
+        let mut vcf_reader = VcfLocalReader::new(file_path, thread_num).await;
+        let record_batch = vcf_reader.describe().await.unwrap();
+        assert!(record_batch.num_columns() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_vcf_local_reader_read_records_bgzf() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let thread_num = 2;
+        let mut vcf_reader = VcfLocalReader::new(file_path, thread_num).await;
+        let mut records = vcf_reader.read_records();
+        assert!(records.next().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_vcf_reader_read_header_remote_bgzf() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let mut vcf_reader = VcfReader::new(file_path, None, Some(64), Some(8)).await;
+        let header = vcf_reader.read_header().await.unwrap();
+        assert!(header.infos().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_vcf_reader_describe_remote_bgzf() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let mut vcf_reader = VcfReader::new(file_path, None, Some(64), Some(8)).await;
+        let record_batch = vcf_reader.describe().await.unwrap();
+        assert!(record_batch.num_columns() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_vcf_reader_read_records_remote_bgzf() {
+        let file_path = "testdata/mock_chr21.vcf.bgz".to_string();
+        let mut vcf_reader = VcfReader::new(file_path, None, Some(64), Some(8)).await;
+        let mut records = vcf_reader.read_records().await;
+        let first_record = records.next().await;
+        assert!(first_record.is_some());
     }
 }
