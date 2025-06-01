@@ -10,7 +10,7 @@ use noodles::vcf::{Header, Record};
 use noodles::{bgzf, vcf};
 use noodles_bgzf::{AsyncReader, MultithreadedReader};
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
-use opendal::services::{S3};
+use opendal::services::S3;
 use opendal::{FuturesBytesStream, Operator};
 use std::fs::File;
 use std::io::Error;
