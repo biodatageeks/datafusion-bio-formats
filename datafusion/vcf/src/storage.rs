@@ -29,14 +29,6 @@ pub enum CompressionType {
 }
 
 impl CompressionType {
-    fn get_compression_type(&self) -> String {
-        match self {
-            CompressionType::GZIP => "gz".to_string(),
-            CompressionType::BGZF => "bgz".to_string(),
-            CompressionType::NONE => "none".to_string(),
-        }
-    }
-
     fn from_string(compression_type: String) -> Self {
         match compression_type.to_lowercase().as_str() {
             "gz" => CompressionType::GZIP,
@@ -55,15 +47,6 @@ pub enum StorageType {
 }
 
 impl StorageType {
-    fn get_object_storage_type(&self) -> String {
-        match self {
-            StorageType::GCS => "gcs".to_string(),
-            StorageType::S3 => "s3".to_string(),
-            StorageType::AZBLOB => "azblob".to_string(),
-            StorageType::LOCAL => "local".to_string(),
-        }
-    }
-
     fn from_string(object_storage_type: String) -> Self {
         match object_storage_type.as_str() {
             "gs" => StorageType::GCS,
@@ -146,11 +129,17 @@ pub async fn get_remote_stream(
     let storage_type = get_storage_type(file_path.clone());
     let bucket_name = get_bucket_name(file_path.clone());
     let file_path = get_file_path(file_path.clone());
+
     match storage_type {
-        StorageType::GCS => {
-            let builder = Gcs::default()
+        StorageType::S3 => {
+            let builder = S3::default()
+                .region(
+                    &S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
+                        .await
+                        .unwrap(),
+                )
                 .bucket(bucket_name.as_str())
-                .disable_vm_metadata()
+                .disable_ec2_metadata()
                 .allow_anonymous();
             let operator = Operator::new(builder)?
                 .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(120)))
@@ -173,7 +162,7 @@ pub async fn get_remote_stream(
                         .unwrap(),
                 )
                 .bucket(bucket_name.as_str())
-                .disable_ec2_metadata()
+                .disable_vm_metadata()
                 .allow_anonymous();
             let operator = Operator::new(builder)?
                 .layer(TimeoutLayer::new().with_io_timeout(std::time::Duration::from_secs(120)))
@@ -187,7 +176,6 @@ pub async fn get_remote_stream(
                 .into_bytes_stream(..)
                 .await
         }
-
         _ => panic!("Invalid object storage type"),
     }
 }
@@ -314,12 +302,14 @@ impl VcfRemoteReader {
             }
         }
     }
+
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
             VcfRemoteReader::BGZF(reader) => reader.read_header().await,
             VcfRemoteReader::PLAIN(reader) => reader.read_header().await,
         }
     }
+
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfRemoteReader::BGZF(reader) => {
@@ -360,6 +350,7 @@ impl VcfLocalReader {
             }
         }
     }
+
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
             VcfLocalReader::BGZF(reader) => reader.read_header(),
@@ -373,6 +364,7 @@ impl VcfLocalReader {
             VcfLocalReader::PLAIN(reader) => reader.records().boxed(),
         }
     }
+
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfLocalReader::BGZF(reader) => {
@@ -452,12 +444,14 @@ impl VcfReader {
             VcfReader::Remote(reader) => reader.read_header().await,
         }
     }
+
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfReader::Local(reader) => reader.describe().await,
             VcfReader::Remote(reader) => reader.describe().await,
         }
     }
+
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             VcfReader::Local(reader) => reader.read_records(),

@@ -1,35 +1,39 @@
-use std::io;
-use std::slice::SliceIndex;
-use std::sync::Arc;
-use bytes::Bytes;
-use datafusion::arrow::datatypes::DataType::Int64;
-use tokio_util::io::{StreamReader, SyncIoBridge};
-use noodles_bgzf as bgzf;
-use object_store::gcp::GoogleCloudStorageBuilder;
-use object_store::ObjectStore;
-use object_store::path::Path;
+// use bytes::Bytes;
 use datafusion::error::Result;
-use datafusion::parquet::arrow::async_reader::AsyncFileReader;
-use futures::{FutureExt, StreamExt, TryStreamExt};
-// use noodles_vcf as vcf;
-use object_store::buffered::BufReader;
-use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeek};
+use noodles_bgzf as bgzf;
+// use object_store::ObjectStore;
+// use object_store::gcp::GoogleCloudStorageBuilder;
+// use object_store::path::Path;
+// use std::io;
+// use std::slice::SliceIndex;
+// use std::sync::Arc;
+use futures::StreamExt;
+// use datafusion::arrow::datatypes::DataType::Int64;
+// use datafusion::parquet::arrow::async_reader::AsyncFileReader;
+use tokio_util::io::StreamReader;
+// use object_store::buffered::BufReader;
+// use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeek};
 
 // use opendal::Result;
-use opendal::layers::LoggingLayer;
-use opendal::services;
+// use log::{info, log};
+use noodles::vcf;
 use opendal::Operator;
-use opendal::services::Gcs;
-use noodles::{bam, sam, vcf};
-use log::{info, log};
+use opendal::layers::LoggingLayer;
+#[allow(unused_imports)]
+use opendal::services;
+// use opendal::services::Gcs;
 use opendal::services::S3;
 
 // const BUCKET: &str = "gcp-public-data--gnomad";
 const BUCKET: &str = "gnomad-public-us-east-1";
 const NAME: &str = "release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz";
+const BATCH_SIZE: usize = 100000;
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
+    let start_time = std::time::Instant::now();
+
     let builder = S3::default()
         .region("us-east-1")
         .bucket(BUCKET)
@@ -40,45 +44,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(LoggingLayer::default())
         .finish();
 
-    let stream = operator.reader_with(NAME)
+    let setup_time = start_time.elapsed();
+    println!("Setup time: {:?}", setup_time);
+
+    let stream_start = std::time::Instant::now();
+    let stream = operator
+        .reader_with(NAME)
         .chunk(16 * 1024 * 1024)
         .concurrent(2)
-        .await?.into_bytes_stream(..).await?;
-    // let stream = operator.reader_with(NAME)
-    //     .concurrent(8)
-    //     .await?.into_bytes_stream(..).await?;
+        .await?
+        .into_bytes_stream(..)
+        .await?;
+    let stream_time = stream_start.elapsed();
+    println!("Stream setup time: {:?}", stream_time);
+
     let inner = bgzf::r#async::Reader::new(StreamReader::new(stream));
     let mut reader = vcf::r#async::io::Reader::new(inner);
-    //
-    info!("Reading header");
-    let mut  count = 0;
+
+    println!("Reading header");
+    let mut count = 0;
+    let mut batch_start = std::time::Instant::now();
+    let mut batch_count = 0;
+
     loop {
         let record = reader.records().next().await;
         if record.is_none() {
             break;
         };
         count += 1;
-        if count % 100000 == 0 {
-            info!("Number of records: {}", count);
+        batch_count += 1;
+
+        if batch_count == BATCH_SIZE {
+            let batch_time = batch_start.elapsed();
+            let records_per_sec = BATCH_SIZE as f64 / batch_time.as_secs_f64();
+            println!(
+                "Processed batch of {} records in {:?} ({:.2} records/sec). Total records: {}",
+                BATCH_SIZE, batch_time, records_per_sec, count
+            );
+            batch_count = 0;
+            batch_start = std::time::Instant::now();
         }
     }
-    println!("Number of records: {}", count);
+
+    let total_time = start_time.elapsed();
+    let avg_speed = count as f64 / total_time.as_secs_f64();
+    println!("Total records processed: {}", count);
+    println!("Total time: {:?}", total_time);
+    println!("Average speed: {:.2} records/sec", avg_speed);
     Ok(())
 }
 
-
-let builder = Gcs::default()
-    .bucket(BUCKET)
-    .disable_vm_metadata()
-    .allow_anonymous();
+// let builder = Gcs::default()
+//     .bucket(BUCKET)
+//     .disable_vm_metadata()
+//     .allow_anonymous();
 //
 // let operator = Operator::new(builder)?.finish();
 //
 // let stream = operator.reader(NAME).await?.into_bytes_stream(..).await?;
 // let inner = StreamReader::new(stream);
-
-
-
 
 // let stdout = io::stdout();
 // let mut writer = sam::r#async::io::Writer::new(stdout);
