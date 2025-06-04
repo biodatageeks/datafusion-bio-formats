@@ -66,7 +66,7 @@ pub enum StorageType {
 
 impl StorageType {
     pub fn from_prefix(object_storage_type: String) -> Self {
-        match object_storage_type.as_str() {
+        match object_storage_type.to_lowercase().as_str() {
             "gs" => StorageType::GCS,
             "s3" => StorageType::S3,
             "abfs" => StorageType::AZBLOB,
@@ -100,7 +100,11 @@ pub fn get_compression_type(
         return compression_type.unwrap();
     }
     //extract the file extension from path
-    if file_path.to_lowercase().ends_with(".vcf") {
+    if file_path.to_lowercase().ends_with(".vcf")
+        || file_path.to_lowercase().ends_with(".fastq")
+        || file_path.to_lowercase().ends_with(".gff3")
+        || file_path.to_lowercase().ends_with(".bed")
+    {
         //FIXME: generalize to other formats
         return CompressionType::NONE;
     }
