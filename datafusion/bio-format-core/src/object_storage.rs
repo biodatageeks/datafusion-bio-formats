@@ -55,7 +55,8 @@ impl CompressionType {
         }
     }
 }
-#[derive(Debug)]
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum StorageType {
     GCS,
     S3,
@@ -411,5 +412,146 @@ pub async fn get_remote_stream(
                 .await
         }
         _ => panic!("Invalid object storage type"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::runtime::Runtime;
+
+    #[test]
+    fn test_compression_type_from_string() {
+        assert_eq!(
+            CompressionType::from_string("gz".to_string()),
+            CompressionType::GZIP
+        );
+        assert_eq!(
+            CompressionType::from_string("bgz".to_string()),
+            CompressionType::BGZF
+        );
+        assert_eq!(
+            CompressionType::from_string("none".to_string()),
+            CompressionType::NONE
+        );
+    }
+
+    #[test]
+    fn test_storage_type_from_string() {
+        assert_eq!(StorageType::from_prefix("gs".to_string()), StorageType::GCS);
+        assert_eq!(StorageType::from_prefix("s3".to_string()), StorageType::S3);
+        assert_eq!(
+            StorageType::from_prefix("abfs".to_string()),
+            StorageType::AZBLOB
+        );
+        assert_eq!(
+            StorageType::from_prefix("local".to_string()),
+            StorageType::LOCAL
+        );
+        assert_eq!(
+            StorageType::from_prefix("file".to_string()),
+            StorageType::LOCAL
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid object storage type")]
+    fn test_storage_type_from_string_invalid() {
+        StorageType::from_prefix("invalid".to_string());
+    }
+
+    #[test]
+    fn test_get_file_path() {
+        let file_path = "s3://bucket_name/folder/file.txt".to_string();
+        assert_eq!(get_file_path(file_path), "folder/file.txt".to_string());
+    }
+
+    #[test]
+    fn test_get_bucket_name() {
+        let file_path = "s3://bucket_name/folder/file.txt".to_string();
+        assert_eq!(get_bucket_name(file_path), "bucket_name".to_string());
+    }
+
+    #[test]
+    fn test_get_storage_type() {
+        let file_path = "s3://bucket_name/folder/file.txt".to_string();
+        assert_eq!(get_storage_type(file_path), StorageType::S3);
+
+        let local_file_path = "/folder/file.txt".to_string();
+        assert_eq!(get_storage_type(local_file_path), StorageType::LOCAL);
+    }
+
+    #[test]
+    fn test_get_compression_type() {
+        let file_path_gz = "file.vcf.gz".to_string();
+        assert_eq!(
+            get_compression_type(file_path_gz, None),
+            CompressionType::GZIP
+        );
+
+        let file_path_bgz = "file.vcf.bgz".to_string();
+        assert_eq!(
+            get_compression_type(file_path_bgz, None),
+            CompressionType::BGZF
+        );
+
+        let file_path_none = "file.vcf".to_string();
+        assert_eq!(
+            get_compression_type(file_path_none, None),
+            CompressionType::NONE
+        );
+    }
+
+    #[test]
+    fn test_get_remote_stream_bgzf_s3() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let file_path = "s3://gnomad-public-us-east-1/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz".to_string();
+            unsafe {
+                env::set_var("AWS_REGION", "us-east-1");
+            }
+            let options = ObjectStorageOptions {
+                chunk_size: Some(64),
+                concurrent_fetches: Some(8),
+                allow_anonymous: true,
+                enable_request_payer: false,
+                max_retries: Some(3),
+                timeout: Some(120),
+                compression_type: Some(CompressionType::AUTO),
+            };
+            let result = get_remote_stream_bgzf(file_path, options).await;
+            if let Err(err) = &result {
+                eprintln!("Error fetching remote BGZF stream: {:?}", err);
+            }
+            if let Err(err) = result.as_ref() {
+                eprintln!("Fetch failed with error: {:?}", err);
+            }
+            assert!(result.is_ok(), "Fetch failed with error.");
+        });
+    }
+
+    #[test]
+    fn test_get_remote_stream_bgzf_gs() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let file_path = "gs://gcp-public-data--gnomad/release/4.1/vcf/exomes/gnomad.exomes.v4.1.sites.chr21.vcf.bgz".to_string();
+            let options = ObjectStorageOptions {
+                chunk_size: Some(64),
+                concurrent_fetches: Some(8),
+                allow_anonymous: true,
+                enable_request_payer: false,
+                max_retries: Some(3),
+                timeout: Some(120),
+                compression_type: Some(CompressionType::AUTO),
+            };
+            let result = get_remote_stream_bgzf(file_path, options).await;
+            if let Err(err) = &result {
+                eprintln!("Error fetching remote BGZF stream from GCS: {:?}", err);
+            }
+            if let Err(err) = result.as_ref() {
+                eprintln!("Fetch failed with error: {:?}", err);
+            }
+            assert!(result.is_ok(), "Fetch failed with error.");
+        });
     }
 }
