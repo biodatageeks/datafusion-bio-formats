@@ -66,7 +66,6 @@ impl TableProvider for BedTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        debug!("VcfTableProvider::schema");
         self.schema.clone()
     }
 

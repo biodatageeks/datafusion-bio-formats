@@ -111,7 +111,6 @@ impl TableProvider for GffTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        debug!("VcfTableProvider::schema");
         self.schema.clone()
     }
 

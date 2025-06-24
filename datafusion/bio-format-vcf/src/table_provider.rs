@@ -131,7 +131,6 @@ impl TableProvider for VcfTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        debug!("VcfTableProvider::schema");
         self.schema.clone()
     }
 

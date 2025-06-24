@@ -55,7 +55,6 @@ impl TableProvider for FastqTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        debug!("VcfTableProvider::schema");
         self.schema.clone()
     }
 
