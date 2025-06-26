@@ -327,6 +327,7 @@ async fn get_local_gff(
     batch_size: usize,
     thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
@@ -342,7 +343,12 @@ async fn get_local_gff(
     let mut batch_num = 0;
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = GffLocalReader::new(file_path.clone(), thread_num).await?;
+    let mut reader = GffLocalReader::new(
+        file_path.clone(),
+        thread_num,
+        object_storage_options.unwrap(),
+    )
+    .await?;
     //unnest builder
     let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
@@ -554,6 +560,7 @@ async fn get_stream(
                 batch_size,
                 thread_num,
                 projection,
+                object_storage_options,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))

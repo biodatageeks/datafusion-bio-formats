@@ -12,7 +12,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use datafusion_bio_format_core::object_storage::get_storage_type;
+use datafusion_bio_format_core::object_storage::{CompressionType, get_storage_type};
 use datafusion_bio_format_core::object_storage::{ObjectStorageOptions, StorageType};
 use datafusion_bio_format_core::table_utils::{OptionalField, builders_to_arrays};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
@@ -182,6 +182,7 @@ async fn get_local_vcf(
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
@@ -198,7 +199,12 @@ async fn get_local_vcf(
     let schema = Arc::clone(&schema_ref);
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = VcfLocalReader::new(file_path.clone(), thread_num).await;
+    let mut reader = VcfLocalReader::new(
+        file_path.clone(),
+        thread_num,
+        object_storage_options.unwrap(),
+    )
+    .await;
     let header = reader.read_header().await?;
     let infos = header.infos();
     let mut record_num = 0;
@@ -419,6 +425,7 @@ async fn get_stream(
                 thread_num,
                 info_fields,
                 projection,
+                object_storage_options,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))

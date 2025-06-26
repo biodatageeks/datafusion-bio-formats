@@ -167,8 +167,13 @@ pub enum GffLocalReader {
 }
 
 impl GffLocalReader {
-    pub async fn new(file_path: String, thread_num: usize) -> Result<Self, Error> {
-        let compression_type = get_compression_type(file_path.clone(), None);
+    pub async fn new(
+        file_path: String,
+        thread_num: usize,
+        object_storage_options: ObjectStorageOptions,
+    ) -> Result<Self, Error> {
+        let compression_type =
+            get_compression_type(file_path.clone(), object_storage_options.compression_type);
         match compression_type {
             CompressionType::GZIP => {
                 let reader = get_local_gff_gz_reader(file_path).await?;

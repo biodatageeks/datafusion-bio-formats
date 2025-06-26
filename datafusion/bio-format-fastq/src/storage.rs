@@ -155,8 +155,13 @@ pub enum FastqLocalReader {
 }
 
 impl FastqLocalReader {
-    pub async fn new(file_path: String, thread_num: usize) -> Result<Self, Error> {
-        let compression_type = get_compression_type(file_path.clone(), None);
+    pub async fn new(
+        file_path: String,
+        thread_num: usize,
+        object_storage_options: ObjectStorageOptions,
+    ) -> Result<Self, Error> {
+        let compression_type =
+            get_compression_type(file_path.clone(), object_storage_options.compression_type);
         match compression_type {
             CompressionType::BGZF => {
                 let reader = get_local_fastq_bgzf_reader(file_path, thread_num)?;

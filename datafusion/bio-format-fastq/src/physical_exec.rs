@@ -174,6 +174,7 @@ async fn get_local_fastq(
     batch_size: usize,
     thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut name: Vec<String> = Vec::with_capacity(batch_size);
@@ -185,7 +186,12 @@ async fn get_local_fastq(
     let mut batch_num = 0;
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = FastqLocalReader::new(file_path.clone(), thread_num).await?;
+    let mut reader = FastqLocalReader::new(
+        file_path.clone(),
+        thread_num,
+        object_storage_options.unwrap(),
+    )
+    .await?;
     let mut record_num = 0;
 
     let stream = try_stream! {
@@ -317,6 +323,7 @@ async fn get_stream(
                 batch_size,
                 thread_num,
                 projection,
+                object_storage_options,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))

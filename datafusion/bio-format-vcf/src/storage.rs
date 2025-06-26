@@ -114,8 +114,10 @@ pub async fn get_local_vcf_reader(
 pub async fn get_local_vcf_header(
     file_path: String,
     thread_num: usize,
+    object_storage_options: ObjectStorageOptions,
 ) -> Result<vcf::Header, Error> {
-    let compression_type = get_compression_type(file_path.clone(), None);
+    let compression_type =
+        get_compression_type(file_path.clone(), object_storage_options.compression_type);
     let header = match compression_type {
         CompressionType::BGZF => {
             let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num)?;
@@ -170,7 +172,9 @@ pub async fn get_header(
 ) -> Result<vcf::Header, Error> {
     let storage_type = get_storage_type(file_path.clone());
     let header = match storage_type {
-        StorageType::LOCAL => get_local_vcf_header(file_path, 1).await?,
+        StorageType::LOCAL => {
+            get_local_vcf_header(file_path, 1, object_storage_options.unwrap().clone()).await?
+        }
         _ => get_remote_vcf_header(file_path, object_storage_options.unwrap().clone()).await?,
     };
     Ok(header)
@@ -249,8 +253,15 @@ pub enum VcfLocalReader {
 }
 
 impl VcfLocalReader {
-    pub async fn new(file_path: String, thread_num: usize) -> Self {
-        let compression_type = get_compression_type(file_path.clone(), None);
+    pub async fn new(
+        file_path: String,
+        thread_num: usize,
+        object_storage_options: ObjectStorageOptions,
+    ) -> Self {
+        let compression_type = get_compression_type(
+            file_path.clone(),
+            object_storage_options.clone().compression_type,
+        );
         match compression_type {
             CompressionType::BGZF => {
                 let reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
@@ -350,9 +361,14 @@ impl VcfReader {
             file_path, storage_type
         );
         match storage_type {
-            StorageType::LOCAL => {
-                VcfReader::Local(VcfLocalReader::new(file_path, thread_num.unwrap_or(1)).await)
-            }
+            StorageType::LOCAL => VcfReader::Local(
+                VcfLocalReader::new(
+                    file_path,
+                    thread_num.unwrap_or(1),
+                    object_storage_options.unwrap(),
+                )
+                .await,
+            ),
             _ => VcfReader::Remote(
                 VcfRemoteReader::new(file_path, object_storage_options.unwrap()).await,
             ),

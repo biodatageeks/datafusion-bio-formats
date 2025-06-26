@@ -1,5 +1,6 @@
 use async_compression::tokio::bufread::GzipDecoder;
 use log;
+use log::debug;
 use noodles::bgzf;
 use noodles_bgzf::AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
@@ -111,6 +112,10 @@ pub fn get_compression_type(
     file_path: String,
     compression_type: Option<CompressionType>,
 ) -> CompressionType {
+    debug!(
+        "get_compression_type called with file_path: {}, compression_type: {:?}",
+        file_path, compression_type
+    );
     if !compression_type.is_none() && compression_type != Some(CompressionType::AUTO) {
         return compression_type.unwrap();
     }
