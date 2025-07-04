@@ -1,4 +1,6 @@
+use async_compression::tokio::bufread::GzipDecoder;
 use log;
+use log::debug;
 use noodles::bgzf;
 use noodles_bgzf::AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
@@ -55,6 +57,20 @@ impl CompressionType {
         }
     }
 }
+
+impl Default for ObjectStorageOptions {
+    fn default() -> Self {
+        ObjectStorageOptions {
+            chunk_size: Some(8),                           // Default chunk size in MB
+            concurrent_fetches: Some(1),                   // Default concurrent fetches
+            allow_anonymous: true, // Default to not allowing anonymous access
+            enable_request_payer: false, // Default to not enabling request payer
+            max_retries: Some(5),  // Default max retries
+            timeout: Some(300),    // Default timeout in seconds
+            compression_type: Some(CompressionType::AUTO), // Default compression type
+        }
+    }
+}
 #[derive(Debug)]
 pub enum StorageType {
     GCS,
@@ -96,6 +112,10 @@ pub fn get_compression_type(
     file_path: String,
     compression_type: Option<CompressionType>,
 ) -> CompressionType {
+    debug!(
+        "get_compression_type called with file_path: {}, compression_type: {:?}",
+        file_path, compression_type
+    );
     if !compression_type.is_none() && compression_type != Some(CompressionType::AUTO) {
         return compression_type.unwrap();
     }
@@ -103,6 +123,7 @@ pub fn get_compression_type(
     if file_path.to_lowercase().ends_with(".vcf")
         || file_path.to_lowercase().ends_with(".fastq")
         || file_path.to_lowercase().ends_with(".gff3")
+        || file_path.to_lowercase().ends_with(".gff")
         || file_path.to_lowercase().ends_with(".bed")
     {
         //FIXME: generalize to other formats
@@ -113,13 +134,25 @@ pub fn get_compression_type(
     CompressionType::from_string(file_extension.to_string())
 }
 
-pub async fn get_remote_stream_bgzf(
+pub async fn get_remote_stream_bgzf_async(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
     let remote_stream =
         StreamReader::new(get_remote_stream(file_path.clone(), object_storage_options).await?);
     Ok(bgzf::r#async::Reader::new(remote_stream))
+}
+
+pub async fn get_remote_stream_gz_async(
+    file_path: String,
+    object_storage_options: ObjectStorageOptions,
+) -> Result<
+    async_compression::tokio::bufread::GzipDecoder<StreamReader<FuturesBytesStream, bytes::Bytes>>,
+    opendal::Error,
+> {
+    let remote_stream =
+        StreamReader::new(get_remote_stream(file_path.clone(), object_storage_options).await?);
+    Ok(GzipDecoder::new(remote_stream))
 }
 
 pub fn get_storage_type(file_path: String) -> StorageType {
@@ -285,9 +318,11 @@ pub async fn get_remote_stream(
             let mut builder = S3::default()
                 .region(
                     &env::var("AWS_REGION").unwrap_or(
-                        S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
-                            .await
-                            .unwrap_or("us-east-1".to_string()),
+                        env::var("AWS_DEFAULT_REGION").unwrap_or(
+                            S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
+                                .await
+                                .unwrap_or("us-east-1".to_string()),
+                        ),
                     ),
                 )
                 .bucket(bucket_name.as_str())

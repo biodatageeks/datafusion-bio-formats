@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+datafusion-execution.workspace = true
+datafusion.workspace = true
 opendal.workspace = true
 noodles.workspace = true
 noodles-bgzf.workspace = true
@@ -12,3 +14,4 @@ tokio.workspace = true
 bytes.workspace = true
 log = "0.4.27"
 url = "2.5.4"
+async-compression = "0.4.19"

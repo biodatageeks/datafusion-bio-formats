@@ -1,19 +1,23 @@
 [workspace]
 resolver = "2"
 
-members = [
-    "datafusion/bio-format-core",
-    "datafusion/bio-format-vcf",
+members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bed",
+    "datafusion/bio-format-core", "datafusion/bio-format-fastq", "datafusion/bio-format-gff",
+    "datafusion/bio-format-vcf", "datafusion/bio-format-bam", "datafusion/bio-format-fasta",
 ]
 
 [workspace.dependencies]
-datafusion = "43.0.0"
+datafusion = {version = "43.0.0", features = ["async-compression"]}
 datafusion-execution = "43.0.0"
 async-trait = "0.1.85"
 opendal = { version = "0.53.3", features = ["services-gcs", "services-s3","layers-blocking", "services-azblob", "services-http"] }
-noodles = { version = "0.93.0",  features = ["bam", "sam", "vcf", "bgzf", "async"] }
+noodles = { version = "0.93.0",  features = ["bam", "vcf", "bgzf", "async"]}
+
 noodles-bgzf = { version = "0.36.0",features = ["libdeflate"] }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "rt", "macros"] }
 tokio-util = {  version="0.7.13", features = ["io-util", "compat"] }
 bytes = "1.10.0"
-
+futures = "0.3.31"
+async-stream = "0.3.6"
+futures-util = "0.3.31"
+async-compression = "0.4.19"

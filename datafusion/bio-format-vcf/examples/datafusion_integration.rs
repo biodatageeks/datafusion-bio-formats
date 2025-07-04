@@ -2,9 +2,12 @@
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
+use datafusion_bio_format_vcf::storage::VcfRemoteReader;
+use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use datafusion_vcf::storage::VcfRemoteReader;
 use datafusion_vcf::table_provider::VcfTableProvider;
 use std::sync::Arc;
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> datafusion::error::Result<()> {
     env_logger::init();

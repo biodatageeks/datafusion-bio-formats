@@ -1,5 +1,5 @@
 [package]
-name = "datafusion-bio-format-vcf"
+name = "datafusion-bio-format-bed"
 version = "0.1.0"
 edition = "2024"
 
@@ -13,17 +13,16 @@ noodles-bgzf.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
-futures.workspace = true
-async-stream.workspace = true
-async-compression.workspace = true
-
 datafusion-bio-format-core = {path = "../bio-format-core"}
-
-log = "0.4.22"
-env_logger = "0.11.6"
-
+async-compression.workspace = true
+futures = "0.3.31"
+log = "0.4.27"
+async-stream = "0.3.6"
+env_logger = "0.11.8"
+noodles-bed = "0.26.0"
+futures-util = "0.3.31"
 
 [[example]]
-name = "datafusion_integration"
+name = "test_reader"
 # Some issue when publishing and path isn't specified, so adding here
-path = "./examples/datafusion_integration.rs"
+path = "./examples/test_reader.rs"

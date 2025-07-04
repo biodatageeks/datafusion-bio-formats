@@ -3,7 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use crate::storage::{VcfLocalReader, VcfRemoteReader};
-use crate::table_provider::{OptionalField, info_to_arrow_type};
+use crate::table_provider::info_to_arrow_type;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, Float64Array, NullArray, StringArray, UInt32Array};
@@ -12,8 +12,9 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use datafusion_bio_format_core::object_storage::get_storage_type;
+use datafusion_bio_format_core::object_storage::{CompressionType, get_storage_type};
 use datafusion_bio_format_core::object_storage::{ObjectStorageOptions, StorageType};
+use datafusion_bio_format_core::table_utils::{OptionalField, builders_to_arrays};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::{StreamExt, TryStreamExt};
 use log::debug;
@@ -151,14 +152,6 @@ fn load_infos(
     Ok(())
 }
 
-fn builders_to_arrays(builders: &mut Vec<OptionalField>) -> Vec<Arc<dyn Array>> {
-    builders
-        .iter_mut()
-        .map(|f| f.finish())
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-}
-
 fn get_variant_end(record: &dyn Record, header: &Header) -> u32 {
     let ref_len = record.reference_bases().len();
     let alt_len = record.alternate_bases().len();
@@ -189,6 +182,7 @@ async fn get_local_vcf(
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
@@ -205,7 +199,12 @@ async fn get_local_vcf(
     let schema = Arc::clone(&schema_ref);
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = VcfLocalReader::new(file_path.clone(), thread_num).await;
+    let mut reader = VcfLocalReader::new(
+        file_path.clone(),
+        thread_num,
+        object_storage_options.unwrap(),
+    )
+    .await;
     let header = reader.read_header().await?;
     let infos = header.infos();
     let mut record_num = 0;
@@ -426,11 +425,12 @@ async fn get_stream(
                 thread_num,
                 info_fields,
                 projection,
+                object_storage_options,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
         }
-        StorageType::GCS | StorageType::S3 | StorageType::AZBLOB | StorageType::HTTP => {
+        StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
             let stream = get_remote_vcf_stream(
                 file_path.clone(),
                 schema.clone(),
@@ -442,6 +442,7 @@ async fn get_stream(
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
         }
+        _ => unimplemented!("Unsupported storage type: {:?}", store_type),
     }
 }
 
