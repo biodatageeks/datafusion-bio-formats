@@ -986,6 +986,7 @@ dependencies = [
  "futures-util",
  "log",
  "noodles",
+ "noodles-bgzf 0.36.0",
  "noodles-fastq 0.19.0",
  "opendal",
  "tokio",

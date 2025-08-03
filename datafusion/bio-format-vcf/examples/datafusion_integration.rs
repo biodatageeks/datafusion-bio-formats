@@ -4,8 +4,9 @@ use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use datafusion_bio_format_vcf::storage::VcfRemoteReader;
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
-use datafusion_vcf::storage::VcfRemoteReader;
-use datafusion_vcf::table_provider::VcfTableProvider;
+// use datafusion_vcf::storage::VcfRemoteReader;
+// use datafusion_vcf::table_provider::VcfTableProvider;
+use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use std::sync::Arc;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -26,7 +27,7 @@ async fn main() -> datafusion::error::Result<()> {
     ctx.sql("set datafusion.execution.skip_physical_aggregate_schema_check=true")
         .await?;
     // let table_provider = VcfTableProvider::new("/tmp/gnomad.exomes.v4.1.sites.chr21.vcf.bgz".parse().unwrap(), vec!["SVTYPE".parse().unwrap()], vec![], Some(8))?;
-    let table_provider = VcfTableProvider::new(path.clone(), infos, None, Some(4), None, None)?;
+    let table_provider = VcfTableProvider::new(path.clone(), infos, None, Some(4), None)?;
     ctx.register_table("custom_table", Arc::new(table_provider))
         .expect("TODO: panic message");
     // let df = ctx.sql("SELECT svtype, count(*) as cnt FROM custom_table group by svtype").await?;
@@ -34,7 +35,8 @@ async fn main() -> datafusion::error::Result<()> {
     // df.clone().write_csv("/tmp/gnomad.exomes.v4.1.sites.chr21-old.csv", DataFrameWriteOptions::default(), Some(CsvOptions::default())).await?;
     let _df = ctx.sql("SELECT chrom FROM custom_table LIMIT 5").await?;
     // println!("{:?}", df.explain(false, false)?);
-    let mut reader = VcfRemoteReader::new(path, 64, 1).await;
+    let object_options = ObjectStorageOptions::default();
+    let mut reader = VcfRemoteReader::new(path, object_options).await;
     let rb = reader.describe().await?;
     // print!("{}", pretty_format_batches(&[rb]).expect("TODO: panic message").to_string());
     let mem_table = MemTable::try_new(rb.schema().clone(), vec![vec![rb]])?;
