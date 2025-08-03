@@ -33,6 +33,7 @@ impl BgzfFastqTableProvider {
     pub fn try_new(path: impl Into<PathBuf>) -> io::Result<Self> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, false),
+            Field::new("description", DataType::Utf8, true),
             Field::new("sequence", DataType::Utf8, false),
             Field::new("quality_scores", DataType::Utf8, false),
         ]));
@@ -244,11 +245,14 @@ impl ExecutionPlan for BgzfFastqExec {
                 let mut names = proj_indices
                     .map_or(true, |p| p.contains(&0))
                     .then(StringBuilder::new);
-                let mut sequences = proj_indices
+                let mut descriptions = proj_indices
                     .map_or(true, |p| p.contains(&1))
                     .then(StringBuilder::new);
-                let mut quality_scores = proj_indices
+                let mut sequences = proj_indices
                     .map_or(true, |p| p.contains(&2))
+                    .then(StringBuilder::new);
+                let mut quality_scores = proj_indices
+                    .map_or(true, |p| p.contains(&3))
                     .then(StringBuilder::new);
 
                 loop {
@@ -259,6 +263,15 @@ impl ExecutionPlan for BgzfFastqExec {
                             // If successful, process it.
                             if let Some(b) = &mut names {
                                 b.append_value(std::str::from_utf8(record.name()).unwrap());
+                            }
+                            if let Some(b) = &mut descriptions {
+                                if record.description().is_empty() {
+                                    b.append_null();
+                                } else {
+                                    b.append_value(
+                                        std::str::from_utf8(record.description()).unwrap(),
+                                    );
+                                }
                             }
                             if let Some(b) = &mut sequences {
                                 b.append_value(std::str::from_utf8(record.sequence()).unwrap());
@@ -283,13 +296,15 @@ impl ExecutionPlan for BgzfFastqExec {
                     for &col_idx in proj.iter() {
                         match col_idx {
                             0 => arrays.push(Arc::new(names.take().unwrap().finish())),
-                            1 => arrays.push(Arc::new(sequences.take().unwrap().finish())),
-                            2 => arrays.push(Arc::new(quality_scores.take().unwrap().finish())),
+                            1 => arrays.push(Arc::new(descriptions.take().unwrap().finish())),
+                            2 => arrays.push(Arc::new(sequences.take().unwrap().finish())),
+                            3 => arrays.push(Arc::new(quality_scores.take().unwrap().finish())),
                             _ => unreachable!(),
                         }
                     }
                 } else {
                     arrays.push(Arc::new(names.unwrap().finish()));
+                    arrays.push(Arc::new(descriptions.unwrap().finish()));
                     arrays.push(Arc::new(sequences.unwrap().finish()));
                     arrays.push(Arc::new(quality_scores.unwrap().finish()));
                 }
