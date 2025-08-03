@@ -20,7 +20,7 @@ use datafusion::{
     },
 };
 use futures::stream::{self};
-use noodles_bgzf::{IndexedReader, gzi};
+use noodles_bgzf::{self as bgzf, IndexedReader, gzi};
 use noodles_fastq as fastq;
 
 #[derive(Debug, Clone)]
@@ -100,7 +100,7 @@ impl datafusion::catalog::TableProvider for BgzfFastqTableProvider {
         state: &dyn datafusion::catalog::Session,
         projection: Option<&Vec<usize>>,
         _filters: &[datafusion::logical_expr::Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut index_path = self.path.as_os_str().to_owned();
         index_path.push(".gzi");
@@ -121,6 +121,7 @@ impl datafusion::catalog::TableProvider for BgzfFastqTableProvider {
             projected_schema,
             projection.cloned(),
             index,
+            limit,
         );
         Ok(Arc::new(exec))
     }
@@ -133,6 +134,7 @@ struct BgzfFastqExec {
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
     index: gzi::Index,
+    limit: Option<usize>,
     properties: PlanProperties,
 }
 
@@ -143,6 +145,7 @@ impl BgzfFastqExec {
         schema: SchemaRef,
         projection: Option<Vec<usize>>,
         index: gzi::Index,
+        limit: Option<usize>,
     ) -> Self {
         let properties = PlanProperties::new(
             datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),
@@ -155,6 +158,7 @@ impl BgzfFastqExec {
             schema,
             projection,
             index,
+            limit,
             properties,
         }
     }
@@ -205,6 +209,7 @@ impl ExecutionPlan for BgzfFastqExec {
         let schema = self.schema.clone();
         let projection = self.projection.clone();
         let index = self.index.clone();
+        let limit = self.limit;
 
         let stream = stream::once(async move {
             let batch = tokio::task::spawn_blocking(move || {
@@ -225,6 +230,11 @@ impl ExecutionPlan for BgzfFastqExec {
                     if proj.is_empty() {
                         let mut num_rows = 0;
                         loop {
+                            if let Some(limit) = limit {
+                                if num_rows >= limit {
+                                    break;
+                                }
+                            }
                             match fastq_reader.read_record(&mut record) {
                                 Ok(0) => break,
                                 Ok(_) => num_rows += 1,
@@ -255,7 +265,14 @@ impl ExecutionPlan for BgzfFastqExec {
                     .map_or(true, |p| p.contains(&3))
                     .then(StringBuilder::new);
 
+                let mut count = 0;
                 loop {
+                    if let Some(limit) = limit {
+                        if count >= limit {
+                            break;
+                        }
+                    }
+
                     // First, read a record.
                     match fastq_reader.read_record(&mut record) {
                         Ok(0) => break, // End of stream
@@ -281,6 +298,7 @@ impl ExecutionPlan for BgzfFastqExec {
                                     std::str::from_utf8(record.quality_scores()).unwrap(),
                                 );
                             }
+                            count += 1;
                         }
                         Err(_) => break, // Stop on error
                     }

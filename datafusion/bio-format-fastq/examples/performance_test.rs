@@ -44,7 +44,7 @@ async fn main() -> datafusion::common::Result<()> {
     println!("Using file: {}", file_path);
 
     // Create a SessionContext
-    let config = SessionConfig::new().with_target_partitions(8);
+    let config = SessionConfig::new().with_target_partitions(1);
     let ctx = SessionContext::new_with_config(config);
 
     // Create and register the table provider
