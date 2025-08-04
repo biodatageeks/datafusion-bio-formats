@@ -1,11 +1,12 @@
 use std::any::Any;
 use std::io::{self, BufRead, Seek};
 use std::sync::Arc;
+use std::thread;
 
-use async_stream::try_stream;
 use async_trait::async_trait;
-use datafusion::arrow::array::{Array, ArrayBuilder, RecordBatch, StringBuilder};
+use datafusion::arrow::array::{Array, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::error::ArrowError;
 use datafusion::common::Result;
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
@@ -14,12 +15,10 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
 };
-
+use futures::channel::mpsc;
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_fastq as fastq;
 use std::path::PathBuf;
-use tokio::sync::mpsc;
-use tokio::task;
 
 #[derive(Debug, Clone)]
 pub struct BgzfFastqTableProvider {
@@ -200,7 +199,7 @@ impl ExecutionPlan for BgzfFastqExec {
     fn execute(
         &self,
         partition: usize,
-        context: Arc<TaskContext>,
+        _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let (start_uncomp, end_comp) = self.partitions[partition];
         let path = self.path.clone();
@@ -208,24 +207,29 @@ impl ExecutionPlan for BgzfFastqExec {
         let projection = self.projection.clone();
         let index = self.index.clone();
         let limit = self.limit;
-        let batch_size = context.session_config().batch_size();
+        let batch_size = 8192;
 
-        let stream = try_stream! {
-            let (tx, mut rx) = mpsc::channel(2);
+        let (mut tx, rx) = mpsc::channel(2);
 
-            let handle = task::spawn_blocking(move || -> Result<()> {
-                let file = std::fs::File::open(path)?;
+        let _handle = thread::spawn(move || {
+            let read_and_send = || -> Result<(), ArrowError> {
+                let file = std::fs::File::open(path)
+                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
                 let buf_reader = std::io::BufReader::new(file);
                 let mut reader = IndexedReader::new(buf_reader, index);
 
-                reader.seek(std::io::SeekFrom::Start(start_uncomp))?;
+                reader
+                    .seek(std::io::SeekFrom::Start(start_uncomp))
+                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
 
                 if start_uncomp > 0 {
-                    skip_to_next_fastq_record(&mut reader)?;
+                    skip_to_next_fastq_record(&mut reader)
+                        .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
                 }
 
                 let mut fastq_reader = fastq::io::Reader::new(reader);
                 let mut record = fastq::Record::default();
+                let mut total_records = 0;
 
                 if let Some(proj) = &projection {
                     if proj.is_empty() {
@@ -239,7 +243,7 @@ impl ExecutionPlan for BgzfFastqExec {
                             match fastq_reader.read_record(&mut record) {
                                 Ok(0) => break,
                                 Ok(_) => num_rows += 1,
-                                Err(_) => break,
+                                Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
                             }
                             if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
                                 break;
@@ -248,121 +252,88 @@ impl ExecutionPlan for BgzfFastqExec {
                         let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
                             .with_row_count(Some(num_rows));
                         let batch = RecordBatch::try_new_with_options(schema, vec![], &options)?;
-                        tx.blocking_send(Ok(batch)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                        tx.try_send(Ok(batch)).ok();
                         return Ok(());
                     }
                 }
 
-                let proj_indices = projection.as_ref();
-                let mut names = proj_indices
-                    .map_or(true, |p| p.contains(&0))
-                    .then(StringBuilder::new);
-                let mut descriptions = proj_indices
-                    .map_or(true, |p| p.contains(&1))
-                    .then(StringBuilder::new);
-                let mut sequences = proj_indices
-                    .map_or(true, |p| p.contains(&2))
-                    .then(StringBuilder::new);
-                let mut quality_scores = proj_indices
-                    .map_or(true, |p| p.contains(&3))
-                    .then(StringBuilder::new);
-
-                let mut count = 0;
-
                 loop {
                     if let Some(limit) = limit {
-                        if count >= limit {
+                        if total_records >= limit {
                             break;
                         }
                     }
 
-                    match fastq_reader.read_record(&mut record) {
-                        Ok(0) => break, // End of stream
-                        Ok(_) => {
-                            if let Some(b) = &mut names {
-                                b.append_value(std::str::from_utf8(record.name()).unwrap());
+                    let proj_indices = projection.as_ref();
+                    let mut names = proj_indices
+                        .map_or(true, |p| p.contains(&0))
+                        .then(StringBuilder::new);
+                    let mut descriptions = proj_indices
+                        .map_or(true, |p| p.contains(&1))
+                        .then(StringBuilder::new);
+                    let mut sequences = proj_indices
+                        .map_or(true, |p| p.contains(&2))
+                        .then(StringBuilder::new);
+                    let mut quality_scores = proj_indices
+                        .map_or(true, |p| p.contains(&3))
+                        .then(StringBuilder::new);
+
+                    let mut count = 0;
+                    while count < batch_size {
+                        if let Some(limit) = limit {
+                            if total_records >= limit {
+                                break;
                             }
-                            if let Some(b) = &mut descriptions {
-                                if record.description().is_empty() {
-                                    b.append_null();
-                                } else {
+                        }
+
+                        if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
+                            break;
+                        }
+
+                        match fastq_reader.read_record(&mut record) {
+                            Ok(0) => break, // End of stream
+                            Ok(_) => {
+                                if let Some(b) = &mut names {
+                                    b.append_value(std::str::from_utf8(record.name()).unwrap());
+                                }
+                                if let Some(b) = &mut descriptions {
+                                    if record.description().is_empty() {
+                                        b.append_null();
+                                    } else {
+                                        b.append_value(
+                                            std::str::from_utf8(record.description()).unwrap(),
+                                        );
+                                    }
+                                }
+                                if let Some(b) = &mut sequences {
+                                    b.append_value(std::str::from_utf8(record.sequence()).unwrap());
+                                }
+                                if let Some(b) = &mut quality_scores {
                                     b.append_value(
-                                        std::str::from_utf8(record.description()).unwrap(),
+                                        std::str::from_utf8(record.quality_scores()).unwrap(),
                                     );
                                 }
+                                count += 1;
+                                total_records += 1;
                             }
-                            if let Some(b) = &mut sequences {
-                                b.append_value(std::str::from_utf8(record.sequence()).unwrap());
-                            }
-                            if let Some(b) = &mut quality_scores {
-                                b.append_value(
-                                    std::str::from_utf8(record.quality_scores()).unwrap(),
-                                );
-                            }
-                            count += 1;
-
-                            if count % batch_size == 0 {
-                                let mut arrays: Vec<Arc<dyn Array>> = vec![];
-                                if let Some(proj) = &projection {
-                                    for &col_idx in proj.iter() {
-                                        match col_idx {
-                                            0 => arrays
-                                                .push(Arc::new(names.as_mut().unwrap().finish())),
-                                            1 => arrays.push(Arc::new(
-                                                descriptions.as_mut().unwrap().finish(),
-                                            )),
-                                            2 => arrays.push(Arc::new(
-                                                sequences.as_mut().unwrap().finish(),
-                                            )),
-                                            3 => arrays.push(Arc::new(
-                                                quality_scores.as_mut().unwrap().finish(),
-                                            )),
-                                            _ => unreachable!(),
-                                        }
-                                    }
-                                } else {
-                                    arrays.push(Arc::new(names.as_mut().unwrap().finish()));
-                                    arrays.push(Arc::new(descriptions.as_mut().unwrap().finish()));
-                                    arrays.push(Arc::new(sequences.as_mut().unwrap().finish()));
-                                    arrays
-                                        .push(Arc::new(quality_scores.as_mut().unwrap().finish()));
-                                }
-                                let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-                                tx.blocking_send(Ok(batch)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
-
-                                if let Some(p) = proj_indices {
-                                    names = p.contains(&0).then(StringBuilder::new);
-                                    descriptions = p.contains(&1).then(StringBuilder::new);
-                                    sequences = p.contains(&2).then(StringBuilder::new);
-                                    quality_scores = p.contains(&3).then(StringBuilder::new);
-                                } else {
-                                    names = Some(StringBuilder::new());
-                                    descriptions = Some(StringBuilder::new());
-                                    sequences = Some(StringBuilder::new());
-                                    quality_scores = Some(StringBuilder::new());
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tx.blocking_send(Err(DataFusionError::Execution(e.to_string()))).map_err(|e| DataFusionError::Execution(e.to_string()))?;
-                            break;
+                            Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
                         }
                     }
 
-                    if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
+                    if count == 0 {
                         break;
                     }
-                }
 
-                if names.as_ref().map_or(false, |b| !b.is_empty()) {
                     let mut arrays: Vec<Arc<dyn Array>> = vec![];
                     if let Some(proj) = &projection {
                         for &col_idx in proj.iter() {
                             match col_idx {
-                                0 => arrays.push(Arc::new(names.take().unwrap().finish())),
-                                1 => arrays.push(Arc::new(descriptions.take().unwrap().finish())),
-                                2 => arrays.push(Arc::new(sequences.take().unwrap().finish())),
-                                3 => arrays.push(Arc::new(quality_scores.take().unwrap().finish())),
+                                0 => arrays.push(Arc::new(names.as_mut().unwrap().finish())),
+                                1 => arrays.push(Arc::new(descriptions.as_mut().unwrap().finish())),
+                                2 => arrays.push(Arc::new(sequences.as_mut().unwrap().finish())),
+                                3 => {
+                                    arrays.push(Arc::new(quality_scores.as_mut().unwrap().finish()))
+                                }
                                 _ => unreachable!(),
                             }
                         }
@@ -372,22 +343,26 @@ impl ExecutionPlan for BgzfFastqExec {
                         arrays.push(Arc::new(sequences.unwrap().finish()));
                         arrays.push(Arc::new(quality_scores.unwrap().finish()));
                     }
-                    let batch = RecordBatch::try_new(schema, arrays)?;
-                    tx.blocking_send(Ok(batch)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+
+                    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+                    if tx.try_send(Ok(batch)).is_err() {
+                        // If the receiver is dropped, stop sending.
+                        break;
+                    }
                 }
                 Ok(())
-            });
+            };
 
-            while let Some(batch) = rx.recv().await {
-                yield batch?;
+            if let Err(e) = read_and_send() {
+                let _ = tx.try_send(Err(e));
             }
+        });
 
-            handle.await.map_err(|e| DataFusionError::Execution(e.to_string()))??;
-        };
+        use futures::StreamExt;
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
-            stream,
+            rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(e, None))),
         )))
     }
 }
