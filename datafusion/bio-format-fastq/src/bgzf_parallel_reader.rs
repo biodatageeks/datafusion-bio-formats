@@ -2,6 +2,7 @@ use std::any::Any;
 use std::io::{self, BufRead, Seek};
 use std::sync::Arc;
 
+use async_stream::try_stream;
 use async_trait::async_trait;
 use datafusion::arrow::array::{Array, ArrayBuilder, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -13,10 +14,12 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
     SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
 };
-use futures::{StreamExt, future::Either, stream};
+
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_fastq as fastq;
 use std::path::PathBuf;
+use tokio::sync::mpsc;
+use tokio::task;
 
 #[derive(Debug, Clone)]
 pub struct BgzfFastqTableProvider {
@@ -207,8 +210,10 @@ impl ExecutionPlan for BgzfFastqExec {
         let limit = self.limit;
         let batch_size = context.session_config().batch_size();
 
-        let stream = futures::stream::once(async move {
-            tokio::task::spawn_blocking(move || {
+        let stream = try_stream! {
+            let (tx, mut rx) = mpsc::channel(2);
+
+            let handle = task::spawn_blocking(move || -> Result<()> {
                 let file = std::fs::File::open(path)?;
                 let buf_reader = std::io::BufReader::new(file);
                 let mut reader = IndexedReader::new(buf_reader, index);
@@ -242,9 +247,9 @@ impl ExecutionPlan for BgzfFastqExec {
                         }
                         let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
                             .with_row_count(Some(num_rows));
-                        let batch = RecordBatch::try_new_with_options(schema, vec![], &options)
-                            .map_err(|e| DataFusionError::ArrowError(e, None))?;
-                        return Ok(vec![batch]);
+                        let batch = RecordBatch::try_new_with_options(schema, vec![], &options)?;
+                        tx.blocking_send(Ok(batch)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                        return Ok(());
                     }
                 }
 
@@ -262,7 +267,6 @@ impl ExecutionPlan for BgzfFastqExec {
                     .map_or(true, |p| p.contains(&3))
                     .then(StringBuilder::new);
 
-                let mut batches = Vec::new();
                 let mut count = 0;
 
                 loop {
@@ -323,10 +327,9 @@ impl ExecutionPlan for BgzfFastqExec {
                                     arrays
                                         .push(Arc::new(quality_scores.as_mut().unwrap().finish()));
                                 }
-                                batches.push(
-                                    RecordBatch::try_new(schema.clone(), arrays)
-                                        .map_err(|e| DataFusionError::ArrowError(e, None))?,
-                                );
+                                let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+                                tx.blocking_send(Ok(batch)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+
                                 if let Some(p) = proj_indices {
                                     names = p.contains(&0).then(StringBuilder::new);
                                     descriptions = p.contains(&1).then(StringBuilder::new);
@@ -340,7 +343,10 @@ impl ExecutionPlan for BgzfFastqExec {
                                 }
                             }
                         }
-                        Err(_) => break, // Stop on error
+                        Err(e) => {
+                            tx.blocking_send(Err(DataFusionError::Execution(e.to_string()))).map_err(|e| DataFusionError::Execution(e.to_string()))?;
+                            break;
+                        }
                     }
 
                     if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
@@ -366,24 +372,18 @@ impl ExecutionPlan for BgzfFastqExec {
                         arrays.push(Arc::new(sequences.unwrap().finish()));
                         arrays.push(Arc::new(quality_scores.unwrap().finish()));
                     }
-                    batches.push(
-                        RecordBatch::try_new(schema, arrays)
-                            .map_err(|e| DataFusionError::ArrowError(e, None))?,
-                    );
+                    let batch = RecordBatch::try_new(schema, arrays)?;
+                    tx.blocking_send(Ok(batch)).map_err(|e| DataFusionError::Execution(e.to_string()))?;
                 }
-                Ok(batches)
-            })
-            .await
-            .map_err(|e| DataFusionError::Execution(e.to_string()))
-        })
-        .map(|res| match res {
-            Ok(Ok(batches)) => Either::Left(stream::iter(batches.into_iter().map(Ok))),
-            Ok(Err(e)) => Either::Right(Either::Left(stream::iter(vec![Err(e)]))),
-            Err(e) => Either::Right(Either::Right(stream::iter(vec![Err(
-                DataFusionError::from(e),
-            )]))),
-        })
-        .flatten();
+                Ok(())
+            });
+
+            while let Some(batch) = rx.recv().await {
+                yield batch?;
+            }
+
+            handle.await.map_err(|e| DataFusionError::Execution(e.to_string()))??;
+        };
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
