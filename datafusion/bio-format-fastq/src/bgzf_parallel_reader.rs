@@ -16,10 +16,10 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
 };
 use futures::channel::mpsc;
-use log::debug;
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_fastq as fastq;
 use std::path::PathBuf;
+use tracing::debug;
 
 #[derive(Debug, Clone)]
 pub struct BgzfFastqTableProvider {
@@ -200,7 +200,7 @@ impl ExecutionPlan for BgzfFastqExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let (start_uncomp, end_comp) = self.partitions[partition];
         let path = self.path.clone();
@@ -208,9 +208,9 @@ impl ExecutionPlan for BgzfFastqExec {
         let projection = self.projection.clone();
         let index = self.index.clone();
         let limit = self.limit;
-        let batch_size = 8192;
+        let batch_size = context.session_config().batch_size();
 
-        let (mut tx, rx) = mpsc::channel(2);
+        let (mut tx, rx) = mpsc::channel::<(Result<RecordBatch, ArrowError>, usize)>(2);
 
         let _handle = thread::spawn(move || {
             let read_and_send = || -> Result<(), ArrowError> {
@@ -253,7 +253,7 @@ impl ExecutionPlan for BgzfFastqExec {
                         let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
                             .with_row_count(Some(num_rows));
                         let batch = RecordBatch::try_new_with_options(schema, vec![], &options)?;
-                        tx.try_send(Ok(batch)).ok();
+                        tx.try_send((Ok(batch), num_rows)).ok();
                         return Ok(());
                     }
                 }
@@ -346,7 +346,8 @@ impl ExecutionPlan for BgzfFastqExec {
                     }
 
                     let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-                    if tx.try_send(Ok(batch)).is_err() {
+                    let num_rows = batch.num_rows();
+                    if tx.try_send((Ok(batch), num_rows)).is_err() {
                         // If the receiver is dropped, stop sending.
                         break;
                     }
@@ -355,7 +356,7 @@ impl ExecutionPlan for BgzfFastqExec {
             };
 
             if let Err(e) = read_and_send() {
-                let _ = tx.try_send(Err(e));
+                let _ = tx.try_send((Err(e), 0));
             }
         });
 
@@ -363,7 +364,10 @@ impl ExecutionPlan for BgzfFastqExec {
 
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema(),
-            rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(e, None))),
+            rx.map(move |(item, count)| {
+                debug!("Partition {}: processed {} rows", partition, count);
+                item.map_err(|e| DataFusionError::ArrowError(e, None))
+            }),
         )))
     }
 }

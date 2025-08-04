@@ -32,6 +32,7 @@ use datafusion_bio_format_fastq::BgzfFastqTableProvider;
 
 #[tokio::main]
 async fn main() -> datafusion::common::Result<()> {
+    tracing_subscriber::fmt::init();
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
         eprintln!(
@@ -44,7 +45,7 @@ async fn main() -> datafusion::common::Result<()> {
     println!("Using file: {}", file_path);
 
     // Create a SessionContext
-    let config = SessionConfig::new().with_target_partitions(1);
+    let config = SessionConfig::new().with_target_partitions(16);
     let ctx = SessionContext::new_with_config(config);
 
     // Create and register the table provider
