@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::io::{self, BufRead, Seek};
+use std::io::{self, BufRead, Seek, SeekFrom};
 use std::sync::Arc;
 use std::thread;
 
@@ -168,6 +168,63 @@ impl DisplayAs for BgzfFastqExec {
     }
 }
 
+fn find_line_end(buf: &[u8], start: usize) -> Option<usize> {
+    buf[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|pos| start + pos)
+}
+
+fn synchronize_reader<R: BufRead>(reader: &mut IndexedReader<R>, end_comp: u64) -> io::Result<()> {
+    // DO NOT perform an initial read_until, as it can discard a valid header
+    // if the initial seek lands exactly on the start of a line.
+    // The loop below is capable of handling any starting position.
+
+    loop {
+        if reader.virtual_position().compressed() >= end_comp {
+            return Ok(());
+        }
+
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(()); // EOF
+        }
+
+        // Find the first potential header line starting with '@'.
+        if let Some(at_pos) = buf.iter().position(|&b| b == b'@') {
+            // We have a potential header. To validate it, we must find a '+' on the third line after it.
+            // This must all be done by inspecting the current buffer without consuming it.
+            if let Some(l1_end) = find_line_end(buf, at_pos) {
+                if let Some(l2_end) = find_line_end(buf, l1_end + 1) {
+                    if let Some(l3_start) = l2_end.checked_add(1) {
+                        if buf.get(l3_start) == Some(&b'+') {
+                            // Validation successful. This is a real record start.
+                            // Consume the stream up to the start of this valid record.
+                            reader.consume(at_pos);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            // If we get here, the validation failed because the buffer wasn't big enough
+            // to contain the full 4-line record, OR it was a false positive.
+            // We must consume data to get more context.
+            // Consume up to and including the false-positive '@' line and try again.
+            if let Some(end_of_at_line) = find_line_end(buf, at_pos) {
+                reader.consume(end_of_at_line + 1);
+            } else {
+                // The buffer ends mid-line, consume it all.
+                let len = buf.len();
+                reader.consume(len);
+            }
+        } else {
+            // No '@' found in the entire buffer. Consume it all and get a new one.
+            let len = buf.len();
+            reader.consume(len);
+        }
+    }
+}
+
 #[async_trait]
 impl ExecutionPlan for BgzfFastqExec {
     fn as_any(&self) -> &dyn Any {
@@ -216,15 +273,14 @@ impl ExecutionPlan for BgzfFastqExec {
             let read_and_send = || -> Result<(), ArrowError> {
                 let file = std::fs::File::open(path)
                     .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-                let buf_reader = std::io::BufReader::new(file);
-                let mut reader = IndexedReader::new(buf_reader, index);
+                let mut reader = IndexedReader::new(std::io::BufReader::new(file), index);
 
                 reader
                     .seek(std::io::SeekFrom::Start(start_uncomp))
                     .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
 
                 if start_uncomp > 0 {
-                    skip_to_next_fastq_record(&mut reader)
+                    synchronize_reader(&mut reader, end_comp)
                         .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
                 }
 
@@ -241,13 +297,13 @@ impl ExecutionPlan for BgzfFastqExec {
                                     break;
                                 }
                             }
+                            if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
+                                break;
+                            }
                             match fastq_reader.read_record(&mut record) {
                                 Ok(0) => break,
                                 Ok(_) => num_rows += 1,
                                 Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
-                            }
-                            if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
-                                break;
                             }
                         }
                         let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
@@ -347,9 +403,14 @@ impl ExecutionPlan for BgzfFastqExec {
 
                     let batch = RecordBatch::try_new(schema.clone(), arrays)?;
                     let num_rows = batch.num_rows();
-                    if tx.try_send((Ok(batch), num_rows)).is_err() {
-                        // If the receiver is dropped, stop sending.
-                        break;
+                    // Block until the send succeeds
+                    while let Err(e) = tx.try_send((Ok(batch.clone()), num_rows)) {
+                        if e.is_disconnected() {
+                            // Receiver is gone, exit
+                            return Ok(());
+                        }
+                        // Channel is full, yield and retry
+                        std::thread::yield_now();
                     }
                 }
                 Ok(())
@@ -369,72 +430,5 @@ impl ExecutionPlan for BgzfFastqExec {
                 item.map_err(|e| DataFusionError::ArrowError(e, None))
             }),
         )))
-    }
-}
-
-fn is_valid_record_start(buf: &[u8]) -> bool {
-    if !buf.starts_with(b"@") {
-        return false;
-    }
-
-    let mut lines = buf.splitn(5, |&b| b == b'\n');
-    if let (Some(l1), Some(l2), Some(l3), Some(l4)) =
-        (lines.next(), lines.next(), lines.next(), lines.next())
-    {
-        if l1.starts_with(b"@") && l3.starts_with(b"+") {
-            let seq_len = if l2.ends_with(b"\r") {
-                l2.len() - 1
-            } else {
-                l2.len()
-            };
-            // Quality scores line can be shorter than sequence line if it's the last line of the file
-            let qual_len = if l4.ends_with(b"\r") {
-                l4.len() - 1
-            } else {
-                l4.len()
-            };
-            return seq_len >= qual_len;
-        }
-    }
-
-    false
-}
-
-fn skip_to_next_fastq_record<R: BufRead>(reader: &mut R) -> io::Result<()> {
-    let buf = reader.fill_buf()?;
-    if buf.is_empty() || is_valid_record_start(buf) {
-        // Current position is already a valid start or EOF, do nothing.
-        return Ok(());
-    }
-
-    // The current position is inside a record, so we must find the next one.
-    // First, consume the rest of the current line.
-    if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-        reader.consume(pos + 1);
-    } else {
-        // No newline in buffer, consume all.
-        let len = buf.len();
-        reader.consume(len);
-    }
-
-    // Now, search for the start of a valid record.
-    loop {
-        let buf = reader.fill_buf()?;
-        if buf.is_empty() {
-            // End of file
-            return Ok(());
-        }
-
-        if is_valid_record_start(buf) {
-            return Ok(());
-        }
-
-        // Not a valid start, consume this line and try the next.
-        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-            reader.consume(pos + 1);
-        } else {
-            let len = buf.len();
-            reader.consume(len);
-        }
     }
 }
