@@ -16,6 +16,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
 };
 use futures::channel::mpsc;
+use log::debug;
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_fastq as fastq;
 use std::path::PathBuf;
@@ -106,7 +107,7 @@ impl datafusion::catalog::TableProvider for BgzfFastqTableProvider {
             .map_err(|e| DataFusionError::Execution(format!("Failed to read GZI index: {}", e)))?;
 
         let partitions = get_bgzf_partition_bounds(&index, state.config().target_partitions());
-
+        debug!("Partitions: {:?}", partitions);
         let projected_schema = match projection {
             Some(p) => Arc::new(self.schema.project(p)?),
             None => self.schema.clone(),
