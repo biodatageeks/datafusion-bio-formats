@@ -8,7 +8,7 @@ datafusion.workspace = true
 datafusion-execution.workspace = true
 async-trait.workspace = true
 opendal.workspace = true
-noodles-vcf = { version = "0.80.0", features = ["async"] }
+noodles-vcf = { git = "https://github.com/biodatageeks/noodles.git",rev = "533a9f181c2fd60ad13da0febe23446543387b38", features = ["async"] }
 noodles-bgzf = { workspace = true }
 tokio-util.workspace = true
 tokio.workspace = true
