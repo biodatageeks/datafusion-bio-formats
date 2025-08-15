@@ -1,11 +1,9 @@
 use crate::physical_exec::VcfExec;
 use crate::storage::get_header;
 use async_trait::async_trait;
-use datafusion::arrow::array::{
-    ArrayRef, BooleanBuilder, Float32Builder, Int32Builder, ListBuilder, StringBuilder,
-};
+
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use datafusion::arrow::error::ArrowError;
+
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
@@ -14,10 +12,10 @@ use datafusion::physical_plan::{ExecutionMode, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use futures::executor::block_on;
 use log::debug;
-use noodles::vcf::header::Formats;
-use noodles::vcf::header::Infos;
-use noodles::vcf::header::record::value::map::format::Type as FormatType;
-use noodles::vcf::header::record::value::map::info::{Number, Type as InfoType};
+use noodles_vcf::header::Formats;
+use noodles_vcf::header::Infos;
+use noodles_vcf::header::record::value::map::format::Type as FormatType;
+use noodles_vcf::header::record::value::map::info::{Number, Type as InfoType};
 use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;

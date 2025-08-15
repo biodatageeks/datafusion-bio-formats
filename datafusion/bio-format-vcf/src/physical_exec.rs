@@ -12,17 +12,17 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use datafusion_bio_format_core::object_storage::{CompressionType, get_storage_type};
+use datafusion_bio_format_core::object_storage::get_storage_type;
 use datafusion_bio_format_core::object_storage::{ObjectStorageOptions, StorageType};
 use datafusion_bio_format_core::table_utils::{OptionalField, builders_to_arrays};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::{StreamExt, TryStreamExt};
 use log::debug;
-use noodles::vcf::Header;
-use noodles::vcf::header::Infos;
-use noodles::vcf::variant::Record;
-use noodles::vcf::variant::record::info::field::{Value, value::Array as ValueArray};
-use noodles::vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
+use noodles_vcf::Header;
+use noodles_vcf::header::Infos;
+use noodles_vcf::variant::Record;
+use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArray};
+use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
 use std::str;
 
 fn build_record_batch(
