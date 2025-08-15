@@ -9,12 +9,10 @@ use noodles_bam::io::Reader;
 use noodles_bgzf as bgzf;
 use noodles_bgzf::MultithreadedReader;
 use noodles_sam::header::ReferenceSequences;
-use noodles_sam::header::record::value::map::ReferenceSequence;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::Error;
 use std::num::NonZero;
-use std::ops::Deref;
 use tokio_util::io::StreamReader;
 
 pub async fn get_remote_bam_reader(

@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::io::{self, BufRead, Seek, SeekFrom};
+use std::io::{self, BufRead, Seek};
 use std::sync::Arc;
 use std::thread;
 

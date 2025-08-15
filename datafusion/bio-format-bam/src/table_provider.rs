@@ -1,6 +1,6 @@
 use crate::physical_exec::BamExec;
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;

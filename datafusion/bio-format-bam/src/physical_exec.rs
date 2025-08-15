@@ -1,11 +1,8 @@
 use crate::storage::BamReader;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{
-    Array, Float32Builder, NullArray, RecordBatch, StringArray, StringBuilder, UInt32Array,
-    UInt32Builder,
-};
-use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Fields, SchemaRef};
+use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, UInt32Array};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -13,17 +10,15 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Pla
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
-use datafusion_bio_format_core::table_utils::OptionalField::Utf8Builder;
-use datafusion_bio_format_core::table_utils::{Attribute, OptionalField, builders_to_arrays};
+
 use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
+use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::cigar::Op;
 use noodles_sam::alignment::record::cigar::op::Kind as OpKind;
-use noodles_sam::alignment::{Record, record};
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::io;
-use std::io::Error;
 use std::sync::Arc;
 
 #[allow(dead_code)]
@@ -435,7 +430,7 @@ fn build_record_batch(
 
     let arrays = match projection {
         None => {
-            let mut arrays: Vec<Arc<dyn Array>> = vec![
+            let arrays: Vec<Arc<dyn Array>> = vec![
                 name_array,
                 chrom_array,
                 start_array,

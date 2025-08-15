@@ -54,22 +54,23 @@ async fn main() -> datafusion::common::Result<()> {
 
     // Execute a query and measure the time
     let start_time = Instant::now();
-    let df = ctx.sql("SELECT count(*) FROM fastq").await?;
+    let df = ctx.sql("SELECT * FROM fastq").await?;
     let batches = df.collect().await?;
+    println!("{}", batches.len());
     let elapsed = start_time.elapsed();
 
     // Print the results
-    if let Some(batch) = batches.first() {
-        if let Some(array) = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::Int64Array>()
-        {
-            if !array.is_empty() {
-                println!("Record count: {}", array.value(0));
-            }
-        }
-    }
+    // if let Some(batch) = batches.first() {
+    //     if let Some(array) = batch
+    //         .column(0)
+    //         .as_any()
+    //         .downcast_ref::<datafusion::arrow::array::Int64Array>()
+    //     {
+    //         if !array.is_empty() {
+    //             println!("Record count: {}", array.value(0));
+    //         }
+    //     }
+    // }
 
     println!("Query executed in: {:?}", elapsed);
 

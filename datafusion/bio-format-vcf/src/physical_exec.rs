@@ -33,7 +33,7 @@ fn build_record_batch(
     ids: &[String],
     refs: &[String],
     alts: &[String],
-    quals: &[f64],
+    quals: &[Option<f64>],
     filters: &[String],
     infos: Option<&Vec<Arc<dyn Array>>>,
     projection: Option<Vec<usize>>,
@@ -191,7 +191,7 @@ async fn get_local_vcf(
     let mut ids: Vec<String> = Vec::with_capacity(batch_size);
     let mut refs: Vec<String> = Vec::with_capacity(batch_size);
     let mut alts: Vec<String> = Vec::with_capacity(batch_size);
-    let mut quals: Vec<f64> = Vec::with_capacity(batch_size);
+    let mut quals: Vec<Option<f64>> = Vec::with_capacity(batch_size);
     let mut filters: Vec<String> = Vec::with_capacity(batch_size);
 
     // let mut count: usize = 0;
@@ -224,7 +224,7 @@ async fn get_local_vcf(
             ids.push(record.ids().iter().map(|v| v.to_string()).collect::<Vec<String>>().join(";"));
             refs.push(record.reference_bases().to_string());
             alts.push(record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join("|"));
-            quals.push(record.quality_score().unwrap_or(Ok(0.0)).unwrap() as f64);
+            quals.push(record.quality_score().transpose()?.map(|v| v as f64));
             filters.push(record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join(";"));
             load_infos(Box::new(record), &header, &mut info_builders)?;
             record_num += 1;
@@ -307,7 +307,7 @@ async fn get_remote_vcf_stream(
         let mut ids: Vec<String> = Vec::with_capacity(batch_size);
         let mut refs: Vec<String> = Vec::with_capacity(batch_size);
         let mut alts: Vec<String> = Vec::with_capacity(batch_size);
-        let mut quals: Vec<f64> = Vec::with_capacity(batch_size);
+        let mut quals: Vec<Option<f64>> = Vec::with_capacity(batch_size);
         let mut filters: Vec<String> = Vec::with_capacity(batch_size);
         // add infos fields vector of vectors of different types
 
@@ -328,7 +328,7 @@ async fn get_remote_vcf_stream(
             ids.push(record.ids().iter().map(|v| v.to_string()).collect::<Vec<String>>().join(";"));
             refs.push(record.reference_bases().to_string());
             alts.push(record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join("|"));
-            quals.push(record.quality_score().unwrap_or(Ok(0.0)).unwrap() as f64);
+            quals.push(record.quality_score().transpose()?.map(|v| v as f64));
             filters.push(record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join(";"));
             load_infos(Box::new(record), &header, &mut info_builders)?;
             record_num += 1;
