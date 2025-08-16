@@ -10,7 +10,6 @@ use std::env;
 use std::fmt::Display;
 use tokio_util::io::StreamReader;
 use url::Url;
-
 #[derive(Clone, Debug)]
 pub struct ObjectStorageOptions {
     pub chunk_size: Option<usize>,
@@ -122,6 +121,8 @@ pub fn get_compression_type(
     //extract the file extension from path
     if file_path.to_lowercase().ends_with(".vcf")
         || file_path.to_lowercase().ends_with(".fastq")
+        || file_path.to_lowercase().ends_with(".fasta")
+        || file_path.to_lowercase().ends_with(".fa")
         || file_path.to_lowercase().ends_with(".gff3")
         || file_path.to_lowercase().ends_with(".gff")
         || file_path.to_lowercase().ends_with(".bed")
