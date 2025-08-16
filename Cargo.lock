@@ -482,9 +482,11 @@ version = "0.1.0"
 dependencies = [
  "async-compression",
  "async-stream",
+ "async-trait",
  "bytes",
  "datafusion",
  "datafusion-bio-format-core",
+ "flate2",
  "futures",
  "futures-util",
  "log",
@@ -2468,7 +2470,7 @@ dependencies = [
 [[package]]
 name = "noodles-bgzf"
 version = "0.42.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=4f5b98384e2d6e5f7d9cc7f117a262e90a03df92#4f5b98384e2d6e5f7d9cc7f117a262e90a03df92"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=5d7a3ffed431af16de40845749d1756047a87b97#5d7a3ffed431af16de40845749d1756047a87b97"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -2506,7 +2508,7 @@ dependencies = [
 [[package]]
 name = "noodles-core"
 version = "0.18.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=4f5b98384e2d6e5f7d9cc7f117a262e90a03df92#4f5b98384e2d6e5f7d9cc7f117a262e90a03df92"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=5d7a3ffed431af16de40845749d1756047a87b97#5d7a3ffed431af16de40845749d1756047a87b97"
 dependencies = [
  "bstr",
 ]
@@ -2567,7 +2569,7 @@ dependencies = [
 [[package]]
 name = "noodles-csi"
 version = "0.50.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=4f5b98384e2d6e5f7d9cc7f117a262e90a03df92#4f5b98384e2d6e5f7d9cc7f117a262e90a03df92"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=5d7a3ffed431af16de40845749d1756047a87b97#5d7a3ffed431af16de40845749d1756047a87b97"
 dependencies = [
  "bit-vec",
  "bstr",
@@ -2724,7 +2726,7 @@ dependencies = [
 [[package]]
 name = "noodles-tabix"
 version = "0.56.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=4f5b98384e2d6e5f7d9cc7f117a262e90a03df92#4f5b98384e2d6e5f7d9cc7f117a262e90a03df92"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=5d7a3ffed431af16de40845749d1756047a87b97#5d7a3ffed431af16de40845749d1756047a87b97"
 dependencies = [
  "bstr",
  "indexmap",
@@ -2755,7 +2757,7 @@ dependencies = [
 [[package]]
 name = "noodles-vcf"
 version = "0.80.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=4f5b98384e2d6e5f7d9cc7f117a262e90a03df92#4f5b98384e2d6e5f7d9cc7f117a262e90a03df92"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=5d7a3ffed431af16de40845749d1756047a87b97#5d7a3ffed431af16de40845749d1756047a87b97"
 dependencies = [
  "futures",
  "indexmap",
