@@ -12,14 +12,13 @@ tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 datafusion-bio-format-core = {path = "../bio-format-core"}
-noodles-fasta = {version = "0.55.0", features = ["async"]}
+noodles-fasta= { git = "https://github.com/biodatageeks/noodles.git",rev = "289ef32e7d43d142914fb3f02335044ae293871c", features = ["async"] }
 futures.workspace = true
 futures-util.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
 log = "0.4.27"
 async-trait = "0.1.81"
-flate2 = "1.0.30"
 
 [[example]]
 name = "test_reader"

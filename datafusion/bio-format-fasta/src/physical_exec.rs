@@ -1,4 +1,6 @@
-use crate::storage::FastaReader;
+use crate::storage::{FastaLocalReader, FastaRemoteReader};
+use async_stream::__private::AsyncStream;
+use async_stream::try_stream;
 use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
@@ -8,12 +10,13 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Pla
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
-use futures::stream;
+
+use futures::Future;
+use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use std::thread;
 
 #[allow(dead_code)]
 pub struct FastaExec {
@@ -69,42 +72,162 @@ impl ExecutionPlan for FastaExec {
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
         debug!("FastaExec::execute");
         debug!("Projection: {:?}", self.projection);
-        let _batch_size = context.session_config().batch_size();
-        let is_remote = matches!(
-            get_storage_type(self.file_path.clone()),
-            StorageType::HTTP | StorageType::GCS | StorageType::S3 | StorageType::AZBLOB
-        );
-        let file_path = self.file_path.clone();
+        let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
-        let projection = self.projection.clone();
-
-        let handle = thread::spawn(move || {
-            let mut reader = FastaReader::new(file_path, is_remote).unwrap();
-            reader.records().collect::<Vec<_>>()
-        });
-
-        let records = handle.join().unwrap();
-
-        let stream = stream::iter(records.into_iter().map(move |result| {
-            let record = result?;
-            let rec_name = std::str::from_utf8(record.name()).unwrap().to_string();
-            let rec_desc = record.description().map(|s| s.to_string());
-            let sequence = std::str::from_utf8(record.sequence().as_ref())
-                .unwrap()
-                .to_string();
-            build_record_batch(
-                schema.clone(),
-                &[rec_name],
-                &[rec_desc],
-                &[sequence],
-                projection.clone(),
-            )
-        }));
-        Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema.clone(),
-            stream,
-        )))
+        let fut = get_stream(
+            self.file_path.clone(),
+            schema.clone(),
+            batch_size,
+            self.thread_num,
+            self.projection.clone(),
+            self.object_storage_options.clone(),
+        );
+        let stream = futures::stream::once(fut).try_flatten();
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
+}
+
+async fn get_remote_fasta_stream(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::error::Result<
+    AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
+> {
+    let mut reader =
+        FastaRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
+
+    let stream = try_stream! {
+        // Create vectors for accumulating record data.
+        let mut name: Vec<String> = Vec::with_capacity(batch_size);
+        let mut description: Vec<Option<String>> = Vec::with_capacity(batch_size);
+        let mut sequence: Vec<String>  = Vec::with_capacity(batch_size);
+
+
+        let mut record_num = 0;
+        let mut batch_num = 0;
+
+        // Process records one by one.
+
+        let mut records = reader.read_records().await;
+        while let Some(result) = records.next().await {
+            let record = result?;  // propagate errors if any
+            name.push(std::str::from_utf8(record.name()).unwrap().to_string());
+            description.push(
+                record.description().map(|s| std::str::from_utf8(s).unwrap().to_string())
+            );
+            sequence.push(std::str::from_utf8(record.sequence().as_ref()).unwrap().to_string());
+
+            record_num += 1;
+            // Once the batch size is reached, build and yield a record batch.
+            if record_num % batch_size == 0 {
+                debug!("Record number: {}", record_num);
+                let batch = build_record_batch(
+                    Arc::clone(&schema.clone()),
+                    &name,
+                    &description,
+                    &sequence,
+                    projection.clone(),
+                )?;
+                batch_num += 1;
+                debug!("Batch number: {}", batch_num);
+                yield batch;
+                // Clear vectors for the next batch.
+                name.clear();
+                description.clear();
+                sequence.clear();
+
+            }
+        }
+        // If there are remaining records that don't fill a complete batch,
+        // yield them as well.
+        if !name.is_empty() {
+            let batch = build_record_batch(
+                Arc::clone(&schema.clone()),
+                &name,
+                &description,
+                &sequence,
+                projection.clone(),
+            )?;
+            yield batch;
+        }
+    };
+    Ok(stream)
+}
+
+async fn get_local_fasta(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    thread_num: Option<usize>,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
+{
+    let mut name: Vec<String> = Vec::with_capacity(batch_size);
+    let mut description: Vec<Option<String>> = Vec::with_capacity(batch_size);
+    let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
+
+    // let mut count: usize = 0;
+    let mut batch_num = 0;
+    let file_path = file_path.clone();
+    let thread_num = thread_num.unwrap_or(1);
+    let mut reader = FastaLocalReader::new(
+        file_path.clone(),
+        thread_num,
+        object_storage_options.unwrap(),
+    )
+    .await?;
+    let mut record_num = 0;
+
+    let stream = try_stream! {
+
+        let mut records = reader.read_records().await;
+        // let iter_start_time = Instant::now();
+        while let Some(result) = records.next().await {
+            let record = result?;  // propagate errors if any
+             name.push(std::str::from_utf8(record.name()).unwrap().to_string());
+            description.push(
+                record.description().map(|s| std::str::from_utf8(s).unwrap().to_string())
+            );
+            sequence.push(std::str::from_utf8(record.sequence().as_ref()).unwrap().to_string());
+
+            record_num += 1;
+            // Once the batch size is reached, build and yield a record batch.
+            if record_num % batch_size == 0 {
+                debug!("Record number: {}", record_num);
+                let batch = build_record_batch(
+                    Arc::clone(&schema.clone()),
+                    &name,
+                    &description,
+                    &sequence,
+                    projection.clone(),
+                )?;
+                batch_num += 1;
+                debug!("Batch number: {}", batch_num);
+                yield batch;
+                // Clear vectors for the next batch.
+                name.clear();
+                description.clear();
+                sequence.clear();
+            }
+        }
+        // If there are remaining records that don't fill a complete batch,
+        // yield them as well.
+        if !name.is_empty() {
+            let batch = build_record_batch(
+                Arc::clone(&schema.clone()),
+                &name,
+                &description,
+                &sequence,
+                projection.clone(),
+            )?;
+            yield batch;
+        }
+    };
+    Ok(stream)
 }
 
 fn build_record_batch(
@@ -149,4 +272,46 @@ fn build_record_batch(
     };
     RecordBatch::try_new(schema.clone(), arrays)
         .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+}
+
+async fn get_stream(
+    file_path: String,
+    schema_ref: SchemaRef,
+    batch_size: usize,
+    thread_num: Option<usize>,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::error::Result<SendableRecordBatchStream> {
+    // Open the BGZF-indexed VCF using IndexedReader.
+
+    let file_path = file_path.clone();
+    let store_type = get_storage_type(file_path.clone());
+    let schema = schema_ref.clone();
+
+    match store_type {
+        StorageType::LOCAL => {
+            let stream = get_local_fasta(
+                file_path.clone(),
+                schema.clone(),
+                batch_size,
+                thread_num,
+                projection,
+                object_storage_options,
+            )
+            .await?;
+            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+        }
+        StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
+            let stream = get_remote_fasta_stream(
+                file_path.clone(),
+                schema.clone(),
+                batch_size,
+                projection,
+                object_storage_options,
+            )
+            .await?;
+            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+        }
+        _ => unimplemented!("Unsupported storage type: {:?}", store_type),
+    }
 }

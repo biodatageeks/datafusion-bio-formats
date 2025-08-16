@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.push("examples/example.fasta");
+    path.push("../../sandbox/test.fasta");
 
     let config = SessionConfig::new().with_information_schema(true);
     let ctx = SessionContext::new_with_config(config);
