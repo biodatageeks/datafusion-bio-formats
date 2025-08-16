@@ -1,5 +1,5 @@
-use bio_format_fasta::table_provider::FastaTableProvider;
 use datafusion::prelude::*;
+use datafusion_bio_format_fasta::table_provider::FastaTableProvider;
 use std::path::PathBuf;
 
 #[tokio::main(flavor = "multi_thread")]

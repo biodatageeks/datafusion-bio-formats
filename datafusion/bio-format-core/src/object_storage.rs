@@ -11,6 +11,13 @@ use std::fmt::Display;
 use tokio_util::io::StreamReader;
 use url::Url;
 
+pub fn get_remote_stream_sync(
+    file_path: &str,
+) -> Result<Box<dyn std::io::Read + Send + Sync>, reqwest::Error> {
+    let response = reqwest::blocking::get(file_path)?;
+    Ok(Box::new(response))
+}
+
 #[derive(Clone, Debug)]
 pub struct ObjectStorageOptions {
     pub chunk_size: Option<usize>,

@@ -1,16 +1,19 @@
-use crate::storage::FastaLocalReader;
+use crate::storage::FastaReader;
 use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::object_storage::{
+    ObjectStorageOptions, StorageType, get_storage_type,
+};
 use futures::stream;
 use log::debug;
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use std::thread;
 
 #[allow(dead_code)]
 pub struct FastaExec {
@@ -67,15 +70,25 @@ impl ExecutionPlan for FastaExec {
         debug!("FastaExec::execute");
         debug!("Projection: {:?}", self.projection);
         let _batch_size = context.session_config().batch_size();
-        let mut reader =
-            FastaLocalReader::new(self.file_path.clone(), self.thread_num.unwrap_or(1))?;
+        let is_remote = matches!(
+            get_storage_type(self.file_path.clone()),
+            StorageType::HTTP | StorageType::GCS | StorageType::S3 | StorageType::AZBLOB
+        );
+        let file_path = self.file_path.clone();
         let schema = self.schema.clone();
         let projection = self.projection.clone();
 
-        let records: Vec<_> = reader.records().collect();
+        let handle = thread::spawn(move || {
+            let mut reader = FastaReader::new(file_path, is_remote).unwrap();
+            reader.records().collect::<Vec<_>>()
+        });
+
+        let records = handle.join().unwrap();
+
         let stream = stream::iter(records.into_iter().map(move |result| {
             let record = result?;
-            let (rec_name, rec_desc) = parse_definition(record.name());
+            let rec_name = std::str::from_utf8(record.name()).unwrap().to_string();
+            let rec_desc = record.description().map(|s| s.to_string());
             let sequence = std::str::from_utf8(record.sequence().as_ref())
                 .unwrap()
                 .to_string();
@@ -91,20 +104,6 @@ impl ExecutionPlan for FastaExec {
             self.schema.clone(),
             stream,
         )))
-    }
-}
-
-fn parse_definition(definition: &str) -> (String, Option<String>) {
-    if let Some(pos) = definition.find(char::is_whitespace) {
-        let (name, desc_part) = definition.split_at(pos);
-        let description = desc_part.trim_start();
-        if description.is_empty() {
-            (name.to_string(), None)
-        } else {
-            (name.to_string(), Some(description.to_string()))
-        }
-    } else {
-        (definition.to_string(), None)
     }
 }
 
