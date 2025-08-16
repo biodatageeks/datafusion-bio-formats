@@ -7,6 +7,7 @@ edition = "2024"
 datafusion.workspace = true
 opendal.workspace = true
 noodles.workspace = true
+noodles-bgzf.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
@@ -16,8 +17,11 @@ futures.workspace = true
 futures-util.workspace = true
 async-compression.workspace = true
 async-stream = "0.3.6"
-log = "0.4.27"
+log = { version = "0.4.27", features = ["release_max_level_debug"] }
 async-trait = "0.1.88"
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
 
 [[example]]
 name = "test_reader"

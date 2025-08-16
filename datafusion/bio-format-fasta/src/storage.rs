@@ -1,17 +1,12 @@
 use async_compression::tokio::bufread::GzipDecoder;
-use async_stream::try_stream;
 use bytes::Bytes;
 use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, get_compression_type, get_remote_stream,
     get_remote_stream_bgzf_async, get_remote_stream_gz_async,
 };
-use futures_util::stream::BoxStream;
-use futures_util::{FutureExt, StreamExt, stream};
-use log::error;
-use noodles::bgzf;
+use noodles_bgzf as bgzf;
 use noodles_fasta as fasta;
 use noodles_fasta::AsyncReader;
-use noodles_fasta::Record;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufReader, Error};

@@ -12,10 +12,8 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
 use log::info;
-use noodles::vcf;
-use noodles::vcf::io::Reader;
-use noodles::vcf::{Header, Record};
 use noodles_bgzf::{AsyncReader, MultithreadedReader};
+use noodles_vcf as vcf;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::Error;
@@ -23,6 +21,8 @@ use std::num::NonZero;
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio_util::io::StreamReader;
+use vcf::io::Reader;
+use vcf::{Header, Record};
 
 pub async fn get_remote_vcf_bgzf_reader(
     file_path: String,
