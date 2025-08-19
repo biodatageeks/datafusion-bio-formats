@@ -6,7 +6,10 @@ use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
-use datafusion::physical_plan::{ExecutionMode, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::{
+    ExecutionPlan, PlanProperties,
+    execution_plan::{Boundedness, EmissionType},
+};
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use log::debug;
 use std::any::Any;
@@ -90,7 +93,8 @@ impl TableProvider for FastaTableProvider {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
-                ExecutionMode::Bounded,
+                EmissionType::Final,
+                Boundedness::Bounded,
             ),
             file_path: self.file_path.clone(),
             schema: schema.clone(),

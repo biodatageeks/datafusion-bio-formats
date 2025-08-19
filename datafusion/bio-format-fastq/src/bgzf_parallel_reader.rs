@@ -13,7 +13,9 @@ use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, stream::RecordBatchStreamAdapter,
+    SendableRecordBatchStream,
+    execution_plan::{Boundedness, EmissionType},
+    stream::RecordBatchStreamAdapter,
 };
 use futures::channel::mpsc;
 use noodles_bgzf::{IndexedReader, gzi};
@@ -148,7 +150,8 @@ impl BgzfFastqExec {
         let properties = PlanProperties::new(
             datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(partitions.len()),
-            datafusion::physical_plan::ExecutionMode::Bounded,
+            EmissionType::Final,
+            Boundedness::Bounded,
         );
         Self {
             path,
