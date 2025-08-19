@@ -1,4 +1,3 @@
-use datafusion_bio_format_gff::storage::{GffLocalReader, GffRemoteReader};
 use datafusion_bio_format_gff::table_provider::GffTableProvider;
 use futures_util::StreamExt;
 use std::sync::Arc;

@@ -3,10 +3,9 @@ use bytes::Bytes;
 use datafusion::arrow;
 use datafusion::arrow::array::StringBuilder;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
-use datafusion_bio_format_core::object_storage::{StorageType, get_remote_stream_gz_async};
 use datafusion_bio_format_core::object_storage::{
-    get_compression_type, get_remote_stream, get_remote_stream_bgzf_async, get_storage_type,
+    CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_remote_stream,
+    get_remote_stream_bgzf_async, get_remote_stream_gz_async, get_storage_type,
 };
 use futures::stream::BoxStream;
 use futures::{StreamExt, stream};

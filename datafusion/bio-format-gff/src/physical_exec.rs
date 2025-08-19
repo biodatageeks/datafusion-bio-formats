@@ -10,10 +10,10 @@ use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use datafusion_bio_format_core::object_storage::{
-    ObjectStorageOptions, StorageType, get_storage_type,
+use datafusion_bio_format_core::{
+    object_storage::{ObjectStorageOptions, StorageType, get_storage_type},
+    table_utils::{Attribute, OptionalField, builders_to_arrays},
 };
-use datafusion_bio_format_core::table_utils::{Attribute, OptionalField, builders_to_arrays};
 use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
 use noodles_gff::feature::RecordBuf;

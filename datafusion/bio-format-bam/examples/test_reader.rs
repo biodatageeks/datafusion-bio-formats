@@ -1,6 +1,4 @@
-use datafusion_bio_format_bam::storage::BamReader;
 use datafusion_bio_format_bam::table_provider::BamTableProvider;
-use futures_util::StreamExt;
 use std::sync::Arc;
 
 #[tokio::main(flavor = "multi_thread")]

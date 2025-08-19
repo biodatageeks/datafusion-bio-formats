@@ -152,22 +152,26 @@ pub async fn get_compression_type(
     }
 
     // GZIP magic number: 0x1f 0x8b
-    if buffer[0] == 0x1f && buffer[1] == 0x8b {
+    if buffer.len() >= 2 && buffer[0] == 0x1f && buffer[1] == 0x8b {
         // FLG byte is at index 3
-        let flg = buffer[3];
-        // FEXTRA flag is the 3rd bit (0-indexed)
-        if (flg & 0x04) != 0 {
+        if buffer.len() >= 10 && (buffer[3] & 0x04) != 0 {
             if buffer.len() < 12 {
                 return CompressionType::GZIP; // Not enough data for BGZF check
             }
             // XLEN is at index 10, little-endian
             let xlen = u16::from_le_bytes([buffer[10], buffer[11]]);
-            if buffer.len() < 12 + xlen as usize {
-                return CompressionType::GZIP; // Not enough data for BGZF subfield check
-            }
-            // BGZF subfield identifier is 'B' 'C'
-            if xlen >= 4 && buffer[12] == b'B' && buffer[13] == b'C' {
-                return CompressionType::BGZF;
+            if buffer.len() >= 12 + xlen as usize {
+                // BGZF subfield identifier is 'B' 'C'
+                let mut i = 12;
+                while i < 12 + xlen as usize {
+                    let si1 = buffer[i];
+                    let si2 = buffer[i + 1];
+                    let slen = u16::from_le_bytes([buffer[i + 2], buffer[i + 3]]);
+                    if si1 == b'B' && si2 == b'C' && slen == 2 {
+                        return CompressionType::BGZF;
+                    }
+                    i += (slen + 4) as usize;
+                }
             }
         }
         return CompressionType::GZIP;
