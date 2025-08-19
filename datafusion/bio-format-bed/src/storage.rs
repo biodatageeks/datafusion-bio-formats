@@ -124,7 +124,9 @@ macro_rules! impl_bed_remote_reader {
                     let compression_type = get_compression_type(
                         file_path.clone(),
                         object_storage_options.clone().compression_type,
-                    );
+                        object_storage_options.clone(),
+                    )
+                    .await;
                     match compression_type {
                         CompressionType::BGZF => {
                             let reader = get_remote_bed_bgzf_reader::<$n>(file_path, object_storage_options).await.unwrap();
@@ -174,8 +176,11 @@ macro_rules! impl_bed_local_reader {
                 pub async fn new(file_path: String, thread_num: usize) -> Result<Self, Error> {
                     info!("Creating local BED reader: {}", file_path);
                     let compression_type = get_compression_type(
-                        file_path.clone(),None
-                    );
+                        file_path.clone(),
+                        None,
+                        ObjectStorageOptions::default(),
+                    )
+                    .await;
                     match compression_type {
                         CompressionType::BGZF => {
                             let reader = get_local_bed_bgzf_reader::<$n>(file_path, thread_num)?;

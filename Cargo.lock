@@ -923,6 +923,7 @@ dependencies = [
  "bytes",
  "datafusion",
  "datafusion-execution",
+ "futures",
  "log",
  "noodles",
  "noodles-bgzf 0.36.0",

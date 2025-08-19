@@ -1,4 +1,5 @@
 use async_compression::tokio::bufread::GzipDecoder;
+use futures::StreamExt;
 use log;
 use log::debug;
 use noodles::bgzf;
@@ -8,6 +9,7 @@ use opendal::services::{Azblob, Gcs, S3};
 use opendal::{FuturesBytesStream, Operator};
 use std::env;
 use std::fmt::Display;
+use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
 use url::Url;
 #[derive(Clone, Debug)]
@@ -107,32 +109,71 @@ fn get_file_path(file_path: String) -> String {
     file_path.to_string()
 }
 
-pub fn get_compression_type(
+pub async fn get_compression_type(
     file_path: String,
     compression_type: Option<CompressionType>,
+    object_storage_options: ObjectStorageOptions,
 ) -> CompressionType {
     debug!(
         "get_compression_type called with file_path: {}, compression_type: {:?}",
         file_path, compression_type
     );
-    if !compression_type.is_none() && compression_type != Some(CompressionType::AUTO) {
+    if compression_type.is_some() && compression_type != Some(CompressionType::AUTO) {
         return compression_type.unwrap();
     }
-    //extract the file extension from path
-    if file_path.to_lowercase().ends_with(".vcf")
-        || file_path.to_lowercase().ends_with(".fastq")
-        || file_path.to_lowercase().ends_with(".fasta")
-        || file_path.to_lowercase().ends_with(".fa")
-        || file_path.to_lowercase().ends_with(".gff3")
-        || file_path.to_lowercase().ends_with(".gff")
-        || file_path.to_lowercase().ends_with(".bed")
-    {
-        //FIXME: generalize to other formats
+
+    let storage_type = get_storage_type(file_path.clone());
+    let buffer = if matches!(storage_type, StorageType::LOCAL) {
+        let local_path = file_path.strip_prefix("file://").unwrap_or(&file_path);
+        // For local files, read directly
+        let mut file = tokio::fs::File::open(local_path).await.unwrap();
+        let mut buffer = vec![0; 18];
+        let n = file.read(&mut buffer).await.unwrap();
+        buffer.truncate(n);
+        buffer
+    } else {
+        // For remote files, use the stream
+        let mut stream = get_remote_stream(file_path, object_storage_options)
+            .await
+            .unwrap();
+
+        let mut buffer = Vec::with_capacity(18); // Read a bit more to be safe for BGZF check
+        while let Some(Ok(chunk)) = stream.next().await {
+            buffer.extend_from_slice(&chunk);
+            if buffer.len() >= 18 {
+                break;
+            }
+        }
+        buffer
+    };
+
+    if buffer.len() < 4 {
         return CompressionType::NONE;
     }
-    let file_extension = file_path.split('.').last().unwrap();
-    //return the compression type
-    CompressionType::from_string(file_extension.to_string())
+
+    // GZIP magic number: 0x1f 0x8b
+    if buffer[0] == 0x1f && buffer[1] == 0x8b {
+        // FLG byte is at index 3
+        let flg = buffer[3];
+        // FEXTRA flag is the 3rd bit (0-indexed)
+        if (flg & 0x04) != 0 {
+            if buffer.len() < 12 {
+                return CompressionType::GZIP; // Not enough data for BGZF check
+            }
+            // XLEN is at index 10, little-endian
+            let xlen = u16::from_le_bytes([buffer[10], buffer[11]]);
+            if buffer.len() < 12 + xlen as usize {
+                return CompressionType::GZIP; // Not enough data for BGZF subfield check
+            }
+            // BGZF subfield identifier is 'B' 'C'
+            if xlen >= 4 && buffer[12] == b'B' && buffer[13] == b'C' {
+                return CompressionType::BGZF;
+            }
+        }
+        return CompressionType::GZIP;
+    }
+
+    CompressionType::NONE
 }
 
 pub async fn get_remote_stream_bgzf_async(

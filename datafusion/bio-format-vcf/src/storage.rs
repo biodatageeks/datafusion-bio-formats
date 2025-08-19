@@ -116,8 +116,12 @@ pub async fn get_local_vcf_header(
     thread_num: usize,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<vcf::Header, Error> {
-    let compression_type =
-        get_compression_type(file_path.clone(), object_storage_options.compression_type);
+    let compression_type = get_compression_type(
+        file_path.clone(),
+        object_storage_options.compression_type.clone(),
+        object_storage_options.clone(),
+    )
+    .await;
     let header = match compression_type {
         CompressionType::BGZF => {
             let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num)?;
@@ -147,7 +151,9 @@ pub async fn get_remote_vcf_header(
     let compression_type = get_compression_type(
         file_path.clone(),
         object_storage_options.clone().compression_type,
-    );
+        object_storage_options.clone(),
+    )
+    .await;
     let header = match compression_type {
         CompressionType::BGZF => {
             let mut reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
@@ -192,7 +198,9 @@ impl VcfRemoteReader {
         let compression_type = get_compression_type(
             file_path.clone(),
             object_storage_options.clone().compression_type,
-        );
+            object_storage_options.clone(),
+        )
+        .await;
         match compression_type {
             CompressionType::BGZF => {
                 let reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
@@ -261,7 +269,9 @@ impl VcfLocalReader {
         let compression_type = get_compression_type(
             file_path.clone(),
             object_storage_options.clone().compression_type,
-        );
+            object_storage_options.clone(),
+        )
+        .await;
         match compression_type {
             CompressionType::BGZF => {
                 let reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();

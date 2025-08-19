@@ -74,7 +74,8 @@ impl GffRemoteReader {
         file_path: String,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
-        let compression_type = get_compression_type(file_path.clone(), None);
+        let compression_type =
+            get_compression_type(file_path.clone(), None, object_storage_options.clone()).await;
         match compression_type {
             CompressionType::GZIP => {
                 let reader = get_remote_gff_gz_reader(file_path, object_storage_options).await?;
@@ -172,8 +173,12 @@ impl GffLocalReader {
         thread_num: usize,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
-        let compression_type =
-            get_compression_type(file_path.clone(), object_storage_options.compression_type);
+        let compression_type = get_compression_type(
+            file_path.clone(),
+            object_storage_options.compression_type.clone(),
+            object_storage_options.clone(),
+        )
+        .await;
         match compression_type {
             CompressionType::GZIP => {
                 let reader = get_local_gff_gz_reader(file_path).await?;
