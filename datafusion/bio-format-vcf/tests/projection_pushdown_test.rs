@@ -501,3 +501,133 @@ async fn test_vcf_multithreaded_projection() -> Result<(), Box<dyn std::error::E
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_vcf_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file().await?;
+    let object_storage_options = create_object_storage_options();
+
+    let table = VcfTableProvider::new(
+        file_path.clone(),
+        Some(vec!["DP".to_string()]),
+        None,
+        Some(1),
+        Some(object_storage_options),
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("vcf_table", Arc::new(table))?;
+
+    // Test COUNT(*) - this may fail due to empty projection bug
+    println!("Testing COUNT(*)...");
+    let df_star = ctx.sql("SELECT COUNT(*) FROM vcf_table").await?;
+    let results_star = df_star.collect().await?;
+
+    assert_eq!(results_star.len(), 1);
+    let batch_star = &results_star[0];
+    assert_eq!(batch_star.num_rows(), 1);
+
+    let count_star = batch_star
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+
+    println!("COUNT(*) result: {}", count_star);
+
+    // Test COUNT(chrom) - this should work
+    println!("Testing COUNT(chrom)...");
+    let df_chrom = ctx.sql("SELECT COUNT(chrom) FROM vcf_table").await?;
+    let results_chrom = df_chrom.collect().await?;
+
+    assert_eq!(results_chrom.len(), 1);
+    let batch_chrom = &results_chrom[0];
+    assert_eq!(batch_chrom.num_rows(), 1);
+
+    let count_chrom = batch_chrom
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+
+    println!("COUNT(chrom) result: {}", count_chrom);
+
+    // They should be equal
+    assert_eq!(
+        count_star, count_chrom,
+        "COUNT(*) should equal COUNT(chrom) but got {} vs {}",
+        count_star, count_chrom
+    );
+    assert_eq!(count_star, 3, "COUNT(*) should be 3 but got {}", count_star);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vcf_select_position_columns_bug() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file().await?;
+    let object_storage_options = create_object_storage_options();
+
+    let table = VcfTableProvider::new(
+        file_path.clone(),
+        Some(vec!["DP".to_string()]),
+        None,
+        Some(1),
+        Some(object_storage_options),
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("vcf_table", Arc::new(table))?;
+
+    // Test SELECT start - this may return 0 rows due to bug
+    println!("Testing SELECT start...");
+    let df = ctx.sql("SELECT start FROM vcf_table").await?;
+    let results = df.collect().await?;
+
+    println!("Number of batches for SELECT start: {}", results.len());
+    assert!(
+        !results.is_empty(),
+        "SELECT start should return at least one batch"
+    );
+
+    let batch = &results[0];
+    println!("Number of rows for SELECT start: {}", batch.num_rows());
+    assert_eq!(
+        batch.num_rows(),
+        3,
+        "SELECT start should return 3 rows but got {}",
+        batch.num_rows()
+    );
+    assert_eq!(batch.num_columns(), 1);
+
+    // Test SELECT start, end - this may also return 0 rows due to bug
+    println!("Testing SELECT start, end...");
+    let df2 = ctx.sql("SELECT start, end FROM vcf_table").await?;
+    let results2 = df2.collect().await?;
+
+    println!(
+        "Number of batches for SELECT start, end: {}",
+        results2.len()
+    );
+    assert!(
+        !results2.is_empty(),
+        "SELECT start, end should return at least one batch"
+    );
+
+    let batch2 = &results2[0];
+    println!(
+        "Number of rows for SELECT start, end: {}",
+        batch2.num_rows()
+    );
+    assert_eq!(
+        batch2.num_rows(),
+        3,
+        "SELECT start, end should return 3 rows but got {}",
+        batch2.num_rows()
+    );
+    assert_eq!(batch2.num_columns(), 2);
+
+    Ok(())
+}

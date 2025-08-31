@@ -348,8 +348,9 @@ async fn get_remote_gff_stream(
         }
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
-        if !chroms.is_empty() {
-            let batch = build_record_batch(
+        let remaining_records = record_num % batch_size;
+        if remaining_records != 0 {
+            let batch = build_record_batch_optimized(
                 Arc::clone(&schema.clone()),
                 &chroms,
                 &poss,
@@ -365,7 +366,15 @@ async fn get_remote_gff_stream(
                         } else {
                             &mut builder
                         })), projection.clone(),
-                // if infos.is_empty() { None } else { Some(&infos) },
+                needs_chrom,
+                needs_start,
+                needs_end,
+                needs_type,
+                needs_source,
+                needs_score,
+                needs_strand,
+                needs_phase,
+                remaining_records,
             )?;
             yield batch;
         }
@@ -519,7 +528,7 @@ async fn get_local_gff(
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
-                let batch = build_record_batch(
+                let batch = build_record_batch_optimized(
                     Arc::clone(&schema.clone()),
                     &chroms,
                     &poss,
@@ -535,6 +544,15 @@ async fn get_local_gff(
                         } else {
                             &mut builder
                         })), projection.clone(),
+                    needs_chrom,
+                    needs_start,
+                    needs_end,
+                    needs_type,
+                    needs_source,
+                    needs_score,
+                    needs_strand,
+                    needs_phase,
+                    batch_size,
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
@@ -553,8 +571,9 @@ async fn get_local_gff(
         }
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
-        if !chroms.is_empty() {
-            let batch = build_record_batch(
+        let remaining_records = record_num % batch_size;
+        if remaining_records != 0 {
+            let batch = build_record_batch_optimized(
                 Arc::clone(&schema.clone()),
                 &chroms,
                 &poss,
@@ -570,6 +589,15 @@ async fn get_local_gff(
                         } else {
                             &mut builder
                         })), projection.clone(),
+                needs_chrom,
+                needs_start,
+                needs_end,
+                needs_type,
+                needs_source,
+                needs_score,
+                needs_strand,
+                needs_phase,
+                remaining_records,
             )?;
             yield batch;
         }
@@ -628,8 +656,8 @@ fn build_record_batch(
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(chroms.len());
             if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(chrom_array.len())) as Arc<dyn Array>);
+                debug!("Empty projection - will create null array after this match");
+                // Arrays will be empty, will be handled after the match block
             } else {
                 for i in proj_ids.clone() {
                     match i {
@@ -801,9 +829,26 @@ fn build_record_batch_optimized(
         }
     };
 
-    RecordBatch::try_new(schema, arrays).map_err(|e| {
-        DataFusionError::Execution(format!("Error creating optimized GFF batch: {:?}", e))
-    })
+    if arrays.is_empty() {
+        // For COUNT(*) queries, create an empty RecordBatch with the correct row count
+        // Arrow allows this via RecordBatch::try_new with an empty schema and empty arrays
+        RecordBatch::try_new_with_options(
+            schema,
+            arrays,
+            &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(record_count)),
+        )
+        .map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Error creating empty GFF batch for COUNT(*): {:?}",
+                e
+            ))
+        })
+    } else {
+        RecordBatch::try_new(schema, arrays).map_err(|e| {
+            DataFusionError::Execution(format!("Error creating optimized GFF batch: {:?}", e))
+        })
+    }
 }
 
 async fn get_stream(

@@ -207,11 +207,11 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
     assert_eq!(batch.schema().field(3).name(), "ref");
 
     if batch.num_rows() > 0 {
-        // Verify the data
+        // Verify the data - AF is a List(Float32) because it has Number=A
         let af_array = batch
             .column(0)
             .as_any()
-            .downcast_ref::<datafusion::arrow::array::Float32Array>()
+            .downcast_ref::<datafusion::arrow::array::ListArray>()
             .unwrap();
         let start_array = batch
             .column(1)
@@ -221,7 +221,7 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
         let ac_array = batch
             .column(2)
             .as_any()
-            .downcast_ref::<datafusion::arrow::array::Int32Array>()
+            .downcast_ref::<datafusion::arrow::array::ListArray>()
             .unwrap();
         let ref_array = batch
             .column(3)
@@ -229,9 +229,23 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
             .downcast_ref::<datafusion::arrow::array::StringArray>()
             .unwrap();
 
-        assert_eq!(af_array.value(0), 0.5);
+        // For ListArray, we need to get the first element of the first list
+        let af_first_list = af_array.value(0);
+        let af_float_array = af_first_list
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float32Array>()
+            .unwrap();
+        assert_eq!(af_float_array.value(0), 0.5);
+
         assert_eq!(start_array.value(0), 100);
-        assert_eq!(ac_array.value(0), 1);
+
+        let ac_first_list = ac_array.value(0);
+        let ac_int_array = ac_first_list
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int32Array>()
+            .unwrap();
+        assert_eq!(ac_int_array.value(0), 1);
+
         assert_eq!(ref_array.value(0), "A");
     }
 

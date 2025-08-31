@@ -180,8 +180,8 @@ fn build_record_batch_optimized(
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
             if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
+                debug!("Empty projection - will create null array after this match");
+                // Arrays will be empty, will be handled after the match block
             } else {
                 for i in proj_ids {
                     match i {
@@ -218,9 +218,26 @@ fn build_record_batch_optimized(
         }
     };
 
-    RecordBatch::try_new(schema, arrays).map_err(|e| {
-        DataFusionError::Execution(format!("Error creating optimized VCF batch: {:?}", e))
-    })
+    if arrays.is_empty() {
+        // For COUNT(*) queries, create an empty RecordBatch with the correct row count
+        // Arrow allows this via RecordBatch::try_new with an empty schema and empty arrays
+        RecordBatch::try_new_with_options(
+            schema,
+            arrays,
+            &datafusion::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(record_count)),
+        )
+        .map_err(|e| {
+            DataFusionError::Execution(format!(
+                "Error creating empty VCF batch for COUNT(*): {:?}",
+                e
+            ))
+        })
+    } else {
+        RecordBatch::try_new(schema, arrays).map_err(|e| {
+            DataFusionError::Execution(format!("Error creating optimized VCF batch: {:?}", e))
+        })
+    }
 }
 
 fn load_infos(
@@ -476,7 +493,8 @@ async fn get_local_vcf(
         }
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
-        if !chroms.is_empty() {
+        let remaining_records = record_num % batch_size;
+        if remaining_records != 0 {
             let batch = build_record_batch_optimized(
                 Arc::clone(&schema.clone()),
                 &chroms,
@@ -497,7 +515,7 @@ async fn get_local_vcf(
                 needs_alt,
                 needs_qual,
                 needs_filter,
-                chroms.len(),
+                remaining_records,
             )?;
             yield batch;
         }
@@ -635,7 +653,8 @@ async fn get_remote_vcf_stream(
         }
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
-        if !chroms.is_empty() {
+        let remaining_records = record_num % batch_size;
+        if remaining_records != 0 {
             let batch = build_record_batch_optimized(
                 Arc::clone(&schema.clone()),
                 &chroms,
@@ -656,7 +675,7 @@ async fn get_remote_vcf_stream(
                 needs_alt,
                 needs_qual,
                 needs_filter,
-                chroms.len(),
+                remaining_records,
             )?;
             yield batch;
         }
