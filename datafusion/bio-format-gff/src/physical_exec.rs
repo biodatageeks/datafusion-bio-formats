@@ -109,24 +109,38 @@ fn set_attribute_builders(
 }
 
 fn load_attributes_unnest(
-    record: RecordBuf,
+    record: &RecordBuf,
     attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
+    projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
+    let projected_attribute_indices: Option<Vec<usize>> =
+        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
+
     for i in 0..attribute_builders.2.len() {
+        if let Some(indices) = &projected_attribute_indices {
+            if !indices.contains(&i) {
+                attribute_builders.2[i].append_null()?;
+                continue;
+            }
+        }
+
         let name = &attribute_builders.0[i];
         let builder = &mut attribute_builders.2[i];
         let attributes = record.attributes();
         let value = attributes.get(name.as_ref());
 
         match value {
-            Some(v) => match v {
-                Value::String(v) => {
-                    builder.append_string(&*v.to_string())?;
-                }
-                Value::Array(v) => {
-                    builder.append_array_string(v.iter().map(|v| v.to_string()).collect())?;
-                }
-            },
+            Some(v) => {
+                let s = match v {
+                    Value::String(s) => s.to_string(),
+                    Value::Array(a) => a
+                        .iter()
+                        .map(|v| v.to_string())
+                        .collect::<Vec<String>>()
+                        .join(","),
+                };
+                builder.append_string(&s)?;
+            }
             None => builder.append_null()?,
         }
     }
@@ -134,7 +148,7 @@ fn load_attributes_unnest(
 }
 
 fn load_attributes(
-    record: RecordBuf,
+    record: &RecordBuf,
     builder: &mut Vec<OptionalField>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
     let attributes = record.attributes();
@@ -172,12 +186,12 @@ fn standardize_strand(strand: Strand) -> String {
     }
 }
 
-fn standardize_phase(phase: Phase) -> u32 {
-    match phase {
+fn standardize_phase(phase: Option<Phase>) -> Option<u32> {
+    phase.map(|p| match p {
         Phase::Zero => 0,
         Phase::One => 1,
         Phase::Two => 2,
-    }
+    })
 }
 async fn get_remote_gff_stream(
     file_path: String,
@@ -203,8 +217,11 @@ async fn get_remote_gff_stream(
     let needs_phase = projection.as_ref().map_or(true, |proj| proj.contains(&7));
 
     //unnest builder
-    let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) = (
+        Vec::<String>::new(),
+        Vec::<DataType>::new(),
+        Vec::<OptionalField>::new(),
+    );
 
     let unnest_enable = match attr_fields {
         Some(attr_fields) => {
@@ -233,14 +250,14 @@ async fn get_remote_gff_stream(
 
     let stream = try_stream! {
         // Create vectors for accumulating record data only for needed fields.
-        let mut chroms: Vec<String> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut poss: Vec<u32> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut pose: Vec<u32> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut ty: Vec<String> = if needs_type { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut source: Vec<String> = if needs_source { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut scores: Vec<Option<f32>> = if needs_score { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut strand: Vec<String> = if needs_strand { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut phase: Vec<Option<u32>> = if needs_phase { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut chroms: Vec<String> = if needs_chrom { Vec::<String>::with_capacity(batch_size) } else { Vec::<String>::new() };
+        let mut poss: Vec<u32> = if needs_start { Vec::<u32>::with_capacity(batch_size) } else { Vec::<u32>::new() };
+        let mut pose: Vec<u32> = if needs_end { Vec::<u32>::with_capacity(batch_size) } else { Vec::<u32>::new() };
+        let mut ty: Vec<String> = if needs_type { Vec::<String>::with_capacity(batch_size) } else { Vec::<String>::new() };
+        let mut source: Vec<String> = if needs_source { Vec::<String>::with_capacity(batch_size) } else { Vec::<String>::new() };
+        let mut scores: Vec<Option<f32>> = if needs_score { Vec::<Option<f32>>::with_capacity(batch_size) } else { Vec::<Option<f32>>::new() };
+        let mut strand: Vec<String> = if needs_strand { Vec::<String>::with_capacity(batch_size) } else { Vec::<String>::new() };
+        let mut phase: Vec<Option<u32>> = if needs_phase { Vec::<Option<u32>>::with_capacity(batch_size) } else { Vec::<Option<u32>>::new() };
 
         let mut record_num = 0;
         let mut batch_num = 0;
@@ -274,13 +291,13 @@ async fn get_remote_gff_stream(
                 strand.push(standardize_strand(record.strand()));
             }
             if needs_phase {
-                phase.push(record.phase().map(|p| standardize_phase(p)));
+                phase.push(standardize_phase(record.phase()));
             }
             if unnest_enable {
-                load_attributes_unnest(record, &mut attribute_builders)?
+                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?
             }
             else {
-                load_attributes(record, &mut builder)?
+                load_attributes(&record, &mut builder)?
             }
 
             record_num += 1;
@@ -377,44 +394,44 @@ async fn get_local_gff(
     let needs_phase = projection.as_ref().map_or(true, |proj| proj.contains(&7));
 
     let mut chroms: Vec<String> = if needs_chrom {
-        Vec::with_capacity(batch_size)
+        Vec::<String>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<String>::new()
     };
     let mut poss: Vec<u32> = if needs_start {
-        Vec::with_capacity(batch_size)
+        Vec::<u32>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<u32>::new()
     };
     let mut pose: Vec<u32> = if needs_end {
-        Vec::with_capacity(batch_size)
+        Vec::<u32>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<u32>::new()
     };
     let mut ty: Vec<String> = if needs_type {
-        Vec::with_capacity(batch_size)
+        Vec::<String>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<String>::new()
     };
     let mut source: Vec<String> = if needs_source {
-        Vec::with_capacity(batch_size)
+        Vec::<String>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<String>::new()
     };
     let mut scores: Vec<Option<f32>> = if needs_score {
-        Vec::with_capacity(batch_size)
+        Vec::<Option<f32>>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<Option<f32>>::new()
     };
     let mut strand: Vec<String> = if needs_strand {
-        Vec::with_capacity(batch_size)
+        Vec::<String>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<String>::new()
     };
     let mut phase: Vec<Option<u32>> = if needs_phase {
-        Vec::with_capacity(batch_size)
+        Vec::<Option<u32>>::with_capacity(batch_size)
     } else {
-        Vec::new()
+        Vec::<Option<u32>>::new()
     };
 
     // let mut count: usize = 0;
@@ -428,8 +445,11 @@ async fn get_local_gff(
     )
     .await?;
     //unnest builder
-    let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) = (
+        Vec::<String>::new(),
+        Vec::<DataType>::new(),
+        Vec::<OptionalField>::new(),
+    );
 
     let unnest_enable = match attr_fields {
         Some(attr_fields) => {
@@ -487,13 +507,13 @@ async fn get_local_gff(
                 strand.push(standardize_strand(record.strand()));
             }
             if needs_phase {
-                phase.push(record.phase().map(|p| standardize_phase(p)));
+                phase.push(standardize_phase(record.phase()));
             }
             if unnest_enable {
-                load_attributes_unnest(record, &mut attribute_builders)?
+                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?
             }
             else {
-                load_attributes(record, &mut builder)?
+                load_attributes(&record, &mut builder)?
             }
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
