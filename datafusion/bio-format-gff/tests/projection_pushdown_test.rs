@@ -501,3 +501,131 @@ async fn test_gff_multithreaded_projection() -> Result<(), Box<dyn std::error::E
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_gff_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_gff_file().await?;
+    let object_storage_options = create_object_storage_options();
+
+    let table = GffTableProvider::new(
+        file_path.clone(),
+        None,
+        Some(1),
+        Some(object_storage_options),
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("gff_table", Arc::new(table))?;
+
+    // Test COUNT(*) - this should work correctly with my fixes
+    println!("Testing GFF COUNT(*)...");
+    let df_star = ctx.sql("SELECT COUNT(*) FROM gff_table").await?;
+    let results_star = df_star.collect().await?;
+
+    assert_eq!(results_star.len(), 1);
+    let batch_star = &results_star[0];
+    assert_eq!(batch_star.num_rows(), 1);
+
+    let count_star = batch_star
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+
+    println!("GFF COUNT(*) result: {}", count_star);
+
+    // Test COUNT(chrom) - this should work as a comparison
+    println!("Testing GFF COUNT(chrom)...");
+    let df_chrom = ctx.sql("SELECT COUNT(chrom) FROM gff_table").await?;
+    let results_chrom = df_chrom.collect().await?;
+
+    assert_eq!(results_chrom.len(), 1);
+    let batch_chrom = &results_chrom[0];
+    assert_eq!(batch_chrom.num_rows(), 1);
+
+    let count_chrom = batch_chrom
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+
+    println!("GFF COUNT(chrom) result: {}", count_chrom);
+
+    // They should be equal and match the expected record count (3 records in test GFF)
+    assert_eq!(
+        count_star, count_chrom,
+        "COUNT(*) should equal COUNT(chrom) but got {} vs {}",
+        count_star, count_chrom
+    );
+    assert_eq!(count_star, 3, "COUNT(*) should be 3 but got {}", count_star);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gff_select_position_columns_bug() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_gff_file().await?;
+    let object_storage_options = create_object_storage_options();
+
+    let table = GffTableProvider::new(
+        file_path.clone(),
+        None,
+        Some(1),
+        Some(object_storage_options),
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("gff_table", Arc::new(table))?;
+
+    // Test SELECT start - this should work correctly with my fixes
+    println!("Testing GFF SELECT start...");
+    let df = ctx.sql("SELECT start FROM gff_table").await?;
+    let results = df.collect().await?;
+
+    println!("Number of batches for GFF SELECT start: {}", results.len());
+    assert!(
+        !results.is_empty(),
+        "SELECT start should return at least one batch"
+    );
+
+    let batch = &results[0];
+    println!("Number of rows for GFF SELECT start: {}", batch.num_rows());
+    assert_eq!(
+        batch.num_rows(),
+        3,
+        "SELECT start should return 3 rows but got {}",
+        batch.num_rows()
+    );
+    assert_eq!(batch.num_columns(), 1);
+
+    // Test SELECT start, end - this should also work correctly
+    println!("Testing GFF SELECT start, end...");
+    let df2 = ctx.sql("SELECT start, end FROM gff_table").await?;
+    let results2 = df2.collect().await?;
+
+    println!(
+        "Number of batches for GFF SELECT start, end: {}",
+        results2.len()
+    );
+    assert!(
+        !results2.is_empty(),
+        "SELECT start, end should return at least one batch"
+    );
+
+    let batch2 = &results2[0];
+    println!(
+        "Number of rows for GFF SELECT start, end: {}",
+        batch2.num_rows()
+    );
+    assert_eq!(
+        batch2.num_rows(),
+        3,
+        "SELECT start, end should return 3 rows but got {}",
+        batch2.num_rows()
+    );
+    assert_eq!(batch2.num_columns(), 2);
+
+    Ok(())
+}

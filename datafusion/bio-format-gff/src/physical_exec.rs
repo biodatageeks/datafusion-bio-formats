@@ -640,18 +640,23 @@ fn build_record_batch(
     }) as Arc<dyn Array>;
     let arrays = match projection {
         None => {
-            let mut arrays: Vec<Arc<dyn Array>> = vec![
-                chrom_array,
-                pos_start_array,
-                pos_end_array,
-                ty_array,
-                source_array,
-                score_array,
-                strand_array,
-                phase_array,
-            ];
-            arrays.append(&mut attributes.unwrap().clone());
-            arrays
+            // Check if schema is empty (for COUNT(*) queries)
+            if schema.fields().is_empty() {
+                Vec::new()
+            } else {
+                let mut arrays: Vec<Arc<dyn Array>> = vec![
+                    chrom_array,
+                    pos_start_array,
+                    pos_end_array,
+                    ty_array,
+                    source_array,
+                    score_array,
+                    strand_array,
+                    phase_array,
+                ];
+                arrays.append(&mut attributes.unwrap().clone());
+                arrays
+            }
         }
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(chroms.len());
@@ -777,26 +782,31 @@ fn build_record_batch_optimized(
 
     let arrays = match projection {
         None => {
-            let mut arrays: Vec<Arc<dyn Array>> = vec![
-                chrom_array,
-                pos_start_array,
-                pos_end_array,
-                ty_array,
-                source_array,
-                score_array,
-                strand_array,
-                phase_array,
-            ];
-            if let Some(attr_arrays) = attributes {
-                arrays.append(&mut attr_arrays.clone());
+            // Check if schema is empty (for COUNT(*) queries)
+            if schema.fields().is_empty() {
+                Vec::new()
+            } else {
+                let mut arrays: Vec<Arc<dyn Array>> = vec![
+                    chrom_array,
+                    pos_start_array,
+                    pos_end_array,
+                    ty_array,
+                    source_array,
+                    score_array,
+                    strand_array,
+                    phase_array,
+                ];
+                if let Some(attr_arrays) = attributes {
+                    arrays.append(&mut attr_arrays.clone());
+                }
+                arrays
             }
-            arrays
         }
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
             if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
+                debug!("Empty projection - will create null array after this match");
+                // Arrays will be empty, will be handled after the match block
             } else {
                 for i in proj_ids {
                     match i {

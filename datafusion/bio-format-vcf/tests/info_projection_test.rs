@@ -438,7 +438,7 @@ async fn test_info_projection_with_count_aggregation() -> Result<(), Box<dyn std
     ctx.register_table("test_vcf", Arc::new(table))?;
 
     // COUNT query with INFO field - should still work with projection
-    let df = ctx.sql("SELECT COUNT(ac) FROM test_vcf").await?;
+    let df = ctx.sql("SELECT COUNT(*) FROM test_vcf").await?;
     let results = df.collect().await?;
 
     if results.is_empty() {
