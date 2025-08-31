@@ -84,13 +84,18 @@ async fn test_info_projection_single_info_field() -> Result<(), Box<dyn std::err
         let ac_array = batch
             .column(1)
             .as_any()
+            .downcast_ref::<datafusion::arrow::array::ListArray>()
+            .unwrap();
+        let ac_values = ac_array
+            .values()
+            .as_any()
             .downcast_ref::<datafusion::arrow::array::Int32Array>()
             .unwrap();
 
         assert_eq!(chrom_array.value(0), "chr1");
-        assert_eq!(ac_array.value(0), 1);
+        assert_eq!(ac_values.value(ac_array.value_offsets()[0] as usize), 1);
         if batch.num_rows() > 1 {
-            assert_eq!(ac_array.value(1), 2);
+            assert_eq!(ac_values.value(ac_array.value_offsets()[1] as usize), 2);
         }
     }
 
@@ -146,6 +151,11 @@ async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::
         let ac_array = batch
             .column(1)
             .as_any()
+            .downcast_ref::<datafusion::arrow::array::ListArray>()
+            .unwrap();
+        let ac_values = ac_array
+            .values()
+            .as_any()
             .downcast_ref::<datafusion::arrow::array::Int32Array>()
             .unwrap();
         let dp_array = batch
@@ -155,7 +165,7 @@ async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::
             .unwrap();
 
         assert_eq!(chrom_array.value(0), "chr1");
-        assert_eq!(ac_array.value(0), 1);
+        assert_eq!(ac_values.value(ac_array.value_offsets()[0] as usize), 1);
         assert_eq!(dp_array.value(0), 20);
     }
 
@@ -354,10 +364,20 @@ async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error
         let ac_array = batch
             .column(1)
             .as_any()
+            .downcast_ref::<datafusion::arrow::array::ListArray>()
+            .unwrap();
+        let ac_values = ac_array
+            .values()
+            .as_any()
             .downcast_ref::<datafusion::arrow::array::Int32Array>()
             .unwrap();
         let af_array = batch
             .column(2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::ListArray>()
+            .unwrap();
+        let af_values = af_array
+            .values()
             .as_any()
             .downcast_ref::<datafusion::arrow::array::Float32Array>()
             .unwrap();
@@ -373,8 +393,8 @@ async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error
             .unwrap();
 
         assert_eq!(chrom_array.value(0), "chr1");
-        assert_eq!(ac_array.value(0), 1);
-        assert_eq!(af_array.value(0), 0.5);
+        assert_eq!(ac_values.value(ac_array.value_offsets()[0] as usize), 1);
+        assert_eq!(af_values.value(af_array.value_offsets()[0] as usize), 0.5);
         assert_eq!(an_array.value(0), 2);
         assert_eq!(dp_array.value(0), 20);
     }
@@ -474,6 +494,11 @@ async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Err
         let ac_array = batch
             .column(1)
             .as_any()
+            .downcast_ref::<datafusion::arrow::array::ListArray>()
+            .unwrap();
+        let ac_values = ac_array
+            .values()
+            .as_any()
             .downcast_ref::<datafusion::arrow::array::Int32Array>()
             .unwrap();
         let an_array = batch
@@ -483,7 +508,7 @@ async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Err
             .unwrap();
 
         assert_eq!(chrom_array.value(0), "chr1");
-        assert_eq!(ac_array.value(0), 1);
+        assert_eq!(ac_values.value(ac_array.value_offsets()[0] as usize), 1);
         assert_eq!(an_array.value(0), 2);
     }
 
