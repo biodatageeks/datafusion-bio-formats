@@ -59,7 +59,7 @@ async fn test_info_projection_single_info_field() -> Result<(), Box<dyn std::err
     ctx.register_table("test_vcf", Arc::new(table))?;
 
     // Query only chrom and AC (index 8 for first INFO field)
-    let df = ctx.sql("SELECT chrom, ac FROM test_vcf").await?;
+    let df = ctx.sql("SELECT chrom, `AC` FROM test_vcf").await?;
     let results = df.collect().await?;
 
     if results.is_empty() {
@@ -72,7 +72,7 @@ async fn test_info_projection_single_info_field() -> Result<(), Box<dyn std::err
     // Should only have 2 columns
     assert_eq!(batch.num_columns(), 2);
     assert_eq!(batch.schema().field(0).name(), "chrom");
-    assert_eq!(batch.schema().field(1).name(), "ac");
+    assert_eq!(batch.schema().field(1).name(), "AC");
 
     if batch.num_rows() > 0 {
         // Verify the data
@@ -125,7 +125,7 @@ async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::
     ctx.register_table("test_vcf", Arc::new(table))?;
 
     // Query chrom, AC (index 8), and DP (index 11)
-    let df = ctx.sql("SELECT chrom, ac, dp FROM test_vcf").await?;
+    let df = ctx.sql("SELECT chrom, `AC`, `DP` FROM test_vcf").await?;
     let results = df.collect().await?;
 
     if results.is_empty() {
@@ -138,8 +138,8 @@ async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::
     // Should have 3 columns
     assert_eq!(batch.num_columns(), 3);
     assert_eq!(batch.schema().field(0).name(), "chrom");
-    assert_eq!(batch.schema().field(1).name(), "ac");
-    assert_eq!(batch.schema().field(2).name(), "dp");
+    assert_eq!(batch.schema().field(1).name(), "AC");
+    assert_eq!(batch.schema().field(2).name(), "DP");
 
     if batch.num_rows() > 0 {
         // Verify the data
@@ -189,7 +189,9 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
     ctx.register_table("test_vcf", Arc::new(table))?;
 
     // Mix core VCF fields and INFO fields in different order
-    let df = ctx.sql("SELECT af, start, ac, ref FROM test_vcf").await?;
+    let df = ctx
+        .sql("SELECT `AF`, start, `AC`, ref FROM test_vcf")
+        .await?;
     let results = df.collect().await?;
 
     if results.is_empty() {
@@ -201,9 +203,9 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
 
     // Should have 4 columns in requested order
     assert_eq!(batch.num_columns(), 4);
-    assert_eq!(batch.schema().field(0).name(), "af");
+    assert_eq!(batch.schema().field(0).name(), "AF");
     assert_eq!(batch.schema().field(1).name(), "start");
-    assert_eq!(batch.schema().field(2).name(), "ac");
+    assert_eq!(batch.schema().field(2).name(), "AC");
     assert_eq!(batch.schema().field(3).name(), "ref");
 
     if batch.num_rows() > 0 {
@@ -349,7 +351,7 @@ async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error
 
     // Query all INFO fields - should process all
     let df = ctx
-        .sql("SELECT chrom, ac, af, an, dp FROM test_vcf")
+        .sql("SELECT chrom, `AC`, `AF`, `AN`, `DP` FROM test_vcf")
         .await?;
     let results = df.collect().await?;
 
@@ -363,10 +365,10 @@ async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error
     // Should have 5 columns (1 core + 4 INFO)
     assert_eq!(batch.num_columns(), 5);
     assert_eq!(batch.schema().field(0).name(), "chrom");
-    assert_eq!(batch.schema().field(1).name(), "ac");
-    assert_eq!(batch.schema().field(2).name(), "af");
-    assert_eq!(batch.schema().field(3).name(), "an");
-    assert_eq!(batch.schema().field(4).name(), "dp");
+    assert_eq!(batch.schema().field(1).name(), "AC");
+    assert_eq!(batch.schema().field(2).name(), "AF");
+    assert_eq!(batch.schema().field(3).name(), "AN");
+    assert_eq!(batch.schema().field(4).name(), "DP");
 
     if batch.num_rows() > 0 {
         // Verify the data
@@ -480,7 +482,7 @@ async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Err
 
     // Test INFO projection with LIMIT
     let df = ctx
-        .sql("SELECT chrom, ac, an FROM test_vcf LIMIT 2")
+        .sql("SELECT chrom, `AC`, `AN` FROM test_vcf LIMIT 2")
         .await?;
     let results = df.collect().await?;
 
@@ -495,8 +497,8 @@ async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Err
     assert_eq!(batch.num_columns(), 3);
     assert!(batch.num_rows() <= 2);
     assert_eq!(batch.schema().field(0).name(), "chrom");
-    assert_eq!(batch.schema().field(1).name(), "ac");
-    assert_eq!(batch.schema().field(2).name(), "an");
+    assert_eq!(batch.schema().field(1).name(), "AC");
+    assert_eq!(batch.schema().field(2).name(), "AN");
 
     if batch.num_rows() > 0 {
         // Verify the first record
@@ -570,9 +572,9 @@ async fn test_info_projection_no_projection_all_fields() -> Result<(), Box<dyn s
     assert_eq!(batch.schema().field(7).name(), "filter");
 
     // Verify INFO fields
-    assert_eq!(batch.schema().field(8).name(), "ac");
-    assert_eq!(batch.schema().field(9).name(), "af");
-    assert_eq!(batch.schema().field(10).name(), "an");
+    assert_eq!(batch.schema().field(8).name(), "AC");
+    assert_eq!(batch.schema().field(9).name(), "AF");
+    assert_eq!(batch.schema().field(10).name(), "AN");
 
     Ok(())
 }

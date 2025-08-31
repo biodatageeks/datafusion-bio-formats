@@ -204,9 +204,8 @@ fn build_record_batch_optimized(
                             {
                                 // Find the corresponding array index by matching field names
                                 // Field name in schema is lowercase, but field_names contains uppercase VCF field names
-                                if let Some(array_idx) = field_names
-                                    .iter()
-                                    .position(|name| name.to_lowercase() == *field_name)
+                                if let Some(array_idx) =
+                                    field_names.iter().position(|name| *name == *field_name)
                                 {
                                     arrays.push(info_arrays[array_idx].clone());
                                 } else {

@@ -233,7 +233,9 @@ async fn test_vcf_projection_info_fields() -> Result<(), Box<dyn std::error::Err
     ctx.register_table("test_vcf", Arc::new(table))?;
 
     // Test selecting with info fields
-    let df = ctx.sql("SELECT chrom, start, dp, af FROM test_vcf").await?;
+    let df = ctx
+        .sql("SELECT chrom, start, `DP`, `AF` FROM test_vcf")
+        .await?;
     let results = df.collect().await?;
 
     assert_eq!(results.len(), 1);
@@ -243,8 +245,8 @@ async fn test_vcf_projection_info_fields() -> Result<(), Box<dyn std::error::Err
     assert_eq!(batch.num_columns(), 4);
     assert_eq!(batch.schema().field(0).name(), "chrom");
     assert_eq!(batch.schema().field(1).name(), "start");
-    assert_eq!(batch.schema().field(2).name(), "dp");
-    assert_eq!(batch.schema().field(3).name(), "af");
+    assert_eq!(batch.schema().field(2).name(), "DP");
+    assert_eq!(batch.schema().field(3).name(), "AF");
     assert_eq!(batch.num_rows(), 3);
 
     // Verify the data
@@ -298,7 +300,7 @@ async fn test_vcf_no_projection_all_columns() -> Result<(), Box<dyn std::error::
     assert_eq!(batch.schema().field(5).name(), "alt");
     assert_eq!(batch.schema().field(6).name(), "qual");
     assert_eq!(batch.schema().field(7).name(), "filter");
-    assert_eq!(batch.schema().field(8).name(), "dp");
+    assert_eq!(batch.schema().field(8).name(), "DP");
     assert_eq!(batch.num_rows(), 3);
 
     Ok(())

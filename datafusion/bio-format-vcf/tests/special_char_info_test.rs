@@ -45,9 +45,7 @@ async fn test_special_info_fields() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = SessionContext::new();
     ctx.register_table("test_vcf", Arc::new(table))?;
 
-    let df = ctx
-        .sql("SELECT \"hgmd-public_20204\" FROM test_vcf")
-        .await?;
+    let df = ctx.sql("SELECT `HGMD-PUBLIC_20204` FROM test_vcf").await?;
     let results = df.collect().await?;
 
     if results.is_empty() {
@@ -58,7 +56,7 @@ async fn test_special_info_fields() -> Result<(), Box<dyn std::error::Error>> {
     let batch = &results[0];
 
     assert_eq!(batch.num_columns(), 1);
-    assert_eq!(batch.schema().field(0).name(), "hgmd-public_20204");
+    assert_eq!(batch.schema().field(0).name(), "HGMD-PUBLIC_20204");
 
     if batch.num_rows() > 0 {
         let hgmd_array = batch

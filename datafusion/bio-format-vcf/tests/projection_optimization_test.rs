@@ -148,7 +148,7 @@ async fn test_projection_optimization_with_info_fields() -> Result<(), Box<dyn s
     ctx.register_table("vcf_table", Arc::new(table_provider))?;
 
     // Query 2: Select core fields + only 2 INFO fields (should only parse AC and DP)
-    let query = "SELECT chrom, start, ac, dp FROM vcf_table LIMIT 10";
+    let query = "SELECT chrom, start, `AC`, `DP` FROM vcf_table LIMIT 10";
     let df = ctx.sql(query).await?;
 
     println!("Query 2 (with specific INFO fields): {:?}", query);
@@ -161,8 +161,8 @@ async fn test_projection_optimization_with_info_fields() -> Result<(), Box<dyn s
         assert_eq!(batch.num_columns(), 4);
         assert_eq!(batch.schema().field(0).name(), "chrom");
         assert_eq!(batch.schema().field(1).name(), "start");
-        assert_eq!(batch.schema().field(2).name(), "ac");
-        assert_eq!(batch.schema().field(3).name(), "dp");
+        assert_eq!(batch.schema().field(2).name(), "AC");
+        assert_eq!(batch.schema().field(3).name(), "DP");
 
         if batch.num_rows() > 0 {
             println!("✅ Selective INFO field parsing works - only AC and DP should be parsed");

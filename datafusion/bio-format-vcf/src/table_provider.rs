@@ -50,7 +50,7 @@ async fn determine_schema_from_header(
                 let dtype = info_to_arrow_type(&header_infos, &tag);
                 let info = header_infos.get(tag.as_str()).unwrap();
                 let nullable = is_nullable(&info.ty());
-                fields.push(Field::new(&tag.to_lowercase(), dtype, nullable)); // Convert to lowercase for schema (backward compatibility)
+                fields.push(Field::new(tag, dtype, nullable)); // Convert to lowercase for schema (backward compatibility)
             }
         }
         _ => {}
@@ -60,11 +60,7 @@ async fn determine_schema_from_header(
         Some(formats) => {
             for tag in formats {
                 let dtype = format_to_arrow_type(&header_formats, &tag);
-                fields.push(Field::new(
-                    format!("format_{}", tag.to_lowercase()),
-                    dtype,
-                    true,
-                ));
+                fields.push(Field::new(format!("format_{}", tag), dtype, true));
             }
         }
         _ => {}
@@ -98,18 +94,14 @@ async fn determine_full_schema_from_header(
     for (tag, info) in header_infos.iter() {
         let dtype = info_to_arrow_type(&header_infos, tag);
         let nullable = is_nullable(&info.ty());
-        fields.push(Field::new(&tag.to_lowercase(), dtype, nullable)); // Convert to lowercase for schema (backward compatibility)
+        fields.push(Field::new(tag, dtype, nullable)); // Convert to lowercase for schema (backward compatibility)
         all_info_fields.push(tag.to_string()); // Keep original case for VCF processing
     }
 
     let mut all_format_fields = Vec::new();
     for (tag, _format) in header_formats.iter() {
         let dtype = format_to_arrow_type(&header_formats, tag);
-        fields.push(Field::new(
-            format!("format_{}", tag.to_lowercase()),
-            dtype,
-            true,
-        ));
+        fields.push(Field::new(format!("format_{}", tag), dtype, true));
         all_format_fields.push(tag.to_string());
     }
 
@@ -134,11 +126,10 @@ fn extract_needed_fields_from_projection(
             // Info and format fields start at index 8
             let field_name = full_schema.field(col_idx).name();
             if field_name.starts_with("format_") {
-                needed_format_fields
-                    .push(field_name.strip_prefix("format_").unwrap().to_uppercase());
+                needed_format_fields.push(field_name.strip_prefix("format_").unwrap().to_string());
             } else {
                 // Field names are lowercase in schema, but VCF processing needs uppercase
-                needed_info_fields.push(field_name.to_uppercase());
+                needed_info_fields.push(field_name.to_string());
             }
         }
     }
