@@ -192,6 +192,16 @@ async fn get_remote_gff_stream(
     let mut reader =
         GffRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
 
+    // Determine which core GFF fields we need to parse based on projection
+    let needs_chrom = projection.as_ref().map_or(true, |proj| proj.contains(&0));
+    let needs_start = projection.as_ref().map_or(true, |proj| proj.contains(&1));
+    let needs_end = projection.as_ref().map_or(true, |proj| proj.contains(&2));
+    let needs_type = projection.as_ref().map_or(true, |proj| proj.contains(&3));
+    let needs_source = projection.as_ref().map_or(true, |proj| proj.contains(&4));
+    let needs_score = projection.as_ref().map_or(true, |proj| proj.contains(&5));
+    let needs_strand = projection.as_ref().map_or(true, |proj| proj.contains(&6));
+    let needs_phase = projection.as_ref().map_or(true, |proj| proj.contains(&7));
+
     //unnest builder
     let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
@@ -222,15 +232,15 @@ async fn get_remote_gff_stream(
     )?];
 
     let stream = try_stream! {
-        // Create vectors for accumulating record data.
-        let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
-        let mut poss: Vec<u32> = Vec::with_capacity(batch_size);
-        let mut pose: Vec<u32> = Vec::with_capacity(batch_size);
-        let mut ty: Vec<String> = Vec::with_capacity(batch_size);
-        let mut source: Vec<String> = Vec::with_capacity(batch_size);
-        let mut scores: Vec<Option<f32>> = Vec::with_capacity(batch_size);
-        let mut strand: Vec<String> = Vec::with_capacity(batch_size);
-        let mut phase: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+        // Create vectors for accumulating record data only for needed fields.
+        let mut chroms: Vec<String> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut poss: Vec<u32> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut pose: Vec<u32> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut ty: Vec<String> = if needs_type { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut source: Vec<String> = if needs_source { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut scores: Vec<Option<f32>> = if needs_score { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut strand: Vec<String> = if needs_strand { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut phase: Vec<Option<u32>> = if needs_phase { Vec::with_capacity(batch_size) } else { Vec::new() };
 
         let mut record_num = 0;
         let mut batch_num = 0;
@@ -240,14 +250,32 @@ async fn get_remote_gff_stream(
         let mut records = reader.read_records().await;
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
-            chroms.push(record.reference_sequence_name().to_string());
-            poss.push(record.start().get() as u32);
-            pose.push(record.end().get() as u32);
-            ty.push(record.ty().to_string());
-            source.push(record.source().to_string());
-            scores.push(record.score());
-            strand.push(standardize_strand(record.strand()));
-            phase.push(record.phase().map(|p| standardize_phase(p)) );
+
+            // Only parse and store fields that are needed
+            if needs_chrom {
+                chroms.push(record.reference_sequence_name().to_string());
+            }
+            if needs_start {
+                poss.push(record.start().get() as u32);
+            }
+            if needs_end {
+                pose.push(record.end().get() as u32);
+            }
+            if needs_type {
+                ty.push(record.ty().to_string());
+            }
+            if needs_source {
+                source.push(record.source().to_string());
+            }
+            if needs_score {
+                scores.push(record.score());
+            }
+            if needs_strand {
+                strand.push(standardize_strand(record.strand()));
+            }
+            if needs_phase {
+                phase.push(record.phase().map(|p| standardize_phase(p)));
+            }
             if unnest_enable {
                 load_attributes_unnest(record, &mut attribute_builders)?
             }
@@ -259,7 +287,7 @@ async fn get_remote_gff_stream(
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
-                let batch = build_record_batch(
+                let batch = build_record_batch_optimized(
                     Arc::clone(&schema.clone()),
                     &chroms,
                     &poss,
@@ -274,9 +302,17 @@ async fn get_remote_gff_stream(
                             &mut attribute_builders.2
                         } else {
                             &mut builder
-                        })), projection.clone(),
-
-
+                        })),
+                    projection.clone(),
+                    needs_chrom,
+                    needs_start,
+                    needs_end,
+                    needs_type,
+                    needs_source,
+                    needs_score,
+                    needs_strand,
+                    needs_phase,
+                    batch_size,
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
@@ -330,14 +366,56 @@ async fn get_local_gff(
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
-    let mut poss: Vec<u32> = Vec::with_capacity(batch_size);
-    let mut pose: Vec<u32> = Vec::with_capacity(batch_size);
-    let mut ty: Vec<String> = Vec::with_capacity(batch_size);
-    let mut source: Vec<String> = Vec::with_capacity(batch_size);
-    let mut scores: Vec<Option<f32>> = Vec::with_capacity(batch_size);
-    let mut strand: Vec<String> = Vec::with_capacity(batch_size);
-    let mut phase: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+    // Determine which core GFF fields we need to parse based on projection
+    let needs_chrom = projection.as_ref().map_or(true, |proj| proj.contains(&0));
+    let needs_start = projection.as_ref().map_or(true, |proj| proj.contains(&1));
+    let needs_end = projection.as_ref().map_or(true, |proj| proj.contains(&2));
+    let needs_type = projection.as_ref().map_or(true, |proj| proj.contains(&3));
+    let needs_source = projection.as_ref().map_or(true, |proj| proj.contains(&4));
+    let needs_score = projection.as_ref().map_or(true, |proj| proj.contains(&5));
+    let needs_strand = projection.as_ref().map_or(true, |proj| proj.contains(&6));
+    let needs_phase = projection.as_ref().map_or(true, |proj| proj.contains(&7));
+
+    let mut chroms: Vec<String> = if needs_chrom {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut poss: Vec<u32> = if needs_start {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut pose: Vec<u32> = if needs_end {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut ty: Vec<String> = if needs_type {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut source: Vec<String> = if needs_source {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut scores: Vec<Option<f32>> = if needs_score {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut strand: Vec<String> = if needs_strand {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut phase: Vec<Option<u32>> = if needs_phase {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
 
     // let mut count: usize = 0;
     let mut batch_num = 0;
@@ -385,14 +463,32 @@ async fn get_local_gff(
         // let iter_start_time = Instant::now();
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
-            chroms.push(record.reference_sequence_name().to_string());
-            poss.push(record.start().get() as u32);
-            pose.push(record.end().get() as u32);
-            ty.push(record.ty().to_string());
-            source.push(record.source().to_string());
-            scores.push(record.score());
-            strand.push(standardize_strand(record.strand())) ;
-            phase.push(record.phase().map(|p|  standardize_phase(p)) );
+
+            // Only parse and store fields that are needed
+            if needs_chrom {
+                chroms.push(record.reference_sequence_name().to_string());
+            }
+            if needs_start {
+                poss.push(record.start().get() as u32);
+            }
+            if needs_end {
+                pose.push(record.end().get() as u32);
+            }
+            if needs_type {
+                ty.push(record.ty().to_string());
+            }
+            if needs_source {
+                source.push(record.source().to_string());
+            }
+            if needs_score {
+                scores.push(record.score());
+            }
+            if needs_strand {
+                strand.push(standardize_strand(record.strand()));
+            }
+            if needs_phase {
+                phase.push(record.phase().map(|p| standardize_phase(p)));
+            }
             if unnest_enable {
                 load_attributes_unnest(record, &mut attribute_builders)?
             }
@@ -534,6 +630,160 @@ fn build_record_batch(
     };
     RecordBatch::try_new(schema.clone(), arrays)
         .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+}
+
+fn build_record_batch_optimized(
+    schema: SchemaRef,
+    chroms: &[String],
+    poss: &[u32],
+    pose: &[u32],
+    ty: &[String],
+    source: &[String],
+    score: &[Option<f32>],
+    strand: &[String],
+    phase: &[Option<u32>],
+    attributes: Option<&Vec<Arc<dyn Array>>>,
+    projection: Option<Vec<usize>>,
+    needs_chrom: bool,
+    needs_start: bool,
+    needs_end: bool,
+    needs_type: bool,
+    needs_source: bool,
+    needs_score: bool,
+    needs_strand: bool,
+    needs_phase: bool,
+    record_count: usize,
+) -> datafusion::error::Result<RecordBatch> {
+    // Only create arrays for fields that are actually needed
+    let chrom_array = if needs_chrom {
+        Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>
+    } else {
+        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
+    };
+
+    let pos_start_array = if needs_start {
+        Arc::new(UInt32Array::from(poss.to_vec())) as Arc<dyn Array>
+    } else {
+        Arc::new(UInt32Array::from(vec![0u32; record_count])) as Arc<dyn Array>
+    };
+
+    let pos_end_array = if needs_end {
+        Arc::new(UInt32Array::from(pose.to_vec())) as Arc<dyn Array>
+    } else {
+        Arc::new(UInt32Array::from(vec![0u32; record_count])) as Arc<dyn Array>
+    };
+
+    let ty_array = if needs_type {
+        Arc::new(StringArray::from(ty.to_vec())) as Arc<dyn Array>
+    } else {
+        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
+    };
+
+    let source_array = if needs_source {
+        Arc::new(StringArray::from(source.to_vec())) as Arc<dyn Array>
+    } else {
+        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
+    };
+
+    let score_array = if needs_score {
+        Arc::new({
+            let mut builder = Float32Builder::new();
+            for s in score {
+                builder.append_option(*s);
+            }
+            builder.finish()
+        }) as Arc<dyn Array>
+    } else {
+        Arc::new({
+            let mut builder = Float32Builder::new();
+            for _ in 0..record_count {
+                builder.append_null();
+            }
+            builder.finish()
+        }) as Arc<dyn Array>
+    };
+
+    let strand_array = if needs_strand {
+        Arc::new(StringArray::from(strand.to_vec())) as Arc<dyn Array>
+    } else {
+        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
+    };
+
+    let phase_array = if needs_phase {
+        Arc::new({
+            let mut builder = UInt32Builder::new();
+            for s in phase {
+                builder.append_option(*s);
+            }
+            builder.finish()
+        }) as Arc<dyn Array>
+    } else {
+        Arc::new({
+            let mut builder = UInt32Builder::new();
+            for _ in 0..record_count {
+                builder.append_null();
+            }
+            builder.finish()
+        }) as Arc<dyn Array>
+    };
+
+    let arrays = match projection {
+        None => {
+            let mut arrays: Vec<Arc<dyn Array>> = vec![
+                chrom_array,
+                pos_start_array,
+                pos_end_array,
+                ty_array,
+                source_array,
+                score_array,
+                strand_array,
+                phase_array,
+            ];
+            if let Some(attr_arrays) = attributes {
+                arrays.append(&mut attr_arrays.clone());
+            }
+            arrays
+        }
+        Some(proj_ids) => {
+            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
+            if proj_ids.is_empty() {
+                debug!("Empty projection creating a dummy field");
+                arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
+            } else {
+                for i in proj_ids {
+                    match i {
+                        0 => arrays.push(chrom_array.clone()),
+                        1 => arrays.push(pos_start_array.clone()),
+                        2 => arrays.push(pos_end_array.clone()),
+                        3 => arrays.push(ty_array.clone()),
+                        4 => arrays.push(source_array.clone()),
+                        5 => arrays.push(score_array.clone()),
+                        6 => arrays.push(strand_array.clone()),
+                        7 => arrays.push(phase_array.clone()),
+                        _ => {
+                            if let Some(attr_arrays) = attributes {
+                                if i >= 8 && (i - 8) < attr_arrays.len() {
+                                    arrays.push(attr_arrays[i - 8].clone());
+                                } else {
+                                    arrays
+                                        .push(Arc::new(NullArray::new(record_count))
+                                            as Arc<dyn Array>);
+                                }
+                            } else {
+                                arrays
+                                    .push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
+                            }
+                        }
+                    }
+                }
+            }
+            arrays
+        }
+    };
+
+    RecordBatch::try_new(schema, arrays).map_err(|e| {
+        DataFusionError::Execution(format!("Error creating optimized GFF batch: {:?}", e))
+    })
 }
 
 async fn get_stream(
