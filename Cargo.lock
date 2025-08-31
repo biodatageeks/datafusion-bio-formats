@@ -1017,6 +1017,7 @@ dependencies = [
  "noodles-bgzf 0.36.0",
  "noodles-vcf 0.80.0",
  "opendal",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]

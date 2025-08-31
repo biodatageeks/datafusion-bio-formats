@@ -90,7 +90,7 @@ fn build_record_batch(
 }
 
 fn build_record_batch_optimized(
-    schema: SchemaRef,
+    projected_schema: SchemaRef,
     chroms: &[String],
     poss: &[u32],
     pose: &[u32],
@@ -100,6 +100,7 @@ fn build_record_batch_optimized(
     quals: &[Option<f64>],
     filters: &[String],
     infos: Option<&Vec<Arc<dyn Array>>>,
+    info_field_names: Option<&Vec<String>>, // Names of INFO fields that have arrays
     projection: Option<Vec<usize>>,
     needs_chrom: bool,
     needs_start: bool,
@@ -183,8 +184,8 @@ fn build_record_batch_optimized(
                 debug!("Empty projection - will create null array after this match");
                 // Arrays will be empty, will be handled after the match block
             } else {
-                for i in proj_ids {
-                    match i {
+                for (proj_field_idx, &original_field_idx) in proj_ids.iter().enumerate() {
+                    match original_field_idx {
                         0 => arrays.push(chrom_array.clone()),
                         1 => arrays.push(pos_start_array.clone()),
                         2 => arrays.push(pos_end_array.clone()),
@@ -194,21 +195,98 @@ fn build_record_batch_optimized(
                         6 => arrays.push(qual_array.clone()),
                         7 => arrays.push(filter_array.clone()),
                         _ => {
-                            if let Some(info_arrays) = infos {
-                                // Map schema field index to actual INFO array index
-                                // The schema field index i maps to INFO field (i - 8)
-                                // But our INFO arrays may be sparse due to projection optimization
-                                let schema_info_idx = i - 8;
-                                if schema_info_idx < info_arrays.len() {
-                                    arrays.push(info_arrays[schema_info_idx].clone());
+                            // For INFO fields, use the projected schema field info
+                            let projected_field = projected_schema.field(proj_field_idx);
+                            let field_name = projected_field.name();
+
+                            if let (Some(info_arrays), Some(field_names)) =
+                                (infos, info_field_names)
+                            {
+                                // Find the corresponding array index by matching field names
+                                // Field name in schema is lowercase, but field_names contains uppercase VCF field names
+                                if let Some(array_idx) = field_names
+                                    .iter()
+                                    .position(|name| name.to_lowercase() == *field_name)
+                                {
+                                    arrays.push(info_arrays[array_idx].clone());
                                 } else {
-                                    arrays
-                                        .push(Arc::new(NullArray::new(record_count))
-                                            as Arc<dyn Array>);
+                                    // Field not found in our info arrays, create null array with correct type
+                                    let field_type = projected_field.data_type().clone();
+                                    let null_array = match field_type {
+                                        DataType::Int32 => Arc::new(
+                                            datafusion::arrow::array::Int32Array::new_null(
+                                                record_count,
+                                            ),
+                                        )
+                                            as Arc<dyn Array>,
+                                        DataType::Float32 => Arc::new(
+                                            datafusion::arrow::array::Float32Array::new_null(
+                                                record_count,
+                                            ),
+                                        )
+                                            as Arc<dyn Array>,
+                                        DataType::Utf8 => Arc::new(
+                                            datafusion::arrow::array::StringArray::new_null(
+                                                record_count,
+                                            ),
+                                        )
+                                            as Arc<dyn Array>,
+                                        DataType::Boolean => Arc::new(
+                                            datafusion::arrow::array::BooleanArray::new_null(
+                                                record_count,
+                                            ),
+                                        )
+                                            as Arc<dyn Array>,
+                                        DataType::List(_) => {
+                                            // Create an empty list array with the correct field type
+                                            let field = projected_field.clone();
+                                            Arc::new(datafusion::arrow::array::ListArray::new_null(
+                                                Arc::new(field),
+                                                record_count,
+                                            ))
+                                                as Arc<dyn Array>
+                                        }
+                                        _ => {
+                                            Arc::new(NullArray::new(record_count)) as Arc<dyn Array>
+                                        }
+                                    };
+                                    arrays.push(null_array);
                                 }
                             } else {
-                                arrays
-                                    .push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
+                                // No info arrays available, create null array with correct type
+                                let field_type = projected_field.data_type().clone();
+                                let null_array = match field_type {
+                                    DataType::Int32 => {
+                                        Arc::new(datafusion::arrow::array::Int32Array::new_null(
+                                            record_count,
+                                        )) as Arc<dyn Array>
+                                    }
+                                    DataType::Float32 => {
+                                        Arc::new(datafusion::arrow::array::Float32Array::new_null(
+                                            record_count,
+                                        )) as Arc<dyn Array>
+                                    }
+                                    DataType::Utf8 => {
+                                        Arc::new(datafusion::arrow::array::StringArray::new_null(
+                                            record_count,
+                                        )) as Arc<dyn Array>
+                                    }
+                                    DataType::Boolean => {
+                                        Arc::new(datafusion::arrow::array::BooleanArray::new_null(
+                                            record_count,
+                                        )) as Arc<dyn Array>
+                                    }
+                                    DataType::List(_) => {
+                                        // Create an empty list array with the correct field type
+                                        let field = projected_field.clone();
+                                        Arc::new(datafusion::arrow::array::ListArray::new_null(
+                                            Arc::new(field),
+                                            record_count,
+                                        )) as Arc<dyn Array>
+                                    }
+                                    _ => Arc::new(NullArray::new(record_count)) as Arc<dyn Array>,
+                                };
+                                arrays.push(null_array);
                             }
                         }
                     }
@@ -222,7 +300,7 @@ fn build_record_batch_optimized(
         // For COUNT(*) queries, create an empty RecordBatch with the correct row count
         // Arrow allows this via RecordBatch::try_new with an empty schema and empty arrays
         RecordBatch::try_new_with_options(
-            schema,
+            projected_schema,
             arrays,
             &datafusion::arrow::record_batch::RecordBatchOptions::new()
                 .with_row_count(Some(record_count)),
@@ -234,7 +312,7 @@ fn build_record_batch_optimized(
             ))
         })
     } else {
-        RecordBatch::try_new(schema, arrays).map_err(|e| {
+        RecordBatch::try_new(projected_schema, arrays).map_err(|e| {
             DataFusionError::Execution(format!("Error creating optimized VCF batch: {:?}", e))
         })
     }
@@ -465,6 +543,7 @@ async fn get_local_vcf(
                     &quals,
                     &filters,
                     Some(&builders_to_arrays(&mut info_builders.2)),
+                    Some(&info_builders.0), // Pass the info field names
                     projection.clone(),
                     needs_chrom,
                     needs_start,
@@ -506,6 +585,7 @@ async fn get_local_vcf(
                 &quals,
                 &filters,
                 Some(&builders_to_arrays(&mut info_builders.2)),
+                Some(&info_builders.0), // Pass the info field names
                 projection.clone(),
                 needs_chrom,
                 needs_start,
@@ -625,6 +705,7 @@ async fn get_remote_vcf_stream(
                     &quals,
                     &filters,
                     Some(&builders_to_arrays(&mut info_builders.2)),
+                    Some(&info_builders.0), // Pass the info field names
                     projection.clone(),
                     needs_chrom,
                     needs_start,
@@ -666,6 +747,7 @@ async fn get_remote_vcf_stream(
                 &quals,
                 &filters,
                 Some(&builders_to_arrays(&mut info_builders.2)),
+                Some(&info_builders.0), // Pass the info field names
                 projection.clone(),
                 needs_chrom,
                 needs_start,
