@@ -114,6 +114,9 @@ fn load_attributes_unnest(
     let projected_attribute_indices: Option<Vec<usize>> =
         projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
 
+    // OPTIMIZATION: Get attributes once outside the loop
+    let attributes = record.attributes();
+
     for i in 0..attribute_builders.2.len() {
         if let Some(indices) = &projected_attribute_indices {
             if !indices.contains(&i) {
@@ -124,20 +127,37 @@ fn load_attributes_unnest(
 
         let name = &attribute_builders.0[i];
         let builder = &mut attribute_builders.2[i];
-        let attributes = record.attributes();
         let value = attributes.get(name.as_ref());
 
         match value {
             Some(v) => {
-                let s = match v {
-                    Value::String(s) => s.to_string(),
-                    Value::Array(a) => a
-                        .iter()
-                        .map(|v| v.to_string())
-                        .collect::<Vec<String>>()
-                        .join(","),
-                };
-                builder.append_string(&s)?;
+                // OPTIMIZATION: Avoid unnecessary string allocations
+                match v {
+                    Value::String(s) => {
+                        // Convert BString to String, then take reference
+                        let s_str = s.to_string();
+                        builder.append_string(&s_str)?;
+                    }
+                    Value::Array(a) => {
+                        // OPTIMIZATION: Use String::with_capacity and write directly
+                        if a.is_empty() {
+                            builder.append_string("")?;
+                        } else {
+                            // Estimate capacity: average 10 chars per item + separators
+                            let capacity = a.len() * 10 + (a.len() - 1);
+                            let mut result = String::with_capacity(capacity);
+
+                            for (idx, val) in a.iter().enumerate() {
+                                if idx > 0 {
+                                    result.push(',');
+                                }
+                                // Convert BString to str
+                                result.push_str(&val.to_string());
+                            }
+                            builder.append_string(&result)?;
+                        }
+                    }
+                }
             }
             None => builder.append_null()?,
         }
@@ -150,24 +170,43 @@ fn load_attributes(
     builder: &mut Vec<OptionalField>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
     let attributes = record.attributes();
-    let mut vec_attributes: Vec<Attribute> = Vec::new();
+
+    // OPTIMIZATION: Pre-allocate Vec with estimated capacity
+    let estimated_capacity = attributes.as_ref().len();
+    let mut vec_attributes: Vec<Attribute> = Vec::with_capacity(estimated_capacity);
+
     for (tag, value) in attributes.as_ref().iter() {
         debug!("Loading attribute: {} with value: {:?}", tag, value);
         match value {
             Value::String(v) => vec_attributes.push(Attribute {
-                tag: tag.to_string(),
-                value: Some(v.to_string()),
+                tag: tag.to_string(),       // Still need owned string for Attribute struct
+                value: Some(v.to_string()), // Still need owned string for Attribute struct
             }),
             Value::Array(v) => {
-                let val = &*v
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<String>>()
-                    .join(", ");
-                vec_attributes.push(Attribute {
-                    tag: tag.to_string(),
-                    value: Some(val.to_string()),
-                })
+                // OPTIMIZATION: Build string more efficiently
+                if v.is_empty() {
+                    vec_attributes.push(Attribute {
+                        tag: tag.to_string(),
+                        value: Some(String::new()),
+                    });
+                } else {
+                    // Estimate capacity for joined string
+                    let capacity = v.len() * 10 + (v.len() - 1) * 2; // 2 chars for ", "
+                    let mut result = String::with_capacity(capacity);
+
+                    for (idx, val) in v.iter().enumerate() {
+                        if idx > 0 {
+                            result.push_str(", ");
+                        }
+                        // Convert BString to str
+                        result.push_str(&val.to_string());
+                    }
+
+                    vec_attributes.push(Attribute {
+                        tag: tag.to_string(),
+                        value: Some(result),
+                    });
+                }
             }
         }
     }
@@ -175,12 +214,18 @@ fn load_attributes(
     Ok(())
 }
 
-fn standardize_strand(strand: Strand) -> String {
+// OPTIMIZATION: Use static string constants to avoid repeated allocations
+static STRAND_FORWARD: &str = "+";
+static STRAND_REVERSE: &str = "-";
+static STRAND_UNKNOWN: &str = "?";
+static STRAND_NONE: &str = ".";
+
+fn standardize_strand(strand: Strand) -> &'static str {
     match strand {
-        Strand::Forward => "+".to_string(),
-        Strand::Reverse => "-".to_string(),
-        Strand::Unknown => "?".to_string(),
-        Strand::None => ".".to_string(),
+        Strand::Forward => STRAND_FORWARD,
+        Strand::Reverse => STRAND_REVERSE,
+        Strand::Unknown => STRAND_UNKNOWN,
+        Strand::None => STRAND_NONE,
     }
 }
 
@@ -281,7 +326,7 @@ async fn get_remote_gff_stream(
                 scores.push(record.score());
             }
             if needs_strand {
-                strand.push(standardize_strand(record.strand()));
+                strand.push(standardize_strand(record.strand()).to_string());
             }
             if needs_phase {
                 phase.push(standardize_phase(record.phase()));
@@ -501,7 +546,7 @@ async fn get_local_gff(
                 scores.push(record.score());
             }
             if needs_strand {
-                strand.push(standardize_strand(record.strand()));
+                strand.push(standardize_strand(record.strand()).to_string());
             }
             if needs_phase {
                 phase.push(standardize_phase(record.phase()));
@@ -593,85 +638,7 @@ async fn get_local_gff(
     Ok(stream)
 }
 
-fn build_record_batch(
-    schema: SchemaRef,
-    chroms: &[String],
-    poss: &[u32],
-    pose: &[u32],
-    ty: &[String],
-    source: &[String],
-    score: &[Option<f32>],
-    strand: &[String],
-    phase: &[Option<u32>],
-    attributes: Option<&Vec<Arc<dyn Array>>>,
-    projection: Option<Vec<usize>>,
-) -> datafusion::error::Result<RecordBatch> {
-    let chrom_array = Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>;
-    let pos_start_array = Arc::new(UInt32Array::from(poss.to_vec())) as Arc<dyn Array>;
-    let pos_end_array = Arc::new(UInt32Array::from(pose.to_vec())) as Arc<dyn Array>;
-    let ty_array = Arc::new(StringArray::from(ty.to_vec())) as Arc<dyn Array>;
-    let source_array = Arc::new(StringArray::from(source.to_vec())) as Arc<dyn Array>;
-    let score_array = Arc::new({
-        let mut builder = Float32Builder::new();
-        for s in score {
-            builder.append_option(*s);
-        }
-        builder.finish()
-    }) as Arc<dyn Array>;
-    let strand_array = Arc::new(StringArray::from(strand.to_vec())) as Arc<dyn Array>;
-    let phase_array = Arc::new({
-        let mut builder = UInt32Builder::new();
-        for s in phase {
-            builder.append_option(*s);
-        }
-        builder.finish()
-    }) as Arc<dyn Array>;
-    let arrays = match projection {
-        None => {
-            // Check if schema is empty (for COUNT(*) queries)
-            if schema.fields().is_empty() {
-                Vec::new()
-            } else {
-                let mut arrays: Vec<Arc<dyn Array>> = vec![
-                    chrom_array,
-                    pos_start_array,
-                    pos_end_array,
-                    ty_array,
-                    source_array,
-                    score_array,
-                    strand_array,
-                    phase_array,
-                ];
-                arrays.append(&mut attributes.unwrap().clone());
-                arrays
-            }
-        }
-        Some(proj_ids) => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(chroms.len());
-            if proj_ids.is_empty() {
-                debug!("Empty projection - will create null array after this match");
-                // Arrays will be empty, will be handled after the match block
-            } else {
-                for i in proj_ids.clone() {
-                    match i {
-                        0 => arrays.push(chrom_array.clone()),
-                        1 => arrays.push(pos_start_array.clone()),
-                        2 => arrays.push(pos_end_array.clone()),
-                        3 => arrays.push(ty_array.clone()),
-                        4 => arrays.push(source_array.clone()),
-                        5 => arrays.push(score_array.clone()),
-                        6 => arrays.push(strand_array.clone()),
-                        7 => arrays.push(phase_array.clone()),
-                        _ => arrays.push(attributes.unwrap()[i - 8].clone()),
-                    }
-                }
-            }
-            arrays
-        }
-    };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
-}
+// NOTE: Removed build_record_batch function - replaced with optimized build_record_batch_optimized
 
 fn build_record_batch_optimized(
     schema: SchemaRef,
