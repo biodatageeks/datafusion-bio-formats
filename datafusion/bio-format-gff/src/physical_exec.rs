@@ -331,11 +331,22 @@ async fn get_remote_gff_stream(
             if needs_phase {
                 phase.push(standardize_phase(record.phase()));
             }
-            if unnest_enable {
-                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?
-            }
-            else {
-                load_attributes(&record, &mut builder)?
+
+            // MAJOR OPTIMIZATION: Only process attributes if they are actually requested
+            if unnest_enable && !attribute_builders.0.is_empty() {
+                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?;
+            } else if !unnest_enable {
+                // Check if attributes are in the projection or schema
+                let needs_attributes = projection.as_ref()
+                    .map_or(true, |proj| proj.iter().any(|&i| i >= 8))
+                    || schema.fields().len() > 8; // 8 core fields
+
+                if needs_attributes {
+                    load_attributes(&record, &mut builder)?;
+                } else {
+                    // Append empty attributes to maintain schema consistency
+                    builder[0].append_null()?;
+                }
             }
 
             record_num += 1;
@@ -551,12 +562,24 @@ async fn get_local_gff(
             if needs_phase {
                 phase.push(standardize_phase(record.phase()));
             }
-            if unnest_enable {
-                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?
+
+            // MAJOR OPTIMIZATION: Only process attributes if they are actually requested
+            if unnest_enable && !attribute_builders.0.is_empty() {
+                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?;
+            } else if !unnest_enable {
+                // Check if attributes are in the projection or schema
+                let needs_attributes = projection.as_ref()
+                    .map_or(true, |proj| proj.iter().any(|&i| i >= 8))
+                    || schema.fields().len() > 8; // 8 core fields
+
+                if needs_attributes {
+                    load_attributes(&record, &mut builder)?;
+                } else {
+                    // Append empty attributes to maintain schema consistency
+                    builder[0].append_null()?;
+                }
             }
-            else {
-                load_attributes(&record, &mut builder)?
-            }
+
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
