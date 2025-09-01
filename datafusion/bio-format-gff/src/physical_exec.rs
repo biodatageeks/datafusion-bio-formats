@@ -259,6 +259,11 @@ async fn get_remote_gff_stream(
     let needs_strand = projection.as_ref().map_or(true, |proj| proj.contains(&6));
     let needs_phase = projection.as_ref().map_or(true, |proj| proj.contains(&7));
 
+    debug!(
+        "GFF remote projection {:?}: needs_chrom={}, needs_end={}, needs_type={}, needs_source={}",
+        projection, needs_chrom, needs_end, needs_type, needs_source
+    );
+
     //unnest builder
     let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) = (
         Vec::<String>::new(),
@@ -273,7 +278,8 @@ async fn get_remote_gff_stream(
         }
         None => false,
     };
-    //nested builder
+
+    //nested builder - always create but only use when needed
     let mut builder = vec![OptionalField::new(
         &DataType::List(FieldRef::new(Field::new(
             "attribute",
@@ -336,15 +342,24 @@ async fn get_remote_gff_stream(
             if unnest_enable && !attribute_builders.0.is_empty() {
                 load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?;
             } else if !unnest_enable {
-                // Check if attributes are in the projection or schema
-                let needs_attributes = projection.as_ref()
-                    .map_or(true, |proj| proj.iter().any(|&i| i >= 8))
-                    || schema.fields().len() > 8; // 8 core fields
+                // Check if attributes are actually needed
+                let needs_attributes = match &projection {
+                    Some(proj) => {
+                        let needs = proj.iter().any(|&i| i >= 8);
+                        debug!("Projection {:?} needs attributes: {}", proj, needs);
+                        needs
+                    },
+                    None => {
+                        let needs = schema.fields().len() > 8;
+                        debug!("No projection, schema has {} fields, needs attributes: {}", schema.fields().len(), needs);
+                        needs
+                    }
+                };
 
                 if needs_attributes {
                     load_attributes(&record, &mut builder)?;
                 } else {
-                    // Append empty attributes to maintain schema consistency
+                    // Append null to maintain schema consistency but don't parse attributes
                     builder[0].append_null()?;
                 }
             }
@@ -353,6 +368,11 @@ async fn get_remote_gff_stream(
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
+                let attribute_arrays = if unnest_enable {
+                    Some(builders_to_arrays(&mut attribute_builders.2))
+                } else {
+                    Some(builders_to_arrays(&mut builder))
+                };
                 let batch = build_record_batch_optimized(
                     Arc::clone(&schema.clone()),
                     &chroms,
@@ -363,12 +383,7 @@ async fn get_remote_gff_stream(
                     &scores,
                     &strand,
                     &phase,
-                    Some(&builders_to_arrays(
-                        if unnest_enable {
-                            &mut attribute_builders.2
-                        } else {
-                            &mut builder
-                        })),
+                    attribute_arrays.as_ref(),
                     projection.clone(),
                     needs_chrom,
                     needs_start,
@@ -516,7 +531,8 @@ async fn get_local_gff(
         }
         None => false,
     };
-    //nested builder
+
+    //nested builder - always create but only use when needed
     let mut builder = vec![OptionalField::new(
         &DataType::List(FieldRef::new(Field::new(
             "attribute",
@@ -567,15 +583,24 @@ async fn get_local_gff(
             if unnest_enable && !attribute_builders.0.is_empty() {
                 load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?;
             } else if !unnest_enable {
-                // Check if attributes are in the projection or schema
-                let needs_attributes = projection.as_ref()
-                    .map_or(true, |proj| proj.iter().any(|&i| i >= 8))
-                    || schema.fields().len() > 8; // 8 core fields
+                // Check if attributes are actually needed
+                let needs_attributes = match &projection {
+                    Some(proj) => {
+                        let needs = proj.iter().any(|&i| i >= 8);
+                        debug!("Projection {:?} needs attributes: {}", proj, needs);
+                        needs
+                    },
+                    None => {
+                        let needs = schema.fields().len() > 8;
+                        debug!("No projection, schema has {} fields, needs attributes: {}", schema.fields().len(), needs);
+                        needs
+                    }
+                };
 
                 if needs_attributes {
                     load_attributes(&record, &mut builder)?;
                 } else {
-                    // Append empty attributes to maintain schema consistency
+                    // Append null to maintain schema consistency but don't parse attributes
                     builder[0].append_null()?;
                 }
             }
