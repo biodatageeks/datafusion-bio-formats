@@ -6,8 +6,8 @@ edition = "2024"
 [dependencies]
 datafusion.workspace = true
 opendal.workspace = true
-noodles.workspace = true
 tokio-util.workspace = true
+noodles = { workspace = true }
 tokio.workspace = true
 bytes.workspace = true
 async-compression.workspace = true
@@ -17,7 +17,7 @@ futures.workspace = true
 futures-util.workspace = true
 async-trait.workspace = true
 
-noodles-gff = {version = "0.50.0", features = ["async"]}
+noodles-gff  = { git = "https://github.com/biodatageeks/noodles.git",rev = "e6ad12db981580623470a3f024533827448038a7", features = ["async"] }
 log = "0.4.27"
 env_logger = "0.11.8"
 
