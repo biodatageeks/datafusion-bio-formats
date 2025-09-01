@@ -14,35 +14,15 @@ use log::debug;
 use std::any::Any;
 use std::sync::Arc;
 
-pub fn get_attribute_names_and_types(attributes: Vec<String>) -> (Vec<String>, Vec<DataType>) {
-    let mut attribute_names = Vec::new();
-    let mut attribute_types = Vec::new();
-
-    for attr in attributes {
-        match attr.split_once(':') {
-            Some((n, t)) => {
-                if t.to_lowercase() == "string" {
-                    attribute_types.push(DataType::Utf8);
-                } else if t.to_lowercase() == "array" {
-                    attribute_types.push(DataType::List(Arc::new(Field::new(
-                        n.to_string(),
-                        DataType::Utf8,
-                        true,
-                    ))));
-                } else {
-                    attribute_types.push(DataType::Utf8); // Default to Utf8 if type is unknown
-                }
-                attribute_names.push(n.to_string());
-            }
-            None => {
-                attribute_types.push(DataType::Utf8);
-                attribute_names.push(attr.to_string());
-            }
-        };
-    }
-    (attribute_names, attribute_types)
-}
-fn determine_schema(attr_fields: Option<Vec<String>>) -> datafusion::common::Result<SchemaRef> {
+/// Constructs schema on-demand based on requested attribute fields from Python layer
+/// This eliminates the need for file scanning and supports two distinct modes:
+///
+/// Mode 1 (Default): No specific attributes requested -> nested attributes structure
+/// Mode 2 (Projection): Specific attributes requested -> flattened individual columns
+fn determine_schema_on_demand(
+    attr_fields: Option<Vec<String>>,
+) -> datafusion::common::Result<SchemaRef> {
+    // Always include 8 static GFF fields
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt32, false),
@@ -51,31 +31,47 @@ fn determine_schema(attr_fields: Option<Vec<String>>) -> datafusion::common::Res
         Field::new("source", DataType::Utf8, false),
         Field::new("score", DataType::Float32, true),
         Field::new("strand", DataType::Utf8, false),
-        Field::new("phase", DataType::UInt32, true), //FIXME:: can be downcasted to 8
+        Field::new("phase", DataType::UInt32, true),
     ];
+
     match attr_fields {
-        None => fields.push(Field::new(
-            "attributes",
-            DataType::List(FieldRef::from(Box::new(Field::new(
-                "item",
-                DataType::Struct(Fields::from(vec![
-                    Field::new("tag", DataType::Utf8, false), // tag must be non-null
-                    Field::new("value", DataType::Utf8, true), // value may be null
-                ])),
+        None => {
+            // Mode 1: Default - return nested attributes for maximum flexibility
+            fields.push(Field::new(
+                "attributes",
+                DataType::List(FieldRef::from(Box::new(Field::new(
+                    "item",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("tag", DataType::Utf8, false), // tag must be non-null
+                        Field::new("value", DataType::Utf8, true), // value may be null
+                    ])),
+                    true,
+                )))),
                 true,
-            )))),
-            true,
-        )),
-        _ => {
-            let attributes = get_attribute_names_and_types(attr_fields.unwrap());
-            for (name, dtype) in attributes.0.iter().zip(attributes.1.iter()) {
-                fields.push(Field::new(name, dtype.clone(), true));
+            ));
+            debug!(
+                "GFF Schema Mode 1 (Default): 8 static fields + nested attributes = 9 columns total"
+            );
+        }
+        Some(attrs) => {
+            // Mode 2: Projection - add requested attributes as individual columns
+            // All GFF attributes are treated as nullable strings for simplicity
+            for attr_name in &attrs {
+                fields.push(Field::new(
+                    attr_name,
+                    DataType::Utf8, // All GFF attributes are strings
+                    true,           // Attributes can be null
+                ));
             }
+            debug!(
+                "GFF Schema Mode 2 (Projection): 8 static fields + {} attribute fields = {} columns total",
+                attrs.len(),
+                8 + attrs.len()
+            );
         }
     }
 
     let schema = Schema::new(fields);
-    debug!("Schema: {:?}", schema);
     Ok(Arc::new(schema))
 }
 
@@ -89,17 +85,29 @@ pub struct GffTableProvider {
 }
 
 impl GffTableProvider {
+    /// Creates a new GFF table provider with projection-driven schema construction.
+    ///
+    /// The schema is built immediately based on the attr_fields parameter from Python:
+    /// - None: Creates default schema with nested attributes (9 columns)
+    /// - Some(attrs): Creates projection schema with flattened attributes (8 + N columns)
     pub fn new(
         file_path: String,
         attr_fields: Option<Vec<String>>,
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema(attr_fields.clone())?;
+        // NEW: Schema construction based on Python-provided attribute fields
+        let schema = determine_schema_on_demand(attr_fields.clone())?;
+
+        debug!(
+            "GffTableProvider::new - constructed schema for file: {}",
+            file_path
+        );
+
         Ok(Self {
             file_path,
-            attr_fields,
-            schema,
+            attr_fields, // Store original Python-provided fields for execution
+            schema,      // Pre-constructed based on request
             thread_num,
             object_storage_options,
         })
@@ -129,7 +137,7 @@ impl TableProvider for GffTableProvider {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        debug!("GffTableProvider::scan");
+        debug!("GffTableProvider::scan with projection: {:?}", projection);
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
@@ -146,18 +154,24 @@ impl TableProvider for GffTableProvider {
             }
         }
 
-        let schema = project_schema(&self.schema, projection);
+        // Schema is already constructed correctly in constructor based on Python categorization
+        // Just apply DataFusion's standard projection logic
+        let projected_schema = project_schema(&self.schema, projection);
+        debug!(
+            "GFF projected schema has {} columns",
+            projected_schema.fields().len()
+        );
 
         Ok(Arc::new(GffExec {
             cache: PlanProperties::new(
-                EquivalenceProperties::new(schema.clone()),
+                EquivalenceProperties::new(projected_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
             ),
             file_path: self.file_path.clone(),
-            attr_fields: self.attr_fields.clone(),
-            schema: schema.clone(),
+            attr_fields: self.attr_fields.clone(), // Pass original Python-provided fields to executor
+            schema: projected_schema.clone(),
             projection: projection.cloned(),
             limit,
             thread_num: self.thread_num,

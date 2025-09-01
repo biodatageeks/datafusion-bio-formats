@@ -1,5 +1,4 @@
 use crate::storage::{GffLocalReader, GffRemoteReader};
-use crate::table_provider::get_attribute_names_and_types;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{
@@ -96,14 +95,13 @@ impl ExecutionPlan for GffExec {
 
 fn set_attribute_builders(
     batch_size: usize,
-    attributes_names_and_types: (Vec<String>, Vec<DataType>),
+    attr_fields: &[String],
     attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
 ) {
-    let (attribute_names, attribute_types) = attributes_names_and_types;
-    for (name, data_type) in attribute_names.into_iter().zip(attribute_types.into_iter()) {
-        let field = OptionalField::new(&data_type, batch_size).unwrap();
-        attribute_builders.0.push(name);
-        attribute_builders.1.push(data_type);
+    for attr_name in attr_fields {
+        let field = OptionalField::new(&DataType::Utf8, batch_size).unwrap();
+        attribute_builders.0.push(attr_name.clone());
+        attribute_builders.1.push(DataType::Utf8);
         attribute_builders.2.push(field);
     }
 }
@@ -223,17 +221,12 @@ async fn get_remote_gff_stream(
         Vec::<OptionalField>::new(),
     );
 
-    let unnest_enable = match attr_fields {
-        Some(attr_fields) => {
-            let attribute_names_and_types = get_attribute_names_and_types(attr_fields.clone());
-            set_attribute_builders(
-                batch_size,
-                attribute_names_and_types,
-                &mut attribute_builders,
-            );
+    let unnest_enable = match &attr_fields {
+        Some(attrs) => {
+            set_attribute_builders(batch_size, attrs, &mut attribute_builders);
             true
         }
-        _ => false,
+        None => false,
     };
     //nested builder
     let mut builder = vec![OptionalField::new(
@@ -460,17 +453,12 @@ async fn get_local_gff(
         Vec::<OptionalField>::new(),
     );
 
-    let unnest_enable = match attr_fields {
-        Some(attr_fields) => {
-            let attribute_names_and_types = get_attribute_names_and_types(attr_fields.clone());
-            set_attribute_builders(
-                batch_size,
-                attribute_names_and_types,
-                &mut attribute_builders,
-            );
+    let unnest_enable = match &attr_fields {
+        Some(attrs) => {
+            set_attribute_builders(batch_size, attrs, &mut attribute_builders);
             true
         }
-        _ => false,
+        None => false,
     };
     //nested builder
     let mut builder = vec![OptionalField::new(
