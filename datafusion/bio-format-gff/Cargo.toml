@@ -17,7 +17,7 @@ futures.workspace = true
 futures-util.workspace = true
 async-trait.workspace = true
 
-noodles-gff  = { git = "https://github.com/biodatageeks/noodles.git",rev = "9e4012a4f5771b7e3edde18c670a1dbdd7703996", features = ["async"] }
+noodles-gff  = { git = "https://github.com/biodatageeks/noodles.git",rev = "668f383a4c980e4a9605bfbaaa2ba88389e3ddad", features = ["async"] }
 log = "0.4.27"
 env_logger = "0.11.8"
 

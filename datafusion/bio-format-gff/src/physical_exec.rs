@@ -246,8 +246,7 @@ async fn get_remote_gff_stream(
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
-    let mut reader =
-        GffRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
+    let reader = GffRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
 
     // Determine which core GFF fields we need to parse based on projection
     let needs_chrom = projection.as_ref().map_or(true, |proj| proj.contains(&0));
@@ -308,7 +307,7 @@ async fn get_remote_gff_stream(
 
         // Process records one by one.
 
-        let mut records = reader.read_records().await;
+        let mut records = reader.read_records();
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
 
@@ -511,7 +510,7 @@ async fn get_local_gff(
     let mut batch_num = 0;
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = GffLocalReader::new(
+    let reader = GffLocalReader::new(
         file_path.clone(),
         thread_num,
         object_storage_options.unwrap(),
@@ -548,7 +547,7 @@ async fn get_local_gff(
 
     let stream = try_stream! {
 
-        let mut records = reader.read_records().await;
+        let mut records = reader.read_records();
         // let iter_start_time = Instant::now();
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
