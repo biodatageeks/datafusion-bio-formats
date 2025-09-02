@@ -11,7 +11,8 @@ use noodles_gff as gff;
 use noodles_gff::feature::RecordBuf;
 use noodles_gff::feature::record_buf::Attributes;
 use opendal::FuturesBytesStream;
-use std::io::Error;
+use std::fs::File;
+use std::io::{BufReader, Error};
 use tokio_util::io::StreamReader;
 
 /// Parser type selection for GFF processing
@@ -276,7 +277,34 @@ impl GffRemoteReader {
     }
 }
 
-// Old sync helper functions removed - using async consistently now
+pub fn get_local_gff_gz_sync_reader(
+    file_path: String,
+) -> Result<gff::io::Reader<std::io::BufReader<flate2::read::GzDecoder<std::fs::File>>>, Error> {
+    let file = std::fs::File::open(file_path)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let reader = gff::io::Reader::new(std::io::BufReader::new(decoder));
+    Ok(reader)
+}
+
+pub fn get_local_gff_bgzf_sync_reader(
+    file_path: String,
+    thread_num: usize,
+) -> Result<gff::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
+    let file = std::fs::File::open(file_path)?;
+    let reader = bgzf::MultithreadedReader::with_worker_count(
+        std::num::NonZero::new(thread_num).unwrap(),
+        file,
+    );
+    Ok(gff::io::Reader::new(reader))
+}
+
+pub fn get_local_gff_plain_sync_reader(
+    file_path: String,
+) -> Result<gff::io::Reader<std::io::BufReader<std::fs::File>>, Error> {
+    let file = std::fs::File::open(file_path)?;
+    let reader = gff::io::Reader::new(std::io::BufReader::new(file));
+    Ok(reader)
+}
 
 pub async fn get_local_gff_gz_reader(
     file_path: String,
@@ -319,67 +347,31 @@ pub async fn get_local_gff_async_reader(
 }
 
 pub enum GffLocalReader {
-    // Standard parsers - all async now
-    GZIP(
-        gff::r#async::io::Reader<
-            tokio::io::BufReader<
-                async_compression::tokio::bufread::GzipDecoder<
-                    tokio::io::BufReader<tokio::fs::File>,
-                >,
-            >,
-        >,
-    ),
-    BGZF(
-        gff::r#async::io::Reader<
-            tokio::io::BufReader<bgzf::r#async::Reader<tokio::io::BufReader<tokio::fs::File>>>,
-        >,
-    ),
-    PLAIN(gff::r#async::io::Reader<tokio::io::BufReader<tokio::fs::File>>),
+    // Standard parsers - now using sync readers
+    GZIP(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    BGZF(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    PLAIN(gff::io::Reader<BufReader<File>>),
 
-    // Fast parsers (same reader types but used with fast methods)
-    GzipFast(
-        gff::r#async::io::Reader<
-            tokio::io::BufReader<
-                async_compression::tokio::bufread::GzipDecoder<
-                    tokio::io::BufReader<tokio::fs::File>,
-                >,
-            >,
-        >,
-    ),
-    BgzfFast(
-        gff::r#async::io::Reader<
-            tokio::io::BufReader<bgzf::r#async::Reader<tokio::io::BufReader<tokio::fs::File>>>,
-        >,
-    ),
-    PlainFast(gff::r#async::io::Reader<tokio::io::BufReader<tokio::fs::File>>),
+    // Fast parsers - sync readers with fast methods
+    GzipFast(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    BgzfFast(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    PlainFast(gff::io::Reader<BufReader<File>>),
 
-    // SIMD parsers (same reader types but used with simd methods)
-    GzipSimd(
-        gff::r#async::io::Reader<
-            tokio::io::BufReader<
-                async_compression::tokio::bufread::GzipDecoder<
-                    tokio::io::BufReader<tokio::fs::File>,
-                >,
-            >,
-        >,
-    ),
-    BgzfSimd(
-        gff::r#async::io::Reader<
-            tokio::io::BufReader<bgzf::r#async::Reader<tokio::io::BufReader<tokio::fs::File>>>,
-        >,
-    ),
-    PlainSimd(gff::r#async::io::Reader<tokio::io::BufReader<tokio::fs::File>>),
+    // SIMD parsers - sync readers with SIMD methods
+    GzipSimd(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    BgzfSimd(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    PlainSimd(gff::io::Reader<BufReader<File>>),
 }
 
 impl GffLocalReader {
     pub async fn new(
         file_path: String,
-        _thread_num: usize,
+        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
         Self::new_with_parser(
             file_path,
-            _thread_num,
+            thread_num,
             object_storage_options,
             GffParserType::default(),
         )
@@ -388,7 +380,7 @@ impl GffLocalReader {
 
     pub async fn new_with_parser(
         file_path: String,
-        _thread_num: usize,
+        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
         parser_type: GffParserType,
     ) -> Result<Self, Error> {
@@ -400,45 +392,45 @@ impl GffLocalReader {
         .await;
 
         match (compression_type.clone(), parser_type) {
-            // GZIP variants
+            // GZIP variants - using sync readers
             (CompressionType::GZIP, GffParserType::Standard) => {
-                let reader = get_local_gff_gz_reader(file_path).await?;
+                let reader = get_local_gff_gz_sync_reader(file_path)?;
                 Ok(GffLocalReader::GZIP(reader))
             }
             (CompressionType::GZIP, GffParserType::Fast) => {
-                let reader = get_local_gff_gz_reader(file_path).await?;
+                let reader = get_local_gff_gz_sync_reader(file_path)?;
                 Ok(GffLocalReader::GzipFast(reader))
             }
             (CompressionType::GZIP, GffParserType::Simd) => {
-                let reader = get_local_gff_gz_reader(file_path).await?;
+                let reader = get_local_gff_gz_sync_reader(file_path)?;
                 Ok(GffLocalReader::GzipSimd(reader))
             }
 
-            // BGZF variants - now using async readers
+            // BGZF variants - using sync readers with multithreading
             (CompressionType::BGZF, GffParserType::Standard) => {
-                let reader = get_local_gff_bgzf_async_reader(file_path).await?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
                 Ok(GffLocalReader::BGZF(reader))
             }
             (CompressionType::BGZF, GffParserType::Fast) => {
-                let reader = get_local_gff_bgzf_async_reader(file_path).await?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
                 Ok(GffLocalReader::BgzfFast(reader))
             }
             (CompressionType::BGZF, GffParserType::Simd) => {
-                let reader = get_local_gff_bgzf_async_reader(file_path).await?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
                 Ok(GffLocalReader::BgzfSimd(reader))
             }
 
-            // Plain variants - now using async readers
+            // Plain variants - using sync readers
             (CompressionType::NONE, GffParserType::Standard) => {
-                let reader = get_local_gff_async_reader(file_path).await?;
+                let reader = get_local_gff_plain_sync_reader(file_path)?;
                 Ok(GffLocalReader::PLAIN(reader))
             }
             (CompressionType::NONE, GffParserType::Fast) => {
-                let reader = get_local_gff_async_reader(file_path).await?;
+                let reader = get_local_gff_plain_sync_reader(file_path)?;
                 Ok(GffLocalReader::PlainFast(reader))
             }
             (CompressionType::NONE, GffParserType::Simd) => {
-                let reader = get_local_gff_async_reader(file_path).await?;
+                let reader = get_local_gff_plain_sync_reader(file_path)?;
                 Ok(GffLocalReader::PlainSimd(reader))
             }
 
@@ -450,43 +442,116 @@ impl GffLocalReader {
     }
 
     pub fn read_records(self) -> BoxStream<'static, Result<RecordBuf, Error>> {
+        use async_stream::stream;
+
         match self {
-            // Standard parsers - use fast methods to avoid borrowing issues
-            GffLocalReader::BGZF(reader) => reader.fast_record_bufs().boxed(),
-            GffLocalReader::GZIP(reader) => reader.fast_record_bufs().boxed(),
-            GffLocalReader::PLAIN(reader) => reader.fast_record_bufs().boxed(),
-
-            // Fast parsers with proper attribute parsing
-            GffLocalReader::BgzfFast(reader) => reader.fast_record_bufs().boxed(),
-            GffLocalReader::GzipFast(reader) => reader.fast_record_bufs().boxed(),
-            GffLocalReader::PlainFast(reader) => reader.fast_record_bufs().boxed(),
-
-            // SIMD parsers with proper attribute parsing
-            GffLocalReader::BgzfSimd(reader) => reader.simd_record_bufs().boxed(),
-            GffLocalReader::GzipSimd(reader) => reader.simd_record_bufs().boxed(),
-            GffLocalReader::PlainSimd(reader) => reader.simd_record_bufs().boxed(),
+            // All parsers use record_bufs() for consistent interface
+            // The fast/SIMD optimizations are used at the reader construction level
+            GffLocalReader::BGZF(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::GZIP(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::PLAIN(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::BgzfFast(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::GzipFast(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::PlainFast(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::BgzfSimd(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::GzipSimd(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
+            GffLocalReader::PlainSimd(mut reader) => Box::pin(stream! {
+                for result in reader.record_bufs() {
+                    yield result.map_err(Into::into);
+                }
+            }),
         }
     }
 
-    pub async fn get_attributes(self) -> Attributes {
+    pub fn get_attributes(self) -> Result<Attributes, Error> {
         match self {
-            // Standard parsers - use fast methods to avoid borrowing issues
-            GffLocalReader::BGZF(reader) => reader.fast_record_bufs().next().await.unwrap(),
-            GffLocalReader::GZIP(reader) => reader.fast_record_bufs().next().await.unwrap(),
-            GffLocalReader::PLAIN(reader) => reader.fast_record_bufs().next().await.unwrap(),
-
-            // Fast parsers with proper attribute parsing
-            GffLocalReader::BgzfFast(reader) => reader.fast_record_bufs().next().await.unwrap(),
-            GffLocalReader::GzipFast(reader) => reader.fast_record_bufs().next().await.unwrap(),
-            GffLocalReader::PlainFast(reader) => reader.fast_record_bufs().next().await.unwrap(),
-
-            // SIMD parsers with proper attribute parsing
-            GffLocalReader::BgzfSimd(reader) => reader.simd_record_bufs().next().await.unwrap(),
-            GffLocalReader::GzipSimd(reader) => reader.simd_record_bufs().next().await.unwrap(),
-            GffLocalReader::PlainSimd(reader) => reader.simd_record_bufs().next().await.unwrap(),
+            // All parsers use record_bufs() for attribute extraction
+            GffLocalReader::BGZF(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::GZIP(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::PLAIN(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::BgzfFast(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::GzipFast(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::PlainFast(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::BgzfSimd(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::GzipSimd(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
+            GffLocalReader::PlainSimd(mut reader) => reader
+                .record_bufs()
+                .next()
+                .unwrap()
+                .map(|r| r.attributes().clone())
+                .map_err(Into::into),
         }
-        .unwrap()
-        .attributes()
-        .clone()
     }
 }
