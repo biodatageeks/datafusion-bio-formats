@@ -10,6 +10,131 @@ use noodles::bgzf;
 use noodles_gff as gff;
 use noodles_gff::feature::RecordBuf;
 use noodles_gff::feature::record_buf::Attributes;
+
+/// Unified GFF record that can hold different fast parser types
+pub enum UnifiedGffRecord {
+    Fast(DynGffRecord),
+    Simd(DynGffRecord),
+}
+
+/// Trait for unified GFF record access
+pub trait GffRecordTrait {
+    fn reference_sequence_name(&self) -> String;
+    fn start(&self) -> u32;
+    fn end(&self) -> u32;
+    fn ty(&self) -> String;
+    fn source(&self) -> String;
+    fn score(&self) -> Option<f32>;
+    fn strand(&self) -> String;
+    fn phase(&self) -> Option<u8>;
+    fn attributes_string(&self) -> String;
+}
+
+/// Iterator that can return different record types  
+pub enum UnifiedGffIterator {
+    // Use dynamic dispatch since the exact types are private
+    Fast(Box<dyn Iterator<Item = std::io::Result<DynGffRecord>> + Send>),
+    Simd(Box<dyn Iterator<Item = std::io::Result<DynGffRecord>> + Send>),
+}
+
+/// Dynamic GFF record that holds the actual fast record types
+pub struct DynGffRecord {
+    pub seqid: String,
+    pub source: String,
+    pub ty: String,
+    pub start: u32,
+    pub end: u32,
+    pub score: Option<f32>,
+    pub strand: String,
+    pub phase: String,
+    pub attributes: String,
+}
+
+impl Iterator for UnifiedGffIterator {
+    type Item = Result<UnifiedGffRecord, Error>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            UnifiedGffIterator::Fast(iter) => iter
+                .next()
+                .map(|result| result.map(UnifiedGffRecord::Fast).map_err(Into::into)),
+            UnifiedGffIterator::Simd(iter) => iter
+                .next()
+                .map(|result| result.map(UnifiedGffRecord::Simd).map_err(Into::into)),
+        }
+    }
+}
+
+impl GffRecordTrait for UnifiedGffRecord {
+    fn reference_sequence_name(&self) -> String {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.seqid.clone(),
+            UnifiedGffRecord::Simd(record) => record.seqid.clone(),
+        }
+    }
+
+    fn start(&self) -> u32 {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.start,
+            UnifiedGffRecord::Simd(record) => record.start,
+        }
+    }
+
+    fn end(&self) -> u32 {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.end,
+            UnifiedGffRecord::Simd(record) => record.end,
+        }
+    }
+
+    fn ty(&self) -> String {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.ty.clone(),
+            UnifiedGffRecord::Simd(record) => record.ty.clone(),
+        }
+    }
+
+    fn source(&self) -> String {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.source.clone(),
+            UnifiedGffRecord::Simd(record) => record.source.clone(),
+        }
+    }
+
+    fn score(&self) -> Option<f32> {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.score,
+            UnifiedGffRecord::Simd(record) => record.score,
+        }
+    }
+
+    fn strand(&self) -> String {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.strand.clone(),
+            UnifiedGffRecord::Simd(record) => record.strand.clone(),
+        }
+    }
+
+    fn phase(&self) -> Option<u8> {
+        match self {
+            UnifiedGffRecord::Fast(record) => {
+                // Convert phase string to u8
+                record.phase.parse().ok()
+            }
+            UnifiedGffRecord::Simd(record) => {
+                // Convert phase string to u8
+                record.phase.parse().ok()
+            }
+        }
+    }
+
+    fn attributes_string(&self) -> String {
+        match self {
+            UnifiedGffRecord::Fast(record) => record.attributes.clone(),
+            UnifiedGffRecord::Simd(record) => record.attributes.clone(),
+        }
+    }
+}
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufReader, Error};
@@ -347,17 +472,17 @@ pub async fn get_local_gff_async_reader(
 }
 
 pub enum GffLocalReader {
-    // Standard parsers - now using sync readers
+    // Standard parsers - using sync readers with regular record_bufs
     GZIP(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
     BGZF(gff::io::Reader<bgzf::MultithreadedReader<File>>),
     PLAIN(gff::io::Reader<BufReader<File>>),
 
-    // Fast parsers - sync readers with fast methods
+    // Fast parsers - using sync readers with fast_records iterator
     GzipFast(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
     BgzfFast(gff::io::Reader<bgzf::MultithreadedReader<File>>),
     PlainFast(gff::io::Reader<BufReader<File>>),
 
-    // SIMD parsers - sync readers with SIMD methods
+    // SIMD parsers - using sync readers with simd_records iterator
     GzipSimd(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
     BgzfSimd(gff::io::Reader<bgzf::MultithreadedReader<File>>),
     PlainSimd(gff::io::Reader<BufReader<File>>),
@@ -441,63 +566,161 @@ impl GffLocalReader {
         }
     }
 
-    pub fn read_records(self) -> BoxStream<'static, Result<RecordBuf, Error>> {
-        use async_stream::stream;
-
+    pub fn into_sync_iterator(self) -> UnifiedGffIterator {
         match self {
-            // All parsers use record_bufs() for consistent interface
-            // The fast/SIMD optimizations are used at the reader construction level
-            GffLocalReader::BGZF(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::GZIP(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::PLAIN(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::BgzfFast(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::GzipFast(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::PlainFast(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::BgzfSimd(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::GzipSimd(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
-            GffLocalReader::PlainSimd(mut reader) => Box::pin(stream! {
-                for result in reader.record_bufs() {
-                    yield result.map_err(Into::into);
-                }
-            }),
+            // Standard parsers also use fast_records() for consistency and to avoid lifetime issues
+            GffLocalReader::BGZF(reader) => {
+                UnifiedGffIterator::Fast(Box::new(reader.fast_records().map(|r| {
+                    r.map(|fast_record| DynGffRecord {
+                        seqid: fast_record.seqid.clone(),
+                        source: fast_record.source.clone(),
+                        ty: fast_record.ty.clone(),
+                        start: fast_record.start,
+                        end: fast_record.end,
+                        score: fast_record.score,
+                        strand: fast_record.strand.clone(),
+                        phase: fast_record.phase.clone(),
+                        attributes: fast_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            GffLocalReader::GZIP(reader) => {
+                UnifiedGffIterator::Fast(Box::new(reader.fast_records().map(|r| {
+                    r.map(|fast_record| DynGffRecord {
+                        seqid: fast_record.seqid.clone(),
+                        source: fast_record.source.clone(),
+                        ty: fast_record.ty.clone(),
+                        start: fast_record.start,
+                        end: fast_record.end,
+                        score: fast_record.score,
+                        strand: fast_record.strand.clone(),
+                        phase: fast_record.phase.clone(),
+                        attributes: fast_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            GffLocalReader::PLAIN(reader) => {
+                UnifiedGffIterator::Fast(Box::new(reader.fast_records().map(|r| {
+                    r.map(|fast_record| DynGffRecord {
+                        seqid: fast_record.seqid.clone(),
+                        source: fast_record.source.clone(),
+                        ty: fast_record.ty.clone(),
+                        start: fast_record.start,
+                        end: fast_record.end,
+                        score: fast_record.score,
+                        strand: fast_record.strand.clone(),
+                        phase: fast_record.phase.clone(),
+                        attributes: fast_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            // Fast parsers use fast_records() and convert to DynGffRecord
+            GffLocalReader::BgzfFast(reader) => {
+                UnifiedGffIterator::Fast(Box::new(reader.fast_records().map(|r| {
+                    r.map(|fast_record| DynGffRecord {
+                        seqid: fast_record.seqid.clone(),
+                        source: fast_record.source.clone(),
+                        ty: fast_record.ty.clone(),
+                        start: fast_record.start,
+                        end: fast_record.end,
+                        score: fast_record.score,
+                        strand: fast_record.strand.clone(),
+                        phase: fast_record.phase.clone(),
+                        attributes: fast_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            GffLocalReader::GzipFast(reader) => {
+                UnifiedGffIterator::Fast(Box::new(reader.fast_records().map(|r| {
+                    r.map(|fast_record| DynGffRecord {
+                        seqid: fast_record.seqid.clone(),
+                        source: fast_record.source.clone(),
+                        ty: fast_record.ty.clone(),
+                        start: fast_record.start,
+                        end: fast_record.end,
+                        score: fast_record.score,
+                        strand: fast_record.strand.clone(),
+                        phase: fast_record.phase.clone(),
+                        attributes: fast_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            GffLocalReader::PlainFast(reader) => {
+                UnifiedGffIterator::Fast(Box::new(reader.fast_records().map(|r| {
+                    r.map(|fast_record| DynGffRecord {
+                        seqid: fast_record.seqid.clone(),
+                        source: fast_record.source.clone(),
+                        ty: fast_record.ty.clone(),
+                        start: fast_record.start,
+                        end: fast_record.end,
+                        score: fast_record.score,
+                        strand: fast_record.strand.clone(),
+                        phase: fast_record.phase.clone(),
+                        attributes: fast_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            // SIMD parsers use simd_records() and convert to DynGffRecord
+            GffLocalReader::BgzfSimd(reader) => {
+                UnifiedGffIterator::Simd(Box::new(reader.simd_records().map(|r| {
+                    r.map(|simd_record| DynGffRecord {
+                        seqid: simd_record.seqid.clone(),
+                        source: simd_record.source.clone(),
+                        ty: simd_record.ty.clone(),
+                        start: simd_record.start,
+                        end: simd_record.end,
+                        score: simd_record.score,
+                        strand: simd_record.strand.clone(),
+                        phase: simd_record.phase.clone(),
+                        attributes: simd_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            GffLocalReader::GzipSimd(reader) => {
+                UnifiedGffIterator::Simd(Box::new(reader.simd_records().map(|r| {
+                    r.map(|simd_record| DynGffRecord {
+                        seqid: simd_record.seqid.clone(),
+                        source: simd_record.source.clone(),
+                        ty: simd_record.ty.clone(),
+                        start: simd_record.start,
+                        end: simd_record.end,
+                        score: simd_record.score,
+                        strand: simd_record.strand.clone(),
+                        phase: simd_record.phase.clone(),
+                        attributes: simd_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
+            GffLocalReader::PlainSimd(reader) => {
+                UnifiedGffIterator::Simd(Box::new(reader.simd_records().map(|r| {
+                    r.map(|simd_record| DynGffRecord {
+                        seqid: simd_record.seqid.clone(),
+                        source: simd_record.source.clone(),
+                        ty: simd_record.ty.clone(),
+                        start: simd_record.start,
+                        end: simd_record.end,
+                        score: simd_record.score,
+                        strand: simd_record.strand.clone(),
+                        phase: simd_record.phase.clone(),
+                        attributes: simd_record.attributes.clone(),
+                    })
+                    .map_err(Into::into)
+                })))
+            }
         }
     }
 
     pub fn get_attributes(self) -> Result<Attributes, Error> {
         match self {
-            // All parsers use record_bufs() for attribute extraction
+            // Standard parsers use record_bufs()
             GffLocalReader::BGZF(mut reader) => reader
                 .record_bufs()
                 .next()
@@ -516,42 +739,26 @@ impl GffLocalReader {
                 .unwrap()
                 .map(|r| r.attributes().clone())
                 .map_err(Into::into),
-            GffLocalReader::BgzfFast(mut reader) => reader
-                .record_bufs()
-                .next()
-                .unwrap()
-                .map(|r| r.attributes().clone())
-                .map_err(Into::into),
-            GffLocalReader::GzipFast(mut reader) => reader
-                .record_bufs()
-                .next()
-                .unwrap()
-                .map(|r| r.attributes().clone())
-                .map_err(Into::into),
-            GffLocalReader::PlainFast(mut reader) => reader
-                .record_bufs()
-                .next()
-                .unwrap()
-                .map(|r| r.attributes().clone())
-                .map_err(Into::into),
-            GffLocalReader::BgzfSimd(mut reader) => reader
-                .record_bufs()
-                .next()
-                .unwrap()
-                .map(|r| r.attributes().clone())
-                .map_err(Into::into),
-            GffLocalReader::GzipSimd(mut reader) => reader
-                .record_bufs()
-                .next()
-                .unwrap()
-                .map(|r| r.attributes().clone())
-                .map_err(Into::into),
-            GffLocalReader::PlainSimd(mut reader) => reader
-                .record_bufs()
-                .next()
-                .unwrap()
-                .map(|r| r.attributes().clone())
-                .map_err(Into::into),
+            // Fast parsers - we'll need to adapt this
+            GffLocalReader::BgzfFast(_) => {
+                unimplemented!("get_attributes not yet implemented for fast parsers")
+            }
+            GffLocalReader::GzipFast(_) => {
+                unimplemented!("get_attributes not yet implemented for fast parsers")
+            }
+            GffLocalReader::PlainFast(_) => {
+                unimplemented!("get_attributes not yet implemented for fast parsers")
+            }
+            // SIMD parsers - we'll need to adapt this
+            GffLocalReader::BgzfSimd(_) => {
+                unimplemented!("get_attributes not yet implemented for SIMD parsers")
+            }
+            GffLocalReader::GzipSimd(_) => {
+                unimplemented!("get_attributes not yet implemented for SIMD parsers")
+            }
+            GffLocalReader::PlainSimd(_) => {
+                unimplemented!("get_attributes not yet implemented for SIMD parsers")
+            }
         }
     }
 }

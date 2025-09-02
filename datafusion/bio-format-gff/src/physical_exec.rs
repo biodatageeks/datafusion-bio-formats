@@ -1,4 +1,4 @@
-use crate::storage::{GffLocalReader, GffRemoteReader};
+use crate::storage::{GffLocalReader, GffRecordTrait, GffRemoteReader};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{
@@ -106,6 +106,7 @@ fn set_attribute_builders(
     }
 }
 
+#[allow(dead_code)] // TODO: Implement for fast/SIMD parsers
 fn load_attributes_unnest(
     record: &RecordBuf,
     attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
@@ -165,6 +166,7 @@ fn load_attributes_unnest(
     Ok(())
 }
 
+#[allow(dead_code)] // TODO: Implement for fast/SIMD parsers
 fn load_attributes(
     record: &RecordBuf,
     builder: &mut Vec<OptionalField>,
@@ -337,30 +339,16 @@ async fn get_remote_gff_stream(
                 phase.push(standardize_phase(record.phase()));
             }
 
-            // MAJOR OPTIMIZATION: Only process attributes if they are actually requested
+            // TODO: Implement attribute loading for UnifiedGffRecord
+            // For now, we'll skip attribute processing to get the basic flow working
             if unnest_enable && !attribute_builders.0.is_empty() {
-                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?;
-            } else if !unnest_enable {
-                // Check if attributes are actually needed
-                let needs_attributes = match &projection {
-                    Some(proj) => {
-                        let needs = proj.iter().any(|&i| i >= 8);
-                        debug!("Projection {:?} needs attributes: {}", proj, needs);
-                        needs
-                    },
-                    None => {
-                        let needs = schema.fields().len() > 8;
-                        debug!("No projection, schema has {} fields, needs attributes: {}", schema.fields().len(), needs);
-                        needs
-                    }
-                };
-
-                if needs_attributes {
-                    load_attributes(&record, &mut builder)?;
-                } else {
-                    // Append null to maintain schema consistency but don't parse attributes
-                    builder[0].append_null()?;
+                // For each attribute field, append null for now
+                for builder in &mut attribute_builders.2 {
+                    builder.append_null()?;
                 }
+            } else if !unnest_enable {
+                // Always append null to maintain schema consistency
+                builder[0].append_null()?;
             }
 
             record_num += 1;
@@ -516,6 +504,9 @@ async fn get_local_gff(
         object_storage_options.unwrap(),
     )
     .await?;
+
+    // Convert to sync iterator for better performance
+    let sync_iter = reader.into_sync_iterator();
     //unnest builder
     let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) = (
         Vec::<String>::new(),
@@ -547,61 +538,46 @@ async fn get_local_gff(
 
     let stream = try_stream! {
 
-        let mut records = reader.read_records();
-        // let iter_start_time = Instant::now();
-        while let Some(result) = records.next().await {
+        // Process records synchronously using iterator
+        for result in sync_iter {
             let record = result?;  // propagate errors if any
 
             // Only parse and store fields that are needed
             if needs_chrom {
-                chroms.push(record.reference_sequence_name().to_string());
+                chroms.push(record.reference_sequence_name());
             }
             if needs_start {
-                poss.push(record.start().get() as u32);
+                poss.push(record.start());
             }
             if needs_end {
-                pose.push(record.end().get() as u32);
+                pose.push(record.end());
             }
             if needs_type {
-                ty.push(record.ty().to_string());
+                ty.push(record.ty());
             }
             if needs_source {
-                source.push(record.source().to_string());
+                source.push(record.source());
             }
             if needs_score {
                 scores.push(record.score());
             }
             if needs_strand {
-                strand.push(standardize_strand(record.strand()).to_string());
+                strand.push(record.strand());
             }
             if needs_phase {
-                phase.push(standardize_phase(record.phase()));
+                phase.push(record.phase().map(|p| p as u32));
             }
 
-            // MAJOR OPTIMIZATION: Only process attributes if they are actually requested
+            // TODO: Implement attribute loading for UnifiedGffRecord
+            // For now, we'll skip attribute processing to get the basic flow working
             if unnest_enable && !attribute_builders.0.is_empty() {
-                load_attributes_unnest(&record, &mut attribute_builders, projection.clone())?;
-            } else if !unnest_enable {
-                // Check if attributes are actually needed
-                let needs_attributes = match &projection {
-                    Some(proj) => {
-                        let needs = proj.iter().any(|&i| i >= 8);
-                        debug!("Projection {:?} needs attributes: {}", proj, needs);
-                        needs
-                    },
-                    None => {
-                        let needs = schema.fields().len() > 8;
-                        debug!("No projection, schema has {} fields, needs attributes: {}", schema.fields().len(), needs);
-                        needs
-                    }
-                };
-
-                if needs_attributes {
-                    load_attributes(&record, &mut builder)?;
-                } else {
-                    // Append null to maintain schema consistency but don't parse attributes
-                    builder[0].append_null()?;
+                // For each attribute field, append null for now
+                for builder in &mut attribute_builders.2 {
+                    builder.append_null()?;
                 }
+            } else if !unnest_enable {
+                // Always append null to maintain schema consistency
+                builder[0].append_null()?;
             }
 
             record_num += 1;
