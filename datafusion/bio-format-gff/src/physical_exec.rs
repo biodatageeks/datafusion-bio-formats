@@ -664,7 +664,17 @@ async fn get_local_gff(
             }
 
             // CONDITIONAL PARSING: Only parse attributes when actually needed
-            let needs_attributes = unnest_enable && !attribute_builders.0.is_empty() || !unnest_enable;
+            // Logic:
+            // - SELECT * or SELECT attributes -> !unnest_enable (parse all attributes)
+            // - SELECT gene_id, transcript_id -> unnest_enable && !attribute_builders.0.is_empty() (parse specific)
+            // - SELECT chrom, start, end -> unnest_enable && attribute_builders.0.is_empty() (skip parsing)
+            let needs_attributes = if !unnest_enable {
+                // Always parse when using nested attributes structure (SELECT * or SELECT attributes)
+                true
+            } else {
+                // Only parse when specific attribute fields are requested
+                !attribute_builders.0.is_empty()
+            };
             if needs_attributes {
                 if unnest_enable && !attribute_builders.0.is_empty() {
                     // Parse attributes from the record's attributes string
