@@ -8,6 +8,7 @@ datafusion.workspace = true
 opendal.workspace = true
 tokio-util.workspace = true
 noodles = { workspace = true }
+noodles-bgzf.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 async-compression.workspace = true
@@ -17,12 +18,17 @@ futures.workspace = true
 futures-util.workspace = true
 async-trait.workspace = true
 
-noodles-gff  = { git = "https://github.com/biodatageeks/noodles.git",rev = "f97c310f9b7791427c59069cdd86f98c915cd553", features = ["async"] }
+noodles-gff  = { git = "https://github.com/biodatageeks/noodles.git",rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c", features = ["async"] }
 flate2 = "1.0"
 log = "0.4.27"
 env_logger = "0.11.8"
+tracing = "0.1.40"
 
 [[example]]
 name = "test_reader"
 # Some issue when publishing and path isn't specified, so adding here
 path = "./examples/test_reader.rs"
+
+[[bin]]
+name = "benchmark_bgzf_threads"
+path = "../../benchmark_bgzf_threads.rs"
