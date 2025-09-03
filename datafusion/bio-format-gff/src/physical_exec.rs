@@ -107,18 +107,18 @@ fn set_attribute_builders(
     }
 }
 
-/// Parse GFF3 attributes string into key-value HashMap - OPTIMIZED
-fn parse_gff_attributes(attributes_str: &str) -> HashMap<String, String> {
+/// Parse GFF3 attributes string directly into Attribute structs - SIMPLE & ORDERED
+fn parse_gff_attributes_to_vec(attributes_str: &str) -> Vec<Attribute> {
     // Early return for empty/null attributes - most common case
     if attributes_str.is_empty() || attributes_str == "." {
-        return HashMap::new();
+        return Vec::new();
     }
 
-    // Pre-allocate HashMap with estimated capacity to reduce allocations
+    // Pre-allocate Vec with estimated capacity to reduce allocations
     let estimated_pairs = attributes_str.matches(';').count() + 1;
-    let mut attributes = HashMap::with_capacity(estimated_pairs);
+    let mut attributes = Vec::with_capacity(estimated_pairs);
 
-    // Split by semicolon and parse key=value pairs - avoid intermediate collections
+    // Split by semicolon and parse key=value pairs - maintain original order
     for pair in attributes_str.split(';') {
         if pair.is_empty() {
             continue;
@@ -146,20 +146,56 @@ fn parse_gff_attributes(attributes_str: &str) -> HashMap<String, String> {
                 value.to_string()
             };
 
-            // Insert with minimal string allocation
-            attributes.insert(key.to_string(), decoded_value);
+            // Create Attribute struct directly - preserves order
+            attributes.push(Attribute {
+                tag: key.to_string(),
+                value: Some(decoded_value),
+            });
         }
     }
 
     attributes
 }
 
-/// Load attributes from parsed attribute HashMap for unnested attributes
-fn load_attributes_unnest_from_map(
-    attributes_map: &HashMap<String, String>,
+/// Load attributes for specific attribute columns (unnested)
+fn load_attributes_unnest_from_string(
+    attributes_str: &str,
     attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
     projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
+    // Create HashMap for efficient lookup of specific attributes
+    let mut attributes_map = HashMap::new();
+
+    // Parse only what we need for the specific attributes requested
+    if !attributes_str.is_empty() && attributes_str != "." {
+        for pair in attributes_str.split(';') {
+            if pair.is_empty() {
+                continue;
+            }
+            if let Some(eq_pos) = pair.find('=') {
+                let key = &pair[..eq_pos];
+                let value = &pair[eq_pos + 1..];
+
+                // Only parse the values we actually need
+                if attribute_builders.0.contains(&key.to_string()) {
+                    let decoded_value = if value.starts_with('"') && value.ends_with('"') {
+                        value[1..value.len() - 1].to_string()
+                    } else if value.contains('%') {
+                        value
+                            .replace("%3B", ";")
+                            .replace("%3D", "=")
+                            .replace("%26", "&")
+                            .replace("%2C", ",")
+                            .replace("%09", "\t")
+                    } else {
+                        value.to_string()
+                    };
+                    attributes_map.insert(key.to_string(), decoded_value);
+                }
+            }
+        }
+    }
+
     let projected_attribute_indices: Option<Vec<usize>> =
         projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
 
@@ -183,21 +219,12 @@ fn load_attributes_unnest_from_map(
     Ok(())
 }
 
-/// Load attributes from parsed attribute HashMap for nested attributes
-fn load_attributes_from_map(
-    attributes_map: &HashMap<String, String>,
+/// Load attributes directly from parsed Attribute structs - preserves original order
+fn load_attributes_from_vec(
+    attributes: Vec<Attribute>,
     builder: &mut Vec<OptionalField>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
-    let mut vec_attributes: Vec<Attribute> = Vec::with_capacity(attributes_map.len());
-
-    for (tag, value) in attributes_map.iter() {
-        vec_attributes.push(Attribute {
-            tag: tag.clone(),
-            value: Some(value.clone()),
-        });
-    }
-
-    builder[0].append_array_struct(vec_attributes)?;
+    builder[0].append_array_struct(attributes)?;
     Ok(())
 }
 
@@ -677,15 +704,14 @@ async fn get_local_gff(
             };
             if needs_attributes {
                 if unnest_enable && !attribute_builders.0.is_empty() {
-                    // Parse attributes from the record's attributes string
+                    // Parse only specific attributes needed (optimized for specific columns)
                     let attributes_str = record.attributes_string();
-                    let attributes_map = parse_gff_attributes(&attributes_str);
-                    load_attributes_unnest_from_map(&attributes_map, &mut attribute_builders, projection.clone())?;
+                    load_attributes_unnest_from_string(&attributes_str, &mut attribute_builders, projection.clone())?;
                 } else if !unnest_enable {
-                    // Parse attributes into nested structure
+                    // Parse attributes into nested structure (preserves original order)
                     let attributes_str = record.attributes_string();
-                    let attributes_map = parse_gff_attributes(&attributes_str);
-                    load_attributes_from_map(&attributes_map, &mut builder)?;
+                    let attributes = parse_gff_attributes_to_vec(&attributes_str);
+                    load_attributes_from_vec(attributes, &mut builder)?;
                 }
             } else {
                 // OPTIMIZATION: Skip attribute parsing entirely when not needed
