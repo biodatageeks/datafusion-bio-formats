@@ -19,6 +19,7 @@ use noodles_gff::feature::RecordBuf;
 use noodles_gff::feature::record::{Phase, Strand};
 use noodles_gff::feature::record_buf::attributes::field::Value;
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -104,6 +105,100 @@ fn set_attribute_builders(
         attribute_builders.1.push(DataType::Utf8);
         attribute_builders.2.push(field);
     }
+}
+
+/// Parse GFF3 attributes string into key-value HashMap - OPTIMIZED
+fn parse_gff_attributes(attributes_str: &str) -> HashMap<String, String> {
+    // Early return for empty/null attributes - most common case
+    if attributes_str.is_empty() || attributes_str == "." {
+        return HashMap::new();
+    }
+
+    // Pre-allocate HashMap with estimated capacity to reduce allocations
+    let estimated_pairs = attributes_str.matches(';').count() + 1;
+    let mut attributes = HashMap::with_capacity(estimated_pairs);
+
+    // Split by semicolon and parse key=value pairs - avoid intermediate collections
+    for pair in attributes_str.split(';') {
+        if pair.is_empty() {
+            continue;
+        }
+
+        // Find '=' position - most critical operation
+        if let Some(eq_pos) = pair.find('=') {
+            let key = &pair[..eq_pos];
+            let value = &pair[eq_pos + 1..];
+
+            // Only do expensive operations when absolutely necessary
+            let decoded_value = if value.starts_with('"') && value.ends_with('"') {
+                // Remove quotes - avoid string allocation until necessary
+                value[1..value.len() - 1].to_string()
+            } else if value.contains('%') {
+                // Only do URL decoding if % is found
+                value
+                    .replace("%3B", ";")
+                    .replace("%3D", "=")
+                    .replace("%26", "&")
+                    .replace("%2C", ",")
+                    .replace("%09", "\t")
+            } else {
+                // Most common case - direct string conversion
+                value.to_string()
+            };
+
+            // Insert with minimal string allocation
+            attributes.insert(key.to_string(), decoded_value);
+        }
+    }
+
+    attributes
+}
+
+/// Load attributes from parsed attribute HashMap for unnested attributes
+fn load_attributes_unnest_from_map(
+    attributes_map: &HashMap<String, String>,
+    attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
+    projection: Option<Vec<usize>>,
+) -> Result<(), datafusion::arrow::error::ArrowError> {
+    let projected_attribute_indices: Option<Vec<usize>> =
+        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
+
+    for i in 0..attribute_builders.2.len() {
+        if let Some(indices) = &projected_attribute_indices {
+            if !indices.contains(&i) {
+                attribute_builders.2[i].append_null()?;
+                continue;
+            }
+        }
+
+        let name = &attribute_builders.0[i];
+        let builder = &mut attribute_builders.2[i];
+
+        if let Some(value) = attributes_map.get(name) {
+            builder.append_string(value)?;
+        } else {
+            builder.append_null()?;
+        }
+    }
+    Ok(())
+}
+
+/// Load attributes from parsed attribute HashMap for nested attributes
+fn load_attributes_from_map(
+    attributes_map: &HashMap<String, String>,
+    builder: &mut Vec<OptionalField>,
+) -> Result<(), datafusion::arrow::error::ArrowError> {
+    let mut vec_attributes: Vec<Attribute> = Vec::with_capacity(attributes_map.len());
+
+    for (tag, value) in attributes_map.iter() {
+        vec_attributes.push(Attribute {
+            tag: tag.clone(),
+            value: Some(value.clone()),
+        });
+    }
+
+    builder[0].append_array_struct(vec_attributes)?;
+    Ok(())
 }
 
 #[allow(dead_code)] // TODO: Implement for fast/SIMD parsers
@@ -568,16 +663,17 @@ async fn get_local_gff(
                 phase.push(record.phase().map(|p| p as u32));
             }
 
-            // TODO: Implement attribute loading for UnifiedGffRecord
-            // For now, we'll skip attribute processing to get the basic flow working
+            // Process attributes using the new attribute parsing functions
             if unnest_enable && !attribute_builders.0.is_empty() {
-                // For each attribute field, append null for now
-                for builder in &mut attribute_builders.2 {
-                    builder.append_null()?;
-                }
+                // Parse attributes from the record's attributes string
+                let attributes_str = record.attributes_string();
+                let attributes_map = parse_gff_attributes(&attributes_str);
+                load_attributes_unnest_from_map(&attributes_map, &mut attribute_builders, projection.clone())?;
             } else if !unnest_enable {
-                // Always append null to maintain schema consistency
-                builder[0].append_null()?;
+                // Parse attributes into nested structure
+                let attributes_str = record.attributes_string();
+                let attributes_map = parse_gff_attributes(&attributes_str);
+                load_attributes_from_map(&attributes_map, &mut builder)?;
             }
 
             record_num += 1;

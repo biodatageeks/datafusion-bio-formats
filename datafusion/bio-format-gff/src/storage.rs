@@ -568,7 +568,7 @@ impl GffLocalReader {
 
     pub fn into_sync_iterator(self) -> UnifiedGffIterator {
         match self {
-            // Standard parsers also use fast_records() for consistency and to avoid lifetime issues
+            // Standard parsers - but we still use fast_records for API consistency
             GffLocalReader::BGZF(reader) => {
                 UnifiedGffIterator::Fast(Box::new(reader.fast_records().map(|r| {
                     r.map(|fast_record| DynGffRecord {
