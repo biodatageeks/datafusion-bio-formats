@@ -1,4 +1,5 @@
-use crate::filter_utils::can_push_down_filter;
+use crate::filter_utils::{can_push_down_filter, evaluate_filters_against_record};
+use crate::storage::GffRecordTrait;
 use std::any::Any;
 use std::io::{self, BufRead, Read, Seek};
 use std::sync::Arc;
@@ -325,7 +326,7 @@ impl ExecutionPlan for BgzfGffExec {
         let schema_ref = self.schema.clone();
         let schema_for_adapter = schema_ref.clone();
         let projection = self.projection.clone();
-        let _filters = self.filters.clone(); // TODO: Implement filter evaluation for BGZF reader
+        let filters = self.filters.clone();
         let index = self.index.clone();
         let attr_fields = self.attr_fields.clone();
         let limit = self.limit;
@@ -334,6 +335,49 @@ impl ExecutionPlan for BgzfGffExec {
             "Executing BGZF GFF partition {} with range: {}-{}",
             partition, start_uncomp, end_comp
         );
+
+        // Lightweight record used only for filter evaluation
+        struct BgzfLineRecord {
+            chrom: String,
+            start: u32,
+            end: u32,
+            ty: String,
+            source: String,
+            score: Option<f32>,
+            strand: String,
+            phase: Option<u8>,
+            attributes: String,
+        }
+
+        impl GffRecordTrait for BgzfLineRecord {
+            fn reference_sequence_name(&self) -> String {
+                self.chrom.clone()
+            }
+            fn start(&self) -> u32 {
+                self.start
+            }
+            fn end(&self) -> u32 {
+                self.end
+            }
+            fn ty(&self) -> String {
+                self.ty.clone()
+            }
+            fn source(&self) -> String {
+                self.source.clone()
+            }
+            fn score(&self) -> Option<f32> {
+                self.score
+            }
+            fn strand(&self) -> String {
+                self.strand.clone()
+            }
+            fn phase(&self) -> Option<u8> {
+                self.phase
+            }
+            fn attributes_string(&self) -> String {
+                self.attributes.clone()
+            }
+        }
 
         let stream = async_stream::try_stream! {
             let reader = std::fs::File::open(&path)
@@ -451,7 +495,45 @@ impl ExecutionPlan for BgzfGffExec {
                     match read_next_line(gff_reader.get_mut()) {
                         Ok(Some(line)) => {
                             if line.is_empty() || line[0] == b'#' { continue; }
-                            num_rows += 1;
+                            // Parse columns minimally for filter evaluation
+                            let mut cols = line.split(|&b| b == b'\t');
+                            let seqid = cols.next().unwrap_or_default();
+                            let source_v = cols.next().unwrap_or_default();
+                            let ty_v = cols.next().unwrap_or_default();
+                            let start_v = cols.next().unwrap_or_default();
+                            let end_v = cols.next().unwrap_or_default();
+                            let score_v = cols.next().unwrap_or_default();
+                            let strand_v = cols.next().unwrap_or_default();
+                            let phase_v = cols.next().unwrap_or_default();
+                            let attrs_v = cols.next().unwrap_or_default();
+
+                            let start_parsed = std::str::from_utf8(start_v).unwrap_or("0").parse::<u32>().unwrap_or(0);
+                            let end_parsed = std::str::from_utf8(end_v).unwrap_or("0").parse::<u32>().unwrap_or(0);
+                            let score_parsed = {
+                                let s = std::str::from_utf8(score_v).unwrap_or(".");
+                                if s == "." || s.is_empty() { None } else { s.parse::<f32>().ok() }
+                            };
+                            let phase_parsed: Option<u8> = {
+                                let p = std::str::from_utf8(phase_v).unwrap_or(".");
+                                if p == "." || p.is_empty() { None } else { p.parse::<u8>().ok() }
+                            };
+
+                            let attrs_str = std::str::from_utf8(attrs_v).unwrap_or("");
+                            let rec = BgzfLineRecord {
+                                chrom: std::str::from_utf8(seqid).unwrap_or("").to_string(),
+                                start: start_parsed,
+                                end: end_parsed,
+                                ty: std::str::from_utf8(ty_v).unwrap_or("").to_string(),
+                                source: std::str::from_utf8(source_v).unwrap_or("").to_string(),
+                                score: score_parsed,
+                                strand: std::str::from_utf8(strand_v).unwrap_or("").to_string(),
+                                phase: phase_parsed,
+                                attributes: attrs_str.to_string(),
+                            };
+
+                            if evaluate_filters_against_record(&rec, &filters, attrs_str) {
+                                num_rows += 1;
+                            }
                         }
                         Ok(None) => break,
                         Err(e) => { Err(ArrowError::ExternalError(Box::new(e)))?; unreachable!() }
@@ -487,31 +569,48 @@ impl ExecutionPlan for BgzfGffExec {
                     let phase_v = cols.next().unwrap_or_default();
                     let attrs_v = cols.next().unwrap_or_default();
 
-                    // Append projected standard fields
-                    if let Some(b) = &mut chrom_builder { b.append_value(std::str::from_utf8(seqid).unwrap_or("")); }
-                    if let Some(b) = &mut start_builder {
-                        if let Ok(v) = std::str::from_utf8(start_v).unwrap_or("0").parse::<u32>() { b.append_value(v); } else { b.append_value(0); }
-                    }
-                    if let Some(b) = &mut end_builder {
-                        if let Ok(v) = std::str::from_utf8(end_v).unwrap_or("0").parse::<u32>() { b.append_value(v); } else { b.append_value(0); }
-                    }
-                    if let Some(b) = &mut type_builder { b.append_value(std::str::from_utf8(ty_v).unwrap_or("")); }
-                    if let Some(b) = &mut source_builder { b.append_value(std::str::from_utf8(source_v).unwrap_or("")); }
-                    if let Some(b) = &mut score_builder {
+                    // Before appending, evaluate filters using parsed values
+                    let start_parsed = std::str::from_utf8(start_v).unwrap_or("0").parse::<u32>().unwrap_or(0);
+                    let end_parsed = std::str::from_utf8(end_v).unwrap_or("0").parse::<u32>().unwrap_or(0);
+                    let score_parsed = {
                         let s = std::str::from_utf8(score_v).unwrap_or(".");
-                        if s == "." || s.is_empty() { b.append_null(); } else if let Ok(f) = s.parse::<f32>() { b.append_value(f); } else { b.append_null(); }
-                    }
-                    if let Some(b) = &mut strand_builder { b.append_value(std::str::from_utf8(strand_v).unwrap_or("")); }
-                    if let Some(b) = &mut phase_builder {
+                        if s == "." || s.is_empty() { None } else { s.parse::<f32>().ok() }
+                    };
+                    let phase_parsed: Option<u8> = {
                         let p = std::str::from_utf8(phase_v).unwrap_or(".");
-                        if p == "." || p.is_empty() { b.append_null(); } else if let Ok(u) = p.parse::<u32>() { b.append_value(u); } else { b.append_null(); }
+                        if p == "." || p.is_empty() { None } else { p.parse::<u8>().ok() }
+                    };
+                    let attrs_str = std::str::from_utf8(attrs_v).unwrap_or("");
+                    let rec = BgzfLineRecord {
+                        chrom: std::str::from_utf8(seqid).unwrap_or("").to_string(),
+                        start: start_parsed,
+                        end: end_parsed,
+                        ty: std::str::from_utf8(ty_v).unwrap_or("").to_string(),
+                        source: std::str::from_utf8(source_v).unwrap_or("").to_string(),
+                        score: score_parsed,
+                        strand: std::str::from_utf8(strand_v).unwrap_or("").to_string(),
+                        phase: phase_parsed,
+                        attributes: attrs_str.to_string(),
+                    };
+
+                    if !evaluate_filters_against_record(&rec, &filters, attrs_str) {
+                        continue; // skip non-matching records
                     }
 
-                    let attrs_str = std::str::from_utf8(attrs_v).unwrap_or("");
+                    // Append projected standard fields
+                    if let Some(b) = &mut chrom_builder { b.append_value(&rec.chrom); }
+                    if let Some(b) = &mut start_builder { b.append_value(rec.start); }
+                    if let Some(b) = &mut end_builder { b.append_value(rec.end); }
+                    if let Some(b) = &mut type_builder { b.append_value(&rec.ty); }
+                    if let Some(b) = &mut source_builder { b.append_value(&rec.source); }
+                    if let Some(b) = &mut score_builder { if let Some(f) = rec.score { b.append_value(f); } else { b.append_null(); } }
+                    if let Some(b) = &mut strand_builder { b.append_value(&rec.strand); }
+                    if let Some(b) = &mut phase_builder { if let Some(u) = rec.phase { b.append_value(u as u32); } else { b.append_null(); } }
+
                     if let Some(ref mut builders) = attribute_builders {
-                        process_unnested_attributes(attrs_str, builders);
+                        process_unnested_attributes(&rec.attributes, builders);
                     } else if let Some(ref mut builder) = nested_builder {
-                        let attributes = process_nested_attributes(attrs_str);
+                        let attributes = process_nested_attributes(&rec.attributes);
                         builder.append_array_struct(attributes)
                             .map_err(|e| ArrowError::ComputeError(format!("Failed to append attributes: {}", e)))?;
                     }

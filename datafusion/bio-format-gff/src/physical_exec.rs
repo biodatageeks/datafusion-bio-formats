@@ -417,50 +417,7 @@ impl GffRecordTrait for RemoteGffRecordWrapper {
     }
 }
 
-/// Evaluates filter expressions against a GFF record
-/// Returns true if the record passes all filters, false otherwise
-fn evaluate_filters_against_record<T: GffRecordTrait>(
-    record: &T,
-    filters: &[Expr],
-    attributes_str: &str,
-) -> bool {
-    if filters.is_empty() {
-        return true;
-    }
-
-    filters
-        .iter()
-        .all(|filter| evaluate_single_filter(record, filter, attributes_str))
-}
-
-/// Evaluates a single filter expression against a GFF record
-fn evaluate_single_filter<T: GffRecordTrait>(
-    record: &T,
-    filter: &Expr,
-    attributes_str: &str,
-) -> bool {
-    match filter {
-        // AND expressions: expr1 AND expr2 (handle this first to avoid pattern conflict)
-        Expr::BinaryExpr(binary_expr)
-            if matches!(binary_expr.op, datafusion::logical_expr::Operator::And) =>
-        {
-            evaluate_single_filter(record, &binary_expr.left, attributes_str)
-                && evaluate_single_filter(record, &binary_expr.right, attributes_str)
-        }
-        // Other binary expressions: column op literal
-        Expr::BinaryExpr(binary_expr) => {
-            evaluate_binary_filter(record, binary_expr, attributes_str)
-        }
-        Expr::Between(between_expr) => {
-            evaluate_between_filter(record, between_expr, attributes_str)
-        }
-        Expr::InList(in_list_expr) => evaluate_in_list_filter(record, in_list_expr, attributes_str),
-        _ => {
-            debug!("Unsupported filter expression: {:?}", filter);
-            true // If we can't evaluate it, let it pass (defensive)
-        }
-    }
-}
+// Filter evaluation moved to filter_utils::evaluate_filters_against_record
 
 /// Evaluates binary expressions like column = value, start > 1000
 fn evaluate_binary_filter<T: GffRecordTrait>(
@@ -828,7 +785,7 @@ async fn get_remote_gff_stream(
             // TODO: Implement attribute extraction for remote GFF records
             let attributes_str = String::new(); // Placeholder for now
 
-            if !evaluate_filters_against_record(&temp_record, &filters, &attributes_str) {
+            if !crate::filter_utils::evaluate_filters_against_record(&temp_record, &filters, &attributes_str) {
                 continue; // Skip this record, it doesn't pass the filters
             }
 
@@ -1064,7 +1021,7 @@ async fn get_local_gff(
 
             // Apply filters early - skip this record if it doesn't pass
             let attributes_str = record.attributes_string();
-            if !evaluate_filters_against_record(&record, &filters, &attributes_str) {
+            if !crate::filter_utils::evaluate_filters_against_record(&record, &filters, &attributes_str) {
                 continue; // Skip this record, it doesn't pass the filters
             }
 
