@@ -1,5 +1,6 @@
+use crate::filter_utils::can_push_down_filter;
 use std::any::Any;
-use std::io::{self, BufRead, BufReader, Read, Seek};
+use std::io::{self, BufRead, Read, Seek};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -10,6 +11,8 @@ use datafusion::common::Result;
 use datafusion::datasource::TableType;
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
+use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
@@ -22,8 +25,6 @@ use noodles_bgzf::{IndexedReader, gzi};
 use noodles_gff as gff;
 use std::path::PathBuf;
 use tracing::debug;
-
-use crate::storage::{GffRecordTrait, UnifiedGffRecord};
 
 #[derive(Debug, Clone)]
 pub struct BgzfGffTableProvider {
@@ -150,13 +151,42 @@ impl datafusion::catalog::TableProvider for BgzfGffTableProvider {
         TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        debug!(
+            "BgzfGffTableProvider::supports_filters_pushdown with {} filters",
+            filters.len()
+        );
+
+        let pushdown_support = filters
+            .iter()
+            .map(|expr| {
+                if can_push_down_filter(expr, &self.schema) {
+                    debug!("BGZF Filter can be pushed down: {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    debug!("BGZF Filter cannot be pushed down: {:?}", expr);
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect();
+
+        Ok(pushdown_support)
+    }
+
     async fn scan(
         &self,
         state: &dyn datafusion::catalog::Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[datafusion::logical_expr::Expr],
+        filters: &[datafusion::logical_expr::Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        debug!(
+            "BgzfGffTableProvider::scan with projection: {:?}, filters: {:?}",
+            projection, filters
+        );
         let mut index_path = self.path.as_os_str().to_owned();
         index_path.push(".gzi");
 
@@ -171,11 +201,25 @@ impl datafusion::catalog::TableProvider for BgzfGffTableProvider {
             None => self.schema.clone(),
         };
 
+        // Filter the provided filters to only include those that can be pushed down
+        let pushable_filters: Vec<Expr> = filters
+            .iter()
+            .filter(|expr| can_push_down_filter(expr, &self.schema))
+            .cloned()
+            .collect();
+
+        debug!(
+            "BgzfGffTableProvider::scan - {} filters can be pushed down out of {} total",
+            pushable_filters.len(),
+            filters.len()
+        );
+
         let exec = BgzfGffExec::new(
             self.path.clone(),
             partitions,
             projected_schema,
             projection.cloned(),
+            pushable_filters,
             index,
             self.attr_fields.clone(),
             limit,
@@ -190,6 +234,7 @@ struct BgzfGffExec {
     partitions: Vec<(u64, u64)>,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
     index: gzi::Index,
     attr_fields: Option<Vec<String>>,
     limit: Option<usize>,
@@ -202,6 +247,7 @@ impl BgzfGffExec {
         partitions: Vec<(u64, u64)>,
         schema: SchemaRef,
         projection: Option<Vec<usize>>,
+        filters: Vec<Expr>,
         index: gzi::Index,
         attr_fields: Option<Vec<String>>,
         limit: Option<usize>,
@@ -218,6 +264,7 @@ impl BgzfGffExec {
             partitions,
             schema,
             projection,
+            filters,
             index,
             attr_fields,
             limit,
@@ -278,6 +325,7 @@ impl ExecutionPlan for BgzfGffExec {
         let schema_ref = self.schema.clone();
         let schema_for_adapter = schema_ref.clone();
         let projection = self.projection.clone();
+        let _filters = self.filters.clone(); // TODO: Implement filter evaluation for BGZF reader
         let index = self.index.clone();
         let attr_fields = self.attr_fields.clone();
         let limit = self.limit;

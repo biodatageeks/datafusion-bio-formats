@@ -1,9 +1,10 @@
+use crate::filter_utils::can_push_down_filter;
 use crate::physical_exec::GffExec;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -130,14 +131,42 @@ impl TableProvider for GffTableProvider {
         // todo!()
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::common::Result<Vec<TableProviderFilterPushDown>> {
+        debug!(
+            "GffTableProvider::supports_filters_pushdown with {} filters",
+            filters.len()
+        );
+
+        let pushdown_support = filters
+            .iter()
+            .map(|expr| {
+                if can_push_down_filter(expr, &self.schema) {
+                    debug!("Filter can be pushed down: {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    debug!("Filter cannot be pushed down: {:?}", expr);
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect();
+
+        Ok(pushdown_support)
+    }
+
     async fn scan(
         &self,
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        debug!("GffTableProvider::scan with projection: {:?}", projection);
+        debug!(
+            "GffTableProvider::scan with projection: {:?}, filters: {:?}",
+            projection, filters
+        );
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
@@ -162,6 +191,19 @@ impl TableProvider for GffTableProvider {
             projected_schema.fields().len()
         );
 
+        // Filter the provided filters to only include those that can be pushed down
+        let pushable_filters: Vec<Expr> = filters
+            .iter()
+            .filter(|expr| can_push_down_filter(expr, &self.schema))
+            .cloned()
+            .collect();
+
+        debug!(
+            "GffTableProvider::scan - {} filters can be pushed down out of {} total",
+            pushable_filters.len(),
+            filters.len()
+        );
+
         Ok(Arc::new(GffExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
@@ -173,6 +215,7 @@ impl TableProvider for GffTableProvider {
             attr_fields: self.attr_fields.clone(), // Pass original Python-provided fields to executor
             schema: projected_schema.clone(),
             projection: projection.cloned(),
+            filters: pushable_filters, // Pass pushable filters to executor
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),

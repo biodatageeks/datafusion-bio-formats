@@ -5,8 +5,9 @@ use datafusion::arrow::array::{
     Array, Float32Builder, NullArray, RecordBatch, StringArray, UInt32Array, UInt32Builder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Fields, SchemaRef};
-use datafusion::common::DataFusionError;
+use datafusion::common::{DataFusionError, ScalarValue};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
+use datafusion::logical_expr::{Expr, expr::InList};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::{
@@ -29,6 +30,7 @@ pub struct GffExec {
     pub(crate) attr_fields: Option<Vec<String>>,
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
+    pub(crate) filters: Vec<Expr>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
     pub(crate) thread_num: Option<usize>,
@@ -87,6 +89,7 @@ impl ExecutionPlan for GffExec {
             batch_size,
             self.thread_num,
             self.projection.clone(),
+            self.filters.clone(),
             self.object_storage_options.clone(),
         );
         let stream = futures::stream::once(fut).try_flatten();
@@ -360,12 +363,385 @@ fn standardize_phase(phase: Option<Phase>) -> Option<u32> {
         Phase::Two => 2,
     })
 }
+
+/// Temporary wrapper for remote GFF records to implement GffRecordTrait
+/// This allows us to use the same filter evaluation logic for both local and remote records
+#[derive(Debug)]
+struct RemoteGffRecordWrapper {
+    chrom: String,
+    start: u32,
+    end: u32,
+    ty: String,
+    source: String,
+    score: Option<f32>,
+    strand: String,
+    phase: Option<u8>,
+    attributes: String,
+}
+
+impl GffRecordTrait for RemoteGffRecordWrapper {
+    fn reference_sequence_name(&self) -> String {
+        self.chrom.clone()
+    }
+
+    fn start(&self) -> u32 {
+        self.start
+    }
+
+    fn end(&self) -> u32 {
+        self.end
+    }
+
+    fn ty(&self) -> String {
+        self.ty.clone()
+    }
+
+    fn source(&self) -> String {
+        self.source.clone()
+    }
+
+    fn score(&self) -> Option<f32> {
+        self.score
+    }
+
+    fn strand(&self) -> String {
+        self.strand.clone()
+    }
+
+    fn phase(&self) -> Option<u8> {
+        self.phase
+    }
+
+    fn attributes_string(&self) -> String {
+        self.attributes.clone()
+    }
+}
+
+/// Evaluates filter expressions against a GFF record
+/// Returns true if the record passes all filters, false otherwise
+fn evaluate_filters_against_record<T: GffRecordTrait>(
+    record: &T,
+    filters: &[Expr],
+    attributes_str: &str,
+) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+
+    filters
+        .iter()
+        .all(|filter| evaluate_single_filter(record, filter, attributes_str))
+}
+
+/// Evaluates a single filter expression against a GFF record
+fn evaluate_single_filter<T: GffRecordTrait>(
+    record: &T,
+    filter: &Expr,
+    attributes_str: &str,
+) -> bool {
+    match filter {
+        // AND expressions: expr1 AND expr2 (handle this first to avoid pattern conflict)
+        Expr::BinaryExpr(binary_expr)
+            if matches!(binary_expr.op, datafusion::logical_expr::Operator::And) =>
+        {
+            evaluate_single_filter(record, &binary_expr.left, attributes_str)
+                && evaluate_single_filter(record, &binary_expr.right, attributes_str)
+        }
+        // Other binary expressions: column op literal
+        Expr::BinaryExpr(binary_expr) => {
+            evaluate_binary_filter(record, binary_expr, attributes_str)
+        }
+        Expr::Between(between_expr) => {
+            evaluate_between_filter(record, between_expr, attributes_str)
+        }
+        Expr::InList(in_list_expr) => evaluate_in_list_filter(record, in_list_expr, attributes_str),
+        _ => {
+            debug!("Unsupported filter expression: {:?}", filter);
+            true // If we can't evaluate it, let it pass (defensive)
+        }
+    }
+}
+
+/// Evaluates binary expressions like column = value, start > 1000
+fn evaluate_binary_filter<T: GffRecordTrait>(
+    record: &T,
+    binary_expr: &datafusion::logical_expr::BinaryExpr,
+    attributes_str: &str,
+) -> bool {
+    if let Expr::Column(column) = &*binary_expr.left {
+        if let Expr::Literal(literal, _) = &*binary_expr.right {
+            let field_name = &column.name;
+
+            return match field_name.as_str() {
+                "chrom" => {
+                    let record_value = record.reference_sequence_name();
+                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
+                }
+                "start" => {
+                    let record_value = record.start();
+                    evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op)
+                }
+                "end" => {
+                    let record_value = record.end();
+                    evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op)
+                }
+                "type" => {
+                    let record_value = record.ty();
+                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
+                }
+                "source" => {
+                    let record_value = record.source();
+                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
+                }
+                "score" => {
+                    if let Some(score) = record.score() {
+                        evaluate_numeric_comparison(score as f64, literal, &binary_expr.op)
+                    } else {
+                        false // No score means it doesn't match numeric filters
+                    }
+                }
+                "strand" => {
+                    let record_value = record.strand();
+                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
+                }
+                _ => {
+                    // Check if it's an attribute field
+                    evaluate_attribute_filter(field_name, attributes_str, literal, &binary_expr.op)
+                }
+            };
+        }
+    }
+    true // If we can't evaluate it, let it pass
+}
+
+/// Evaluates BETWEEN expressions like start BETWEEN 1000 AND 2000
+fn evaluate_between_filter<T: GffRecordTrait>(
+    record: &T,
+    between_expr: &datafusion::logical_expr::Between,
+    _attributes_str: &str,
+) -> bool {
+    if let Expr::Column(column) = &*between_expr.expr {
+        if let (Expr::Literal(low_literal, _), Expr::Literal(high_literal, _)) =
+            (&*between_expr.low, &*between_expr.high)
+        {
+            let field_name = &column.name;
+
+            return match field_name.as_str() {
+                "start" => {
+                    let record_value = record.start() as f64;
+                    evaluate_between_comparison(
+                        record_value,
+                        low_literal,
+                        high_literal,
+                        between_expr.negated,
+                    )
+                }
+                "end" => {
+                    let record_value = record.end() as f64;
+                    evaluate_between_comparison(
+                        record_value,
+                        low_literal,
+                        high_literal,
+                        between_expr.negated,
+                    )
+                }
+                "score" => {
+                    if let Some(score) = record.score() {
+                        evaluate_between_comparison(
+                            score as f64,
+                            low_literal,
+                            high_literal,
+                            between_expr.negated,
+                        )
+                    } else {
+                        between_expr.negated // No score: pass if NOT BETWEEN, fail if BETWEEN
+                    }
+                }
+                _ => true, // Unsupported field for BETWEEN
+            };
+        }
+    }
+    true
+}
+
+/// Evaluates IN list expressions like chrom IN ('chr1', 'chr2')
+fn evaluate_in_list_filter<T: GffRecordTrait>(
+    record: &T,
+    in_list_expr: &InList,
+    attributes_str: &str,
+) -> bool {
+    if let Expr::Column(column) = &*in_list_expr.expr {
+        let field_name = &column.name;
+
+        let record_value = match field_name.as_str() {
+            "chrom" => Some(record.reference_sequence_name()),
+            "type" => Some(record.ty()),
+            "source" => Some(record.source()),
+            "strand" => Some(record.strand()),
+            "start" => Some(record.start().to_string()),
+            "end" => Some(record.end().to_string()),
+            "score" => record.score().map(|s| s.to_string()),
+            _ => {
+                // Check if it's an attribute field
+                extract_attribute_value(field_name, attributes_str)
+            }
+        };
+
+        if let Some(value) = record_value {
+            let matches = in_list_expr.list.iter().any(|expr| {
+                if let Expr::Literal(literal, _) = expr {
+                    match literal {
+                        ScalarValue::Utf8(Some(literal_str)) => value == *literal_str,
+                        ScalarValue::UInt32(Some(literal_u32)) => value == literal_u32.to_string(),
+                        ScalarValue::Float32(Some(literal_f32)) => value == literal_f32.to_string(),
+                        _ => false,
+                    }
+                } else {
+                    false
+                }
+            });
+            return if in_list_expr.negated {
+                !matches
+            } else {
+                matches
+            };
+        }
+    }
+    true
+}
+
+/// Helper function to evaluate string comparisons
+fn evaluate_string_comparison(
+    record_value: &str,
+    literal: &ScalarValue,
+    op: &datafusion::logical_expr::Operator,
+) -> bool {
+    if let ScalarValue::Utf8(Some(literal_str)) = literal {
+        match op {
+            datafusion::logical_expr::Operator::Eq => record_value == literal_str,
+            datafusion::logical_expr::Operator::NotEq => record_value != literal_str,
+            _ => true, // Unsupported operator for strings
+        }
+    } else {
+        true
+    }
+}
+
+/// Helper function to evaluate numeric comparisons
+fn evaluate_numeric_comparison(
+    record_value: f64,
+    literal: &ScalarValue,
+    op: &datafusion::logical_expr::Operator,
+) -> bool {
+    let literal_value = match literal {
+        ScalarValue::UInt32(Some(val)) => *val as f64,
+        ScalarValue::Float32(Some(val)) => *val as f64,
+        ScalarValue::Float64(Some(val)) => *val,
+        ScalarValue::Int32(Some(val)) => *val as f64,
+        ScalarValue::Int64(Some(val)) => *val as f64,
+        _ => return true, // Unsupported literal type
+    };
+
+    match op {
+        datafusion::logical_expr::Operator::Eq => {
+            (record_value - literal_value).abs() < f64::EPSILON
+        }
+        datafusion::logical_expr::Operator::NotEq => {
+            (record_value - literal_value).abs() >= f64::EPSILON
+        }
+        datafusion::logical_expr::Operator::Lt => record_value < literal_value,
+        datafusion::logical_expr::Operator::LtEq => record_value <= literal_value,
+        datafusion::logical_expr::Operator::Gt => record_value > literal_value,
+        datafusion::logical_expr::Operator::GtEq => record_value >= literal_value,
+        _ => true, // Unsupported operator
+    }
+}
+
+/// Helper function to evaluate BETWEEN comparisons
+fn evaluate_between_comparison(
+    record_value: f64,
+    low_literal: &ScalarValue,
+    high_literal: &ScalarValue,
+    negated: bool,
+) -> bool {
+    let low_value = match low_literal {
+        ScalarValue::UInt32(Some(val)) => *val as f64,
+        ScalarValue::Float32(Some(val)) => *val as f64,
+        ScalarValue::Float64(Some(val)) => *val,
+        ScalarValue::Int32(Some(val)) => *val as f64,
+        ScalarValue::Int64(Some(val)) => *val as f64,
+        _ => return true,
+    };
+
+    let high_value = match high_literal {
+        ScalarValue::UInt32(Some(val)) => *val as f64,
+        ScalarValue::Float32(Some(val)) => *val as f64,
+        ScalarValue::Float64(Some(val)) => *val,
+        ScalarValue::Int32(Some(val)) => *val as f64,
+        ScalarValue::Int64(Some(val)) => *val as f64,
+        _ => return true,
+    };
+
+    let between = record_value >= low_value && record_value <= high_value;
+    if negated { !between } else { between }
+}
+
+/// Helper function to evaluate attribute-based filters
+fn evaluate_attribute_filter(
+    field_name: &str,
+    attributes_str: &str,
+    literal: &ScalarValue,
+    op: &datafusion::logical_expr::Operator,
+) -> bool {
+    if let Some(attr_value) = extract_attribute_value(field_name, attributes_str) {
+        return evaluate_string_comparison(&attr_value, literal, op);
+    }
+    false // Attribute not found
+}
+
+/// Helper function to extract attribute value from attributes string
+fn extract_attribute_value(field_name: &str, attributes_str: &str) -> Option<String> {
+    if attributes_str.is_empty() || attributes_str == "." {
+        return None;
+    }
+
+    for pair in attributes_str.split(';') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some(eq_pos) = pair.find('=') {
+            let key = &pair[..eq_pos];
+            if key == field_name {
+                let value = &pair[eq_pos + 1..];
+
+                // Handle quoted and URL-encoded values
+                let decoded_value = if value.starts_with('"') && value.ends_with('"') {
+                    value[1..value.len() - 1].to_string()
+                } else if value.contains('%') {
+                    value
+                        .replace("%3B", ";")
+                        .replace("%3D", "=")
+                        .replace("%26", "&")
+                        .replace("%2C", ",")
+                        .replace("%09", "\t")
+                } else {
+                    value.to_string()
+                };
+
+                return Some(decoded_value);
+            }
+        }
+    }
+    None
+}
+
 async fn get_remote_gff_stream(
     file_path: String,
     attr_fields: Option<Vec<String>>,
     schema: SchemaRef,
     batch_size: usize,
     projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
@@ -434,6 +810,27 @@ async fn get_remote_gff_stream(
         let mut records = reader.read_records();
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
+
+            // Apply filters early - skip this record if it doesn't pass
+            // For remote records, we need to create a temporary wrapper that implements GffRecordTrait
+            let temp_record = RemoteGffRecordWrapper {
+                chrom: record.reference_sequence_name().to_string(),
+                start: record.start().get() as u32,
+                end: record.end().get() as u32,
+                ty: record.ty().to_string(),
+                source: record.source().to_string(),
+                score: record.score(),
+                strand: standardize_strand(record.strand()).to_string(),
+                phase: standardize_phase(record.phase()).map(|p| p as u8),
+                attributes: String::new(), // Will be populated below if needed
+            };
+
+            // TODO: Implement attribute extraction for remote GFF records
+            let attributes_str = String::new(); // Placeholder for now
+
+            if !evaluate_filters_against_record(&temp_record, &filters, &attributes_str) {
+                continue; // Skip this record, it doesn't pass the filters
+            }
 
             // Only parse and store fields that are needed
             if needs_chrom {
@@ -562,6 +959,7 @@ async fn get_local_gff(
     batch_size: usize,
     thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
@@ -664,6 +1062,12 @@ async fn get_local_gff(
         for result in sync_iter {
             let record = result?;  // propagate errors if any
 
+            // Apply filters early - skip this record if it doesn't pass
+            let attributes_str = record.attributes_string();
+            if !evaluate_filters_against_record(&record, &filters, &attributes_str) {
+                continue; // Skip this record, it doesn't pass the filters
+            }
+
             // Only parse and store fields that are needed
             if needs_chrom {
                 chroms.push(record.reference_sequence_name());
@@ -705,11 +1109,9 @@ async fn get_local_gff(
             if needs_attributes {
                 if unnest_enable && !attribute_builders.0.is_empty() {
                     // Parse only specific attributes needed (optimized for specific columns)
-                    let attributes_str = record.attributes_string();
                     load_attributes_unnest_from_string(&attributes_str, &mut attribute_builders, projection.clone())?;
                 } else if !unnest_enable {
                     // Parse attributes into nested structure (preserves original order)
-                    let attributes_str = record.attributes_string();
                     let attributes = parse_gff_attributes_to_vec(&attributes_str);
                     load_attributes_from_vec(attributes, &mut builder)?;
                 }
@@ -993,6 +1395,7 @@ async fn get_stream(
     batch_size: usize,
     thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
@@ -1010,6 +1413,7 @@ async fn get_stream(
                 batch_size,
                 thread_num,
                 projection,
+                filters,
                 object_storage_options,
             )
             .await?;
@@ -1022,6 +1426,7 @@ async fn get_stream(
                 schema.clone(),
                 batch_size,
                 projection,
+                filters,
                 object_storage_options,
             )
             .await?;

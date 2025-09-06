@@ -69,13 +69,21 @@ pub fn get_local_vcf_bgzf_reader(
     thread_num: usize,
 ) -> Result<Reader<MultithreadedReader<File>>, Error> {
     debug!(
-        "Reading VCF file from local storage with {} threads",
+        "Reading VCF file from local storage with {} threads using parallel BGZF",
         thread_num
     );
+
+    // Ensure we have at least 1 thread and cap at reasonable maximum
+    let worker_count = std::cmp::min(std::cmp::max(thread_num, 1), 32);
+    debug!(
+        "Using {} worker threads for BGZF decompression",
+        worker_count
+    );
+
     File::open(file_path)
         .map(|f| {
             noodles_bgzf::MultithreadedReader::with_worker_count(
-                NonZero::new(thread_num).unwrap(),
+                NonZero::new(worker_count).unwrap(),
                 f,
             )
         })
@@ -281,10 +289,20 @@ impl VcfLocalReader {
             object_storage_options.clone(),
         )
         .await;
+
+        info!(
+            "Creating VcfLocalReader with compression: {:?}, threads: {}",
+            compression_type, thread_num
+        );
+
         match compression_type {
             CompressionType::BGZF => {
                 let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
                 let header = Arc::new(reader.read_header().unwrap());
+                info!(
+                    "Successfully created parallel BGZF VCF reader with {} threads",
+                    thread_num
+                );
                 VcfLocalReader::BGZF(reader, header)
             }
             CompressionType::GZIP => {

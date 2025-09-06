@@ -149,7 +149,7 @@ fn extract_needed_fields_from_projection(
     (info_fields, format_fields)
 }
 
-fn is_nullable(ty: &InfoType) -> bool {
+pub fn is_nullable(ty: &InfoType) -> bool {
     !matches!(ty, InfoType::Flag)
 }
 
@@ -183,6 +183,24 @@ impl VcfTableProvider {
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
+        // Optimize thread count for parallel BGZF reading
+        let optimal_thread_num = thread_num.or_else(|| {
+            // For BGZF files, use number of CPU cores for optimal parallel decompression
+            if file_path.ends_with(".bgz")
+                || file_path.ends_with(".vcf.bgz")
+                || file_path.contains(".bgz")
+            {
+                Some(num_cpus::get())
+            } else {
+                Some(1)
+            }
+        });
+
+        debug!(
+            "VcfTableProvider: Using {} threads for parallel BGZF reading",
+            optimal_thread_num.unwrap_or(1)
+        );
+
         Ok(Self {
             file_path,
             requested_info_fields: info_fields,
@@ -190,7 +208,7 @@ impl VcfTableProvider {
             full_schema: None,
             all_info_fields: None,
             all_format_fields: None,
-            thread_num,
+            thread_num: optimal_thread_num,
             object_storage_options,
         })
     }

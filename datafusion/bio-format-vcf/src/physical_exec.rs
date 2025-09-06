@@ -89,7 +89,7 @@ fn build_record_batch(
         .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
 }
 
-fn build_record_batch_optimized(
+pub fn build_record_batch_optimized(
     projected_schema: SchemaRef,
     chroms: &[String],
     poss: &[u32],
