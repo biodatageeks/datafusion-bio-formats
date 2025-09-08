@@ -132,17 +132,34 @@ pub async fn get_compression_type(
         buffer.truncate(n);
         buffer
     } else {
-        // For remote files, use the stream with byte limit for compression detection
-        let mut stream = get_remote_stream(file_path, object_storage_options, Some(1024)).await?;
-
-        let mut buffer = Vec::with_capacity(18); // Read a bit more to be safe for BGZF check
-        while let Some(Ok(chunk)) = stream.next().await {
-            buffer.extend_from_slice(&chunk);
-            if buffer.len() >= 18 {
-                break;
+        // For remote files, read only the minimum bytes needed for compression detection (18 bytes)
+        match get_remote_stream(file_path.clone(), object_storage_options.clone(), Some(18)).await {
+            Ok(mut stream) => {
+                let mut buffer = Vec::with_capacity(18);
+                while let Some(chunk_result) = stream.next().await {
+                    match chunk_result {
+                        Ok(chunk) => {
+                            buffer.extend_from_slice(&chunk);
+                            if buffer.len() >= 18 {
+                                break;
+                            }
+                        }
+                        Err(_) => {
+                            // If we get an error but have some data, use what we have
+                            break;
+                        }
+                    }
+                }
+                buffer
+            }
+            Err(e) => {
+                log::error!(
+                    "Failed to get remote stream for compression detection: {}",
+                    e
+                );
+                return Ok(CompressionType::NONE);
             }
         }
-        buffer
     };
 
     if buffer.len() < 4 {

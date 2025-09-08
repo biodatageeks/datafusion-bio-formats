@@ -55,13 +55,12 @@ pub async fn get_remote_vcf_gz_reader(
 pub async fn get_remote_vcf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
-) -> vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>> {
-    let inner = StreamReader::new(
-        get_remote_stream(file_path.clone(), object_storage_options, None)
-            .await
-            .unwrap(),
-    );
-    vcf::r#async::io::Reader::new(inner)
+) -> Result<vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>, std::io::Error> {
+    let stream = get_remote_stream(file_path.clone(), object_storage_options, None)
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let inner = StreamReader::new(stream);
+    Ok(vcf::r#async::io::Reader::new(inner))
 }
 
 pub fn get_local_vcf_bgzf_reader(
@@ -173,7 +172,7 @@ pub async fn get_remote_vcf_header(
             reader.read_header().await?
         }
         CompressionType::NONE => {
-            let mut reader = get_remote_vcf_reader(file_path, object_storage_options).await;
+            let mut reader = get_remote_vcf_reader(file_path, object_storage_options).await?;
             reader.read_header().await?
         }
         _ => panic!("Compression type not supported."),
@@ -235,7 +234,9 @@ impl VcfRemoteReader {
                 VcfRemoteReader::GZIP(reader, header)
             }
             CompressionType::NONE => {
-                let mut reader = get_remote_vcf_reader(file_path, object_storage_options).await;
+                let mut reader = get_remote_vcf_reader(file_path, object_storage_options)
+                    .await
+                    .unwrap();
                 let header = Arc::new(reader.read_header().await.unwrap());
                 VcfRemoteReader::PLAIN(reader, header)
             }
