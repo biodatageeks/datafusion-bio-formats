@@ -57,7 +57,7 @@ pub async fn get_remote_vcf_reader(
     object_storage_options: ObjectStorageOptions,
 ) -> vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>> {
     let inner = StreamReader::new(
-        get_remote_stream(file_path.clone(), object_storage_options)
+        get_remote_stream(file_path.clone(), object_storage_options, None)
             .await
             .unwrap(),
     );
@@ -128,7 +128,8 @@ pub async fn get_local_vcf_header(
         object_storage_options.compression_type.clone(),
         object_storage_options.clone(),
     )
-    .await;
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let header = match compression_type {
         CompressionType::BGZF => {
             let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num)?;
@@ -160,7 +161,8 @@ pub async fn get_remote_vcf_header(
         object_storage_options.clone().compression_type,
         object_storage_options.clone(),
     )
-    .await;
+    .await
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let header = match compression_type {
         CompressionType::BGZF => {
             let mut reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
@@ -216,7 +218,8 @@ impl VcfRemoteReader {
             object_storage_options.clone().compression_type,
             object_storage_options.clone(),
         )
-        .await;
+        .await
+        .unwrap_or(CompressionType::NONE);
         match compression_type {
             CompressionType::BGZF => {
                 let mut reader =
@@ -288,7 +291,8 @@ impl VcfLocalReader {
             object_storage_options.clone().compression_type,
             object_storage_options.clone(),
         )
-        .await;
+        .await
+        .unwrap_or(CompressionType::NONE);
 
         info!(
             "Creating VcfLocalReader with compression: {:?}, threads: {}",

@@ -246,7 +246,7 @@ pub async fn get_remote_gff_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<gff::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>, Error> {
-    let stream = get_remote_stream(file_path.clone(), object_storage_options).await?;
+    let stream = get_remote_stream(file_path.clone(), object_storage_options, None).await?;
     let reader = gff::r#async::io::Reader::new(StreamReader::new(stream));
     Ok(reader)
 }
@@ -310,7 +310,9 @@ impl GffRemoteReader {
         parser_type: GffParserType,
     ) -> Result<Self, Error> {
         let compression_type =
-            get_compression_type(file_path.clone(), None, object_storage_options.clone()).await;
+            get_compression_type(file_path.clone(), None, object_storage_options.clone())
+                .await
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         match (compression_type.clone(), parser_type) {
             // GZIP variants
@@ -514,7 +516,8 @@ impl GffLocalReader {
             object_storage_options.compression_type.clone(),
             object_storage_options.clone(),
         )
-        .await;
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         match (compression_type.clone(), parser_type) {
             // GZIP variants - using sync readers

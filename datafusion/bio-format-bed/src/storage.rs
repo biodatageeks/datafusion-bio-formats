@@ -52,7 +52,7 @@ pub async fn get_remote_bed_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<async_reader::Reader<StreamReader<FuturesBytesStream, Bytes>, N>, Error> {
-    let stream = get_remote_stream(file_path.clone(), object_storage_options).await?;
+    let stream = get_remote_stream(file_path.clone(), object_storage_options, None).await?;
     let reader = async_reader::Reader::new(StreamReader::new(stream));
     Ok(reader)
 }
@@ -126,7 +126,8 @@ macro_rules! impl_bed_remote_reader {
                         object_storage_options.clone().compression_type,
                         object_storage_options.clone(),
                     )
-                    .await;
+                    .await
+                    .unwrap_or(CompressionType::NONE);
                     match compression_type {
                         CompressionType::BGZF => {
                             let reader = get_remote_bed_bgzf_reader::<$n>(file_path, object_storage_options).await.unwrap();
@@ -180,7 +181,8 @@ macro_rules! impl_bed_local_reader {
                         None,
                         ObjectStorageOptions::default(),
                     )
-                    .await;
+                    .await
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
                     match compression_type {
                         CompressionType::BGZF => {
                             let reader = get_local_bed_bgzf_reader::<$n>(file_path, thread_num)?;

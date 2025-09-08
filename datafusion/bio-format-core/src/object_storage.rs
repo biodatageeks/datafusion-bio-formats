@@ -113,13 +113,13 @@ pub async fn get_compression_type(
     file_path: String,
     compression_type: Option<CompressionType>,
     object_storage_options: ObjectStorageOptions,
-) -> CompressionType {
+) -> Result<CompressionType, opendal::Error> {
     debug!(
         "get_compression_type called with file_path: {}, compression_type: {:?}",
         file_path, compression_type
     );
     if compression_type.is_some() && compression_type != Some(CompressionType::AUTO) {
-        return compression_type.unwrap();
+        return Ok(compression_type.unwrap());
     }
 
     let storage_type = get_storage_type(file_path.clone());
@@ -132,10 +132,8 @@ pub async fn get_compression_type(
         buffer.truncate(n);
         buffer
     } else {
-        // For remote files, use the stream
-        let mut stream = get_remote_stream(file_path, object_storage_options)
-            .await
-            .unwrap();
+        // For remote files, use the stream with byte limit for compression detection
+        let mut stream = get_remote_stream(file_path, object_storage_options, Some(1024)).await?;
 
         let mut buffer = Vec::with_capacity(18); // Read a bit more to be safe for BGZF check
         while let Some(Ok(chunk)) = stream.next().await {
@@ -148,7 +146,7 @@ pub async fn get_compression_type(
     };
 
     if buffer.len() < 4 {
-        return CompressionType::NONE;
+        return Ok(CompressionType::NONE);
     }
 
     // GZIP magic number: 0x1f 0x8b
@@ -156,7 +154,7 @@ pub async fn get_compression_type(
         // FLG byte is at index 3
         if buffer.len() >= 10 && (buffer[3] & 0x04) != 0 {
             if buffer.len() < 12 {
-                return CompressionType::GZIP; // Not enough data for BGZF check
+                return Ok(CompressionType::GZIP); // Not enough data for BGZF check
             }
             // XLEN is at index 10, little-endian
             let xlen = u16::from_le_bytes([buffer[10], buffer[11]]);
@@ -168,24 +166,25 @@ pub async fn get_compression_type(
                     let si2 = buffer[i + 1];
                     let slen = u16::from_le_bytes([buffer[i + 2], buffer[i + 3]]);
                     if si1 == b'B' && si2 == b'C' && slen == 2 {
-                        return CompressionType::BGZF;
+                        return Ok(CompressionType::BGZF);
                     }
                     i += (slen + 4) as usize;
                 }
             }
         }
-        return CompressionType::GZIP;
+        return Ok(CompressionType::GZIP);
     }
 
-    CompressionType::NONE
+    Ok(CompressionType::NONE)
 }
 
 pub async fn get_remote_stream_bgzf_async(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
-    let remote_stream =
-        StreamReader::new(get_remote_stream(file_path.clone(), object_storage_options).await?);
+    let remote_stream = StreamReader::new(
+        get_remote_stream(file_path.clone(), object_storage_options, None).await?,
+    );
     Ok(bgzf::r#async::Reader::new(remote_stream))
 }
 
@@ -196,8 +195,9 @@ pub async fn get_remote_stream_gz_async(
     async_compression::tokio::bufread::GzipDecoder<StreamReader<FuturesBytesStream, bytes::Bytes>>,
     opendal::Error,
 > {
-    let remote_stream =
-        StreamReader::new(get_remote_stream(file_path.clone(), object_storage_options).await?);
+    let remote_stream = StreamReader::new(
+        get_remote_stream(file_path.clone(), object_storage_options, None).await?,
+    );
     Ok(GzipDecoder::new(remote_stream))
 }
 
@@ -332,6 +332,7 @@ fn is_azure_blob_url(url_str: &str) -> bool {
 pub async fn get_remote_stream(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
+    byte_limit: Option<usize>,
 ) -> Result<FuturesBytesStream, opendal::Error> {
     let storage_type = get_storage_type(file_path.clone());
     let bucket_name = get_bucket_name(file_path.clone());
@@ -393,12 +394,24 @@ pub async fn get_remote_stream(
             // let adjusted_chunk_size = chunk_size.min(8 * 1024 * 1024); // Max 8MB chunks
             // let adjusted_concurrency = concurrent_fetches.max(4); // Min 4 concurrent fetches
 
-            operator
-                .reader_with(relative_file_path.as_str())
-                .concurrent(1)
-                .await?
-                .into_bytes_stream(..)
-                .await
+            match byte_limit {
+                Some(limit) => {
+                    operator
+                        .reader_with(relative_file_path.as_str())
+                        .concurrent(1)
+                        .await?
+                        .into_bytes_stream(0u64..limit as u64)
+                        .await
+                }
+                None => {
+                    operator
+                        .reader_with(relative_file_path.as_str())
+                        .concurrent(1)
+                        .await?
+                        .into_bytes_stream(..)
+                        .await
+                }
+            }
         }
         //FIXME: Currently, Azure Blob Storage does not support anonymous access
         StorageType::AZBLOB => {
@@ -437,13 +450,26 @@ pub async fn get_remote_stream(
                 .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
                 .layer(LoggingLayer::default())
                 .finish();
-            operator
-                .reader_with(blob_info.relative_path.as_str())
-                .chunk(chunk_size * 1024 * 1024)
-                .concurrent(1)
-                .await?
-                .into_bytes_stream(..)
-                .await
+            match byte_limit {
+                Some(limit) => {
+                    operator
+                        .reader_with(blob_info.relative_path.as_str())
+                        .chunk(chunk_size * 1024 * 1024)
+                        .concurrent(1)
+                        .await?
+                        .into_bytes_stream(0u64..limit as u64)
+                        .await
+                }
+                None => {
+                    operator
+                        .reader_with(blob_info.relative_path.as_str())
+                        .chunk(chunk_size * 1024 * 1024)
+                        .concurrent(1)
+                        .await?
+                        .into_bytes_stream(..)
+                        .await
+                }
+            }
         }
         StorageType::HTTP => unimplemented!("HTTP storage type is not implemented yet"),
 
@@ -483,13 +509,26 @@ pub async fn get_remote_stream(
                 .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
                 .layer(LoggingLayer::default())
                 .finish();
-            operator
-                .reader_with(relative_file_path.as_str())
-                .chunk(chunk_size * 1024 * 1024)
-                .concurrent(concurrent_fetches)
-                .await?
-                .into_bytes_stream(..)
-                .await
+            match byte_limit {
+                Some(limit) => {
+                    operator
+                        .reader_with(relative_file_path.as_str())
+                        .chunk(chunk_size * 1024 * 1024)
+                        .concurrent(concurrent_fetches)
+                        .await?
+                        .into_bytes_stream(0u64..limit as u64)
+                        .await
+                }
+                None => {
+                    operator
+                        .reader_with(relative_file_path.as_str())
+                        .chunk(chunk_size * 1024 * 1024)
+                        .concurrent(concurrent_fetches)
+                        .await?
+                        .into_bytes_stream(..)
+                        .await
+                }
+            }
         }
         _ => panic!("Invalid object storage type"),
     }

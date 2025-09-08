@@ -10,7 +10,7 @@ async fn test_get_compression_type_gzip() {
     let path = format!("file://{}", file.path().to_str().unwrap());
 
     let compression_type = get_compression_type(path, None, ObjectStorageOptions::default()).await;
-    assert_eq!(compression_type, CompressionType::GZIP);
+    assert_eq!(compression_type.unwrap(), CompressionType::GZIP);
 }
 
 #[tokio::test]
@@ -24,7 +24,7 @@ async fn test_get_compression_type_bgzf() {
     let path = format!("file://{}", file.path().to_str().unwrap());
 
     let compression_type = get_compression_type(path, None, ObjectStorageOptions::default()).await;
-    assert_eq!(compression_type, CompressionType::BGZF);
+    assert_eq!(compression_type.unwrap(), CompressionType::BGZF);
 }
 
 #[tokio::test]
@@ -34,7 +34,7 @@ async fn test_get_compression_type_none() {
     let path = format!("file://{}", file.path().to_str().unwrap());
 
     let compression_type = get_compression_type(path, None, ObjectStorageOptions::default()).await;
-    assert_eq!(compression_type, CompressionType::NONE);
+    assert_eq!(compression_type.unwrap(), CompressionType::NONE);
 }
 
 #[tokio::test]
@@ -43,5 +43,5 @@ async fn test_get_compression_type_empty() {
     let path = format!("file://{}", file.path().to_str().unwrap());
 
     let compression_type = get_compression_type(path, None, ObjectStorageOptions::default()).await;
-    assert_eq!(compression_type, CompressionType::NONE);
+    assert_eq!(compression_type.unwrap(), CompressionType::NONE);
 }
