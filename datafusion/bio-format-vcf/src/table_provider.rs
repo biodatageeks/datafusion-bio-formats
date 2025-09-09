@@ -50,7 +50,7 @@ async fn determine_schema_from_header(
                 let dtype = info_to_arrow_type(&header_infos, &tag);
                 let info = header_infos.get(tag.as_str()).unwrap();
                 let nullable = is_nullable(&info.ty());
-                fields.push(Field::new(tag, dtype, nullable)); // Convert to lowercase for schema (backward compatibility)
+                fields.push(Field::new(tag.to_lowercase(), dtype, nullable));
             }
         }
         _ => {}
@@ -60,7 +60,11 @@ async fn determine_schema_from_header(
         Some(formats) => {
             for tag in formats {
                 let dtype = format_to_arrow_type(&header_formats, &tag);
-                fields.push(Field::new(format!("format_{}", tag), dtype, true));
+                fields.push(Field::new(
+                    format!("format_{}", tag.to_lowercase()),
+                    dtype,
+                    true,
+                ));
             }
         }
         _ => {}
@@ -69,84 +73,6 @@ async fn determine_schema_from_header(
     let schema = Schema::new(fields);
     // println!("Schema: {:?}", schema);
     Ok(Arc::new(schema))
-}
-
-async fn determine_full_schema_from_header(
-    file_path: &str,
-    object_storage_options: &Option<ObjectStorageOptions>,
-) -> datafusion::common::Result<(SchemaRef, Vec<String>, Vec<String>)> {
-    let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
-    let header_infos = header.infos();
-    let header_formats = header.formats();
-
-    let mut fields = vec![
-        Field::new("chrom", DataType::Utf8, false),
-        Field::new("start", DataType::UInt32, false),
-        Field::new("end", DataType::UInt32, false),
-        Field::new("id", DataType::Utf8, true),
-        Field::new("ref", DataType::Utf8, false),
-        Field::new("alt", DataType::Utf8, false),
-        Field::new("qual", DataType::Float64, true),
-        Field::new("filter", DataType::Utf8, true),
-    ];
-
-    let mut all_info_fields = Vec::new();
-    for (tag, info) in header_infos.iter() {
-        let dtype = info_to_arrow_type(&header_infos, tag);
-        let nullable = is_nullable(&info.ty());
-        fields.push(Field::new(tag, dtype, nullable)); // Convert to lowercase for schema (backward compatibility)
-        all_info_fields.push(tag.to_string()); // Keep original case for VCF processing
-    }
-
-    let mut all_format_fields = Vec::new();
-    for (tag, _format) in header_formats.iter() {
-        let dtype = format_to_arrow_type(&header_formats, tag);
-        fields.push(Field::new(format!("format_{}", tag), dtype, true));
-        all_format_fields.push(tag.to_string());
-    }
-
-    let schema = Schema::new(fields);
-    Ok((Arc::new(schema), all_info_fields, all_format_fields))
-}
-
-fn extract_needed_fields_from_projection(
-    projection: Option<&Vec<usize>>,
-    full_schema: &SchemaRef,
-) -> (Option<Vec<String>>, Option<Vec<String>>) {
-    let projection = match projection {
-        Some(proj) => proj,
-        None => return (None, None), // No projection means all fields needed
-    };
-
-    let mut needed_info_fields = Vec::new();
-    let mut needed_format_fields = Vec::new();
-
-    for &col_idx in projection {
-        if col_idx >= 8 {
-            // Info and format fields start at index 8
-            let field_name = full_schema.field(col_idx).name();
-            if field_name.starts_with("format_") {
-                needed_format_fields.push(field_name.strip_prefix("format_").unwrap().to_string());
-            } else {
-                // Field names are lowercase in schema, but VCF processing needs uppercase
-                needed_info_fields.push(field_name.to_string());
-            }
-        }
-    }
-
-    let info_fields = if needed_info_fields.is_empty() {
-        None
-    } else {
-        Some(needed_info_fields)
-    };
-
-    let format_fields = if needed_format_fields.is_empty() {
-        None
-    } else {
-        Some(needed_format_fields)
-    };
-
-    (info_fields, format_fields)
 }
 
 pub fn is_nullable(ty: &InfoType) -> bool {
@@ -166,11 +92,9 @@ fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
 #[derive(Clone, Debug)]
 pub struct VcfTableProvider {
     file_path: String,
-    requested_info_fields: Option<Vec<String>>,
-    requested_format_fields: Option<Vec<String>>,
-    full_schema: Option<SchemaRef>,
-    all_info_fields: Option<Vec<String>>,
-    all_format_fields: Option<Vec<String>>,
+    info_fields: Option<Vec<String>>,
+    format_fields: Option<Vec<String>>,
+    schema: SchemaRef,
     thread_num: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
 }
@@ -183,44 +107,20 @@ impl VcfTableProvider {
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
-        debug!(
-            "VcfTableProvider: Using {} threads for parallel BGZF reading",
-            thread_num.unwrap_or(1)
-        );
-
+        let schema = block_on(determine_schema_from_header(
+            &file_path,
+            &info_fields,
+            &format_fields,
+            &object_storage_options,
+        ))?;
         Ok(Self {
             file_path,
-            requested_info_fields: info_fields,
-            requested_format_fields: format_fields,
-            full_schema: None,
-            all_info_fields: None,
-            all_format_fields: None,
+            info_fields,
+            format_fields,
+            schema,
             thread_num,
             object_storage_options,
         })
-    }
-
-    async fn ensure_full_schema(&mut self) -> datafusion::common::Result<()> {
-        if self.full_schema.is_none() {
-            // Use the requested fields to create the schema, but discover all available fields for optimization
-            let (_schema, all_info_fields, all_format_fields) =
-                determine_full_schema_from_header(&self.file_path, &self.object_storage_options)
-                    .await?;
-
-            // Create schema with only the requested fields (to maintain backward compatibility)
-            let requested_schema = determine_schema_from_header(
-                &self.file_path,
-                &self.requested_info_fields,
-                &self.requested_format_fields,
-                &self.object_storage_options,
-            )
-            .await?;
-
-            self.full_schema = Some(requested_schema);
-            self.all_info_fields = Some(all_info_fields);
-            self.all_format_fields = Some(all_format_fields);
-        }
-        Ok(())
     }
 }
 
@@ -232,34 +132,7 @@ impl TableProvider for VcfTableProvider {
     }
 
     fn schema(&self) -> SchemaRef {
-        // If we have the full schema, use it
-        if let Some(ref schema) = self.full_schema {
-            return schema.clone();
-        }
-
-        // If no full schema yet, we need to determine it lazily
-        // This is a fallback - ideally scan() should be called first
-        let mut provider_clone = self.clone();
-        let schema = block_on(async {
-            provider_clone.ensure_full_schema().await?;
-            Ok::<SchemaRef, datafusion::common::DataFusionError>(
-                provider_clone.full_schema.unwrap(),
-            )
-        })
-        .unwrap_or_else(|_| {
-            // If we can't get the schema, return a minimal core schema
-            Arc::new(Schema::new(vec![
-                Field::new("chrom", DataType::Utf8, false),
-                Field::new("start", DataType::UInt32, false),
-                Field::new("end", DataType::UInt32, false),
-                Field::new("id", DataType::Utf8, true),
-                Field::new("ref", DataType::Utf8, false),
-                Field::new("alt", DataType::Utf8, false),
-                Field::new("qual", DataType::Float64, true),
-                Field::new("filter", DataType::Utf8, true),
-            ]))
-        });
-        schema
+        self.schema.clone()
     }
 
     fn table_type(&self) -> TableType {
@@ -274,25 +147,12 @@ impl TableProvider for VcfTableProvider {
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        debug!("VcfTableProvider::scan with projection: {:?}", projection);
-
-        // Make a mutable clone to ensure full schema is available
-        let mut provider_clone = self.clone();
-        provider_clone.ensure_full_schema().await?;
-        let full_schema = provider_clone.full_schema.as_ref().unwrap();
-
-        // Extract only the info and format fields that are actually needed based on projection
-        let (optimized_info_fields, optimized_format_fields) =
-            extract_needed_fields_from_projection(projection, full_schema);
-
-        debug!("Optimized info fields: {:?}", optimized_info_fields);
-        debug!("Optimized format fields: {:?}", optimized_format_fields);
+        debug!("VcfTableProvider::scan");
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    // For empty projections (COUNT(*)), return an empty schema
-                    Arc::new(Schema::empty())
+                    Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
@@ -303,19 +163,19 @@ impl TableProvider for VcfTableProvider {
             }
         }
 
-        let projected_schema = project_schema(full_schema, projection);
+        let schema = project_schema(&self.schema, projection);
 
         Ok(Arc::new(VcfExec {
             cache: PlanProperties::new(
-                EquivalenceProperties::new(projected_schema.clone()),
+                EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
             ),
             file_path: self.file_path.clone(),
-            schema: projected_schema.clone(),
-            info_fields: optimized_info_fields, // Only needed fields!
-            format_fields: optimized_format_fields, // Only needed fields!
+            schema: schema.clone(),
+            info_fields: self.info_fields.clone(),
+            format_fields: self.format_fields.clone(),
             projection: projection.cloned(),
             limit,
             thread_num: self.thread_num,

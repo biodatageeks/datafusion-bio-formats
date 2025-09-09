@@ -68,21 +68,13 @@ pub fn get_local_vcf_bgzf_reader(
     thread_num: usize,
 ) -> Result<Reader<MultithreadedReader<File>>, Error> {
     debug!(
-        "Reading VCF file from local storage with {} threads using parallel BGZF",
+        "Reading VCF file from local storage with {} threads",
         thread_num
     );
-
-    // Ensure we have at least 1 thread and cap at reasonable maximum
-    let worker_count = std::cmp::min(std::cmp::max(thread_num, 1), 32);
-    debug!(
-        "Using {} worker threads for BGZF decompression",
-        worker_count
-    );
-
     File::open(file_path)
         .map(|f| {
             noodles_bgzf::MultithreadedReader::with_worker_count(
-                NonZero::new(worker_count).unwrap(),
+                NonZero::new(thread_num).unwrap(),
                 f,
             )
         })
@@ -195,18 +187,9 @@ pub async fn get_header(
 }
 
 pub enum VcfRemoteReader {
-    BGZF(
-        vcf::r#async::io::Reader<AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>,
-        Arc<Header>,
-    ),
-    GZIP(
-        vcf::r#async::io::Reader<BufReader<GzipDecoder<StreamReader<FuturesBytesStream, Bytes>>>>,
-        Arc<Header>,
-    ),
-    PLAIN(
-        vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>,
-        Arc<Header>,
-    ),
+    BGZF(vcf::r#async::io::Reader<AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>),
+    GZIP(vcf::r#async::io::Reader<BufReader<GzipDecoder<StreamReader<FuturesBytesStream, Bytes>>>>),
+    PLAIN(vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 }
 
 impl VcfRemoteReader {
@@ -221,24 +204,20 @@ impl VcfRemoteReader {
         .unwrap_or(CompressionType::NONE);
         match compression_type {
             CompressionType::BGZF => {
-                let mut reader =
-                    get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
-                let header = Arc::new(reader.read_header().await.unwrap());
-                VcfRemoteReader::BGZF(reader, header)
+                let reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
+                VcfRemoteReader::BGZF(reader)
             }
             CompressionType::GZIP => {
-                let mut reader = get_remote_vcf_gz_reader(file_path, object_storage_options)
+                let reader = get_remote_vcf_gz_reader(file_path, object_storage_options)
                     .await
                     .unwrap();
-                let header = Arc::new(reader.read_header().await.unwrap());
-                VcfRemoteReader::GZIP(reader, header)
+                VcfRemoteReader::GZIP(reader)
             }
             CompressionType::NONE => {
-                let mut reader = get_remote_vcf_reader(file_path, object_storage_options)
+                let reader = get_remote_vcf_reader(file_path, object_storage_options)
                     .await
                     .unwrap();
-                let header = Arc::new(reader.read_header().await.unwrap());
-                VcfRemoteReader::PLAIN(reader, header)
+                VcfRemoteReader::PLAIN(reader)
             }
             _ => panic!("Compression type not supported."),
         }
@@ -246,39 +225,42 @@ impl VcfRemoteReader {
 
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
-            VcfRemoteReader::BGZF(_, header) => Ok((**header).clone()),
-            VcfRemoteReader::GZIP(_, header) => Ok((**header).clone()),
-            VcfRemoteReader::PLAIN(_, header) => Ok((**header).clone()),
+            VcfRemoteReader::BGZF(reader) => reader.read_header().await,
+            VcfRemoteReader::GZIP(reader) => reader.read_header().await,
+            VcfRemoteReader::PLAIN(reader) => reader.read_header().await,
         }
     }
 
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
-            VcfRemoteReader::BGZF(_, header) => Ok(get_info_fields(header).await),
-            VcfRemoteReader::GZIP(_, header) => Ok(get_info_fields(header).await),
-            VcfRemoteReader::PLAIN(_, header) => Ok(get_info_fields(header).await),
+            VcfRemoteReader::BGZF(reader) => {
+                let header = reader.read_header().await?;
+                Ok(get_info_fields(&header).await)
+            }
+            VcfRemoteReader::GZIP(reader) => {
+                let header = reader.read_header().await?;
+                Ok(get_info_fields(&header).await)
+            }
+            VcfRemoteReader::PLAIN(reader) => {
+                let header = reader.read_header().await?;
+                Ok(get_info_fields(&header).await)
+            }
         }
     }
 
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
-            VcfRemoteReader::BGZF(reader, _) => Box::pin(reader.records()),
-            VcfRemoteReader::GZIP(reader, _) => Box::pin(reader.records()),
-            VcfRemoteReader::PLAIN(reader, _) => Box::pin(reader.records()),
+            VcfRemoteReader::BGZF(reader) => reader.records().boxed(),
+            VcfRemoteReader::GZIP(reader) => reader.records().boxed(),
+            VcfRemoteReader::PLAIN(reader) => reader.records().boxed(),
         }
     }
 }
 
 pub enum VcfLocalReader {
-    BGZF(Reader<MultithreadedReader<File>>, Arc<Header>),
-    GZIP(
-        vcf::r#async::io::Reader<BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>>,
-        Arc<Header>,
-    ),
-    PLAIN(
-        vcf::r#async::io::Reader<BufReader<tokio::fs::File>>,
-        Arc<Header>,
-    ),
+    BGZF(Reader<MultithreadedReader<File>>),
+    GZIP(vcf::r#async::io::Reader<BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>>),
+    PLAIN(vcf::r#async::io::Reader<BufReader<tokio::fs::File>>),
 }
 
 impl VcfLocalReader {
@@ -294,31 +276,18 @@ impl VcfLocalReader {
         )
         .await
         .unwrap_or(CompressionType::NONE);
-
-        info!(
-            "Creating VcfLocalReader with compression: {:?}, threads: {}",
-            compression_type, thread_num
-        );
-
         match compression_type {
             CompressionType::BGZF => {
-                let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
-                let header = Arc::new(reader.read_header().unwrap());
-                info!(
-                    "Successfully created parallel BGZF VCF reader with {} threads",
-                    thread_num
-                );
-                VcfLocalReader::BGZF(reader, header)
+                let reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
+                VcfLocalReader::BGZF(reader)
             }
             CompressionType::GZIP => {
-                let mut reader = get_local_vcf_gz_reader(file_path).await.unwrap();
-                let header = Arc::new(reader.read_header().await.unwrap());
-                VcfLocalReader::GZIP(reader, header)
+                let reader = get_local_vcf_gz_reader(file_path).await.unwrap();
+                VcfLocalReader::GZIP(reader)
             }
             CompressionType::NONE => {
-                let mut reader = get_local_vcf_reader(file_path).await.unwrap();
-                let header = Arc::new(reader.read_header().await.unwrap());
-                VcfLocalReader::PLAIN(reader, header)
+                let reader = get_local_vcf_reader(file_path).await.unwrap();
+                VcfLocalReader::PLAIN(reader)
             }
             _ => panic!("Compression type not supported."),
         }
@@ -326,28 +295,34 @@ impl VcfLocalReader {
 
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
-            VcfLocalReader::BGZF(_, header) => Ok((**header).clone()),
-            VcfLocalReader::GZIP(_, header) => Ok((**header).clone()),
-            VcfLocalReader::PLAIN(_, header) => Ok((**header).clone()),
+            VcfLocalReader::BGZF(reader) => reader.read_header(),
+            VcfLocalReader::GZIP(reader) => reader.read_header().await,
+            VcfLocalReader::PLAIN(reader) => reader.read_header().await,
         }
     }
 
     pub fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
-            VcfLocalReader::BGZF(reader, _) => {
-                let records = reader.records().map(|r| r.map_err(Error::from));
-                Box::pin(stream::iter(records))
-            }
-            VcfLocalReader::GZIP(reader, _) => Box::pin(reader.records()),
-            VcfLocalReader::PLAIN(reader, _) => Box::pin(reader.records()),
+            VcfLocalReader::BGZF(reader) => stream::iter(reader.records()).boxed(),
+            VcfLocalReader::GZIP(reader) => reader.records().boxed(),
+            VcfLocalReader::PLAIN(reader) => reader.records().boxed(),
         }
     }
 
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
-            VcfLocalReader::BGZF(_, header) => Ok(get_info_fields(header).await),
-            VcfLocalReader::GZIP(_, header) => Ok(get_info_fields(header).await),
-            VcfLocalReader::PLAIN(_, header) => Ok(get_info_fields(header).await),
+            VcfLocalReader::BGZF(reader) => {
+                let header = reader.read_header()?;
+                Ok(get_info_fields(&header).await)
+            }
+            VcfLocalReader::GZIP(reader) => {
+                let header = reader.read_header().await?;
+                Ok(get_info_fields(&header).await)
+            }
+            VcfLocalReader::PLAIN(reader) => {
+                let header = reader.read_header().await?;
+                Ok(get_info_fields(&header).await)
+            }
         }
     }
 }

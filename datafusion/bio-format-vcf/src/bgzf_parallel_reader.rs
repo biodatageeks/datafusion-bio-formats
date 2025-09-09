@@ -20,6 +20,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_bio_format_core::table_utils::{OptionalField, builders_to_arrays};
 use futures::channel::mpsc;
+use log::debug;
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_vcf as vcf;
 use noodles_vcf::header::Formats;
@@ -27,7 +28,6 @@ use noodles_vcf::variant::Record;
 use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArray};
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids};
 use std::path::PathBuf;
-use tracing::debug;
 
 #[cfg(test)]
 use tempfile::tempdir;
@@ -119,7 +119,7 @@ fn get_bgzf_partition_bounds(index: &gzi::Index, thread_num: usize) -> Vec<(u64,
             break;
         }
 
-        let (_, start_uncomp) = block_offsets[current_block_idx];
+        let (start_comp, _) = block_offsets[current_block_idx];
 
         let remainder = num_blocks % num_partitions;
         let blocks_in_partition = num_blocks / num_partitions + if i < remainder { 1 } else { 0 };
@@ -131,7 +131,7 @@ fn get_bgzf_partition_bounds(index: &gzi::Index, thread_num: usize) -> Vec<(u64,
             block_offsets[next_partition_start_block_idx].0
         };
 
-        ranges.push((start_uncomp, end_comp));
+        ranges.push((start_comp, end_comp));
         current_block_idx = next_partition_start_block_idx;
     }
     ranges
@@ -195,7 +195,6 @@ struct BgzfVcfExec {
     index: gzi::Index,
     limit: Option<usize>,
     all_info_fields: Vec<String>,
-    all_format_fields: Vec<String>,
     properties: PlanProperties,
 }
 
@@ -224,7 +223,6 @@ impl BgzfVcfExec {
             index,
             limit,
             all_info_fields,
-            all_format_fields,
             properties,
         }
     }
@@ -666,7 +664,7 @@ impl ExecutionPlan for BgzfVcfExec {
                     }
 
                     // Build record batch using the existing logic
-                    let batch = crate::physical_exec::build_record_batch_optimized(
+                    let batch = crate::physical_exec::build_record_batch(
                         schema.clone(),
                         &chroms,
                         &poss,
@@ -677,17 +675,7 @@ impl ExecutionPlan for BgzfVcfExec {
                         &quals,
                         &filters,
                         Some(&builders_to_arrays(&mut info_builders.2)),
-                        Some(&info_builders.0),
                         projection.clone(),
-                        needs_chrom,
-                        needs_start,
-                        needs_end,
-                        needs_id,
-                        needs_ref,
-                        needs_alt,
-                        needs_qual,
-                        needs_filter,
-                        count,
                     )
                     .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
 
