@@ -127,6 +127,10 @@ impl OptionalField {
     pub fn append_int(&mut self, value: i32) -> Result<(), ArrowError> {
         match self {
             OptionalField::Int32Builder(builder) => Ok(builder.append_value(value)),
+            OptionalField::ArrayInt32Builder(builder) => {
+                builder.values().append_value(value);
+                Ok(builder.append(true))
+            }
             _ => Err(ArrowError::SchemaError("Invalid builder".into())),
         }
     }
@@ -134,6 +138,10 @@ impl OptionalField {
     pub fn append_boolean(&mut self, value: bool) -> Result<(), ArrowError> {
         match self {
             OptionalField::BooleanBuilder(builder) => Ok(builder.append_value(value)),
+            OptionalField::ArrayBooleanBuilder(builder) => {
+                builder.values().append_value(value);
+                Ok(builder.append(true))
+            }
             _ => Err(ArrowError::SchemaError("Expected BooleanBuilder".into())),
         }
     }
@@ -151,6 +159,10 @@ impl OptionalField {
     pub fn append_float(&mut self, value: f32) -> Result<(), ArrowError> {
         match self {
             OptionalField::Float32Builder(builder) => Ok(builder.append_value(value)),
+            OptionalField::ArrayFloat32Builder(builder) => {
+                builder.values().append_value(value);
+                Ok(builder.append(true))
+            }
             _ => Err(ArrowError::SchemaError("Expected Float32Builder".into())),
         }
     }
@@ -170,6 +182,10 @@ impl OptionalField {
     pub fn append_string(&mut self, value: &str) -> Result<(), ArrowError> {
         match self {
             OptionalField::Utf8Builder(builder) => Ok(builder.append_value(value)),
+            OptionalField::ArrayUtf8Builder(builder) => {
+                builder.values().append_value(value);
+                Ok(builder.append(true))
+            }
             _ => Err(ArrowError::SchemaError("Expected Utf8Builder".into())),
         }
     }

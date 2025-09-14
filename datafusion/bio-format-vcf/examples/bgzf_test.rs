@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let stream_time = stream_start.elapsed();
                 println!("Stream setup time: {:?}", stream_time);
 
-                let inner = bgzf::r#async::Reader::new(StreamReader::new(stream));
+                let inner = bgzf::r#async::io::Reader::new(StreamReader::new(stream));
                 let mut reader = vcf::r#async::io::Reader::new(inner);
 
                 println!("Reading header...");

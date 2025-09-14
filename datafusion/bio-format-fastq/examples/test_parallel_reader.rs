@@ -197,18 +197,16 @@
 //     }
 // }
 
-use crate::bgzf::Reader;
 use noodles::bgzf;
 use noodles_bgzf::gzi;
 use std::fs::File;
 use std::io;
-use std::io::{BufRead, BufReader, Read, SeekFrom};
+use std::io::{BufRead, BufReader, SeekFrom};
 
-use datafusion::prelude::position;
 use noodles_bgzf::gzi::Index;
 use noodles_bgzf::virtual_position::VirtualPosition;
 use noodles_fastq as fastq;
-use std::{io::Seek, sync::Arc};
+use std::io::Seek;
 
 const BLOCK_SIZE: usize = 64 * 1024; // 64 KiB typical BGZF block
 

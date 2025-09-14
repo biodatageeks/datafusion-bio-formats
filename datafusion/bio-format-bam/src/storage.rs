@@ -22,7 +22,7 @@ pub async fn get_remote_bam_reader(
     bam::r#async::io::Reader<bgzf::AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>>,
     Error,
 > {
-    let stream = get_remote_stream(file_path.clone(), object_storage_options).await?;
+    let stream = get_remote_stream(file_path.clone(), object_storage_options, None).await?;
     let reader = bam::r#async::io::Reader::from(bgzf::AsyncReader::new(StreamReader::new(stream)));
     Ok(reader)
 }

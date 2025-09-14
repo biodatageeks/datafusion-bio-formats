@@ -12,9 +12,10 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use datafusion_bio_format_core::object_storage::get_storage_type;
-use datafusion_bio_format_core::object_storage::{ObjectStorageOptions, StorageType};
-use datafusion_bio_format_core::table_utils::{OptionalField, builders_to_arrays};
+use datafusion_bio_format_core::{
+    object_storage::{ObjectStorageOptions, StorageType, get_storage_type},
+    table_utils::{OptionalField, builders_to_arrays},
+};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::{StreamExt, TryStreamExt};
 use log::debug;
@@ -25,7 +26,7 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
 use std::str;
 
-fn build_record_batch(
+pub fn build_record_batch(
     schema: SchemaRef,
     chroms: &[String],
     poss: &[u32],

@@ -6,6 +6,7 @@ members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bed",
     "datafusion/bio-format-vcf", "datafusion/bio-format-bam", "datafusion/bio-format-fasta",
 ]
 
+
 [workspace.dependencies]
 datafusion = {version = "48.0.1"}
 datafusion-execution = "48.0.1"

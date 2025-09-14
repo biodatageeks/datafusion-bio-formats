@@ -75,7 +75,7 @@ async fn determine_schema_from_header(
     Ok(Arc::new(schema))
 }
 
-fn is_nullable(ty: &InfoType) -> bool {
+pub fn is_nullable(ty: &InfoType) -> bool {
     !matches!(ty, InfoType::Flag)
 }
 
