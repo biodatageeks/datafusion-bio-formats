@@ -207,35 +207,33 @@ impl NeedletailLocalReader {
 
         log::info!("Starting needletail streaming read of file: {}", file_path);
 
-        // Use needletail's file-based API directly - this streams and doesn't load entire file into memory
-        stream::once(async move {
-            let mut records = Vec::new();
-
+        // Create a true async stream that yields records one by one
+        let stream = async_stream::try_stream! {
             match parse_fastx_file(&file_path) {
                 Ok(mut reader) => {
                     while let Some(record_result) = reader.next() {
                         match record_result {
-                            Ok(rec) => match NeedletailRecord::from_needletail_record(rec) {
-                                Ok(nr) => records.push(Ok(nr)),
-                                Err(e) => records.push(Err(e)),
+                            Ok(rec) => {
+                                match NeedletailRecord::from_needletail_record(rec) {
+                                    Ok(nr) => yield nr,  // ← Yield immediately, don't collect!
+                                    Err(e) => Err(e)?,
+                                }
                             },
-                            Err(e) => records.push(Err(std::io::Error::new(
+                            Err(e) => Err(std::io::Error::new(
                                 std::io::ErrorKind::Other,
                                 e.to_string(),
-                            ))),
+                            ))?,
                         }
                     }
                 }
-                Err(e) => records.push(Err(std::io::Error::new(
+                Err(e) => Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     e.to_string(),
-                ))),
+                ))?,
             }
+        };
 
-            stream::iter(records)
-        })
-        .flatten()
-        .boxed()
+        Box::pin(stream)
     }
 
     fn parse_fastx_from_bytes(
