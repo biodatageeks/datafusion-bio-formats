@@ -504,42 +504,26 @@ async fn get_local_fastq_needletail(
     let needs_sequence = projection.as_ref().map_or(true, |proj| proj.contains(&2));
     let needs_quality_scores = projection.as_ref().map_or(true, |proj| proj.contains(&3));
 
-    let mut name: Vec<String> = if needs_name {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut description: Vec<Option<String>> = if needs_description {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut sequence: Vec<String> = if needs_sequence {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut quality_scores: Vec<String> = if needs_quality_scores {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
-    let mut batch_num = 0;
-    let file_path = file_path.clone();
-    let thread_num = thread_num.unwrap_or(1);
-    let mut reader = NeedletailLocalReader::new(
+    // Create the reader first to validate file access
+    let reader = NeedletailLocalReader::new(
         file_path.clone(),
-        thread_num,
+        thread_num.unwrap_or(1),
         object_storage_options.unwrap(),
     )
     .await?;
-    let mut record_num = 0;
 
+    // Use sync iteration for maximum performance
     let stream = try_stream! {
+        let mut name: Vec<String> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut description: Vec<Option<String>> = if needs_description { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut sequence: Vec<String> = if needs_sequence { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut quality_scores: Vec<String> = if needs_quality_scores { Vec::with_capacity(batch_size) } else { Vec::new() };
 
-        let mut records = reader.read_records().await;
-        while let Some(result) = records.next().await {
+        let mut record_num = 0;
+        let mut batch_num = 0;
+
+        // Use the high-performance sync iterator
+        for result in reader.read_records_sync() {
             let record = result?;  // propagate errors if any
 
             // Only parse and store fields that are needed

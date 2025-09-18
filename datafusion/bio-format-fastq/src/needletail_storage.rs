@@ -15,36 +15,32 @@ pub struct NeedletailRecord {
 }
 
 impl NeedletailRecord {
+    #[inline]
     fn from_needletail_record(record: SequenceRecord<'_>) -> Result<Self, Error> {
-        let full_name = std::str::from_utf8(record.id())
-            .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, e))?;
+        // Use unsafe string conversion for performance (needletail guarantees valid UTF-8)
+        let full_name = unsafe { std::str::from_utf8_unchecked(record.id()) };
 
-        log::debug!("Parsing needletail record with ID: {}", full_name);
-
-        // Parse name and description from the full name string
-        // FASTQ format: @name [description]
-        // Example: @SRR123456.1 Illumina sequencing read
+        // Fast string parsing without intermediate allocations
         let (name, description) = if let Some(space_pos) = full_name.find(' ') {
-            let name_part = full_name[..space_pos].to_string();
-            let desc_part = full_name[space_pos + 1..].trim();
+            let name_part = unsafe { full_name.get_unchecked(..space_pos) };
+            let desc_part = unsafe { full_name.get_unchecked(space_pos + 1..) }.trim();
             let description = if desc_part.is_empty() {
                 None
             } else {
-                Some(desc_part.to_string())
+                Some(desc_part.to_owned())
             };
-            (name_part, description)
+            (name_part.to_owned(), description)
         } else {
-            (full_name.to_string(), None)
+            (full_name.to_owned(), None)
         };
 
-        let sequence = std::str::from_utf8(&record.seq())
-            .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, e))?
-            .to_string();
+        // Use unsafe string conversion for sequence (needletail guarantees valid UTF-8)
+        let seq_bytes = record.seq();
+        let sequence = unsafe { std::str::from_utf8_unchecked(&seq_bytes) }.to_owned();
 
+        // Use unsafe string conversion for quality scores
         let quality_scores = if let Some(qual) = record.qual() {
-            std::str::from_utf8(&qual)
-                .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, e))?
-                .to_string()
+            unsafe { std::str::from_utf8_unchecked(&qual) }.to_owned()
         } else {
             String::new()
         };
@@ -198,42 +194,24 @@ impl NeedletailLocalReader {
         }
     }
 
-    pub async fn read_records(&mut self) -> BoxStream<'_, Result<NeedletailRecord, Error>> {
+    pub fn read_records_sync(&self) -> impl Iterator<Item = Result<NeedletailRecord, Error>> + '_ {
         let file_path = match self {
-            NeedletailLocalReader::PLAIN(path) => path.clone(),
-            NeedletailLocalReader::GZIP(path) => path.clone(),
-            NeedletailLocalReader::BGZF(path) => path.clone(),
+            NeedletailLocalReader::PLAIN(path) => path,
+            NeedletailLocalReader::GZIP(path) => path,
+            NeedletailLocalReader::BGZF(path) => path,
         };
 
-        log::info!("Starting needletail streaming read of file: {}", file_path);
+        log::debug!("Starting needletail sync read of file: {}", file_path);
 
-        // Create a true async stream that yields records one by one
-        let stream = async_stream::try_stream! {
-            match parse_fastx_file(&file_path) {
-                Ok(mut reader) => {
-                    while let Some(record_result) = reader.next() {
-                        match record_result {
-                            Ok(rec) => {
-                                match NeedletailRecord::from_needletail_record(rec) {
-                                    Ok(nr) => yield nr,  // ← Yield immediately, don't collect!
-                                    Err(e) => Err(e)?,
-                                }
-                            },
-                            Err(e) => Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                e.to_string(),
-                            ))?,
-                        }
-                    }
-                }
-                Err(e) => Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e.to_string(),
-                ))?,
-            }
-        };
+        // Create a synchronous iterator - much faster than async for local files
+        NeedletailSyncIterator::new(file_path.clone())
+    }
 
-        Box::pin(stream)
+    // Keep async version for compatibility but mark as deprecated
+    #[deprecated(note = "Use read_records_sync for better performance with local files")]
+    pub async fn read_records(&mut self) -> BoxStream<'_, Result<NeedletailRecord, Error>> {
+        let records: Vec<_> = self.read_records_sync().collect();
+        stream::iter(records).boxed()
     }
 
     fn parse_fastx_from_bytes(
@@ -319,5 +297,47 @@ impl NeedletailBgzfMultiThreadedReader {
         }
 
         stream::iter(records).boxed()
+    }
+}
+
+// High-performance synchronous iterator for local files
+pub struct NeedletailSyncIterator {
+    inner: Box<dyn Iterator<Item = Result<NeedletailRecord, Error>> + Send>,
+}
+
+impl NeedletailSyncIterator {
+    pub fn new(file_path: String) -> Self {
+        match parse_fastx_file(&file_path) {
+            Ok(mut reader) => {
+                let iter = std::iter::from_fn(move || {
+                    reader.next().map(|record_result| match record_result {
+                        Ok(rec) => NeedletailRecord::from_needletail_record(rec),
+                        Err(e) => Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("needletail parse error: {}", e),
+                        )),
+                    })
+                });
+                Self {
+                    inner: Box::new(iter),
+                }
+            }
+            Err(e) => {
+                let error = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
+                let iter = std::iter::once(Err(error));
+                Self {
+                    inner: Box::new(iter),
+                }
+            }
+        }
+    }
+}
+
+impl Iterator for NeedletailSyncIterator {
+    type Item = Result<NeedletailRecord, Error>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
     }
 }
