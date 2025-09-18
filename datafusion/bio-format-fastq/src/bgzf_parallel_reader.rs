@@ -47,11 +47,6 @@ impl BgzfFastqTableProvider {
             path
         );
 
-        if parser == FastqParser::Needletail {
-            log::warn!(
-                "Note: BGZF table provider with needletail parser falls back to noodles for indexed BGZF reading"
-            );
-        }
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, false),
             Field::new("description", DataType::Utf8, true),
@@ -204,6 +199,323 @@ fn find_line_end(buf: &[u8], start: usize) -> Option<usize> {
         .map(|pos| start + pos)
 }
 
+fn execute_noodles_indexed_partition(
+    path: PathBuf,
+    index: gzi::Index,
+    start_uncomp: u64,
+    end_comp: u64,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    batch_size: usize,
+    tx: &mut mpsc::Sender<(Result<RecordBatch, ArrowError>, usize)>,
+) -> Result<(), ArrowError> {
+    use std::fs::File;
+
+    let file = File::open(&path).map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+    let mut reader = IndexedReader::new(std::io::BufReader::new(file), index);
+
+    reader
+        .seek(std::io::SeekFrom::Start(start_uncomp))
+        .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+
+    if start_uncomp > 0 {
+        synchronize_reader(&mut reader, end_comp)
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+    }
+
+    let mut fastq_reader = fastq::io::Reader::new(reader);
+    let mut record = fastq::Record::default();
+    let mut total_records = 0;
+
+    if let Some(proj) = &projection {
+        if proj.is_empty() {
+            let mut num_rows = 0;
+            loop {
+                if let Some(limit) = limit {
+                    if num_rows >= limit {
+                        break;
+                    }
+                }
+                if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
+                    break;
+                }
+                match fastq_reader.read_record(&mut record) {
+                    Ok(0) => break,
+                    Ok(_) => num_rows += 1,
+                    Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
+                }
+            }
+            let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(num_rows));
+            let batch = RecordBatch::try_new_with_options(schema, vec![], &options)?;
+            tx.try_send((Ok(batch), num_rows)).ok();
+            return Ok(());
+        }
+    }
+
+    loop {
+        if let Some(limit) = limit {
+            if total_records >= limit {
+                break;
+            }
+        }
+
+        let proj_indices = projection.as_ref();
+        let mut names = proj_indices
+            .map_or(true, |p| p.contains(&0))
+            .then(StringBuilder::new);
+        let mut descriptions = proj_indices
+            .map_or(true, |p| p.contains(&1))
+            .then(StringBuilder::new);
+        let mut sequences = proj_indices
+            .map_or(true, |p| p.contains(&2))
+            .then(StringBuilder::new);
+        let mut quality_scores = proj_indices
+            .map_or(true, |p| p.contains(&3))
+            .then(StringBuilder::new);
+
+        let mut count = 0;
+        while count < batch_size {
+            if let Some(limit) = limit {
+                if total_records >= limit {
+                    break;
+                }
+            }
+
+            if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
+                break;
+            }
+
+            match fastq_reader.read_record(&mut record) {
+                Ok(0) => break, // End of stream
+                Ok(_) => {
+                    if let Some(b) = &mut names {
+                        b.append_value(std::str::from_utf8(record.name()).unwrap());
+                    }
+                    if let Some(b) = &mut descriptions {
+                        if record.description().is_empty() {
+                            b.append_null();
+                        } else {
+                            b.append_value(std::str::from_utf8(record.description()).unwrap());
+                        }
+                    }
+                    if let Some(b) = &mut sequences {
+                        b.append_value(std::str::from_utf8(record.sequence()).unwrap());
+                    }
+                    if let Some(b) = &mut quality_scores {
+                        b.append_value(std::str::from_utf8(record.quality_scores()).unwrap());
+                    }
+                    count += 1;
+                    total_records += 1;
+                }
+                Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
+            }
+        }
+
+        if count == 0 {
+            break;
+        }
+
+        let mut arrays: Vec<Arc<dyn Array>> = vec![];
+        if let Some(proj) = &projection {
+            for &col_idx in proj.iter() {
+                match col_idx {
+                    0 => arrays.push(Arc::new(names.as_mut().unwrap().finish())),
+                    1 => arrays.push(Arc::new(descriptions.as_mut().unwrap().finish())),
+                    2 => arrays.push(Arc::new(sequences.as_mut().unwrap().finish())),
+                    3 => arrays.push(Arc::new(quality_scores.as_mut().unwrap().finish())),
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            arrays.push(Arc::new(names.unwrap().finish()));
+            arrays.push(Arc::new(descriptions.unwrap().finish()));
+            arrays.push(Arc::new(sequences.unwrap().finish()));
+            arrays.push(Arc::new(quality_scores.unwrap().finish()));
+        }
+
+        let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+        let num_rows = batch.num_rows();
+        // Block until the send succeeds
+        while let Err(e) = tx.try_send((Ok(batch.clone()), num_rows)) {
+            if e.is_disconnected() {
+                // Receiver is gone, exit
+                return Ok(());
+            }
+            // Channel is full, yield and retry
+            std::thread::yield_now();
+        }
+    }
+    Ok(())
+}
+
+fn execute_needletail_bgzf_partition(
+    path: PathBuf,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    batch_size: usize,
+    tx: &mut mpsc::Sender<(Result<RecordBatch, ArrowError>, usize)>,
+) -> Result<(), ArrowError> {
+    use needletail::parse_fastx_file;
+
+    // Simple direct needletail parsing - no complex async setup
+    let mut reader = parse_fastx_file(&path).map_err(|e| {
+        ArrowError::ExternalError(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)))
+    })?;
+
+    let mut total_records = 0;
+
+    if let Some(proj) = &projection {
+        if proj.is_empty() {
+            let mut num_rows = 0;
+            while let Some(record_result) = reader.next() {
+                match record_result {
+                    Ok(_) => {
+                        if let Some(limit) = limit {
+                            if num_rows >= limit {
+                                break;
+                            }
+                        }
+                        num_rows += 1;
+                    }
+                    Err(e) => {
+                        return Err(ArrowError::ExternalError(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e,
+                        ))));
+                    }
+                }
+            }
+            let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(num_rows));
+            let batch = RecordBatch::try_new_with_options(schema, vec![], &options)?;
+            tx.try_send((Ok(batch), num_rows)).ok();
+            return Ok(());
+        }
+    }
+
+    loop {
+        if let Some(limit) = limit {
+            if total_records >= limit {
+                break;
+            }
+        }
+
+        let proj_indices = projection.as_ref();
+        let mut names = proj_indices
+            .map_or(true, |p| p.contains(&0))
+            .then(StringBuilder::new);
+        let mut descriptions = proj_indices
+            .map_or(true, |p| p.contains(&1))
+            .then(StringBuilder::new);
+        let mut sequences = proj_indices
+            .map_or(true, |p| p.contains(&2))
+            .then(StringBuilder::new);
+        let mut quality_scores = proj_indices
+            .map_or(true, |p| p.contains(&3))
+            .then(StringBuilder::new);
+
+        let mut count = 0;
+        while count < batch_size {
+            if let Some(limit) = limit {
+                if total_records >= limit {
+                    break;
+                }
+            }
+
+            match reader.next() {
+                Some(Ok(record)) => {
+                    // Parse the ID field for name and description
+                    let id_str = unsafe { std::str::from_utf8_unchecked(record.id()) };
+                    let (name, description) = if let Some(space_pos) = id_str.find(' ') {
+                        let name_part = &id_str[..space_pos];
+                        let desc_part = id_str[space_pos + 1..].trim();
+                        (
+                            name_part,
+                            if desc_part.is_empty() {
+                                None
+                            } else {
+                                Some(desc_part)
+                            },
+                        )
+                    } else {
+                        (id_str, None)
+                    };
+
+                    if let Some(b) = &mut names {
+                        b.append_value(name);
+                    }
+                    if let Some(b) = &mut descriptions {
+                        match description {
+                            Some(desc) => b.append_value(desc),
+                            None => b.append_null(),
+                        }
+                    }
+                    if let Some(b) = &mut sequences {
+                        let seq_bytes = record.seq();
+                        let seq = unsafe { std::str::from_utf8_unchecked(&seq_bytes) };
+                        b.append_value(seq);
+                    }
+                    if let Some(b) = &mut quality_scores {
+                        if let Some(qual) = record.qual() {
+                            let qual_str = unsafe { std::str::from_utf8_unchecked(&qual) };
+                            b.append_value(qual_str);
+                        } else {
+                            b.append_value("");
+                        }
+                    }
+                    count += 1;
+                    total_records += 1;
+                }
+                Some(Err(e)) => {
+                    return Err(ArrowError::ExternalError(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e,
+                    ))));
+                }
+                None => break, // End of stream
+            }
+        }
+
+        if count == 0 {
+            break;
+        }
+
+        let mut arrays: Vec<Arc<dyn Array>> = vec![];
+        if let Some(proj) = &projection {
+            for &col_idx in proj.iter() {
+                match col_idx {
+                    0 => arrays.push(Arc::new(names.as_mut().unwrap().finish())),
+                    1 => arrays.push(Arc::new(descriptions.as_mut().unwrap().finish())),
+                    2 => arrays.push(Arc::new(sequences.as_mut().unwrap().finish())),
+                    3 => arrays.push(Arc::new(quality_scores.as_mut().unwrap().finish())),
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            arrays.push(Arc::new(names.unwrap().finish()));
+            arrays.push(Arc::new(descriptions.unwrap().finish()));
+            arrays.push(Arc::new(sequences.unwrap().finish()));
+            arrays.push(Arc::new(quality_scores.unwrap().finish()));
+        }
+
+        let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+        let num_rows = batch.num_rows();
+        // Block until the send succeeds
+        while let Err(e) = tx.try_send((Ok(batch.clone()), num_rows)) {
+            if e.is_disconnected() {
+                // Receiver is gone, exit
+                return Ok(());
+            }
+            // Channel is full, yield and retry
+            std::thread::yield_now();
+        }
+    }
+    Ok(())
+}
+
 fn synchronize_reader<R: BufRead>(reader: &mut IndexedReader<R>, end_comp: u64) -> io::Result<()> {
     // DO NOT perform an initial read_until, as it can discard a valid header
     // if the initial seek lands exactly on the start of a line.
@@ -303,151 +615,25 @@ impl ExecutionPlan for BgzfFastqExec {
 
         let (mut tx, rx) = mpsc::channel::<(Result<RecordBatch, ArrowError>, usize)>(2);
 
+        let parser = self.parser;
         let _handle = thread::spawn(move || {
             let read_and_send = || -> Result<(), ArrowError> {
-                let file = std::fs::File::open(path)
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-                let mut reader = IndexedReader::new(std::io::BufReader::new(file), index);
-
-                reader
-                    .seek(std::io::SeekFrom::Start(start_uncomp))
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-
-                if start_uncomp > 0 {
-                    synchronize_reader(&mut reader, end_comp)
-                        .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+                match parser {
+                    FastqParser::Noodles => execute_noodles_indexed_partition(
+                        path,
+                        index,
+                        start_uncomp,
+                        end_comp,
+                        schema,
+                        projection,
+                        limit,
+                        batch_size,
+                        &mut tx,
+                    ),
+                    FastqParser::Needletail => execute_needletail_bgzf_partition(
+                        path, schema, projection, limit, batch_size, &mut tx,
+                    ),
                 }
-
-                let mut fastq_reader = fastq::io::Reader::new(reader);
-                let mut record = fastq::Record::default();
-                let mut total_records = 0;
-
-                if let Some(proj) = &projection {
-                    if proj.is_empty() {
-                        let mut num_rows = 0;
-                        loop {
-                            if let Some(limit) = limit {
-                                if num_rows >= limit {
-                                    break;
-                                }
-                            }
-                            if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
-                                break;
-                            }
-                            match fastq_reader.read_record(&mut record) {
-                                Ok(0) => break,
-                                Ok(_) => num_rows += 1,
-                                Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
-                            }
-                        }
-                        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
-                            .with_row_count(Some(num_rows));
-                        let batch = RecordBatch::try_new_with_options(schema, vec![], &options)?;
-                        tx.try_send((Ok(batch), num_rows)).ok();
-                        return Ok(());
-                    }
-                }
-
-                loop {
-                    if let Some(limit) = limit {
-                        if total_records >= limit {
-                            break;
-                        }
-                    }
-
-                    let proj_indices = projection.as_ref();
-                    let mut names = proj_indices
-                        .map_or(true, |p| p.contains(&0))
-                        .then(StringBuilder::new);
-                    let mut descriptions = proj_indices
-                        .map_or(true, |p| p.contains(&1))
-                        .then(StringBuilder::new);
-                    let mut sequences = proj_indices
-                        .map_or(true, |p| p.contains(&2))
-                        .then(StringBuilder::new);
-                    let mut quality_scores = proj_indices
-                        .map_or(true, |p| p.contains(&3))
-                        .then(StringBuilder::new);
-
-                    let mut count = 0;
-                    while count < batch_size {
-                        if let Some(limit) = limit {
-                            if total_records >= limit {
-                                break;
-                            }
-                        }
-
-                        if fastq_reader.get_ref().virtual_position().compressed() >= end_comp {
-                            break;
-                        }
-
-                        match fastq_reader.read_record(&mut record) {
-                            Ok(0) => break, // End of stream
-                            Ok(_) => {
-                                if let Some(b) = &mut names {
-                                    b.append_value(std::str::from_utf8(record.name()).unwrap());
-                                }
-                                if let Some(b) = &mut descriptions {
-                                    if record.description().is_empty() {
-                                        b.append_null();
-                                    } else {
-                                        b.append_value(
-                                            std::str::from_utf8(record.description()).unwrap(),
-                                        );
-                                    }
-                                }
-                                if let Some(b) = &mut sequences {
-                                    b.append_value(std::str::from_utf8(record.sequence()).unwrap());
-                                }
-                                if let Some(b) = &mut quality_scores {
-                                    b.append_value(
-                                        std::str::from_utf8(record.quality_scores()).unwrap(),
-                                    );
-                                }
-                                count += 1;
-                                total_records += 1;
-                            }
-                            Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
-                        }
-                    }
-
-                    if count == 0 {
-                        break;
-                    }
-
-                    let mut arrays: Vec<Arc<dyn Array>> = vec![];
-                    if let Some(proj) = &projection {
-                        for &col_idx in proj.iter() {
-                            match col_idx {
-                                0 => arrays.push(Arc::new(names.as_mut().unwrap().finish())),
-                                1 => arrays.push(Arc::new(descriptions.as_mut().unwrap().finish())),
-                                2 => arrays.push(Arc::new(sequences.as_mut().unwrap().finish())),
-                                3 => {
-                                    arrays.push(Arc::new(quality_scores.as_mut().unwrap().finish()))
-                                }
-                                _ => unreachable!(),
-                            }
-                        }
-                    } else {
-                        arrays.push(Arc::new(names.unwrap().finish()));
-                        arrays.push(Arc::new(descriptions.unwrap().finish()));
-                        arrays.push(Arc::new(sequences.unwrap().finish()));
-                        arrays.push(Arc::new(quality_scores.unwrap().finish()));
-                    }
-
-                    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-                    let num_rows = batch.num_rows();
-                    // Block until the send succeeds
-                    while let Err(e) = tx.try_send((Ok(batch.clone()), num_rows)) {
-                        if e.is_disconnected() {
-                            // Receiver is gone, exit
-                            return Ok(());
-                        }
-                        // Channel is full, yield and retry
-                        std::thread::yield_now();
-                    }
-                }
-                Ok(())
             };
 
             if let Err(e) = read_and_send() {
