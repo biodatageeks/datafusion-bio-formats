@@ -99,6 +99,10 @@ async fn get_remote_fastq_stream(
 ) -> datafusion::error::Result<
     std::pin::Pin<Box<dyn futures::Stream<Item = datafusion::error::Result<RecordBatch>> + Send>>,
 > {
+    log::info!(
+        "Starting remote FASTQ stream processing with {} parser",
+        parser
+    );
     match parser {
         FastqParser::Noodles => {
             let stream = get_remote_fastq_stream_noodles(
@@ -332,6 +336,10 @@ async fn get_local_fastq(
 ) -> datafusion::error::Result<
     std::pin::Pin<Box<dyn futures::Stream<Item = datafusion::error::Result<RecordBatch>> + Send>>,
 > {
+    log::info!(
+        "Starting local FASTQ stream processing with {} parser",
+        parser
+    );
     match parser {
         FastqParser::Noodles => {
             let stream = get_local_fastq_noodles(

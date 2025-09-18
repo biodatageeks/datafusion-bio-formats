@@ -20,6 +20,8 @@ impl NeedletailRecord {
         let full_name = std::str::from_utf8(record.id())
             .map_err(|e| Error::new(std::io::ErrorKind::InvalidData, e))?;
 
+        log::debug!("Parsing needletail record with ID: {}", full_name);
+
         // Parse name and description from the full name string
         // FASTQ format: @name [description]
         // Example: @SRR123456.1 Illumina sequencing read
@@ -68,6 +70,7 @@ impl NeedletailRemoteReader {
         file_path: String,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
+        log::info!("Creating needletail remote reader for: {}", file_path);
         let compression_type =
             get_compression_type(file_path.clone(), None, object_storage_options.clone())
                 .await
@@ -176,6 +179,7 @@ impl NeedletailLocalReader {
         _thread_num: usize, // Not used for needletail single-threaded reading
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
+        log::info!("Creating needletail local reader for: {}", file_path);
         let compression_type = get_compression_type(
             file_path.clone(),
             object_storage_options.compression_type.clone(),
@@ -279,6 +283,11 @@ pub struct NeedletailBgzfMultiThreadedReader {
 
 impl NeedletailBgzfMultiThreadedReader {
     pub fn new(file_path: String, thread_num: usize) -> Self {
+        log::info!(
+            "Creating needletail multi-threaded BGZF reader for: {} with {} threads",
+            file_path,
+            thread_num
+        );
         Self {
             file_path,
             thread_num,

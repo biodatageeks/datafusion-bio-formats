@@ -56,6 +56,11 @@ impl FastqTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         parser: FastqParser,
     ) -> datafusion::common::Result<Self> {
+        log::info!(
+            "Creating FASTQ table provider with {} parser for file: {}",
+            parser,
+            file_path
+        );
         let schema = determine_schema()?;
         Ok(Self {
             file_path,
