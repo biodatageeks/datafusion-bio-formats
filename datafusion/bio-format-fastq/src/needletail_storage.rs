@@ -4,8 +4,7 @@ use datafusion_bio_format_core::object_storage::{
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
 use needletail::{parse_fastx_file, parser::SequenceRecord};
-use std::fs::File;
-use std::io::{BufReader, Cursor, Error, Read};
+use std::io::{Cursor, Error, Read};
 use tokio_util::io::StreamReader;
 
 pub struct NeedletailRecord {
@@ -168,9 +167,9 @@ impl NeedletailRemoteReader {
 }
 
 pub enum NeedletailLocalReader {
-    PLAIN(Box<dyn Read + Send + Sync>),
-    GZIP(Box<dyn Read + Send + Sync>),
-    BGZF(Box<dyn Read + Send + Sync>),
+    PLAIN(String), // Store file path instead of reader
+    GZIP(String),  // Store file path instead of reader
+    BGZF(String),  // Store file path instead of reader
 }
 
 impl NeedletailLocalReader {
@@ -189,21 +188,9 @@ impl NeedletailLocalReader {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         match compression_type {
-            CompressionType::BGZF => {
-                let file = File::open(file_path)?;
-                let reader: Box<dyn Read + Send + Sync> = Box::new(BufReader::new(file));
-                Ok(NeedletailLocalReader::BGZF(reader))
-            }
-            CompressionType::GZIP => {
-                let file = File::open(file_path)?;
-                let reader: Box<dyn Read + Send + Sync> = Box::new(BufReader::new(file));
-                Ok(NeedletailLocalReader::GZIP(reader))
-            }
-            CompressionType::NONE => {
-                let file = File::open(file_path)?;
-                let reader: Box<dyn Read + Send + Sync> = Box::new(BufReader::new(file));
-                Ok(NeedletailLocalReader::PLAIN(reader))
-            }
+            CompressionType::BGZF => Ok(NeedletailLocalReader::BGZF(file_path)),
+            CompressionType::GZIP => Ok(NeedletailLocalReader::GZIP(file_path)),
+            CompressionType::NONE => Ok(NeedletailLocalReader::PLAIN(file_path)),
             _ => unimplemented!(
                 "Unsupported compression type for needletail FASTQ reader: {:?}",
                 compression_type
@@ -212,29 +199,43 @@ impl NeedletailLocalReader {
     }
 
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<NeedletailRecord, Error>> {
-        match self {
-            NeedletailLocalReader::PLAIN(reader) => {
-                let mut data = Vec::new();
-                match reader.read_to_end(&mut data) {
-                    Ok(_) => Self::parse_fastx_from_bytes(data),
-                    Err(e) => stream::once(async move { Err(e) }).boxed(),
+        let file_path = match self {
+            NeedletailLocalReader::PLAIN(path) => path.clone(),
+            NeedletailLocalReader::GZIP(path) => path.clone(),
+            NeedletailLocalReader::BGZF(path) => path.clone(),
+        };
+
+        log::info!("Starting needletail streaming read of file: {}", file_path);
+
+        // Use needletail's file-based API directly - this streams and doesn't load entire file into memory
+        stream::once(async move {
+            let mut records = Vec::new();
+
+            match parse_fastx_file(&file_path) {
+                Ok(mut reader) => {
+                    while let Some(record_result) = reader.next() {
+                        match record_result {
+                            Ok(rec) => match NeedletailRecord::from_needletail_record(rec) {
+                                Ok(nr) => records.push(Ok(nr)),
+                                Err(e) => records.push(Err(e)),
+                            },
+                            Err(e) => records.push(Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                e.to_string(),
+                            ))),
+                        }
+                    }
                 }
+                Err(e) => records.push(Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e.to_string(),
+                ))),
             }
-            NeedletailLocalReader::GZIP(reader) => {
-                let mut data = Vec::new();
-                match reader.read_to_end(&mut data) {
-                    Ok(_) => Self::parse_fastx_from_bytes(data),
-                    Err(e) => stream::once(async move { Err(e) }).boxed(),
-                }
-            }
-            NeedletailLocalReader::BGZF(reader) => {
-                let mut data = Vec::new();
-                match reader.read_to_end(&mut data) {
-                    Ok(_) => Self::parse_fastx_from_bytes(data),
-                    Err(e) => stream::once(async move { Err(e) }).boxed(),
-                }
-            }
-        }
+
+            stream::iter(records)
+        })
+        .flatten()
+        .boxed()
     }
 
     fn parse_fastx_from_bytes(

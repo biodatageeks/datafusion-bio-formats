@@ -49,7 +49,7 @@ async fn main() -> datafusion::common::Result<()> {
     let ctx = SessionContext::new_with_config(config);
 
     // Create and register the table provider
-    let provider = BgzfFastqTableProvider::try_new(file_path)?;
+    let provider = BgzfFastqTableProvider::new(file_path)?;
     ctx.register_table("fastq", std::sync::Arc::new(provider))?;
 
     // Execute a query and measure the time

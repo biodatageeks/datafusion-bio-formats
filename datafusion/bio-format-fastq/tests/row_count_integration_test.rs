@@ -12,8 +12,7 @@ async fn test_bgzf_fastq_table_provider_row_count() {
         // This is the robust way to locate test data.
         let file_path = format!("{}/data/sample.fastq.bgz", env!("CARGO_MANIFEST_DIR"));
 
-        let provider =
-            BgzfFastqTableProvider::try_new(&file_path).expect("Failed to create provider");
+        let provider = BgzfFastqTableProvider::new(&file_path).expect("Failed to create provider");
         ctx.register_table("fastq", Arc::new(provider))
             .expect("Failed to register table");
 

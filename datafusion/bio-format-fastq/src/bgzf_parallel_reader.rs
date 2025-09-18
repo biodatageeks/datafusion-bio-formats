@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Seek};
 use std::sync::Arc;
 use std::thread;
 
+use crate::parser::FastqParser;
 use async_trait::async_trait;
 use datafusion::arrow::array::{Array, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -27,10 +28,30 @@ use tracing::debug;
 pub struct BgzfFastqTableProvider {
     path: PathBuf,
     schema: SchemaRef,
+    parser: FastqParser,
 }
 
 impl BgzfFastqTableProvider {
-    pub fn try_new(path: impl Into<PathBuf>) -> io::Result<Self> {
+    pub fn new(path: impl Into<PathBuf>) -> datafusion::common::Result<Self> {
+        Self::new_with_parser(path, FastqParser::default())
+    }
+
+    pub fn new_with_parser(
+        path: impl Into<PathBuf>,
+        parser: FastqParser,
+    ) -> datafusion::common::Result<Self> {
+        let path = path.into();
+        log::info!(
+            "Creating BGZF FASTQ table provider with {} parser for file: {:?}",
+            parser,
+            path
+        );
+
+        if parser == FastqParser::Needletail {
+            log::warn!(
+                "Note: BGZF table provider with needletail parser falls back to noodles for indexed BGZF reading"
+            );
+        }
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, false),
             Field::new("description", DataType::Utf8, true),
@@ -38,8 +59,9 @@ impl BgzfFastqTableProvider {
             Field::new("quality_scores", DataType::Utf8, false),
         ]));
         Ok(Self {
-            path: path.into(),
+            path,
             schema,
+            parser,
         })
     }
 }
@@ -122,6 +144,7 @@ impl datafusion::catalog::TableProvider for BgzfFastqTableProvider {
             projection.cloned(),
             index,
             limit,
+            self.parser,
         );
         Ok(Arc::new(exec))
     }
@@ -135,6 +158,7 @@ struct BgzfFastqExec {
     projection: Option<Vec<usize>>,
     index: gzi::Index,
     limit: Option<usize>,
+    parser: FastqParser,
     properties: PlanProperties,
 }
 
@@ -146,6 +170,7 @@ impl BgzfFastqExec {
         projection: Option<Vec<usize>>,
         index: gzi::Index,
         limit: Option<usize>,
+        parser: FastqParser,
     ) -> Self {
         let properties = PlanProperties::new(
             datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),
@@ -160,6 +185,7 @@ impl BgzfFastqExec {
             projection,
             index,
             limit,
+            parser,
             properties,
         }
     }
@@ -262,6 +288,11 @@ impl ExecutionPlan for BgzfFastqExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        log::info!(
+            "Executing BGZF FASTQ partition {} with {} parser",
+            partition,
+            self.parser
+        );
         let (start_uncomp, end_comp) = self.partitions[partition];
         let path = self.path.clone();
         let schema = self.schema.clone();
