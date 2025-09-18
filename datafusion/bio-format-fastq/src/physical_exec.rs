@@ -1,5 +1,6 @@
+use crate::needletail_storage::{NeedletailLocalReader, NeedletailRemoteReader};
+use crate::parser::FastqParser;
 use crate::storage::{FastqLocalReader, FastqRemoteReader};
-use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
 use datafusion::arrow::datatypes::SchemaRef;
@@ -26,6 +27,7 @@ pub struct FastqExec {
     pub(crate) limit: Option<usize>,
     pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
+    pub(crate) parser: FastqParser,
 }
 
 impl Debug for FastqExec {
@@ -80,6 +82,7 @@ impl ExecutionPlan for FastqExec {
             self.thread_num,
             self.projection.clone(),
             self.object_storage_options.clone(),
+            self.parser,
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
@@ -92,9 +95,44 @@ async fn get_remote_fastq_stream(
     batch_size: usize,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
+    parser: FastqParser,
 ) -> datafusion::error::Result<
-    AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
+    std::pin::Pin<Box<dyn futures::Stream<Item = datafusion::error::Result<RecordBatch>> + Send>>,
 > {
+    match parser {
+        FastqParser::Noodles => {
+            let stream = get_remote_fastq_stream_noodles(
+                file_path,
+                schema,
+                batch_size,
+                projection,
+                object_storage_options,
+            )
+            .await?;
+            Ok(Box::pin(stream))
+        }
+        FastqParser::Needletail => {
+            let stream = get_remote_fastq_stream_needletail(
+                file_path,
+                schema,
+                batch_size,
+                projection,
+                object_storage_options,
+            )
+            .await?;
+            Ok(Box::pin(stream))
+        }
+    }
+}
+
+async fn get_remote_fastq_stream_noodles(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
+{
     let mut reader =
         FastqRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
 
@@ -187,7 +225,142 @@ async fn get_remote_fastq_stream(
     Ok(stream)
 }
 
+async fn get_remote_fastq_stream_needletail(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
+{
+    let mut reader =
+        NeedletailRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
+
+    // Determine which fields we need to parse based on projection
+    let needs_name = projection.as_ref().map_or(true, |proj| proj.contains(&0));
+    let needs_description = projection.as_ref().map_or(true, |proj| proj.contains(&1));
+    let needs_sequence = projection.as_ref().map_or(true, |proj| proj.contains(&2));
+    let needs_quality_scores = projection.as_ref().map_or(true, |proj| proj.contains(&3));
+
+    let stream = try_stream! {
+        // Create vectors for accumulating record data only for needed fields.
+        let mut name: Vec<String> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut description: Vec<Option<String>> = if needs_description { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut sequence: Vec<String> = if needs_sequence { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut quality_scores: Vec<String> = if needs_quality_scores { Vec::with_capacity(batch_size) } else { Vec::new() };
+
+        let mut record_num = 0;
+        let mut batch_num = 0;
+
+        // Process records one by one.
+        let mut records = reader.read_records();
+        while let Some(result) = records.next().await {
+            let record = result?;  // propagate errors if any
+
+            // Only parse and store fields that are needed
+            if needs_name {
+                name.push(record.name);
+            }
+            if needs_description {
+                description.push(record.description);
+            }
+            if needs_sequence {
+                sequence.push(record.sequence);
+            }
+            if needs_quality_scores {
+                quality_scores.push(record.quality_scores);
+            }
+
+            record_num += 1;
+            // Once the batch size is reached, build and yield a record batch.
+            if record_num % batch_size == 0 {
+                debug!("Record number: {}", record_num);
+                let batch = build_record_batch_optimized(
+                    Arc::clone(&schema.clone()),
+                    &name,
+                    &description,
+                    &sequence,
+                    &quality_scores,
+                    projection.clone(),
+                    needs_name,
+                    needs_description,
+                    needs_sequence,
+                    needs_quality_scores,
+                    batch_size,
+                )?;
+                batch_num += 1;
+                debug!("Batch number: {}", batch_num);
+                yield batch;
+                // Clear vectors for the next batch.
+                name.clear();
+                description.clear();
+                sequence.clear();
+                quality_scores.clear();
+            }
+        }
+        // If there are remaining records that don't fill a complete batch,
+        // yield them as well.
+        if !name.is_empty() || !description.is_empty() || !sequence.is_empty() || !quality_scores.is_empty() || record_num > 0 {
+            let actual_size = if needs_name { name.len() } else if needs_description { description.len() } else if needs_sequence { sequence.len() } else if needs_quality_scores { quality_scores.len() } else { record_num % batch_size };
+            let batch = build_record_batch_optimized(
+                Arc::clone(&schema.clone()),
+                &name,
+                &description,
+                &sequence,
+                &quality_scores,
+                projection.clone(),
+                needs_name,
+                needs_description,
+                needs_sequence,
+                needs_quality_scores,
+                actual_size,
+            )?;
+            yield batch;
+        }
+    };
+    Ok(stream)
+}
+
 async fn get_local_fastq(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    thread_num: Option<usize>,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+    parser: FastqParser,
+) -> datafusion::error::Result<
+    std::pin::Pin<Box<dyn futures::Stream<Item = datafusion::error::Result<RecordBatch>> + Send>>,
+> {
+    match parser {
+        FastqParser::Noodles => {
+            let stream = get_local_fastq_noodles(
+                file_path,
+                schema,
+                batch_size,
+                thread_num,
+                projection,
+                object_storage_options,
+            )
+            .await?;
+            Ok(Box::pin(stream))
+        }
+        FastqParser::Needletail => {
+            let stream = get_local_fastq_needletail(
+                file_path,
+                schema,
+                batch_size,
+                thread_num,
+                projection,
+                object_storage_options,
+            )
+            .await?;
+            Ok(Box::pin(stream))
+        }
+    }
+}
+
+async fn get_local_fastq_noodles(
     file_path: String,
     schema: SchemaRef,
     batch_size: usize,
@@ -256,6 +429,123 @@ async fn get_local_fastq(
             }
             if needs_quality_scores {
                 quality_scores.push(std::str::from_utf8(record.quality_scores()).unwrap().to_string());
+            }
+
+            record_num += 1;
+            // Once the batch size is reached, build and yield a record batch.
+            if record_num % batch_size == 0 {
+                debug!("Record number: {}", record_num);
+                let batch = build_record_batch_optimized(
+                    Arc::clone(&schema.clone()),
+                    &name,
+                    &description,
+                    &sequence,
+                    &quality_scores,
+                    projection.clone(),
+                    needs_name,
+                    needs_description,
+                    needs_sequence,
+                    needs_quality_scores,
+                    batch_size,
+                )?;
+                batch_num += 1;
+                debug!("Batch number: {}", batch_num);
+                yield batch;
+                // Clear vectors for the next batch.
+                name.clear();
+                description.clear();
+                sequence.clear();
+                quality_scores.clear();
+            }
+        }
+        // If there are remaining records that don't fill a complete batch,
+        // yield them as well.
+        if !name.is_empty() || !description.is_empty() || !sequence.is_empty() || !quality_scores.is_empty() || record_num > 0 {
+            let actual_size = if needs_name { name.len() } else if needs_description { description.len() } else if needs_sequence { sequence.len() } else if needs_quality_scores { quality_scores.len() } else { record_num % batch_size };
+            let batch = build_record_batch_optimized(
+                Arc::clone(&schema.clone()),
+                &name,
+                &description,
+                &sequence,
+                &quality_scores,
+                projection.clone(),
+                needs_name,
+                needs_description,
+                needs_sequence,
+                needs_quality_scores,
+                actual_size,
+            )?;
+            yield batch;
+        }
+    };
+    Ok(stream)
+}
+
+async fn get_local_fastq_needletail(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    thread_num: Option<usize>,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
+{
+    // Determine which fields we need to parse based on projection
+    let needs_name = projection.as_ref().map_or(true, |proj| proj.contains(&0));
+    let needs_description = projection.as_ref().map_or(true, |proj| proj.contains(&1));
+    let needs_sequence = projection.as_ref().map_or(true, |proj| proj.contains(&2));
+    let needs_quality_scores = projection.as_ref().map_or(true, |proj| proj.contains(&3));
+
+    let mut name: Vec<String> = if needs_name {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut description: Vec<Option<String>> = if needs_description {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut sequence: Vec<String> = if needs_sequence {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut quality_scores: Vec<String> = if needs_quality_scores {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+
+    let mut batch_num = 0;
+    let file_path = file_path.clone();
+    let thread_num = thread_num.unwrap_or(1);
+    let mut reader = NeedletailLocalReader::new(
+        file_path.clone(),
+        thread_num,
+        object_storage_options.unwrap(),
+    )
+    .await?;
+    let mut record_num = 0;
+
+    let stream = try_stream! {
+
+        let mut records = reader.read_records().await;
+        while let Some(result) = records.next().await {
+            let record = result?;  // propagate errors if any
+
+            // Only parse and store fields that are needed
+            if needs_name {
+                name.push(record.name);
+            }
+            if needs_description {
+                description.push(record.description);
+            }
+            if needs_sequence {
+                sequence.push(record.sequence);
+            }
+            if needs_quality_scores {
+                quality_scores.push(record.quality_scores);
             }
 
             record_num += 1;
@@ -398,6 +688,7 @@ async fn get_stream(
     thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
+    parser: FastqParser,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
 
@@ -414,6 +705,7 @@ async fn get_stream(
                 thread_num,
                 projection,
                 object_storage_options,
+                parser,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -425,6 +717,7 @@ async fn get_stream(
                 batch_size,
                 projection,
                 object_storage_options,
+                parser,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))

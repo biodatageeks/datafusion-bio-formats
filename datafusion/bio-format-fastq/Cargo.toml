@@ -21,9 +21,16 @@ log = { version = "0.4.27", features = ["release_max_level_debug"] }
 async-trait = "0.1.88"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+needletail = {git = "https://github.com/biodatageeks/needletail.git", rev = "3633dc3c6dcbc5cac106a81cf6ed1c7fa1776baf"}
 
+[dev-dependencies]
+tempfile = "3.8"
 
 [[example]]
 name = "test_reader"
 # Some issue when publishing and path isn't specified, so adding here
 path = "./examples/test_reader.rs"
+
+[[example]]
+name = "parser_comparison"
+path = "./examples/parser_comparison.rs"

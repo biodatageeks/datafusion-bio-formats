@@ -1,4 +1,4 @@
-use datafusion_bio_format_fastq::table_provider::FastqTableProvider;
+use datafusion_bio_format_fastq::{FastqParser, table_provider::FastqTableProvider};
 use futures_util::StreamExt;
 use std::sync::Arc;
 
@@ -15,16 +15,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         concurrent_fetches: Some(8), // Number of concurrent requests
         compression_type: None,
     };
-    let table =
-        FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options)).unwrap();
+    // Test with noodles parser (default)
+    println!("Testing with noodles parser...");
+    let table_noodles = FastqTableProvider::new_with_parser(
+        file_path.clone(),
+        Some(1),
+        Some(object_storage_options.clone()),
+        FastqParser::Noodles,
+    )
+    .unwrap();
+
+    // Test with needletail parser
+    println!("Testing with needletail parser...");
+    let table_needletail = FastqTableProvider::new_with_parser(
+        file_path.clone(),
+        Some(1),
+        Some(object_storage_options),
+        FastqParser::Needletail,
+    )
+    .unwrap();
 
     let ctx = datafusion::execution::context::SessionContext::new();
     ctx.sql("set datafusion.execution.skip_physical_aggregate_schema_check=true")
         .await?;
-    ctx.register_table("example", Arc::new(table)).unwrap();
-    let df = ctx.sql("SELECT * FROM example").await?;
-    let results = df.count().await?;
-    println!("Count: {:?}", results);
+
+    // Test noodles parser
+    ctx.register_table("fastq_noodles", Arc::new(table_noodles))
+        .unwrap();
+    let df_noodles = ctx.sql("SELECT * FROM fastq_noodles").await?;
+    let results_noodles = df_noodles.count().await?;
+    println!("Noodles parser count: {:?}", results_noodles);
+
+    // Test needletail parser
+    ctx.register_table("fastq_needletail", Arc::new(table_needletail))
+        .unwrap();
+    let df_needletail = ctx.sql("SELECT * FROM fastq_needletail").await?;
+    let results_needletail = df_needletail.count().await?;
+    println!("Needletail parser count: {:?}", results_needletail);
+
+    // Compare results
+    if results_noodles == results_needletail {
+        println!("✓ Both parsers returned the same count!");
+    } else {
+        println!("✗ Parsers returned different counts!");
+    }
     // // let file_path = "gs://polars-bio-it/example.fastq.gz".to_string();
     // // let file_path = "gs://polars-bio-it/example.fastq.bgz".to_string();
     //

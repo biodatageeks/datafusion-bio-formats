@@ -1,3 +1,4 @@
+use crate::parser::FastqParser;
 use crate::physical_exec::FastqExec;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -32,6 +33,7 @@ pub struct FastqTableProvider {
     schema: SchemaRef,
     thread_num: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
+    parser: FastqParser,
 }
 
 impl FastqTableProvider {
@@ -40,12 +42,27 @@ impl FastqTableProvider {
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
+        Self::new_with_parser(
+            file_path,
+            thread_num,
+            object_storage_options,
+            FastqParser::default(),
+        )
+    }
+
+    pub fn new_with_parser(
+        file_path: String,
+        thread_num: Option<usize>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        parser: FastqParser,
+    ) -> datafusion::common::Result<Self> {
         let schema = determine_schema()?;
         Ok(Self {
             file_path,
             schema,
             thread_num,
             object_storage_options,
+            parser,
         })
     }
 }
@@ -104,6 +121,7 @@ impl TableProvider for FastqTableProvider {
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
+            parser: self.parser,
         }))
     }
 }
