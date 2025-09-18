@@ -4,7 +4,9 @@ use datafusion_bio_format_core::object_storage::{
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
 use needletail::{parse_fastx_file, parser::SequenceRecord};
-use std::io::{Cursor, Error, Read};
+use noodles_bgzf as bgzf;
+use std::fs::File;
+use std::io::{BufReader, Cursor, Error, Read};
 use tokio_util::io::StreamReader;
 
 pub struct NeedletailRecord {
@@ -163,18 +165,39 @@ impl NeedletailRemoteReader {
 }
 
 pub enum NeedletailLocalReader {
-    PLAIN(String), // Store file path instead of reader
-    GZIP(String),  // Store file path instead of reader
-    BGZF(String),  // Store file path instead of reader
+    PLAIN(String),       // Store file path for plain files
+    GZIP(String),        // Store file path for gzip files
+    BGZF(String, usize), // Store file path and thread count for BGZF files
+}
+
+// Wrapper for multi-threaded BGZF reader with needletail
+pub struct NeedletailBgzfReader {
+    reader: bgzf::MultithreadedReader<File>,
+}
+
+fn get_needletail_bgzf_reader(
+    file_path: String,
+    thread_num: usize,
+) -> Result<NeedletailBgzfReader, Error> {
+    let file = File::open(file_path)?;
+    let reader = bgzf::MultithreadedReader::with_worker_count(
+        std::num::NonZero::new(thread_num).unwrap(),
+        file,
+    );
+    Ok(NeedletailBgzfReader { reader })
 }
 
 impl NeedletailLocalReader {
     pub async fn new(
         file_path: String,
-        _thread_num: usize, // Not used for needletail single-threaded reading
+        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
-        log::info!("Creating needletail local reader for: {}", file_path);
+        log::info!(
+            "Creating needletail local reader for: {} with {} threads",
+            file_path,
+            thread_num
+        );
         let compression_type = get_compression_type(
             file_path.clone(),
             object_storage_options.compression_type.clone(),
@@ -184,7 +207,10 @@ impl NeedletailLocalReader {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         match compression_type {
-            CompressionType::BGZF => Ok(NeedletailLocalReader::BGZF(file_path)),
+            CompressionType::BGZF => {
+                // Store path and thread count for lazy BGZF reader creation
+                Ok(NeedletailLocalReader::BGZF(file_path, thread_num))
+            }
             CompressionType::GZIP => Ok(NeedletailLocalReader::GZIP(file_path)),
             CompressionType::NONE => Ok(NeedletailLocalReader::PLAIN(file_path)),
             _ => unimplemented!(
@@ -195,16 +221,24 @@ impl NeedletailLocalReader {
     }
 
     pub fn read_records_sync(&self) -> impl Iterator<Item = Result<NeedletailRecord, Error>> + '_ {
-        let file_path = match self {
-            NeedletailLocalReader::PLAIN(path) => path,
-            NeedletailLocalReader::GZIP(path) => path,
-            NeedletailLocalReader::BGZF(path) => path,
-        };
-
-        log::debug!("Starting needletail sync read of file: {}", file_path);
-
-        // Create a synchronous iterator - much faster than async for local files
-        NeedletailSyncIterator::new(file_path.clone())
+        match self {
+            NeedletailLocalReader::PLAIN(path) => {
+                log::debug!("Starting needletail sync read of plain file: {}", path);
+                NeedletailSyncIterator::new_from_path(path.clone())
+            }
+            NeedletailLocalReader::GZIP(path) => {
+                log::debug!("Starting needletail sync read of gzip file: {}", path);
+                NeedletailSyncIterator::new_from_path(path.clone())
+            }
+            NeedletailLocalReader::BGZF(path, thread_count) => {
+                log::debug!(
+                    "Starting needletail sync read of BGZF file: {} with {} threads",
+                    path,
+                    thread_count
+                );
+                NeedletailSyncIterator::new_from_bgzf_path(path.clone(), *thread_count)
+            }
+        }
     }
 
     // Keep async version for compatibility but mark as deprecated
@@ -300,35 +334,106 @@ impl NeedletailBgzfMultiThreadedReader {
     }
 }
 
-// High-performance synchronous iterator for local files
-pub struct NeedletailSyncIterator {
-    inner: Box<dyn Iterator<Item = Result<NeedletailRecord, Error>> + Send>,
+// Iterator that handles both file paths and BGZF readers
+pub enum NeedletailSyncIterator {
+    FromPath(Box<dyn Iterator<Item = Result<NeedletailRecord, Error>> + Send>),
+    FromBgzf(Box<dyn Iterator<Item = Result<NeedletailRecord, Error>> + Send>),
 }
 
 impl NeedletailSyncIterator {
-    pub fn new(file_path: String) -> Self {
+    pub fn new_from_path(file_path: String) -> Self {
         match parse_fastx_file(&file_path) {
             Ok(mut reader) => {
                 let iter = std::iter::from_fn(move || {
-                    reader.next().map(|record_result| match record_result {
-                        Ok(rec) => NeedletailRecord::from_needletail_record(rec),
-                        Err(e) => Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("needletail parse error: {}", e),
-                        )),
-                    })
+                    reader
+                        .next()
+                        .map(|record_result| Self::convert_record(record_result))
                 });
-                Self {
-                    inner: Box::new(iter),
-                }
+                Self::FromPath(Box::new(iter))
             }
             Err(e) => {
                 let error = std::io::Error::new(std::io::ErrorKind::Other, e.to_string());
                 let iter = std::iter::once(Err(error));
-                Self {
-                    inner: Box::new(iter),
+                Self::FromPath(Box::new(iter))
+            }
+        }
+    }
+
+    pub fn new_from_bgzf_path(file_path: String, thread_count: usize) -> Self {
+        match get_needletail_bgzf_reader(file_path, thread_count) {
+            Ok(bgzf_reader) => {
+                // Take ownership of the BGZF reader
+                let buf_reader = BufReader::new(bgzf_reader.reader);
+
+                match needletail::parser::parse_fastx_reader(buf_reader) {
+                    Ok(mut reader) => {
+                        let iter = std::iter::from_fn(move || {
+                            reader
+                                .next()
+                                .map(|record_result| Self::convert_record(record_result))
+                        });
+                        Self::FromBgzf(Box::new(iter))
+                    }
+                    Err(e) => {
+                        let error = std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("Failed to create needletail reader from BGZF: {}", e),
+                        );
+                        let iter = std::iter::once(Err(error));
+                        Self::FromBgzf(Box::new(iter))
+                    }
                 }
             }
+            Err(e) => {
+                let iter = std::iter::once(Err(e));
+                Self::FromBgzf(Box::new(iter))
+            }
+        }
+    }
+
+    #[inline]
+    fn convert_record(
+        record_result: Result<SequenceRecord, needletail::errors::ParseError>,
+    ) -> Result<NeedletailRecord, Error> {
+        match record_result {
+            Ok(rec) => {
+                // Inline optimized conversion to avoid function call overhead
+                let full_name = unsafe { std::str::from_utf8_unchecked(rec.id()) };
+                let (name, description) = if let Some(space_pos) = full_name.find(' ') {
+                    let name_part = unsafe { full_name.get_unchecked(..space_pos) };
+                    let desc_part = unsafe { full_name.get_unchecked(space_pos + 1..) }.trim();
+                    (
+                        name_part.to_string(),
+                        if desc_part.is_empty() {
+                            None
+                        } else {
+                            Some(desc_part.to_string())
+                        },
+                    )
+                } else {
+                    (full_name.to_string(), None)
+                };
+
+                let seq_bytes = rec.seq();
+                let sequence = unsafe { std::str::from_utf8_unchecked(&seq_bytes) }.to_string();
+
+                let quality_scores = if let Some(qual) = rec.qual() {
+                    unsafe { std::str::from_utf8_unchecked(&qual) }.to_string()
+                } else {
+                    String::new()
+                };
+
+                Ok(NeedletailRecord {
+                    name,
+                    description,
+                    sequence,
+                    quality_scores,
+                })
+            }
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("needletail parse error: {}", e),
+            )),
         }
     }
 }
@@ -338,6 +443,9 @@ impl Iterator for NeedletailSyncIterator {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
+        match self {
+            Self::FromPath(iter) => iter.next(),
+            Self::FromBgzf(iter) => iter.next(),
+        }
     }
 }

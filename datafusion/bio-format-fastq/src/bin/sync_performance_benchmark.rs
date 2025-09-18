@@ -6,8 +6,8 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Test file - use the sample data file
-    let file_path = format!("{}/data/sample.fastq.bgz", env!("CARGO_MANIFEST_DIR"));
+    // Test file - use the larger performance test file
+    let file_path = "/tmp/ERR194146.fastq.bgz".to_string();
 
     println!("=== FASTQ Parser Performance Benchmark ===");
     println!("Testing file: {}", file_path);
