@@ -239,7 +239,7 @@ async fn get_local_fastq(
         file_path.clone(),
         thread_num,
         byte_range.clone(),
-        object_storage_options.unwrap(),
+        object_storage_options.unwrap_or(ObjectStorageOptions::default()),
     )
     .await?;
     let mut record_num = 0;
