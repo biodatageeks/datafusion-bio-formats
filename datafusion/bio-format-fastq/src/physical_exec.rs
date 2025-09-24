@@ -1,4 +1,5 @@
 use crate::storage::{FastqLocalReader, FastqRemoteReader};
+use crate::table_provider::FastqByteRange;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
@@ -24,6 +25,7 @@ pub struct FastqExec {
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
+    pub(crate) byte_range: Option<FastqByteRange>,
     pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
 }
@@ -79,6 +81,7 @@ impl ExecutionPlan for FastqExec {
             batch_size,
             self.thread_num,
             self.projection.clone(),
+            self.byte_range.clone(),
             self.object_storage_options.clone(),
         );
         let stream = futures::stream::once(fut).try_flatten();
@@ -91,12 +94,17 @@ async fn get_remote_fastq_stream(
     schema: SchemaRef,
     batch_size: usize,
     projection: Option<Vec<usize>>,
+    byte_range: Option<FastqByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
-    let mut reader =
-        FastqRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
+    let mut reader = FastqRemoteReader::new_with_range(
+        file_path.clone(),
+        byte_range.clone(),
+        object_storage_options.unwrap(),
+    )
+    .await?;
 
     // Determine which fields we need to parse based on projection
     let needs_name = projection.as_ref().map_or(true, |proj| proj.contains(&0));
@@ -193,6 +201,7 @@ async fn get_local_fastq(
     batch_size: usize,
     thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<FastqByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
@@ -226,9 +235,10 @@ async fn get_local_fastq(
     let mut batch_num = 0;
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = FastqLocalReader::new(
+    let mut reader = FastqLocalReader::new_with_range(
         file_path.clone(),
         thread_num,
+        byte_range.clone(),
         object_storage_options.unwrap(),
     )
     .await?;
@@ -397,6 +407,7 @@ async fn get_stream(
     batch_size: usize,
     thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<FastqByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
@@ -413,6 +424,7 @@ async fn get_stream(
                 batch_size,
                 thread_num,
                 projection,
+                byte_range,
                 object_storage_options,
             )
             .await?;
@@ -424,6 +436,7 @@ async fn get_stream(
                 schema.clone(),
                 batch_size,
                 projection,
+                byte_range,
                 object_storage_options,
             )
             .await?;

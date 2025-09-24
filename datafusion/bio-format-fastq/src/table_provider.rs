@@ -14,6 +14,13 @@ use log::debug;
 use std::any::Any;
 use std::sync::Arc;
 
+/// Byte range specification for file reading
+#[derive(Clone, Debug, PartialEq)]
+pub struct FastqByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
 fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     let fields = vec![
         Field::new("name", DataType::Utf8, false),
@@ -31,6 +38,7 @@ pub struct FastqTableProvider {
     file_path: String,
     schema: SchemaRef,
     thread_num: Option<usize>,
+    byte_range: Option<FastqByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
@@ -45,6 +53,24 @@ impl FastqTableProvider {
             file_path,
             schema,
             thread_num,
+            byte_range: None,
+            object_storage_options,
+        })
+    }
+
+    /// Create FastqTableProvider that reads only a specific byte range
+    pub fn new_with_range(
+        file_path: String,
+        byte_range: Option<FastqByteRange>, // None = read entire file
+        thread_num: Option<usize>,          // For distributed use, should be None (single-threaded)
+        object_storage_options: Option<ObjectStorageOptions>,
+    ) -> datafusion::common::Result<Self> {
+        let schema = determine_schema()?;
+        Ok(Self {
+            file_path,
+            schema,
+            thread_num,
+            byte_range,
             object_storage_options,
         })
     }
@@ -102,6 +128,7 @@ impl TableProvider for FastqTableProvider {
             schema: schema.clone(),
             projection: projection.cloned(),
             limit,
+            byte_range: self.byte_range.clone(),
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
         }))
