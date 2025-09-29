@@ -128,25 +128,80 @@ fn resolve_fastq_range_start(file_path: &str, byte_range: &FastqByteRange) -> Re
     file.seek(SeekFrom::Start(byte_range.start))?;
     let mut reader = BufReader::new(file);
     let mut current_offset = byte_range.start;
+
+    // Skip to end of current line (which is likely in the middle of a record)
     let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line)?;
+    if bytes_read == 0 {
+        return Ok(byte_range.end);
+    }
+    current_offset += bytes_read as u64;
+
+    // FASTQ format: exactly 4 lines per record
+    // Line 1: @header
+    // Line 2: sequence (ACGTN...)
+    // Line 3: + (separator)
+    // Line 4: quality (same length as sequence!)
+    //
+    // Critical: Quality scores can start with '@', so we must validate all 4 lines
+    // The strongest check is: len(sequence) == len(quality)
+
+    // Allow searching beyond end_offset to find a valid boundary
+    // Typical FASTQ record: ~100-500 bytes, allow up to 2000 bytes search
+    let search_limit = byte_range.end + 2000;
+
+    // Strategy: Sliding window of 4 lines, checking each window for valid FASTQ pattern
+    // This avoids the complexity of seeking back after false matches
+    let mut lines_buffer: Vec<(String, u64)> = Vec::new(); // (line_content, line_start_offset)
 
     loop {
         line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
-        if bytes_read == 0 {
+        let line_start = current_offset;
+        let line_bytes = reader.read_line(&mut line)?;
+        if line_bytes == 0 {
+            // EOF reached
             return Ok(byte_range.end);
         }
 
-        if line.starts_with('@') {
-            return Ok(current_offset);
+        lines_buffer.push((line.clone(), line_start));
+        current_offset += line_bytes as u64;
+
+        // Keep only last 4 lines in buffer
+        if lines_buffer.len() > 4 {
+            lines_buffer.remove(0);
         }
 
-        current_offset += bytes_read as u64;
-        if current_offset >= byte_range.end {
+        // Check if we have a valid FASTQ record (need exactly 4 lines)
+        if lines_buffer.len() == 4 {
+            let (line0, offset0) = &lines_buffer[0];
+            let (line1, _) = &lines_buffer[1];
+            let (line2, _) = &lines_buffer[2];
+            let (line3, _) = &lines_buffer[3];
+
+            // Validate FASTQ structure:
+            // 1. Line 0 starts with '@' (header)
+            // 2. Line 2 starts with '+' (separator)
+            // 3. Line 1 (sequence) and Line 3 (quality) have the same length
+            if line0.starts_with('@') && line2.starts_with('+') {
+                let seq_len = line1.trim_end().len();
+                let qual_len = line3.trim_end().len();
+
+                // Strong validation: sequence and quality must have identical length
+                if seq_len == qual_len && seq_len > 0 {
+                    // This is a valid FASTQ record!
+                    return Ok(*offset0);
+                }
+            }
+        }
+
+        // Give up if we've searched too far past the end
+        if current_offset >= search_limit {
             return Ok(byte_range.end);
         }
     }
 }
+
+
 
 fn open_local_fastq_reader_at_range(
     file_path: &str,
