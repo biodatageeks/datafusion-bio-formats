@@ -119,53 +119,88 @@ pub fn get_local_fastq_reader(file_path: String) -> Result<Reader<BufReader<File
     reader
 }
 
+fn resolve_fastq_range_start(file_path: &str, byte_range: &FastqByteRange) -> Result<u64, Error> {
+    if byte_range.start == 0 {
+        return Ok(0);
+    }
+
+    let mut file = std::fs::File::open(file_path)?;
+    file.seek(SeekFrom::Start(byte_range.start))?;
+    let mut reader = BufReader::new(file);
+    let mut current_offset = byte_range.start;
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            return Ok(byte_range.end);
+        }
+
+        if line.starts_with('@') {
+            return Ok(current_offset);
+        }
+
+        current_offset += bytes_read as u64;
+        if current_offset >= byte_range.end {
+            return Ok(byte_range.end);
+        }
+    }
+}
+
+fn open_local_fastq_reader_at_range(
+    file_path: &str,
+    byte_range: &FastqByteRange,
+) -> Result<(Reader<BufReader<File>>, u64), Error> {
+    if byte_range.start > byte_range.end {
+        return Err(Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "Invalid byte range: start ({}) > end ({})",
+                byte_range.start, byte_range.end
+            ),
+        ));
+    }
+
+    let actual_start = resolve_fastq_range_start(file_path, byte_range)?;
+
+    let mut file = std::fs::File::open(file_path)?;
+    file.seek(SeekFrom::Start(actual_start))?;
+    let reader = BufReader::new(file);
+    Ok((fastq::io::Reader::new(reader), actual_start))
+}
+
 /// Create a reader that seeks to a specific byte range and handles FASTQ record boundaries
 pub fn get_local_fastq_reader_with_range(
     file_path: String,
     byte_range: FastqByteRange,
 ) -> Result<Reader<BufReader<LimitedRangeFile>>, Error> {
-    // Validate byte range
     if byte_range.start > byte_range.end {
         return Err(Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("Invalid byte range: start ({}) > end ({})", byte_range.start, byte_range.end)
+            format!(
+                "Invalid byte range: start ({}) > end ({})",
+                byte_range.start, byte_range.end
+            ),
         ));
     }
 
+    let actual_start = resolve_fastq_range_start(&file_path, &byte_range)?;
     let mut file = std::fs::File::open(&file_path)?;
 
-    // Seek to the start position
-    let actual_start = if byte_range.start > 0 {
-        file.seek(SeekFrom::Start(byte_range.start))?;
+    // If there's no complete record within the requested window, return an empty reader.
+    if actual_start >= byte_range.end {
+        file.seek(SeekFrom::Start(byte_range.end))?;
+        let limited = LimitedRangeFile::new(file, byte_range.end, byte_range.end);
+        return Ok(fastq::io::Reader::new(BufReader::new(limited)));
+    }
 
-        // Find the next FASTQ record boundary (line starting with '@')
-        let mut buf_reader = BufReader::new(&mut file);
-        let boundary_start = find_next_fastq_record_boundary(&mut buf_reader, byte_range.start)?;
-
-        // If boundary is beyond end offset, return empty range
-        if boundary_start >= byte_range.end {
-            // Create an empty range file
-            file = std::fs::File::open(&file_path)?;
-            let limited_file = LimitedRangeFile::new(file, boundary_start, boundary_start);
-            let reader = BufReader::new(limited_file);
-            return Ok(fastq::io::Reader::new(reader));
-        }
-
-        // Reopen file and seek to the actual start boundary
-        file = std::fs::File::open(&file_path)?;
-        file.seek(SeekFrom::Start(boundary_start))?;
-        boundary_start
-    } else {
-        0
-    };
-
-    // Create a limited range file wrapper that stops reading at end offset
-    let limited_file = LimitedRangeFile::new(file, actual_start, byte_range.end);
-    let reader = BufReader::new(limited_file);
-    Ok(fastq::io::Reader::new(reader))
+    file.seek(SeekFrom::Start(actual_start))?;
+    let limited = LimitedRangeFile::new(file, actual_start, byte_range.end);
+    Ok(fastq::io::Reader::new(BufReader::new(limited)))
 }
 
-/// A file wrapper that limits reading to a specific byte range
+/// A file wrapper that limits reading to a specific byte range.
 pub struct LimitedRangeFile {
     file: File,
     start_offset: u64,
@@ -187,16 +222,15 @@ impl LimitedRangeFile {
 impl std::io::Read for LimitedRangeFile {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.current_position >= self.end_offset {
-            return Ok(0); // EOF - no more bytes to read in this range
-        }
-
-        let remaining_bytes = (self.end_offset - self.current_position) as usize;
-        let bytes_to_read = std::cmp::min(buf.len(), remaining_bytes);
-
-        if bytes_to_read == 0 {
             return Ok(0);
         }
 
+        let remaining = (self.end_offset - self.current_position) as usize;
+        if remaining == 0 {
+            return Ok(0);
+        }
+
+        let bytes_to_read = std::cmp::min(buf.len(), remaining);
         let bytes_read = self.file.read(&mut buf[..bytes_to_read])?;
         self.current_position += bytes_read as u64;
         Ok(bytes_read)
@@ -205,63 +239,59 @@ impl std::io::Read for LimitedRangeFile {
 
 impl std::io::Seek for LimitedRangeFile {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        let new_pos = match pos {
+        let target = match pos {
             SeekFrom::Start(offset) => self.start_offset + offset,
             SeekFrom::Current(offset) => (self.current_position as i64 + offset) as u64,
             SeekFrom::End(offset) => (self.end_offset as i64 + offset) as u64,
         };
 
-        // Clamp position to valid range
-        let clamped_pos = std::cmp::max(self.start_offset, std::cmp::min(new_pos, self.end_offset));
-
-        let actual_pos = self.file.seek(SeekFrom::Start(clamped_pos))?;
-        self.current_position = actual_pos;
-        Ok(actual_pos - self.start_offset)
+        let clamped = target.clamp(self.start_offset, self.end_offset);
+        let actual = self.file.seek(SeekFrom::Start(clamped))?;
+        self.current_position = actual;
+        Ok(actual - self.start_offset)
     }
 }
 
-/// Find the next FASTQ record boundary starting from current position
-fn find_next_fastq_record_boundary(reader: &mut BufReader<&mut File>, start_offset: u64) -> Result<u64, Error> {
-    let mut current_offset = start_offset;
-    let mut line = String::new();
+/// A FASTQ reader that tracks position and stops at byte boundaries
+pub struct PositionTrackingFastqReader {
+    reader: Reader<BufReader<File>>,
+    end_offset: u64,
+    current_pos: u64,
+}
 
-    // If we're at the start of file, no need to search
-    if start_offset == 0 {
-        return Ok(0);
+impl PositionTrackingFastqReader {
+    pub fn new(reader: Reader<BufReader<File>>, start_pos: u64, end_offset: u64) -> Self {
+        Self {
+            reader,
+            end_offset,
+            current_pos: start_pos,
+        }
     }
 
-    // First, skip to end of current line to get to a line boundary
-    line.clear();
-    let bytes_read = reader.read_line(&mut line)?;
-    if bytes_read == 0 {
-        // EOF reached
-        return Ok(current_offset);
-    }
-    current_offset += bytes_read as u64;
+    /// Read records while tracking position and respecting end boundary
+    /// Strategy: Include a record if it STARTS before the end offset, even if it extends beyond
+    pub fn records(&mut self) -> impl Iterator<Item = Result<noodles_fastq::Record, Error>> + '_ {
+        std::iter::from_fn(move || {
+            if self.current_pos >= self.end_offset {
+                return None;
+            }
 
-    // Now search for next FASTQ record starting with '@'
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line)?;
+            let mut record = noodles_fastq::Record::default();
+            match self.reader.read_record(&mut record) {
+                Ok(0) => None,
+                Ok(bytes_read) => {
+                    let record_start = self.current_pos;
+                    self.current_pos += bytes_read as u64;
 
-        if bytes_read == 0 {
-            // EOF reached, return current offset
-            return Ok(current_offset);
-        }
-
-        // Check if this line starts a new FASTQ record
-        if line.starts_with('@') && line.trim().len() > 1 {
-            // Found a potential record start
-            return Ok(current_offset);
-        }
-
-        current_offset += bytes_read as u64;
-
-        // Safety check to avoid infinite loops
-        if current_offset > start_offset + 10000 {
-            // If we can't find a boundary within 10KB, just return current position
-            return Ok(current_offset);
-        }
+                    if record_start < self.end_offset {
+                        Some(Ok(record))
+                    } else {
+                        None
+                    }
+                }
+                Err(e) => Some(Err(e)),
+            }
+        })
     }
 }
 
@@ -378,7 +408,7 @@ pub enum FastqLocalReader {
         >,
     ),
     PLAIN(Reader<BufReader<File>>),
-    PlainRanged(Reader<BufReader<LimitedRangeFile>>),
+    PlainRanged(PositionTrackingFastqReader),
 }
 
 impl FastqLocalReader {
@@ -426,9 +456,11 @@ impl FastqLocalReader {
             CompressionType::NONE => {
                 // Uncompressed: direct byte range seeking
                 if let Some(range) = byte_range {
-                    // Use the new byte range reader with proper boundary synchronization
-                    let reader = get_local_fastq_reader_with_range(file_path, range)?;
-                    Ok(FastqLocalReader::PlainRanged(reader))
+                    let (reader, actual_start) =
+                        open_local_fastq_reader_at_range(&file_path, &range)?;
+                    let tracking_reader =
+                        PositionTrackingFastqReader::new(reader, actual_start, range.end);
+                    Ok(FastqLocalReader::PlainRanged(tracking_reader))
                 } else {
                     let reader = get_local_fastq_reader(file_path)?;
                     Ok(FastqLocalReader::PLAIN(reader))

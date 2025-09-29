@@ -1,4 +1,4 @@
-use datafusion_bio_format_fastq::storage::{get_local_fastq_reader_with_range, FastqLocalReader};
+use datafusion_bio_format_fastq::storage::{FastqLocalReader, get_local_fastq_reader_with_range};
 use datafusion_bio_format_fastq::table_provider::FastqByteRange;
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -15,24 +15,21 @@ fn create_test_fastq_file() -> std::io::Result<NamedTempFile> {
         "+\n",                // 2 bytes
         "IIIIIIIIIIIIIIII\n", // 17 bytes
         // Total: 43 bytes per record
-
         "@read2\n",           // 7 bytes
         "GCTAGCTAGCTAGCTA\n", // 17 bytes
         "+\n",                // 2 bytes
         "HHHHHHHHHHHHHHHH\n", // 17 bytes
         // Total: 43 bytes per record
-
         "@read3\n",           // 7 bytes
         "TTTTAAAACCCCGGGG\n", // 17 bytes
         "+\n",                // 2 bytes
         "JJJJJJJJJJJJJJJJ\n", // 17 bytes
         // Total: 43 bytes per record
-
         "@read4\n",           // 7 bytes
         "AAAATTTTCCCCGGGG\n", // 17 bytes
         "+\n",                // 2 bytes
         "KKKKKKKKKKKKKKKK\n", // 17 bytes
-        // Total: 43 bytes per record
+                              // Total: 43 bytes per record
     );
 
     temp_file.write_all(fastq_content.as_bytes())?;
@@ -46,7 +43,10 @@ fn test_full_file_reading() -> std::io::Result<()> {
     let file_path = temp_file.path().to_string_lossy().to_string();
 
     // Read entire file
-    let byte_range = FastqByteRange { start: 0, end: 1000 }; // Large end range
+    let byte_range = FastqByteRange {
+        start: 0,
+        end: 1000,
+    }; // Large end range
     let mut reader = get_local_fastq_reader_with_range(file_path, byte_range)?;
 
     let mut record_count = 0;
@@ -88,7 +88,10 @@ fn test_byte_range_second_half() -> std::io::Result<()> {
     let file_path = temp_file.path().to_string_lossy().to_string();
 
     // Start from middle of file - should find next record boundary
-    let byte_range = FastqByteRange { start: 50, end: 200 }; // Start mid-file
+    let byte_range = FastqByteRange {
+        start: 50,
+        end: 200,
+    }; // Start mid-file
     let mut reader = get_local_fastq_reader_with_range(file_path, byte_range)?;
 
     let mut record_count = 0;
@@ -115,7 +118,10 @@ fn test_byte_range_middle_split() -> std::io::Result<()> {
     let file_path = temp_file.path().to_string_lossy().to_string();
 
     // Create byte range that starts and ends in middle of records
-    let byte_range = FastqByteRange { start: 20, end: 100 };
+    let byte_range = FastqByteRange {
+        start: 20,
+        end: 100,
+    };
     let mut reader = get_local_fastq_reader_with_range(file_path, byte_range)?;
 
     let mut record_count = 0;
@@ -165,8 +171,14 @@ fn test_byte_range_end_boundary() -> std::io::Result<()> {
         }
     }
 
-    assert!(record_count >= 1, "Should read at least 1 record within 50-byte limit");
-    assert!(record_count <= 2, "Should not read more than 2 records within 50-byte limit");
+    assert!(
+        record_count >= 1,
+        "Should read at least 1 record within 50-byte limit"
+    );
+    assert!(
+        record_count <= 2,
+        "Should not read more than 2 records within 50-byte limit"
+    );
     Ok(())
 }
 
@@ -196,7 +208,10 @@ fn test_byte_range_at_record_boundary() -> std::io::Result<()> {
     let file_path = temp_file.path().to_string_lossy().to_string();
 
     // Start near beginning of read3 (around byte 80-90)
-    let byte_range = FastqByteRange { start: 80, end: 200 };
+    let byte_range = FastqByteRange {
+        start: 80,
+        end: 200,
+    };
     let mut reader = get_local_fastq_reader_with_range(file_path, byte_range)?;
 
     let mut record_count = 0;
@@ -220,11 +235,17 @@ fn test_byte_range_at_record_boundary() -> std::io::Result<()> {
     }
 
     assert!(record_count >= 1, "Should read at least 1 record");
-    assert!(record_count <= 2, "Should read at most 2 records within byte range");
+    assert!(
+        record_count <= 2,
+        "Should read at most 2 records within byte range"
+    );
     // The first record should be read3 or later (not read1 or read2)
     if !record_names.is_empty() {
-        assert!(record_names[0] == "read3" || record_names[0] == "read4",
-                "Should read read3 or read4, got: {}", record_names[0]);
+        assert!(
+            record_names[0] == "read3" || record_names[0] == "read4",
+            "Should read read3 or read4, got: {}",
+            record_names[0]
+        );
     }
     Ok(())
 }
@@ -243,8 +264,9 @@ async fn test_integration_with_fastq_local_reader() -> std::io::Result<()> {
         file_path,
         1, // single thread
         byte_range,
-        storage_opts
-    ).await?;
+        storage_opts,
+    )
+    .await?;
 
     let mut record_count = 0;
     let mut record_stream = reader.read_records().await;
@@ -265,7 +287,10 @@ fn test_invalid_byte_range() {
     let file_path = temp_file.path().to_string_lossy().to_string();
 
     // Invalid range where start > end
-    let byte_range = FastqByteRange { start: 100, end: 50 };
+    let byte_range = FastqByteRange {
+        start: 100,
+        end: 50,
+    };
     let result = get_local_fastq_reader_with_range(file_path, byte_range);
 
     // Should handle gracefully (implementation detail - might return empty or error)
