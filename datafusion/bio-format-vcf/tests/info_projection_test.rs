@@ -572,9 +572,9 @@ async fn test_info_projection_no_projection_all_fields() -> Result<(), Box<dyn s
     assert_eq!(batch.schema().field(7).name(), "filter");
 
     // Verify INFO fields
-    assert_eq!(batch.schema().field(8).name(), "AC");
-    assert_eq!(batch.schema().field(9).name(), "AF");
-    assert_eq!(batch.schema().field(10).name(), "AN");
+    assert_eq!(batch.schema().field(8).name(), "ac");
+    assert_eq!(batch.schema().field(9).name(), "af");
+    assert_eq!(batch.schema().field(10).name(), "an");
 
     Ok(())
 }

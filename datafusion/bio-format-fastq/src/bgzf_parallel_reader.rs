@@ -44,7 +44,7 @@ impl BgzfFastqTableProvider {
     }
 }
 
-fn get_bgzf_partition_bounds(index: &gzi::Index, thread_num: usize) -> Vec<(u64, u64)> {
+pub fn get_bgzf_partition_bounds(index: &gzi::Index, thread_num: usize) -> Vec<(u64, u64)> {
     let mut block_offsets: Vec<(u64, u64)> = index.as_ref().iter().map(|(c, u)| (*c, *u)).collect();
     block_offsets.insert(0, (0, 0));
 
@@ -178,7 +178,7 @@ fn find_line_end(buf: &[u8], start: usize) -> Option<usize> {
         .map(|pos| start + pos)
 }
 
-fn synchronize_reader<R: BufRead>(reader: &mut IndexedReader<R>, end_comp: u64) -> io::Result<()> {
+pub fn synchronize_reader<R: BufRead>(reader: &mut IndexedReader<R>, end_comp: u64) -> io::Result<()> {
     // DO NOT perform an initial read_until, as it can discard a valid header
     // if the initial seek lands exactly on the start of a line.
     // The loop below is capable of handling any starting position.
@@ -430,7 +430,7 @@ impl ExecutionPlan for BgzfFastqExec {
             self.schema(),
             rx.map(move |(item, count)| {
                 debug!("Partition {}: processed {} rows", partition, count);
-                item.map_err(|e| DataFusionError::ArrowError(e, None))
+                item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
             }),
         )))
     }
