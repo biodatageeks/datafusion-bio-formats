@@ -201,16 +201,16 @@ impl BgzfRangedFastqReader {
         static READER_COUNTER: AtomicU64 = AtomicU64::new(0);
         let reader_id = READER_COUNTER.fetch_add(1, Ordering::SeqCst);
 
-        eprintln!("DEBUG BgzfRangedFastqReader#{} - start={}, end={}", reader_id, start_offset, end_offset);
+        log::debug!("BgzfRangedFastqReader#{} - start={}, end={}", reader_id, start_offset, end_offset);
         Self {
             reader,
             start_offset,
             end_offset,
             state: if start_offset == 0 {
-                eprintln!("DEBUG Reader#{} - Partition 0, starting in Reading state", reader_id);
+                log::debug!("Reader#{} - Partition 0, starting in Reading state", reader_id);
                 ReaderState::Reading  // Partition 0 starts at beginning
             } else {
-                eprintln!("DEBUG Reader#{} - Non-zero partition, starting in Uninitialized state", reader_id);
+                log::debug!("Reader#{} - Non-zero partition, starting in Uninitialized state", reader_id);
                 ReaderState::Uninitialized  // Need to sync
             },
         }
@@ -220,7 +220,7 @@ impl BgzfRangedFastqReader {
     fn initialize(&mut self) -> Result<(), Error> {
         // Record position before synchronization to detect if we moved
         let pos_before_sync = self.reader.get_ref().virtual_position().compressed();
-        eprintln!("DEBUG initialize - pos_before_sync={}", pos_before_sync);
+        log::debug!("initialize - pos_before_sync={}", pos_before_sync);
 
         // Synchronize to next complete FASTQ record
         synchronize_bgzf_fastq_reader(&mut self.reader.get_mut(), self.end_offset)?;
@@ -228,7 +228,7 @@ impl BgzfRangedFastqReader {
         // Record the position after synchronization
         let sync_pos = self.reader.get_ref().virtual_position().compressed();
         let moved = sync_pos != pos_before_sync;
-        eprintln!("DEBUG initialize - sync_pos={}, moved={}", sync_pos, moved);
+        log::debug!("initialize - sync_pos={}, moved={}", sync_pos, moved);
 
         if sync_pos >= self.end_offset {
             // Synchronization went past our range - no records for us
@@ -261,14 +261,14 @@ impl BgzfRangedFastqReader {
 
                     let sync_pos = *sync_position;
                     let moved = *moved_during_sync;
-                    eprintln!("DEBUG Synchronized state - sync_pos={}, start_offset={}, moved={}",
+                    log::debug!("Synchronized state - sync_pos={}, start_offset={}, moved={}",
                              sync_pos, self.start_offset, moved);
 
                     if moved {
                         // We had to search forward to find a record boundary
                         // This means the record started before our partition boundary
                         // Previous partition owns it
-                        eprintln!("DEBUG - Skipping first record (moved during sync, started before boundary)");
+                        log::debug!("Skipping first record (moved during sync, started before boundary)");
                         let mut dummy = noodles_fastq::Record::default();
                         self.reader.read_record(&mut dummy)?;
                         self.state = ReaderState::Reading;
@@ -276,7 +276,7 @@ impl BgzfRangedFastqReader {
                     } else {
                         // We landed exactly on a record boundary
                         // This record starts at our partition boundary - we own it
-                        eprintln!("DEBUG - Owning first record (landed exactly on record boundary)");
+                        log::debug!("Owning first record (landed exactly on record boundary)");
                         self.state = ReaderState::Reading;
                         continue;
                     }
