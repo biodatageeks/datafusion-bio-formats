@@ -8,6 +8,7 @@ use datafusion_bio_format_core::object_storage::{
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
 use noodles::bgzf;
+use noodles_bgzf::gzi;
 use noodles_fastq as fastq;
 use noodles_fastq::Record;
 use noodles_fastq::io::Reader;
@@ -110,6 +111,277 @@ pub fn get_local_fastq_bgzf_reader(
         })
         .map(fastq::io::Reader::new);
     reader
+}
+
+/// Helper to find line end in buffer
+fn find_line_end(buf: &[u8], start: usize) -> Option<usize> {
+    buf[start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|pos| start + pos)
+}
+
+/// Synchronize BGZF reader to next valid FASTQ record boundary
+fn synchronize_bgzf_fastq_reader<R: BufRead>(
+    reader: &mut noodles_bgzf::IndexedReader<R>,
+    end_comp: u64,
+) -> Result<(), Error> {
+    loop {
+        if reader.virtual_position().compressed() >= end_comp {
+            return Ok(());
+        }
+
+        let buf = reader.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(()); // EOF
+        }
+
+        // Find the first potential header line starting with '@'
+        if let Some(at_pos) = buf.iter().position(|&b| b == b'@') {
+            // Validate it's a real FASTQ record by checking for '+' on third line
+            if let Some(l1_end) = find_line_end(buf, at_pos) {
+                if let Some(l2_end) = find_line_end(buf, l1_end + 1) {
+                    if let Some(l3_start) = l2_end.checked_add(1) {
+                        if buf.get(l3_start) == Some(&b'+') {
+                            // Valid record found, consume up to start of record
+                            reader.consume(at_pos);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+            // False positive or incomplete buffer, consume and retry
+            if let Some(end_of_at_line) = find_line_end(buf, at_pos) {
+                reader.consume(end_of_at_line + 1);
+            } else {
+                let len = buf.len();
+                reader.consume(len);
+            }
+        } else {
+            // No '@' found, consume entire buffer
+            let len = buf.len();
+            reader.consume(len);
+        }
+    }
+}
+
+/// Partition-aware BGZF FASTQ reader with proper boundary handling
+///
+/// This reader ensures each record is read by exactly ONE partition:
+/// - Records that START in [start, end) are owned by this partition and read completely
+/// - Records that START before start are skipped (owned by previous partition)
+/// - Records that START at/after end are not read (owned by next partition)
+/// - Records can EXTEND past end boundary if they START before it
+pub struct BgzfRangedFastqReader {
+    reader: fastq::io::Reader<noodles_bgzf::IndexedReader<BufReader<File>>>,
+    start_offset: u64,  // Compressed offset where partition starts
+    end_offset: u64,    // Compressed offset where partition ends
+    state: ReaderState,
+}
+
+#[derive(Debug)]
+enum ReaderState {
+    /// Initial state - need to synchronize and check ownership
+    Uninitialized,
+    /// After sync, positioned at first record - need to check if we own it
+    Synchronized { sync_position: u64, moved_during_sync: bool },
+    /// Normal reading state
+    Reading,
+    /// Reached end of partition or EOF
+    Finished,
+}
+
+impl BgzfRangedFastqReader {
+    pub fn new(
+        reader: fastq::io::Reader<noodles_bgzf::IndexedReader<BufReader<File>>>,
+        start_offset: u64,
+        end_offset: u64,
+    ) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static READER_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let reader_id = READER_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        eprintln!("DEBUG BgzfRangedFastqReader#{} - start={}, end={}", reader_id, start_offset, end_offset);
+        Self {
+            reader,
+            start_offset,
+            end_offset,
+            state: if start_offset == 0 {
+                eprintln!("DEBUG Reader#{} - Partition 0, starting in Reading state", reader_id);
+                ReaderState::Reading  // Partition 0 starts at beginning
+            } else {
+                eprintln!("DEBUG Reader#{} - Non-zero partition, starting in Uninitialized state", reader_id);
+                ReaderState::Uninitialized  // Need to sync
+            },
+        }
+    }
+
+    /// Initialize reader by synchronizing to record boundary
+    fn initialize(&mut self) -> Result<(), Error> {
+        // Record position before synchronization to detect if we moved
+        let pos_before_sync = self.reader.get_ref().virtual_position().compressed();
+        eprintln!("DEBUG initialize - pos_before_sync={}", pos_before_sync);
+
+        // Synchronize to next complete FASTQ record
+        synchronize_bgzf_fastq_reader(&mut self.reader.get_mut(), self.end_offset)?;
+
+        // Record the position after synchronization
+        let sync_pos = self.reader.get_ref().virtual_position().compressed();
+        let moved = sync_pos != pos_before_sync;
+        eprintln!("DEBUG initialize - sync_pos={}, moved={}", sync_pos, moved);
+
+        if sync_pos >= self.end_offset {
+            // Synchronization went past our range - no records for us
+            self.state = ReaderState::Finished;
+        } else {
+            // Pass info about whether we moved during sync
+            self.state = ReaderState::Synchronized {
+                sync_position: sync_pos,
+                moved_during_sync: moved,
+            };
+        }
+
+        Ok(())
+    }
+
+    /// Read a single record while respecting partition boundaries
+    /// Returns the number of bytes read (0 indicates EOF or end of range)
+    pub fn read_record(&mut self, record: &mut noodles_fastq::Record) -> Result<usize, Error> {
+        loop {
+            match &self.state {
+                ReaderState::Uninitialized => {
+                    self.initialize()?;
+                    continue;
+                }
+                ReaderState::Synchronized { sync_position, moved_during_sync } => {
+                    // We're at the first record after sync
+                    // Decision: skip or own?
+                    // - If we MOVED during sync: record started before our boundary → skip it
+                    // - If we DIDN'T move: we landed exactly on a record start → own it
+
+                    let sync_pos = *sync_position;
+                    let moved = *moved_during_sync;
+                    eprintln!("DEBUG Synchronized state - sync_pos={}, start_offset={}, moved={}",
+                             sync_pos, self.start_offset, moved);
+
+                    if moved {
+                        // We had to search forward to find a record boundary
+                        // This means the record started before our partition boundary
+                        // Previous partition owns it
+                        eprintln!("DEBUG - Skipping first record (moved during sync, started before boundary)");
+                        let mut dummy = noodles_fastq::Record::default();
+                        self.reader.read_record(&mut dummy)?;
+                        self.state = ReaderState::Reading;
+                        continue;
+                    } else {
+                        // We landed exactly on a record boundary
+                        // This record starts at our partition boundary - we own it
+                        eprintln!("DEBUG - Owning first record (landed exactly on record boundary)");
+                        self.state = ReaderState::Reading;
+                        continue;
+                    }
+                }
+                ReaderState::Finished => {
+                    return Ok(0);
+                }
+                ReaderState::Reading => {
+                    // Check position BEFORE reading
+                    let pos_before = self.reader.get_ref().virtual_position().compressed();
+
+                    if pos_before >= self.end_offset {
+                        self.state = ReaderState::Finished;
+                        return Ok(0);
+                    }
+
+                    // Read the record - it's ours because it starts in our range
+                    return self.reader.read_record(record);
+                }
+            }
+        }
+    }
+
+    /// Read records while respecting partition boundaries
+    /// Strategy:
+    /// - Synchronize to first complete record (if not partition 0)
+    /// - Check if synchronized record is owned by this partition
+    /// - Read all records that START before end_offset (even if they extend past)
+    pub fn records(&mut self) -> impl Iterator<Item = Result<noodles_fastq::Record, Error>> + '_ {
+        std::iter::from_fn(move || {
+            let mut record = noodles_fastq::Record::default();
+            match self.read_record(&mut record) {
+                Ok(0) => None,
+                Ok(_) => Some(Ok(record)),
+                Err(e) => Some(Err(e)),
+            }
+        })
+    }
+}
+
+/// Read GZI index file for BGZF
+pub fn read_gzi_index(gzi_path: &str) -> Result<gzi::Index, Error> {
+    gzi::read(std::path::Path::new(gzi_path)).map_err(|e| {
+        Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Failed to read GZI index {}: {}", gzi_path, e),
+        )
+    })
+}
+
+/// Create a local BGZF reader with GZI index for byte range reading
+///
+/// Implements proper partition boundary handling:
+/// - Seeks to the BGZF block containing start_offset
+/// - For non-zero start: synchronizes to next complete record, checks ownership
+/// - Records starting in [start, end) are owned and read completely (even if extending past end)
+/// - Records starting before start or at/after end are not read by this partition
+///
+/// This ensures each record is read exactly once across all partitions with no overlaps.
+pub fn get_local_fastq_bgzf_reader_with_range(
+    file_path: String,
+    byte_range: FastqByteRange,
+) -> Result<BgzfRangedFastqReader, Error> {
+    // Read GZI index (file_path + ".gzi")
+    let gzi_path = format!("{}.gzi", file_path);
+    let index = read_gzi_index(&gzi_path)?;
+
+    // Open file and create indexed reader
+    let file = std::fs::File::open(&file_path)?;
+    let mut reader = noodles_bgzf::IndexedReader::new(BufReader::new(file), index.clone());
+
+    // Find the BGZF block that contains or comes before our start_offset
+    // The GZI index gives us (compressed_offset, uncompressed_offset) pairs
+    let virtual_pos = if byte_range.start == 0 {
+        // Start at beginning
+        0
+    } else {
+        // Find the block at or before our start offset
+        let mut target_comp = 0u64;
+        let mut target_uncomp = 0u64;
+
+        for (comp, uncomp) in index.as_ref().iter() {
+            if *comp <= byte_range.start {
+                target_comp = *comp;
+                target_uncomp = *uncomp;
+            } else {
+                break; // Found the block after our target
+            }
+        }
+
+        // Use the uncompressed offset as the seek position
+        // IndexedReader will use the GZI index to find the right block
+        target_uncomp
+    };
+
+    // Seek to the virtual position
+    reader.seek(SeekFrom::Start(virtual_pos))?;
+
+    // Create partition-aware reader
+    // It will handle synchronization and ownership checking internally
+    Ok(BgzfRangedFastqReader::new(
+        fastq::io::Reader::new(reader),
+        byte_range.start,  // Compressed offset
+        byte_range.end,    // Compressed offset
+    ))
 }
 
 pub fn get_local_fastq_reader(file_path: String) -> Result<Reader<BufReader<File>>, Error> {
@@ -457,6 +729,7 @@ impl FastqRemoteReader {
 
 pub enum FastqLocalReader {
     BGZF(fastq::io::Reader<bgzf::MultithreadedReader<std::fs::File>>),
+    BGZFRanged(BgzfRangedFastqReader),
     GZIP(
         fastq::r#async::io::Reader<
             tokio::io::BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>,
@@ -492,10 +765,15 @@ impl FastqLocalReader {
 
         match compression_type {
             CompressionType::BGZF => {
-                // For distributed reading, force single-threaded to avoid conflicts
-                let effective_thread_num = if byte_range.is_some() { 1 } else { thread_num };
-                let reader = get_local_fastq_bgzf_reader(file_path, effective_thread_num)?;
-                Ok(FastqLocalReader::BGZF(reader))
+                if let Some(range) = byte_range {
+                    // Use IndexedReader with GZI index for range reading
+                    let reader = get_local_fastq_bgzf_reader_with_range(file_path, range)?;
+                    Ok(FastqLocalReader::BGZFRanged(reader))
+                } else {
+                    // Use MultithreadedReader for full-file reading
+                    let reader = get_local_fastq_bgzf_reader(file_path, thread_num)?;
+                    Ok(FastqLocalReader::BGZF(reader))
+                }
             }
             CompressionType::GZIP => {
                 // Regular gzip: not splittable, must read from start
@@ -531,6 +809,7 @@ impl FastqLocalReader {
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             FastqLocalReader::BGZF(reader) => stream::iter(reader.records()).boxed(),
+            FastqLocalReader::BGZFRanged(reader) => stream::iter(reader.records()).boxed(),
             FastqLocalReader::GZIP(reader) => reader.records().boxed(),
             FastqLocalReader::PLAIN(reader) => stream::iter(reader.records()).boxed(),
             FastqLocalReader::PlainRanged(reader) => stream::iter(reader.records()).boxed(),
