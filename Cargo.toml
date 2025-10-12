@@ -4,6 +4,7 @@ resolver = "2"
 members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bed",
     "datafusion/bio-format-core", "datafusion/bio-format-fastq", "datafusion/bio-format-gff",
     "datafusion/bio-format-vcf", "datafusion/bio-format-bam", "datafusion/bio-format-fasta",
+    "datafusion/bio-format-cram",
 ]
 
 
@@ -12,9 +13,12 @@ datafusion = {version = "48.0.1"}
 datafusion-execution = "48.0.1"
 async-trait = "0.1.85"
 opendal = { version = "0.53.3", features = ["services-gcs", "services-s3","layers-blocking", "services-azblob", "services-http"] }
-noodles = { version = "0.93.0",  features = ["bam", "vcf", "bgzf", "async"]}
+noodles = { version = "0.93.0",  features = ["bam", "vcf", "bgzf", "cram", "async"]}
 
 noodles-bgzf = { version = "0.36.0",features = ["libdeflate"] }
+noodles-cram = { version = "0.81.0", features = ["async"] }
+noodles-sam = { version = "0.74.0" }
+noodles-fasta = { version = "0.51.0", features = ["async"] }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "rt", "macros"] }
 tokio-util = {  version="0.7.13", features = ["io-util", "compat"] }
 bytes = "1.10.0"

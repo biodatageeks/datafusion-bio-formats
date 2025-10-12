@@ -1,0 +1,25 @@
+[package]
+name = "datafusion-bio-format-cram"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+datafusion.workspace = true
+opendal.workspace = true
+noodles-bgzf.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+datafusion-bio-format-core = {path = "../bio-format-core"}
+futures.workspace = true
+futures-util.workspace = true
+noodles-cram.workspace = true
+noodles-sam.workspace = true
+noodles-fasta.workspace = true
+async-stream = "0.3.6"
+log = "0.4.27"
+async-trait = "0.1.88"
+
+[[example]]
+name = "test_reader"
+path = "./examples/test_reader.rs"
