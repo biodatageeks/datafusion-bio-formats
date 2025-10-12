@@ -202,7 +202,7 @@ pub async fn get_remote_stream_bgzf_async(
     let remote_stream = StreamReader::new(
         get_remote_stream(file_path.clone(), object_storage_options, None).await?,
     );
-    Ok(bgzf::r#async::Reader::new(remote_stream))
+    Ok(bgzf::AsyncReader::new(remote_stream))
 }
 
 pub async fn get_remote_stream_gz_async(
