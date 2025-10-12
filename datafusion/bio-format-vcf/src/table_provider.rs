@@ -50,7 +50,8 @@ async fn determine_schema_from_header(
                 let dtype = info_to_arrow_type(&header_infos, &tag);
                 let info = header_infos.get(tag.as_str()).unwrap();
                 let nullable = is_nullable(&info.ty());
-                fields.push(Field::new(tag.to_lowercase(), dtype, nullable));
+                // Preserve case sensitivity for INFO fields to avoid conflicts
+                fields.push(Field::new(tag.clone(), dtype, nullable));
             }
         }
         _ => {}
@@ -60,11 +61,8 @@ async fn determine_schema_from_header(
         Some(formats) => {
             for tag in formats {
                 let dtype = format_to_arrow_type(&header_formats, &tag);
-                fields.push(Field::new(
-                    format!("format_{}", tag.to_lowercase()),
-                    dtype,
-                    true,
-                ));
+                // Preserve case sensitivity for FORMAT fields
+                fields.push(Field::new(format!("format_{}", tag), dtype, true));
             }
         }
         _ => {}
