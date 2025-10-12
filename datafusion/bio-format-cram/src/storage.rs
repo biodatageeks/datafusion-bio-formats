@@ -81,7 +81,9 @@ impl ReferenceSequenceRepository {
                 let reader = BufReader::new(file);
 
                 // Read FASTA index
-                let index = fasta::fai::read(&index_path)?;
+                let index_file = File::open(&index_path)?;
+                let mut index_reader = fasta::fai::io::Reader::new(BufReader::new(index_file));
+                let index = index_reader.read_index()?;
 
                 // Create indexed reader
                 let indexed_reader = fasta::io::IndexedReader::new(reader, index);

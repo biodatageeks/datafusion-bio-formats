@@ -19,8 +19,3 @@ async-compression.workspace = true
 async-stream.workspace = true
 log = "0.4.27"
 async-trait = "0.1.81"
-
-[[example]]
-name = "test_reader"
-# Some issue when publishing and path isn't specified, so adding here
-path = "./examples/test_reader.rs"

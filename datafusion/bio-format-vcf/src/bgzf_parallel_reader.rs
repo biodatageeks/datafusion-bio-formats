@@ -207,7 +207,7 @@ impl BgzfVcfExec {
         index: gzi::Index,
         limit: Option<usize>,
         all_info_fields: Vec<String>,
-        all_format_fields: Vec<String>,
+        _all_format_fields: Vec<String>,
     ) -> Self {
         let properties = PlanProperties::new(
             datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),

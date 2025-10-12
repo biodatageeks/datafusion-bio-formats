@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match noodles_bgzf::gzi::fs::read(&gzi_file) {
                 Ok(index) => {
                     let reader = BufReader::new(file);
-                    let mut indexed_reader = noodles_bgzf::IndexedReader::new(reader, index);
+                    let indexed_reader = noodles_bgzf::IndexedReader::new(reader, index);
 
                     let mut vcf_reader = noodles_vcf::io::Reader::new(indexed_reader);
 

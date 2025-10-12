@@ -375,7 +375,7 @@ version = "0.4.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06575e6a9673580f52661c92107baabffbf41e2141373441cbcdc47cb733003c"
 dependencies = [
- "bzip2",
+ "bzip2 0.5.2",
  "flate2",
  "futures-core",
  "memchr",
@@ -599,6 +599,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49ecfb22d906f800d4fe833b6282cf4dc1c298f5057ca0b5445e5c209735ca47"
 dependencies = [
  "bzip2-sys",
+]
+
+[[package]]
+name = "bzip2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bea8dcd42434048e4f7a304411d9273a411f647446c1234a65ce0554923f4cff"
+dependencies = [
+ "libbz2-rs-sys",
 ]
 
 [[package]]
@@ -836,7 +845,7 @@ dependencies = [
  "arrow-schema",
  "async-trait",
  "bytes",
- "bzip2",
+ "bzip2 0.5.2",
  "chrono",
  "datafusion-catalog",
  "datafusion-catalog-listing",
@@ -954,9 +963,9 @@ dependencies = [
  "futures-util",
  "log",
  "noodles-bgzf 0.36.0",
- "noodles-cram 0.82.0",
- "noodles-fasta 0.52.0",
- "noodles-sam 0.75.0",
+ "noodles-cram 0.85.0",
+ "noodles-fasta 0.55.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-sam 0.78.0",
  "opendal",
  "tokio",
  "tokio-util",
@@ -977,7 +986,7 @@ dependencies = [
  "log",
  "noodles 0.93.0",
  "noodles-bgzf 0.36.0",
- "noodles-fasta 0.55.0",
+ "noodles-fasta 0.55.0 (git+https://github.com/biodatageeks/noodles.git?rev=289ef32e7d43d142914fb3f02335044ae293871c)",
  "opendal",
  "tokio",
  "tokio-util",
@@ -1147,7 +1156,7 @@ dependencies = [
  "async-compression",
  "async-trait",
  "bytes",
- "bzip2",
+ "bzip2 0.5.2",
  "chrono",
  "datafusion-common",
  "datafusion-common-runtime",
@@ -2406,6 +2415,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libbz2-rs-sys"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c4a545a15244c7d945065b5d392b2d2d7f21526fba56ce51467b06ed445e8f7"
+
+[[package]]
 name = "libc"
 version = "0.2.175"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2592,22 +2607,6 @@ dependencies = [
 
 [[package]]
 name = "noodles-bam"
-version = "0.79.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4b51fdc1278cd06b161c60d61a85fccbfef024b31a90fa374065b579d4b6e2d"
-dependencies = [
- "bstr",
- "byteorder",
- "indexmap",
- "memchr",
- "noodles-bgzf 0.39.0",
- "noodles-core 0.17.0",
- "noodles-csi 0.47.0",
- "noodles-sam 0.75.0",
-]
-
-[[package]]
-name = "noodles-bam"
 version = "0.81.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05df875ba2b10c2fcc0b12700671682d28392af021339d5edcb918ea8b324811"
@@ -2623,6 +2622,20 @@ dependencies = [
  "noodles-sam 0.77.0",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "noodles-bam"
+version = "0.82.0"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2#7e127da6b6ce4c94df33549a3fc1072f03c0acb2"
+dependencies = [
+ "bstr",
+ "indexmap",
+ "memchr",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-sam 0.78.0",
 ]
 
 [[package]]
@@ -2677,18 +2690,6 @@ dependencies = [
 
 [[package]]
 name = "noodles-bgzf"
-version = "0.39.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c93502a2ed72e16264e7c37fda8fef6e260717787bfed572cdeef0a6bda885aa"
-dependencies = [
- "byteorder",
- "bytes",
- "crossbeam-channel",
- "flate2",
-]
-
-[[package]]
-name = "noodles-bgzf"
 version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f07e5d75eb7e00c1fe140acef39dea0aea2f48a05ab698a16c6797dd0c0db7e4"
@@ -2707,6 +2708,16 @@ dependencies = [
 name = "noodles-bgzf"
 version = "0.42.0"
 source = "git+https://github.com/biodatageeks/noodles.git?rev=289ef32e7d43d142914fb3f02335044ae293871c#289ef32e7d43d142914fb3f02335044ae293871c"
+dependencies = [
+ "bytes",
+ "crossbeam-channel",
+ "flate2",
+]
+
+[[package]]
+name = "noodles-bgzf"
+version = "0.42.0"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2#7e127da6b6ce4c94df33549a3fc1072f03c0acb2"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -2756,6 +2767,14 @@ dependencies = [
 [[package]]
 name = "noodles-core"
 version = "0.18.0"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2#7e127da6b6ce4c94df33549a3fc1072f03c0acb2"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
+name = "noodles-core"
+version = "0.18.0"
 source = "git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c#9b7b2c5b6531373918302d4c07410e583f1b5b5c"
 dependencies = [
  "bstr",
@@ -2771,7 +2790,7 @@ dependencies = [
  "bitflags",
  "bstr",
  "byteorder",
- "bzip2",
+ "bzip2 0.5.2",
  "flate2",
  "futures",
  "indexmap",
@@ -2787,23 +2806,21 @@ dependencies = [
 
 [[package]]
 name = "noodles-cram"
-version = "0.82.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa94c838bb3ce887826712ceb149d2c01f022ff20592c3bb878e0630e2de084e"
+version = "0.85.0"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2#7e127da6b6ce4c94df33549a3fc1072f03c0acb2"
 dependencies = [
  "async-compression",
  "bitflags",
  "bstr",
- "byteorder",
- "bzip2",
+ "bzip2 0.6.0",
  "flate2",
  "futures",
  "indexmap",
  "md-5",
- "noodles-bam 0.79.0",
- "noodles-core 0.17.0",
- "noodles-fasta 0.52.0",
- "noodles-sam 0.75.0",
+ "noodles-bam 0.82.0",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-fasta 0.55.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-sam 0.78.0",
  "pin-project-lite",
  "tokio",
  "xz2",
@@ -2826,20 +2843,6 @@ dependencies = [
 
 [[package]]
 name = "noodles-csi"
-version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9095e33dc91b87006591b4dc5c8afd2884aec92de4916bf1d61900390cf645a7"
-dependencies = [
- "bit-vec",
- "bstr",
- "byteorder",
- "indexmap",
- "noodles-bgzf 0.39.0",
- "noodles-core 0.17.0",
-]
-
-[[package]]
-name = "noodles-csi"
 version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c291585d38573d80921a9b57b47f1da57fdf24969ed8fe0b0f79acc1cce18a42"
@@ -2850,6 +2853,18 @@ dependencies = [
  "indexmap",
  "noodles-bgzf 0.41.0",
  "noodles-core 0.17.0",
+]
+
+[[package]]
+name = "noodles-csi"
+version = "0.50.0"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2#7e127da6b6ce4c94df33549a3fc1072f03c0acb2"
+dependencies = [
+ "bit-vec",
+ "bstr",
+ "indexmap",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
 ]
 
 [[package]]
@@ -2880,20 +2895,6 @@ dependencies = [
 
 [[package]]
 name = "noodles-fasta"
-version = "0.52.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa4df7d2c7b34830e2506632e821e9f78f2927cd28100a36a288c30054310f07"
-dependencies = [
- "bstr",
- "bytes",
- "memchr",
- "noodles-bgzf 0.39.0",
- "noodles-core 0.17.0",
- "tokio",
-]
-
-[[package]]
-name = "noodles-fasta"
 version = "0.55.0"
 source = "git+https://github.com/biodatageeks/noodles.git?rev=289ef32e7d43d142914fb3f02335044ae293871c#289ef32e7d43d142914fb3f02335044ae293871c"
 dependencies = [
@@ -2903,6 +2904,20 @@ dependencies = [
  "memchr",
  "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=289ef32e7d43d142914fb3f02335044ae293871c)",
  "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=289ef32e7d43d142914fb3f02335044ae293871c)",
+ "tokio",
+]
+
+[[package]]
+name = "noodles-fasta"
+version = "0.55.0"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2#7e127da6b6ce4c94df33549a3fc1072f03c0acb2"
+dependencies = [
+ "bstr",
+ "bytes",
+ "futures",
+ "memchr",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
  "tokio",
 ]
 
@@ -2958,7 +2973,7 @@ dependencies = [
  "memchr",
  "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
  "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
- "noodles-csi 0.50.0",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
  "percent-encoding",
  "tokio",
 ]
@@ -2984,22 +2999,6 @@ dependencies = [
 
 [[package]]
 name = "noodles-sam"
-version = "0.75.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7795bba55d5c5e4343f26d08aa872e447714c9f2bb1987875d761fc98705a29"
-dependencies = [
- "bitflags",
- "bstr",
- "indexmap",
- "lexical-core",
- "memchr",
- "noodles-bgzf 0.39.0",
- "noodles-core 0.17.0",
- "noodles-csi 0.47.0",
-]
-
-[[package]]
-name = "noodles-sam"
 version = "0.77.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d28913bd9a893b5acdf8e10ef6b9f9614ee1a0d7c4f0346e6a3bb2bf342bc28"
@@ -3012,6 +3011,21 @@ dependencies = [
  "noodles-bgzf 0.41.0",
  "noodles-core 0.17.0",
  "noodles-csi 0.49.0",
+]
+
+[[package]]
+name = "noodles-sam"
+version = "0.78.0"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2#7e127da6b6ce4c94df33549a3fc1072f03c0acb2"
+dependencies = [
+ "bitflags",
+ "bstr",
+ "indexmap",
+ "lexical-core",
+ "memchr",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=7e127da6b6ce4c94df33549a3fc1072f03c0acb2)",
 ]
 
 [[package]]
@@ -3050,7 +3064,7 @@ dependencies = [
  "indexmap",
  "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
  "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
- "noodles-csi 0.50.0",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
  "tokio",
 ]
 
@@ -3082,7 +3096,7 @@ dependencies = [
  "memchr",
  "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
  "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
- "noodles-csi 0.50.0",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=9b7b2c5b6531373918302d4c07410e583f1b5b5c)",
  "noodles-tabix 0.56.0",
  "percent-encoding",
  "pin-project-lite",
