@@ -234,13 +234,6 @@ impl DisplayAs for BgzfVcfExec {
     }
 }
 
-fn find_line_end(buf: &[u8], start: usize) -> Option<usize> {
-    buf[start..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map(|pos| start + pos)
-}
-
 fn synchronize_vcf_reader<R: BufRead>(
     reader: &mut IndexedReader<R>,
     end_comp: u64,

@@ -21,7 +21,7 @@ use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
     stream::RecordBatchStreamAdapter,
 };
-use datafusion_bio_format_core::table_utils::{Attribute, OptionalField, builders_to_arrays};
+use datafusion_bio_format_core::table_utils::{Attribute, OptionalField};
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_gff as gff;
 use std::path::PathBuf;
@@ -800,46 +800,6 @@ fn process_nested_attributes(attributes_str: &str) -> Vec<Attribute> {
     }
 
     attributes
-}
-
-/// Create Arrow RecordBatch from builders
-fn create_batch(
-    schema: &SchemaRef,
-    chrom_builder: &mut datafusion::arrow::array::StringBuilder,
-    start_builder: &mut datafusion::arrow::array::UInt32Builder,
-    end_builder: &mut datafusion::arrow::array::UInt32Builder,
-    type_builder: &mut datafusion::arrow::array::StringBuilder,
-    source_builder: &mut datafusion::arrow::array::StringBuilder,
-    score_builder: &mut datafusion::arrow::array::Float32Builder,
-    strand_builder: &mut datafusion::arrow::array::StringBuilder,
-    phase_builder: &mut datafusion::arrow::array::UInt32Builder,
-    attribute_builders: &mut Option<(
-        Vec<String>,
-        Vec<datafusion::arrow::datatypes::DataType>,
-        Vec<OptionalField>,
-    )>,
-    nested_builder: &mut Option<OptionalField>,
-) -> Result<RecordBatch, ArrowError> {
-    let mut columns: Vec<Arc<dyn Array>> = vec![
-        Arc::new(chrom_builder.finish()),
-        Arc::new(start_builder.finish()),
-        Arc::new(end_builder.finish()),
-        Arc::new(type_builder.finish()),
-        Arc::new(source_builder.finish()),
-        Arc::new(score_builder.finish()),
-        Arc::new(strand_builder.finish()),
-        Arc::new(phase_builder.finish()),
-    ];
-
-    // Add attribute columns
-    if let Some(builders) = attribute_builders {
-        let attr_arrays = builders_to_arrays(&mut builders.2);
-        columns.extend(attr_arrays.into_iter().map(|arr| arr as Arc<dyn Array>));
-    } else if let Some(builder) = nested_builder {
-        columns.push(builder.finish()?);
-    }
-
-    RecordBatch::try_new(schema.clone(), columns)
 }
 
 /// Create Arrow RecordBatch from builders with projection support

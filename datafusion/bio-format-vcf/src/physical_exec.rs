@@ -6,7 +6,7 @@ use crate::storage::{VcfLocalReader, VcfRemoteReader};
 use crate::table_provider::info_to_arrow_type;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, Float64Array, NullArray, StringArray, UInt32Array};
+use datafusion::arrow::array::{Array, Float64Array, StringArray, UInt32Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;

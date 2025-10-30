@@ -1,5 +1,4 @@
 use datafusion_bio_format_fastq::table_provider::FastqTableProvider;
-use futures_util::StreamExt;
 use std::sync::Arc;
 
 #[tokio::main(flavor = "multi_thread")]

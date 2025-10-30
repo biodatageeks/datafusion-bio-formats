@@ -147,7 +147,8 @@
       "Bash(./test_range_reading)",
       "WebFetch(domain:opendal.apache.org)",
       "Bash(./test_remote_range_reading)",
-      "Read(//Users/mwiewior/.cargo/git/checkouts/noodles-b4f93bd9cc0a0e76/7e127da/noodles-cram/src/container/compression_header/preservation_map/**)"
+      "Read(//Users/mwiewior/.cargo/git/checkouts/noodles-b4f93bd9cc0a0e76/7e127da/noodles-cram/src/container/compression_header/preservation_map/**)",
+      "Bash(awk:*)"
     ],
     "deny": [],
     "ask": []
