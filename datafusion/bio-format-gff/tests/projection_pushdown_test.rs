@@ -90,7 +90,9 @@ async fn test_gff_projection_position_columns() -> Result<(), Box<dyn std::error
     ctx.register_table("test_gff", Arc::new(table))?;
 
     // Test selecting position columns
-    let df = ctx.sql("SELECT chrom, start, end FROM test_gff").await?;
+    let df = ctx
+        .sql("SELECT chrom, start, \"end\" FROM test_gff")
+        .await?;
     let results = df.collect().await?;
 
     if results.is_empty() {
@@ -602,7 +604,7 @@ async fn test_gff_select_position_columns_bug() -> Result<(), Box<dyn std::error
 
     // Test SELECT start, end - this should also work correctly
     println!("Testing GFF SELECT start, end...");
-    let df2 = ctx.sql("SELECT start, end FROM gff_table").await?;
+    let df2 = ctx.sql("SELECT start, \"end\" FROM gff_table").await?;
     let results2 = df2.collect().await?;
 
     println!(

@@ -18,10 +18,10 @@ chr2	300	rs3	C	T,A	70	PASS	AC=1,1;AF=0.33,0.33;AN=3;DP=30
 chr2	400	.	T	G	50	PASS	AC=1;AF=0.25;AN=4;DP=40;SVTYPE=SNV
 "#;
 
-async fn create_test_vcf_file_with_info() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_info_projection.vcf";
-    fs::write(temp_file, SAMPLE_VCF_CONTENT_WITH_INFO).await?;
-    Ok(temp_file.to_string())
+async fn create_test_vcf_file_with_info(test_name: &str) -> std::io::Result<String> {
+    let temp_file = format!("/tmp/test_info_projection_{}.vcf", test_name);
+    fs::write(&temp_file, SAMPLE_VCF_CONTENT_WITH_INFO).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {
@@ -38,7 +38,7 @@ fn create_object_storage_options() -> ObjectStorageOptions {
 
 #[tokio::test]
 async fn test_info_projection_single_info_field() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("single_info_field").await?;
     let object_storage_options = create_object_storage_options();
 
     // Create table with multiple INFO fields but only project one
@@ -104,7 +104,7 @@ async fn test_info_projection_single_info_field() -> Result<(), Box<dyn std::err
 
 #[tokio::test]
 async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("multiple_info_fields").await?;
     let object_storage_options = create_object_storage_options();
 
     // Create table with all INFO fields but only project some
@@ -174,7 +174,7 @@ async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::
 
 #[tokio::test]
 async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("mixed_core_and_info").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -256,7 +256,7 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
 
 #[tokio::test]
 async fn test_info_projection_no_info_fields_queried() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("no_info_fields_queried").await?;
     let object_storage_options = create_object_storage_options();
 
     // Create table with INFO fields available but don't query any
@@ -330,7 +330,7 @@ async fn test_info_projection_no_info_fields_queried() -> Result<(), Box<dyn std
 
 #[tokio::test]
 async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("all_info_fields").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -420,7 +420,7 @@ async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error
 
 #[tokio::test]
 async fn test_info_projection_with_count_aggregation() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("with_count_aggregation").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -466,7 +466,7 @@ async fn test_info_projection_with_count_aggregation() -> Result<(), Box<dyn std
 
 #[tokio::test]
 async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("with_limit").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -533,7 +533,7 @@ async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Err
 
 #[tokio::test]
 async fn test_info_projection_no_projection_all_fields() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file_with_info().await?;
+    let file_path = create_test_vcf_file_with_info("no_projection_all_fields").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(

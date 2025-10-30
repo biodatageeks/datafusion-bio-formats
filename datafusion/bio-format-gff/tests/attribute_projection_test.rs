@@ -185,7 +185,9 @@ async fn test_attribute_projection_no_attributes_queried() -> Result<(), Box<dyn
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
 
-    let df = ctx.sql("SELECT chrom, start, end FROM test_gff").await?;
+    let df = ctx
+        .sql("SELECT chrom, start, \"end\" FROM test_gff")
+        .await?;
     let results = df.collect().await?;
 
     let batch = &results[0];

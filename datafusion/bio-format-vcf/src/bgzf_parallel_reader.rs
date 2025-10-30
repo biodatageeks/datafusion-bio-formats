@@ -704,7 +704,7 @@ impl ExecutionPlan for BgzfVcfExec {
             self.schema(),
             rx.map(move |(item, count)| {
                 debug!("VCF Partition {}: processed {} rows", partition, count);
-                item.map_err(|e| DataFusionError::ArrowError(e, None))
+                item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
             }),
         )))
     }

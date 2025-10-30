@@ -28,7 +28,3 @@ tracing = "0.1.40"
 name = "test_reader"
 # Some issue when publishing and path isn't specified, so adding here
 path = "./examples/test_reader.rs"
-
-[[bin]]
-name = "benchmark_bgzf_threads"
-path = "../../benchmark_bgzf_threads.rs"

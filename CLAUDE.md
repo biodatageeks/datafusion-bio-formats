@@ -1,3 +1,22 @@
+<!-- OPENSPEC:START -->
+# OpenSpec Instructions
+
+These instructions are for AI assistants working in this project.
+
+Always open `@/openspec/AGENTS.md` when the request:
+- Mentions planning or proposals (words like proposal, spec, change, plan)
+- Introduces new capabilities, breaking changes, architecture shifts, or big performance/security work
+- Sounds ambiguous and you need the authoritative spec before coding
+
+Use `@/openspec/AGENTS.md` to learn:
+- How to create and apply change proposals
+- Spec format and conventions
+- Project structure and guidelines
+
+Keep this managed block so 'openspec update' can refresh the instructions.
+
+<!-- OPENSPEC:END -->
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -52,7 +71,7 @@ The `bio-format-core` crate provides cloud storage integration via OpenDAL with 
 - Compression detection (GZIP, BGZF, AUTO)
 
 ### Key Dependencies
-- DataFusion 48.0.1 - SQL query engine
+- DataFusion 50.3.0 - SQL query engine
 - Noodles 0.93.0 - Bioinformatics file parsing
 - OpenDAL 0.53.3 - Object storage abstraction
 - Tokio - Async runtime
