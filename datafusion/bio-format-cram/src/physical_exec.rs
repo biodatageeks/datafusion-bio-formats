@@ -15,10 +15,8 @@ use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
 use noodles_sam::alignment::record::cigar::Op;
 use noodles_sam::alignment::record::cigar::op::Kind as OpKind;
-use noodles_sam::alignment::record_buf::Cigar as CigarBuf;
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
-use std::io;
 use std::sync::Arc;
 
 #[allow(dead_code)]

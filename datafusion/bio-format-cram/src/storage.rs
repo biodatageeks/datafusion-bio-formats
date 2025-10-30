@@ -26,10 +26,92 @@ pub enum ReferenceSequenceRepository {
 
 impl ReferenceSequenceRepository {
     /// Load reference from external FASTA file
-    pub fn from_fasta_path(_path: &str) -> io::Result<Self> {
-        // TODO: Implement external FASTA reference support
-        // For now, return Embedded mode which will use the reference embedded in the CRAM file
-        Ok(Self::Embedded)
+    ///
+    /// This function creates a FASTA repository for use with CRAM files that require
+    /// an external reference sequence. The FASTA file must have an accompanying index
+    /// file (.fai) in the same directory.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the FASTA file (local filesystem only for now)
+    ///
+    /// # Returns
+    /// * `Ok(ReferenceSequenceRepository::External)` - Successfully loaded reference
+    /// * `Err` - Failed to load reference or index file
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use std::io;
+    /// # use bio_format_cram::storage::ReferenceSequenceRepository;
+    /// let repo = ReferenceSequenceRepository::from_fasta_path("/path/to/reference.fasta")?;
+    /// # Ok::<(), io::Error>(())
+    /// ```
+    pub fn from_fasta_path(path: &str) -> io::Result<Self> {
+        use std::path::PathBuf;
+
+        // Determine storage type
+        let storage_type = get_storage_type(path.to_string());
+
+        match storage_type {
+            StorageType::LOCAL => {
+                // Local file path - use IndexedReader
+                let fasta_path = PathBuf::from(path);
+                let index_path = format!("{}.fai", path);
+
+                // Check if files exist
+                if !fasta_path.exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("FASTA file not found: {}", path),
+                    ));
+                }
+
+                let index_path_buf = PathBuf::from(&index_path);
+                if !index_path_buf.exists() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!(
+                            "FASTA index (.fai) not found: {}. Please create it using 'samtools faidx {}'",
+                            index_path, path
+                        ),
+                    ));
+                }
+
+                // Open FASTA file
+                let file = File::open(&fasta_path)?;
+                let reader = BufReader::new(file);
+
+                // Read FASTA index
+                let index_file = File::open(&index_path)?;
+                let mut index_reader = fasta::fai::io::Reader::new(BufReader::new(index_file));
+                let index = index_reader.read_index()?;
+
+                // Create indexed reader
+                let indexed_reader = fasta::io::IndexedReader::new(reader, index);
+
+                // Create adapter and repository
+                let adapter = fasta::repository::adapters::IndexedReader::new(indexed_reader);
+                let repository = fasta::Repository::new(adapter);
+
+                Ok(Self::External(repository))
+            }
+            StorageType::S3 | StorageType::GCS | StorageType::AZBLOB => {
+                // Remote storage not yet implemented
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "Remote FASTA references from {:?} are not yet supported. Please use a local FASTA file or embedded reference.",
+                        storage_type
+                    ),
+                ))
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Unsupported storage type for FASTA reference: {:?}",
+                    storage_type
+                ),
+            )),
+        }
     }
 }
 
@@ -61,23 +143,39 @@ pub async fn get_remote_cram_reader(
 pub async fn get_local_cram_reader(
     file_path: String,
     reference_path: Option<String>,
-) -> Result<(Reader<BufReader<File>>, ReferenceSequenceRepository), io::Error> {
-    let file = File::open(&file_path)?;
-    let reader = cram::io::Reader::new(BufReader::new(file));
-
-    // Load reference if provided
+) -> Result<(Reader<File>, ReferenceSequenceRepository), io::Error> {
+    // Load reference repository if provided
     let reference_repo = if let Some(ref_path) = reference_path {
         ReferenceSequenceRepository::from_fasta_path(&ref_path)?
     } else {
-        // Try to use embedded reference
+        // Use default empty repository for embedded references
         ReferenceSequenceRepository::Embedded
+    };
+
+    // Build reader with the repository using Builder pattern
+    let reader = match &reference_repo {
+        ReferenceSequenceRepository::External(repo) => {
+            // Use Builder to set the repository
+            cram::io::reader::Builder::default()
+                .set_reference_sequence_repository(repo.clone())
+                .build_from_path(&file_path)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+        }
+        ReferenceSequenceRepository::Embedded | ReferenceSequenceRepository::None => {
+            // Use Builder with default (empty) repository
+            let default_repo = fasta::Repository::default();
+            cram::io::reader::Builder::default()
+                .set_reference_sequence_repository(default_repo)
+                .build_from_path(&file_path)
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+        }
     };
 
     Ok((reader, reference_repo))
 }
 
 pub enum CramReader {
-    Local(Reader<BufReader<File>>, ReferenceSequenceRepository, Header),
+    Local(Reader<File>, ReferenceSequenceRepository, Header),
     Remote(
         cram::r#async::io::Reader<StreamReader<FuturesBytesStream, bytes::Bytes>>,
         ReferenceSequenceRepository,
@@ -117,9 +215,15 @@ impl CramReader {
     pub async fn read_records<'a>(&'a mut self) -> BoxStream<'a, Result<RecordBuf, io::Error>> {
         match self {
             CramReader::Local(reader, _reference_repo, header) => {
+                // Repository is already set on the reader via Builder pattern during construction
+                // The reader will use it automatically when decoding CRAM data
                 stream::iter(reader.records(header)).boxed()
             }
-            CramReader::Remote(reader, _reference_repo, header) => reader.records(header).boxed(),
+            CramReader::Remote(reader, _reference_repo, header) => {
+                // Repository is already set on the reader via Builder pattern during construction
+                // The reader will use it automatically when decoding CRAM data
+                reader.records(header).boxed()
+            }
         }
     }
 
