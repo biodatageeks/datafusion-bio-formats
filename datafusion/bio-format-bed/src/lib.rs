@@ -42,6 +42,6 @@ mod physical_exec;
 pub mod storage;
 /// DataFusion table provider for BED file format
 ///
-/// This module implements the DataFusion [`TableProvider`] trait to enable SQL queries
+/// This module implements the DataFusion `TableProvider` trait to enable SQL queries
 /// over BED files. It defines the schema and query execution plan for BED data.
 pub mod table_provider;
