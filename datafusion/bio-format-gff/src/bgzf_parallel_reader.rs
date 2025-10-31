@@ -27,6 +27,12 @@ use noodles_gff as gff;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// Table provider for BGZF-compressed GFF files with parallel processing support
+///
+/// Implements Apache DataFusion's TableProvider trait with support for:
+/// - Parallel reading of BGZF-compressed blocks
+/// - Filter pushdown optimization for efficient predicate evaluation
+/// - Dynamic schema construction based on requested attributes
 #[derive(Debug, Clone)]
 pub struct BgzfGffTableProvider {
     path: PathBuf,
@@ -35,6 +41,14 @@ pub struct BgzfGffTableProvider {
 }
 
 impl BgzfGffTableProvider {
+    /// Creates a new BGZF GFF table provider
+    ///
+    /// # Arguments
+    /// * `path` - Path to the BGZF-compressed GFF file
+    /// * `attr_fields` - Optional list of specific attributes to extract as columns
+    ///
+    /// # Returns
+    /// A configured table provider or IO error if schema construction fails
     pub fn try_new(path: impl Into<PathBuf>, attr_fields: Option<Vec<String>>) -> io::Result<Self> {
         let schema = determine_schema_on_demand(attr_fields.clone())
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Schema error: {}", e)))?;
@@ -243,6 +257,7 @@ struct BgzfGffExec {
 }
 
 impl BgzfGffExec {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         path: PathBuf,
         partitions: Vec<(u64, u64)>,
@@ -803,6 +818,7 @@ fn process_nested_attributes(attributes_str: &str) -> Vec<Attribute> {
 }
 
 /// Create Arrow RecordBatch from builders with projection support
+#[allow(clippy::too_many_arguments)]
 fn create_batch_projected(
     schema: &SchemaRef,
     projection_indices: &[usize],
@@ -966,7 +982,7 @@ mod tests {
 
         let batch2 = create_batch_projected(
             &schema2,
-            &vec![0, 1],
+            &[0, 1],
             1,
             &mut chrom_builder,
             &mut start_builder,

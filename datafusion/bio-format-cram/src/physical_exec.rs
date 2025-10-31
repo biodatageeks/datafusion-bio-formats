@@ -168,7 +168,7 @@ async fn get_remote_cram_stream(
                .collect();
             sequence.push(seq_string);
             quality_scores.push(record.quality_scores().as_ref().iter()
-                .map(|score| char::from(u8::from(*score)+33))
+                .map(|score| char::from(*score+33))
                 .collect::<String>());
 
             flag.push(record.flags().bits() as u32);
@@ -312,7 +312,7 @@ async fn get_local_cram(
             };
             sequence.push(seq_string);
             quality_scores.push(record.quality_scores().as_ref().iter()
-                .map(|score| char::from(u8::from(*score)+33))
+                .map(|score| char::from(*score+33))
                 .collect::<String>());
 
             match record.mapping_quality() {
@@ -397,6 +397,7 @@ async fn get_local_cram(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_record_batch(
     schema: SchemaRef,
     name: &[Option<String>],
@@ -529,7 +530,7 @@ fn cigar_op_to_string(op: Op) -> String {
     format!("{}{}", op.len(), kind)
 }
 
-fn get_chrom_by_seq_id(rid: Option<usize>, names: &Vec<String>) -> Option<String> {
+fn get_chrom_by_seq_id(rid: Option<usize>, names: &[String]) -> Option<String> {
     match rid {
         Some(rid) => {
             let chrom_name = names

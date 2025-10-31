@@ -33,6 +33,11 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     Ok(Arc::new(schema))
 }
 
+/// DataFusion table provider for CRAM files.
+///
+/// Allows registering CRAM files as queryable tables in DataFusion.
+/// Supports both local and cloud-based CRAM files with optional
+/// external reference sequences.
 #[derive(Clone, Debug)]
 pub struct CramTableProvider {
     file_path: String,
@@ -42,6 +47,16 @@ pub struct CramTableProvider {
 }
 
 impl CramTableProvider {
+    /// Creates a new CRAM table provider.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to CRAM file (local or cloud storage URL)
+    /// * `reference_path` - Optional path to FASTA reference file
+    /// * `object_storage_options` - Optional cloud storage configuration
+    ///
+    /// # Returns
+    /// * `Ok(provider)` - Successfully created provider
+    /// * `Err` - Failed to determine schema
     pub fn new(
         file_path: String,
         reference_path: Option<String>,

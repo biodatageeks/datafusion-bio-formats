@@ -26,6 +26,10 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     Ok(Arc::new(schema))
 }
 
+/// A DataFusion table provider for FASTQ files
+///
+/// This provider enables SQL queries on FASTQ files (both compressed and uncompressed).
+/// It supports local files and cloud storage (S3, GCS, Azure) via object storage options.
 #[derive(Clone, Debug)]
 pub struct FastqTableProvider {
     file_path: String,
@@ -35,6 +39,17 @@ pub struct FastqTableProvider {
 }
 
 impl FastqTableProvider {
+    /// Creates a new FASTQ table provider
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the FASTQ file (local or cloud storage URL)
+    /// * `thread_num` - Optional number of threads for parallel reading (BGZF files only)
+    /// * `object_storage_options` - Optional configuration for cloud storage access
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema cannot be determined
     pub fn new(
         file_path: String,
         thread_num: Option<usize>,

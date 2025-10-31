@@ -163,7 +163,7 @@ async fn get_remote_bam_stream(
                 }
             };
            let seq_string = record.sequence().iter()
-               .map(|p| char::from(p))
+               .map(char::from)
                .collect();
             sequence.push(seq_string);
             quality_scores.push(record.quality_scores().iter()
@@ -172,7 +172,7 @@ async fn get_remote_bam_stream(
 
             flag.push(record.flags().bits() as u32);
             cigar.push(record.cigar().iter().map(|p| p.unwrap())
-                .map(|op| cigar_op_to_string(op))
+                .map(cigar_op_to_string)
                 .collect::<Vec<String>>().join(""));
             let chrom_name = get_chrom_by_seq_id(
                 record.mate_reference_sequence_id(),
@@ -281,7 +281,7 @@ async fn get_local_bam(
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
             let seq_string = record.sequence().iter()
-                   .map(|p| char::from(p))
+                   .map(char::from)
                    .collect();
             let chrom_name = get_chrom_by_seq_id(
                 record.reference_sequence_id(),
@@ -327,7 +327,7 @@ async fn get_local_bam(
             };
             flag.push(record.flags().bits() as u32);
             cigar.push(record.cigar().iter().map(|p| p.unwrap())
-                .map(|op| cigar_op_to_string(op))
+                .map(cigar_op_to_string)
                 .collect::<Vec<String>>().join(""));
              let chrom_name = get_chrom_by_seq_id(
                 record.mate_reference_sequence_id(),
@@ -399,6 +399,7 @@ async fn get_local_bam(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_record_batch(
     schema: SchemaRef,
     name: &[Option<String>],
@@ -532,11 +533,10 @@ fn cigar_op_to_string(op: Op) -> String {
     format!("{}{}", op.len(), kind)
 }
 
-fn get_chrom_by_seq_id(rid: Option<io::Result<usize>>, names: &Vec<String>) -> Option<String> {
+fn get_chrom_by_seq_id(rid: Option<io::Result<usize>>, names: &[String]) -> Option<String> {
     match rid {
         Some(rid) => {
-            let idx =
-                usize::try_from(rid.unwrap()).expect("reference_sequence_id() should be >= 0");
+            let idx = rid.unwrap();
             let chrom_name = names
                 .get(idx)
                 .expect("reference_sequence_id() should be in bounds");

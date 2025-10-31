@@ -115,6 +115,19 @@ impl ReferenceSequenceRepository {
     }
 }
 
+/// Reads a CRAM file from remote cloud storage (S3, GCS, or Azure).
+///
+/// Creates an async reader for CRAM files stored on cloud storage platforms,
+/// with optional external reference sequence support.
+///
+/// # Arguments
+/// * `file_path` - URL or path to the CRAM file on cloud storage
+/// * `reference_path` - Optional path to external FASTA reference file
+/// * `object_storage_options` - Cloud storage configuration (credentials, etc.)
+///
+/// # Returns
+/// * `Ok((reader, reference_repo))` - Async CRAM reader and reference repository
+/// * `Err` - Failed to read file or load reference
 pub async fn get_remote_cram_reader(
     file_path: String,
     reference_path: Option<String>,
@@ -140,6 +153,19 @@ pub async fn get_remote_cram_reader(
     Ok((reader, reference_repo))
 }
 
+/// Reads a CRAM file from the local filesystem.
+///
+/// Creates a reader for local CRAM files with optional external reference
+/// sequence support. The reader uses the noodles library's Builder pattern
+/// to set up reference repositories for sequence reconstruction.
+///
+/// # Arguments
+/// * `file_path` - Path to the local CRAM file
+/// * `reference_path` - Optional path to external FASTA reference file
+///
+/// # Returns
+/// * `Ok((reader, reference_repo))` - CRAM reader and reference repository
+/// * `Err` - Failed to read file or load reference
 pub async fn get_local_cram_reader(
     file_path: String,
     reference_path: Option<String>,
@@ -174,8 +200,14 @@ pub async fn get_local_cram_reader(
     Ok((reader, reference_repo))
 }
 
+/// Unified interface for reading CRAM files from either local or remote storage.
+///
+/// Abstracts over the difference between local synchronous reads and
+/// remote asynchronous reads, allowing the same code to work with both.
 pub enum CramReader {
+    /// Local CRAM file reader with embedded or local reference
     Local(Reader<File>, ReferenceSequenceRepository, Header),
+    /// Remote CRAM file reader (async) with embedded or remote reference
     Remote(
         cram::r#async::io::Reader<StreamReader<FuturesBytesStream, bytes::Bytes>>,
         ReferenceSequenceRepository,
@@ -184,6 +216,18 @@ pub enum CramReader {
 }
 
 impl CramReader {
+    /// Creates a new CRAM reader, automatically detecting local vs. remote storage.
+    ///
+    /// Determines whether the file is stored locally or remotely based on the path,
+    /// and creates the appropriate reader type.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to CRAM file (local path or cloud storage URL)
+    /// * `reference_path` - Optional path to external FASTA reference
+    /// * `object_storage_options` - Cloud storage config (required for remote files)
+    ///
+    /// # Returns
+    /// A CramReader variant appropriate for the storage type.
     pub async fn new(
         file_path: String,
         reference_path: Option<String>,
@@ -212,7 +256,14 @@ impl CramReader {
         }
     }
 
-    pub async fn read_records<'a>(&'a mut self) -> BoxStream<'a, Result<RecordBuf, io::Error>> {
+    /// Returns an async stream of CRAM records from this reader.
+    ///
+    /// Yields individual CRAM records that have been decoded using the
+    /// configured reference sequence repository.
+    ///
+    /// # Returns
+    /// A boxed stream of Results containing CRAM RecordBuf entries
+    pub async fn read_records(&mut self) -> BoxStream<'_, Result<RecordBuf, io::Error>> {
         match self {
             CramReader::Local(reader, _reference_repo, header) => {
                 // Repository is already set on the reader via Builder pattern during construction
@@ -227,6 +278,13 @@ impl CramReader {
         }
     }
 
+    /// Returns the CRAM file header.
+    ///
+    /// The header contains metadata about the CRAM file including
+    /// reference sequences, read groups, and other file information.
+    ///
+    /// # Returns
+    /// Reference to the SAM/CRAM header
     pub fn get_header(&self) -> &Header {
         match self {
             CramReader::Local(_, _, header) => header,
@@ -234,6 +292,13 @@ impl CramReader {
         }
     }
 
+    /// Returns the reference sequences from the CRAM file header.
+    ///
+    /// Provides access to the reference sequence metadata including
+    /// chromosome names, lengths, and other sequence attributes.
+    ///
+    /// # Returns
+    /// Reference to the ReferenceSequences from the header
     pub fn get_sequences(&self) -> &ReferenceSequences {
         match self {
             CramReader::Local(_, _, header) => header.reference_sequences(),

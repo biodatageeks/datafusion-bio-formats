@@ -24,8 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let df = ctx.sql("SELECT * FROM example").await?;
     // let results = df.count().await?;
     // println!("Count: {:?}", results);
-    let results = df.limit(0, Some(10)).unwrap().show().await?;
-    println!("Count: {:?}", results);
+    df.limit(0, Some(10)).unwrap().show().await?;
 
     // let file_path = "/Users/mwiewior/research/data/NA12878.proper.wes.md.chr1.bam".to_string();
     // let reader = BamReader::new(

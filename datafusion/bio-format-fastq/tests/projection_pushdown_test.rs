@@ -18,10 +18,10 @@ TTTTAAAACCCC
 KKKKKKKKKKKK
 "#;
 
-async fn create_test_fastq_file() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_projection.fastq";
-    fs::write(temp_file, SAMPLE_FASTQ_CONTENT).await?;
-    Ok(temp_file.to_string())
+async fn create_test_fastq_file(test_name: &str) -> std::io::Result<String> {
+    let temp_file = format!("/tmp/test_projection_{}.fastq", test_name);
+    fs::write(&temp_file, SAMPLE_FASTQ_CONTENT).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {
@@ -38,7 +38,7 @@ fn create_object_storage_options() -> ObjectStorageOptions {
 
 #[tokio::test]
 async fn test_projection_single_column_name() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("single_column_name").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
@@ -73,7 +73,7 @@ async fn test_projection_single_column_name() -> Result<(), Box<dyn std::error::
 
 #[tokio::test]
 async fn test_projection_two_columns() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("two_columns").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
@@ -116,7 +116,7 @@ async fn test_projection_two_columns() -> Result<(), Box<dyn std::error::Error>>
 
 #[tokio::test]
 async fn test_projection_quality_scores_only() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("quality_scores_only").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
@@ -151,7 +151,7 @@ async fn test_projection_quality_scores_only() -> Result<(), Box<dyn std::error:
 
 #[tokio::test]
 async fn test_no_projection_all_columns() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("no_projection_all_columns").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
@@ -179,7 +179,7 @@ async fn test_no_projection_all_columns() -> Result<(), Box<dyn std::error::Erro
 
 #[tokio::test]
 async fn test_projection_with_count() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("projection_with_count").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
@@ -208,7 +208,7 @@ async fn test_projection_with_count() -> Result<(), Box<dyn std::error::Error>> 
 
 #[tokio::test]
 async fn test_projection_reordered_columns() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("projection_reordered_columns").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
@@ -258,7 +258,7 @@ async fn test_projection_reordered_columns() -> Result<(), Box<dyn std::error::E
 
 #[tokio::test]
 async fn test_projection_with_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("projection_with_limit").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
@@ -303,7 +303,7 @@ async fn test_projection_with_limit() -> Result<(), Box<dyn std::error::Error>> 
 
 #[tokio::test]
 async fn test_multithreaded_projection() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_fastq_file().await?;
+    let file_path = create_test_fastq_file("multithreaded_projection").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = FastqTableProvider::new(

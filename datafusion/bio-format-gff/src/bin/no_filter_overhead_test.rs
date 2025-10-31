@@ -3,7 +3,6 @@ use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageO
 use datafusion_bio_format_gff::table_provider::GffTableProvider;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio;
 
 fn create_object_storage_options() -> ObjectStorageOptions {
     ObjectStorageOptions {
@@ -161,7 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=====================");
 
     // Compare with our baseline from previous benchmark
-    if let Some((_, baseline_times)) = all_results.get(0) {
+    if let Some((_, baseline_times)) = all_results.first() {
         let baseline_avg = baseline_times.iter().sum::<f64>() / baseline_times.len() as f64;
         let baseline_std = {
             let variance = baseline_times

@@ -6,25 +6,54 @@ use datafusion::arrow::datatypes::{DataType, Field, Fields};
 use datafusion::arrow::error::ArrowError;
 use std::sync::Arc;
 
+/// Represents a key-value attribute pair used in bioinformatics file formats
 pub struct Attribute {
+    /// The attribute name/key
     pub tag: String,
+    /// The optional attribute value
     pub value: Option<String>,
 }
 
+/// Builder wrapper for optional fields in Arrow record batches
+///
+/// Supports various data types including scalar and array types for building Arrow columns
 #[derive(Debug)]
 pub enum OptionalField {
+    /// Builder for Int32 scalar values
     Int32Builder(Int32Builder),
+    /// Builder for Int32 array values
     ArrayInt32Builder(ListBuilder<Int32Builder>),
+    /// Builder for Float32 scalar values
     Float32Builder(Float32Builder),
+    /// Builder for Float32 array values
     ArrayFloat32Builder(ListBuilder<Float32Builder>),
+    /// Builder for Boolean scalar values
     BooleanBuilder(BooleanBuilder),
+    /// Builder for Boolean array values
     ArrayBooleanBuilder(ListBuilder<BooleanBuilder>),
+    /// Builder for UTF8 string scalar values
     Utf8Builder(StringBuilder),
+    /// Builder for UTF8 string array values
     ArrayUtf8Builder(ListBuilder<StringBuilder>),
+    /// Builder for structured array values (list of structs)
     ArrayStructBuilder(ListBuilder<StructBuilder>),
 }
 
 impl OptionalField {
+    /// Creates a new OptionalField builder for the specified data type
+    ///
+    /// # Arguments
+    ///
+    /// * `data_type` - Arrow data type to build
+    /// * `batch_size` - Initial capacity for the builder
+    ///
+    /// # Returns
+    ///
+    /// A new OptionalField builder or an error if the data type is unsupported
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data type is not supported
     pub fn new(data_type: &DataType, batch_size: usize) -> Result<OptionalField, ArrowError> {
         match data_type {
             DataType::Int32 => Ok(OptionalField::Int32Builder(Int32Builder::with_capacity(
@@ -92,6 +121,15 @@ impl OptionalField {
         }
     }
 
+    /// Appends a list of structured attribute items to an ArrayStructBuilder
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - Vector of Attribute key-value pairs to append
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayStructBuilder
     pub fn append_array_struct(&mut self, items: Vec<Attribute>) -> Result<(), ArrowError> {
         match self {
             OptionalField::ArrayStructBuilder(list_builder) => {
@@ -124,54 +162,113 @@ impl OptionalField {
             ))),
         }
     }
+    /// Appends an integer value to the builder
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Int32 value to append
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an Int32Builder or ArrayInt32Builder
     pub fn append_int(&mut self, value: i32) -> Result<(), ArrowError> {
         match self {
-            OptionalField::Int32Builder(builder) => Ok(builder.append_value(value)),
+            OptionalField::Int32Builder(builder) => {
+                builder.append_value(value);
+                Ok(())
+            }
             OptionalField::ArrayInt32Builder(builder) => {
                 builder.values().append_value(value);
-                Ok(builder.append(true))
+                builder.append(true);
+                Ok(())
             }
             _ => Err(ArrowError::SchemaError("Invalid builder".into())),
         }
     }
 
+    /// Appends a boolean value to the builder
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Boolean value to append
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not a BooleanBuilder or ArrayBooleanBuilder
     pub fn append_boolean(&mut self, value: bool) -> Result<(), ArrowError> {
         match self {
-            OptionalField::BooleanBuilder(builder) => Ok(builder.append_value(value)),
+            OptionalField::BooleanBuilder(builder) => {
+                builder.append_value(value);
+                Ok(())
+            }
             OptionalField::ArrayBooleanBuilder(builder) => {
                 builder.values().append_value(value);
-                Ok(builder.append(true))
+                builder.append(true);
+                Ok(())
             }
             _ => Err(ArrowError::SchemaError("Expected BooleanBuilder".into())),
         }
     }
 
+    /// Appends a vector of integers as an array element
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Vector of Int32 values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayInt32Builder
     pub fn append_array_int(&mut self, value: Vec<i32>) -> Result<(), ArrowError> {
         match self {
             OptionalField::ArrayInt32Builder(builder) => {
                 builder.values().append_slice(&value);
-                Ok(builder.append(true))
+                builder.append(true);
+                Ok(())
             }
             _ => Err(ArrowError::SchemaError("Expected ArrayInt32Builder".into())),
         }
     }
 
+    /// Appends a float value to the builder
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Float32 value to append
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not a Float32Builder or ArrayFloat32Builder
     pub fn append_float(&mut self, value: f32) -> Result<(), ArrowError> {
         match self {
-            OptionalField::Float32Builder(builder) => Ok(builder.append_value(value)),
+            OptionalField::Float32Builder(builder) => {
+                builder.append_value(value);
+                Ok(())
+            }
             OptionalField::ArrayFloat32Builder(builder) => {
                 builder.values().append_value(value);
-                Ok(builder.append(true))
+                builder.append(true);
+                Ok(())
             }
             _ => Err(ArrowError::SchemaError("Expected Float32Builder".into())),
         }
     }
 
+    /// Appends a vector of floats as an array element
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Vector of Float32 values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayFloat32Builder
     pub fn append_array_float(&mut self, value: Vec<f32>) -> Result<(), ArrowError> {
         match self {
             OptionalField::ArrayFloat32Builder(builder) => {
                 builder.values().append_slice(&value);
-                Ok(builder.append(true))
+                builder.append(true);
+                Ok(())
             }
             _ => Err(ArrowError::SchemaError(
                 "Expected ArrayFloat32Builder".into(),
@@ -179,39 +276,91 @@ impl OptionalField {
         }
     }
 
+    /// Appends a string value to the builder
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - String value to append
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not a Utf8Builder or ArrayUtf8Builder
     pub fn append_string(&mut self, value: &str) -> Result<(), ArrowError> {
         match self {
-            OptionalField::Utf8Builder(builder) => Ok(builder.append_value(value)),
+            OptionalField::Utf8Builder(builder) => {
+                builder.append_value(value);
+                Ok(())
+            }
             OptionalField::ArrayUtf8Builder(builder) => {
                 builder.values().append_value(value);
-                Ok(builder.append(true))
+                builder.append(true);
+                Ok(())
             }
             _ => Err(ArrowError::SchemaError("Expected Utf8Builder".into())),
         }
     }
 
+    /// Appends a vector of strings as an array element
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Vector of String values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayUtf8Builder
     pub fn append_array_string(&mut self, value: Vec<String>) -> Result<(), ArrowError> {
         match self {
             OptionalField::ArrayUtf8Builder(builder) => {
                 for v in value {
                     builder.values().append_value(&v);
                 }
-                Ok(builder.append(true))
+                builder.append(true);
+                Ok(())
             }
             _ => Err(ArrowError::SchemaError("Expected ArrayUtf8Builder".into())),
         }
     }
 
+    /// Appends a null value to the builder
+    ///
+    /// # Errors
+    ///
+    /// This method does not return errors in practice
     pub fn append_null(&mut self) -> Result<(), ArrowError> {
         match self {
-            OptionalField::Int32Builder(builder) => Ok(builder.append_null()),
-            OptionalField::ArrayInt32Builder(builder) => Ok(builder.append_null()),
-            OptionalField::Utf8Builder(builder) => Ok(builder.append_null()),
-            OptionalField::ArrayUtf8Builder(builder) => Ok(builder.append_null()),
-            OptionalField::Float32Builder(builder) => Ok(builder.append_null()),
-            OptionalField::ArrayFloat32Builder(builder) => Ok(builder.append_null()),
-            OptionalField::BooleanBuilder(builder) => Ok(builder.append_null()),
-            OptionalField::ArrayBooleanBuilder(builder) => Ok(builder.append_null()),
+            OptionalField::Int32Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayInt32Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::Utf8Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayUtf8Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::Float32Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayFloat32Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::BooleanBuilder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayBooleanBuilder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
             OptionalField::ArrayStructBuilder(builder) => {
                 builder.append_null();
                 Ok(())
@@ -219,6 +368,15 @@ impl OptionalField {
         }
     }
 
+    /// Finalizes the builder and returns the built Arrow array
+    ///
+    /// # Returns
+    ///
+    /// The completed Arrow array
+    ///
+    /// # Errors
+    ///
+    /// This method does not return errors in practice
     pub fn finish(&mut self) -> Result<ArrayRef, ArrowError> {
         match self {
             OptionalField::Int32Builder(builder) => Ok(Arc::new(builder.finish())),
@@ -237,7 +395,20 @@ impl OptionalField {
     }
 }
 
-pub fn builders_to_arrays(builders: &mut Vec<OptionalField>) -> Vec<Arc<dyn Array>> {
+/// Converts a vector of OptionalField builders to a vector of Arrow arrays
+///
+/// # Arguments
+///
+/// * `builders` - Mutable reference to slice of OptionalField builders
+///
+/// # Returns
+///
+/// Vector of finalized Arrow arrays
+///
+/// # Panics
+///
+/// Panics if any builder fails to finish (which should not happen in normal operation)
+pub fn builders_to_arrays(builders: &mut [OptionalField]) -> Vec<Arc<dyn Array>> {
     builders
         .iter_mut()
         .map(|f| f.finish())

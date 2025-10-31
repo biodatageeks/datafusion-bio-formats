@@ -76,6 +76,14 @@ fn determine_schema_on_demand(
     Ok(Arc::new(schema))
 }
 
+/// Apache DataFusion table provider for GFF/GFF3 bioinformatics files
+///
+/// Implements the TableProvider trait to enable seamless SQL queries on GFF files.
+/// Features include:
+/// - Projection-driven schema construction for attribute columns
+/// - Filter pushdown support for efficient predicate evaluation
+/// - Support for local and cloud storage (S3, GCS, Azure)
+/// - Compressed and uncompressed file handling
 #[derive(Clone, Debug)]
 pub struct GffTableProvider {
     file_path: String,

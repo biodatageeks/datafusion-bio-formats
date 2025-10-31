@@ -3,7 +3,6 @@ use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageO
 use datafusion_bio_format_gff::table_provider::GffTableProvider;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio;
 
 fn create_object_storage_options() -> ObjectStorageOptions {
     ObjectStorageOptions {
@@ -152,7 +151,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("{}", "-".repeat(105));
 
-    let baseline_time = results.get(0).map(|(_, avg, _, _)| *avg).unwrap_or(0.0);
+    let baseline_time = results.first().map(|(_, avg, _, _)| *avg).unwrap_or(0.0);
 
     for (i, (description, avg_time, min_time, _rows)) in results.iter().enumerate() {
         let speedup = if i == 0 {
@@ -169,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🎯 Key Performance Insights");
     println!("===========================");
 
-    if let Some((_, baseline_avg, _, baseline_rows)) = results.get(0) {
+    if let Some((_, baseline_avg, _, baseline_rows)) = results.first() {
         if let Some((_, chr1_avg, _, chr1_rows)) = results.get(1) {
             let chr1_speedup = baseline_avg / chr1_avg;
             let chr1_efficiency =

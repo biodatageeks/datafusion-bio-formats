@@ -288,7 +288,7 @@ async fn test_filter_pushdown_between() -> Result<(), Box<dyn std::error::Error>
     for i in 0..batch.num_rows() {
         let start_val = start_array.value(i);
         assert!(
-            start_val >= 1000 && start_val <= 4000,
+            (1000..=4000).contains(&start_val),
             "All results should have start between 1000 and 4000, got {}",
             start_val
         );

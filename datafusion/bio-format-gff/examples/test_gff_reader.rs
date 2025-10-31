@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_table("gff_table", Arc::new(table)).unwrap();
     let df = ctx.sql("SELECT start,`ID` FROM gff_table").await?;
     let results = df.collect().await?;
-    println!("Count: {:?}", results.iter().count());
+    println!("Count: {:?}", results.len());
     // let batches = results.await.unwrap().show().await?;
     // for batch in batches {
     //     println!("{:?}", batch);
