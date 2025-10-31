@@ -1,6 +1,6 @@
 # Dependencies Specification
 
-## MODIFIED Requirements
+## ADDED Requirements
 
 ### Requirement: DataFusion Dependency Version
 The project MUST use Apache DataFusion version 50.3.0 for SQL query execution and table provider functionality. The project MUST use Rust toolchain version 1.86.0 to support DataFusion 50.3.0 requirements.

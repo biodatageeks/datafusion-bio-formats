@@ -15,7 +15,7 @@ Upgrade Apache DataFusion from 48.0.1 to 50.3.0 to benefit from significant perf
 - Ensure all tests pass with DataFusion 50.x behavior
 
 ## Impact
-- **Affected specs**: dependencies (MODIFIED)
+- **Affected specs**: dependencies (CREATED)
 - **Affected code**:
   - `rust-toolchain.toml` - Rust version bump
   - `Cargo.toml` - DataFusion version update in [workspace.dependencies]
