@@ -14,13 +14,13 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 | Crate | Description | Predicate Pushdown | Projection Pushdown | Multi-threaded | Status |
 |-------|-------------|-------------------|---------------------|----------------|--------|
 | **[datafusion-bio-format-core](datafusion/bio-format-core)** | Core utilities and object storage support | N/A | N/A | N/A | ✅ |
-| **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ✅ | ✅ (BGZF) | ✅ |
-| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ❌ | ✅ | ✅ (BGZF) | ✅ |
-| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ❌ | ✅ | ❌ | ✅ |
-| **[datafusion-bio-format-bed](datafusion/bio-format-bed)** | BED genomic intervals | ❌ | ✅ | ❌ | ✅ |
+| **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ❌ |✅   (BGZF) | ✅ |
+| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ❌ | ❌ | ❌ | ✅ |
+| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ❌ | ❌ | ❌ | ✅ |
+| **[datafusion-bio-format-bed](datafusion/bio-format-bed)** | BED genomic intervals | ❌ | ❌  | ❌ | ✅ |
 | **[datafusion-bio-format-gff](datafusion/bio-format-gff)** | GFF genome annotations | ✅ | ✅ | ✅ (BGZF) | ✅ |
-| **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ✅ | ❌ | ✅ |
-| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ❌ | ✅ | ❌ | ✅ |
+| **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ❌  | ❌ | ✅ |
+| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ❌ | ❌  | ❌ | ✅ |
 
 ## Features
 
