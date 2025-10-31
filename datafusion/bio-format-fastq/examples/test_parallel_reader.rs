@@ -223,7 +223,7 @@ fn get_bgzf_block_offsets(index: Index, thread_num: usize) -> Vec<(u64, u64)> {
     }
 
     // Determine how many blocks per thread (rounding up)
-    let chunk_size = (total_blocks + thread_num - 1) / thread_num;
+    let chunk_size = total_blocks.div_ceil(thread_num);
     let mut ranges = Vec::with_capacity(thread_num.min(total_blocks));
 
     for chunk_idx in 0..thread_num {

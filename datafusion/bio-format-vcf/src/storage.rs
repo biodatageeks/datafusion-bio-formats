@@ -40,8 +40,7 @@ pub async fn get_remote_vcf_bgzf_reader(
     let inner = get_remote_stream_bgzf_async(file_path.clone(), object_storage_options)
         .await
         .unwrap();
-    let reader = vcf::r#async::io::Reader::new(inner);
-    reader
+    vcf::r#async::io::Reader::new(inner)
 }
 
 /// Creates a remote GZIP-compressed VCF reader for cloud storage.
@@ -154,13 +153,12 @@ pub async fn get_local_vcf_gz_reader(
     >,
     Error,
 > {
-    let reader = tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
         .map(GzipDecoder::new)
         .map(tokio::io::BufReader::new)
-        .map(vcf::r#async::io::Reader::new);
-    reader
+        .map(vcf::r#async::io::Reader::new)
 }
 
 /// Creates a local uncompressed VCF reader.
@@ -545,7 +543,7 @@ pub async fn get_info_fields(header: &Header) -> arrow::array::RecordBatch {
     let mut field_descriptions = StringBuilder::new();
     for (field_name, field) in info_fields {
         field_names.append_value(field_name);
-        field_types.append_value(field.ty().to_string());
+        field_types.append_value(field.ty());
         field_descriptions.append_value(field.description());
     }
     // build RecordBatch
@@ -557,7 +555,7 @@ pub async fn get_info_fields(header: &Header) -> arrow::array::RecordBatch {
         arrow::datatypes::Field::new("type", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("description", arrow::datatypes::DataType::Utf8, false),
     ]);
-    let record_batch = arrow::record_batch::RecordBatch::try_new(
+    arrow::record_batch::RecordBatch::try_new(
         SchemaRef::from(schema.clone()),
         vec![
             Arc::new(field_names),
@@ -565,8 +563,7 @@ pub async fn get_info_fields(header: &Header) -> arrow::array::RecordBatch {
             Arc::new(field_descriptions),
         ],
     )
-    .unwrap();
-    record_batch
+    .unwrap()
 }
 
 /// Unified reader for both local and remote VCF files.

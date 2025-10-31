@@ -343,16 +343,16 @@ impl ExecutionPlan for BgzfFastqExec {
 
                     let proj_indices = projection.as_ref();
                     let mut names = proj_indices
-                        .map_or(true, |p| p.contains(&0))
+                        .is_none_or(|p| p.contains(&0))
                         .then(StringBuilder::new);
                     let mut descriptions = proj_indices
-                        .map_or(true, |p| p.contains(&1))
+                        .is_none_or(|p| p.contains(&1))
                         .then(StringBuilder::new);
                     let mut sequences = proj_indices
-                        .map_or(true, |p| p.contains(&2))
+                        .is_none_or(|p| p.contains(&2))
                         .then(StringBuilder::new);
                     let mut quality_scores = proj_indices
-                        .map_or(true, |p| p.contains(&3))
+                        .is_none_or(|p| p.contains(&3))
                         .then(StringBuilder::new);
 
                     let mut count = 0;

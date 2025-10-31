@@ -263,7 +263,7 @@ impl CramReader {
     ///
     /// # Returns
     /// A boxed stream of Results containing CRAM RecordBuf entries
-    pub async fn read_records<'a>(&'a mut self) -> BoxStream<'a, Result<RecordBuf, io::Error>> {
+    pub async fn read_records(&mut self) -> BoxStream<'_, Result<RecordBuf, io::Error>> {
         match self {
             CramReader::Local(reader, _reference_repo, header) => {
                 // Repository is already set on the reader via Builder pattern during construction

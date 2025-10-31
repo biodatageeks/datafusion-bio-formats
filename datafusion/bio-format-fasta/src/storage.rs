@@ -98,15 +98,14 @@ pub fn get_local_fasta_bgzf_reader(
     file_path: String,
     thread_num: usize,
 ) -> Result<fasta::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
-    let reader = std::fs::File::open(file_path)
+    std::fs::File::open(file_path)
         .map(|f| {
             bgzf::MultithreadedReader::with_worker_count(
                 std::num::NonZero::new(thread_num).unwrap(),
                 f,
             )
         })
-        .map(fasta::io::Reader::new);
-    reader
+        .map(fasta::io::Reader::new)
 }
 
 /// Creates a FASTA reader for uncompressed local files.
@@ -119,10 +118,9 @@ pub fn get_local_fasta_bgzf_reader(
 ///
 /// A buffered FASTA reader for sequential file reading.
 pub fn get_local_fasta_reader(file_path: String) -> Result<Reader<BufReader<File>>, Error> {
-    let reader = std::fs::File::open(file_path)
+    std::fs::File::open(file_path)
         .map(BufReader::new)
-        .map(fasta::io::Reader::new);
-    reader
+        .map(fasta::io::Reader::new)
 }
 
 /// Creates an async FASTA reader for GZIP-compressed local files.
@@ -142,13 +140,12 @@ pub async fn get_local_fasta_gz_reader(
     >,
     Error,
 > {
-    let reader = tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
         .map(GzipDecoder::new)
         .map(tokio::io::BufReader::new)
-        .map(fasta::r#async::io::Reader::new);
-    reader
+        .map(fasta::r#async::io::Reader::new)
 }
 
 /// Async FASTA reader abstraction for cloud storage with multiple compression format support.

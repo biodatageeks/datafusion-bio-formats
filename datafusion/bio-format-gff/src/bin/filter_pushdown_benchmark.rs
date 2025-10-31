@@ -3,7 +3,6 @@ use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageO
 use datafusion_bio_format_gff::table_provider::GffTableProvider;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio;
 
 fn create_object_storage_options() -> ObjectStorageOptions {
     ObjectStorageOptions {

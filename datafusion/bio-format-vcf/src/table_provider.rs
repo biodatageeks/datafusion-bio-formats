@@ -60,28 +60,22 @@ async fn determine_schema_from_header(
         Field::new("filter", DataType::Utf8, true),
     ];
 
-    match info_fields {
-        Some(infos) => {
-            for tag in infos {
-                let dtype = info_to_arrow_type(&header_infos, &tag);
-                let info = header_infos.get(tag.as_str()).unwrap();
-                let nullable = is_nullable(&info.ty());
-                // Preserve case sensitivity for INFO fields to avoid conflicts
-                fields.push(Field::new(tag.clone(), dtype, nullable));
-            }
+    if let Some(infos) = info_fields {
+        for tag in infos {
+            let dtype = info_to_arrow_type(header_infos, tag);
+            let info = header_infos.get(tag.as_str()).unwrap();
+            let nullable = is_nullable(&info.ty());
+            // Preserve case sensitivity for INFO fields to avoid conflicts
+            fields.push(Field::new(tag.clone(), dtype, nullable));
         }
-        _ => {}
     }
 
-    match format_fields {
-        Some(formats) => {
-            for tag in formats {
-                let dtype = format_to_arrow_type(&header_formats, &tag);
-                // Preserve case sensitivity for FORMAT fields
-                fields.push(Field::new(format!("format_{}", tag), dtype, true));
-            }
+    if let Some(formats) = format_fields {
+        for tag in formats {
+            let dtype = format_to_arrow_type(header_formats, tag);
+            // Preserve case sensitivity for FORMAT fields
+            fields.push(Field::new(format!("format_{}", tag), dtype, true));
         }
-        _ => {}
     }
 
     let schema = Schema::new(fields);

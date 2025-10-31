@@ -76,12 +76,12 @@ impl Iterator for UnifiedGffIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            UnifiedGffIterator::Fast(iter) => iter
-                .next()
-                .map(|result| result.map(UnifiedGffRecord::Fast).map_err(Into::into)),
-            UnifiedGffIterator::Simd(iter) => iter
-                .next()
-                .map(|result| result.map(UnifiedGffRecord::Simd).map_err(Into::into)),
+            UnifiedGffIterator::Fast(iter) => {
+                iter.next().map(|result| result.map(UnifiedGffRecord::Fast))
+            }
+            UnifiedGffIterator::Simd(iter) => {
+                iter.next().map(|result| result.map(UnifiedGffRecord::Simd))
+            }
         }
     }
 }
@@ -555,13 +555,12 @@ pub async fn get_local_gff_gz_reader(
     >,
     Error,
 > {
-    let reader = tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
         .map(GzipDecoder::new)
         .map(tokio::io::BufReader::new)
-        .map(gff::r#async::io::Reader::new);
-    reader
+        .map(gff::r#async::io::Reader::new)
 }
 
 /// Creates an async GFF reader for BGZF-compressed local files
@@ -746,7 +745,6 @@ impl GffLocalReader {
                         phase: fast_record.phase.clone(),
                         attributes: fast_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             GffLocalReader::GZIP(reader) => {
@@ -762,7 +760,6 @@ impl GffLocalReader {
                         phase: fast_record.phase.clone(),
                         attributes: fast_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             GffLocalReader::PLAIN(reader) => {
@@ -778,7 +775,6 @@ impl GffLocalReader {
                         phase: fast_record.phase.clone(),
                         attributes: fast_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             // Fast parsers use fast_records() and convert to DynGffRecord
@@ -795,7 +791,6 @@ impl GffLocalReader {
                         phase: fast_record.phase.clone(),
                         attributes: fast_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             GffLocalReader::GzipFast(reader) => {
@@ -811,7 +806,6 @@ impl GffLocalReader {
                         phase: fast_record.phase.clone(),
                         attributes: fast_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             GffLocalReader::PlainFast(reader) => {
@@ -827,7 +821,6 @@ impl GffLocalReader {
                         phase: fast_record.phase.clone(),
                         attributes: fast_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             // SIMD parsers use simd_records() and convert to DynGffRecord
@@ -844,7 +837,6 @@ impl GffLocalReader {
                         phase: simd_record.phase.clone(),
                         attributes: simd_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             GffLocalReader::GzipSimd(reader) => {
@@ -860,7 +852,6 @@ impl GffLocalReader {
                         phase: simd_record.phase.clone(),
                         attributes: simd_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
             GffLocalReader::PlainSimd(reader) => {
@@ -876,7 +867,6 @@ impl GffLocalReader {
                         phase: simd_record.phase.clone(),
                         attributes: simd_record.attributes.clone(),
                     })
-                    .map_err(Into::into)
                 })))
             }
         }
@@ -894,19 +884,19 @@ impl GffLocalReader {
                 .next()
                 .unwrap()
                 .map(|r| r.attributes().clone())
-                .map_err(Into::into),
+                ,
             GffLocalReader::GZIP(mut reader) => reader
                 .record_bufs()
                 .next()
                 .unwrap()
                 .map(|r| r.attributes().clone())
-                .map_err(Into::into),
+                ,
             GffLocalReader::PLAIN(mut reader) => reader
                 .record_bufs()
                 .next()
                 .unwrap()
                 .map(|r| r.attributes().clone())
-                .map_err(Into::into),
+                ,
             // Fast parsers - we'll need to adapt this
             GffLocalReader::BgzfFast(_) => {
                 unimplemented!("get_attributes not yet implemented for fast parsers")

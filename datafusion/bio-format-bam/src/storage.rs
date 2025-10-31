@@ -51,15 +51,14 @@ pub async fn get_local_bam_reader(
     file_path: String,
     thread_num: usize,
 ) -> Result<Reader<MultithreadedReader<File>>, Error> {
-    let reader = File::open(file_path)
+    File::open(file_path)
         .map(|f| {
             noodles_bgzf::MultithreadedReader::with_worker_count(
                 NonZero::new(thread_num).unwrap(),
                 f,
             )
         })
-        .map(bam::io::Reader::from);
-    reader
+        .map(bam::io::Reader::from)
 }
 
 /// An enum representing either a local or remote BAM file reader.

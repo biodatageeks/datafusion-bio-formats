@@ -257,6 +257,7 @@ struct BgzfGffExec {
 }
 
 impl BgzfGffExec {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         path: PathBuf,
         partitions: Vec<(u64, u64)>,
@@ -817,6 +818,7 @@ fn process_nested_attributes(attributes_str: &str) -> Vec<Attribute> {
 }
 
 /// Create Arrow RecordBatch from builders with projection support
+#[allow(clippy::too_many_arguments)]
 fn create_batch_projected(
     schema: &SchemaRef,
     projection_indices: &[usize],
@@ -980,7 +982,7 @@ mod tests {
 
         let batch2 = create_batch_projected(
             &schema2,
-            &vec![0, 1],
+            &[0, 1],
             1,
             &mut chrom_builder,
             &mut start_builder,

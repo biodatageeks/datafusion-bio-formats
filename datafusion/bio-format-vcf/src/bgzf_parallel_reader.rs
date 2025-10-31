@@ -88,7 +88,7 @@ impl BgzfVcfTableProvider {
 
         let mut all_info_fields = Vec::new();
         for (tag, info) in header_infos.iter() {
-            let dtype = info_to_arrow_type(&header_infos, tag);
+            let dtype = info_to_arrow_type(header_infos, tag);
             let nullable = is_nullable(&info.ty());
             fields.push(Field::new(tag, dtype, nullable));
             all_info_fields.push(tag.to_string());
@@ -96,7 +96,7 @@ impl BgzfVcfTableProvider {
 
         let mut all_format_fields = Vec::new();
         for (tag, _format) in header_formats.iter() {
-            let dtype = format_to_arrow_type(&header_formats, tag);
+            let dtype = format_to_arrow_type(header_formats, tag);
             fields.push(Field::new(format!("format_{}", tag), dtype, true));
             all_format_fields.push(tag.to_string());
         }
@@ -221,6 +221,7 @@ struct BgzfVcfExec {
 }
 
 impl BgzfVcfExec {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         path: PathBuf,
         partitions: Vec<(u64, u64)>,
@@ -488,21 +489,21 @@ impl ExecutionPlan for BgzfVcfExec {
                 let header_infos = header.infos();
 
                 // Determine which fields are needed based on projection
-                let needs_chrom = projection.as_ref().map_or(true, |proj| proj.contains(&0));
-                let needs_start = projection.as_ref().map_or(true, |proj| proj.contains(&1));
-                let needs_end = projection.as_ref().map_or(true, |proj| proj.contains(&2));
-                let needs_id = projection.as_ref().map_or(true, |proj| proj.contains(&3));
-                let needs_ref = projection.as_ref().map_or(true, |proj| proj.contains(&4));
-                let needs_alt = projection.as_ref().map_or(true, |proj| proj.contains(&5));
-                let needs_qual = projection.as_ref().map_or(true, |proj| proj.contains(&6));
-                let needs_filter = projection.as_ref().map_or(true, |proj| proj.contains(&7));
+                let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+                let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+                let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+                let needs_id = projection.as_ref().is_none_or(|proj| proj.contains(&3));
+                let needs_ref = projection.as_ref().is_none_or(|proj| proj.contains(&4));
+                let needs_alt = projection.as_ref().is_none_or(|proj| proj.contains(&5));
+                let needs_qual = projection.as_ref().is_none_or(|proj| proj.contains(&6));
+                let needs_filter = projection.as_ref().is_none_or(|proj| proj.contains(&7));
 
                 // Set up info builders
                 let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
                     (Vec::new(), Vec::new(), Vec::new());
 
                 for field_name in all_info_fields {
-                    let data_type = info_to_arrow_type(&header_infos, &field_name);
+                    let data_type = info_to_arrow_type(header_infos, &field_name);
                     let field = OptionalField::new(&data_type, batch_size)
                         .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
                     info_builders.0.push(field_name);
@@ -758,7 +759,7 @@ mod tests {
         let idx = make_index(&[(128, 0), (256, 0)]);
         let parts = get_bgzf_partition_bounds(&idx, 8);
         // We should not create more partitions than blocks+sentinel
-        assert_eq!(parts.len(), 3.min(8).min(idx.as_ref().len() + 1));
+        assert_eq!(parts.len(), 3.min(idx.as_ref().len() + 1));
     }
 
     #[test]

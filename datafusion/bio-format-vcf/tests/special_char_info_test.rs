@@ -65,7 +65,7 @@ async fn test_special_info_fields() -> Result<(), Box<dyn std::error::Error>> {
             .downcast_ref::<datafusion::arrow::array::BooleanArray>()
             .unwrap();
 
-        assert_eq!(hgmd_array.value(0), true);
+        assert!(hgmd_array.value(0));
     }
 
     Ok(())

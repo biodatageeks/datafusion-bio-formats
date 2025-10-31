@@ -171,8 +171,10 @@ pub async fn get_compression_type(
         "get_compression_type called with file_path: {}, compression_type: {:?}",
         file_path, compression_type
     );
-    if compression_type.is_some() && compression_type != Some(CompressionType::AUTO) {
-        return Ok(compression_type.unwrap());
+    if let Some(ct) = compression_type {
+        if ct != CompressionType::AUTO {
+            return Ok(ct);
+        }
     }
 
     let storage_type = get_storage_type(file_path.clone());
@@ -537,7 +539,7 @@ pub async fn get_remote_stream(
         }
         //FIXME: Currently, Azure Blob Storage does not support anonymous access
         StorageType::AZBLOB => {
-            let blob_info = extract_account_and_container(&*file_path.clone());
+            let blob_info = extract_account_and_container(&file_path);
             log::info!(
                 "Using Azure Blob Storage type with parameters: \
                 account_name: {}, \
@@ -614,14 +616,12 @@ pub async fn get_remote_stream(
             let mut builder = Gcs::default().bucket(bucket_name.as_str());
             if allow_anonymous {
                 builder = builder.disable_vm_metadata().allow_anonymous();
+            } else if let Ok(service_account_key) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+                builder = builder.credential_path(service_account_key.as_str());
             } else {
-                if let Ok(service_account_key) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-                    builder = builder.credential_path(service_account_key.as_str());
-                } else {
-                    log::warn!(
-                        "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set. Using default credentials."
-                    );
-                }
+                log::warn!(
+                    "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set. Using default credentials."
+                );
             };
             let operator = Operator::new(builder)?
                 .layer(

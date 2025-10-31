@@ -52,6 +52,7 @@ use std::str;
 /// # Errors
 ///
 /// Returns an error if the RecordBatch cannot be created
+#[allow(clippy::too_many_arguments)]
 pub fn build_record_batch(
     schema: SchemaRef,
     chroms: &[String],

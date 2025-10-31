@@ -109,15 +109,14 @@ pub fn get_local_bed_bgzf_reader<const N: usize>(
         "Reading VCF file from local storage with {} threads",
         thread_num
     );
-    let reader = File::open(file_path)
+    File::open(file_path)
         .map(|f| {
             noodles_bgzf::MultithreadedReader::with_worker_count(
                 NonZero::new(thread_num).unwrap(),
                 f,
             )
         })
-        .map(noodles_bed::io::Reader::new);
-    reader
+        .map(noodles_bed::io::Reader::new)
 }
 
 /// Creates a local GZIP-compressed BED reader
@@ -142,13 +141,12 @@ pub async fn get_local_bed_gz_reader<const N: usize>(
     >,
     Error,
 > {
-    let reader = tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
         .map(GzipDecoder::new)
         .map(tokio::io::BufReader::new)
-        .map(async_reader::Reader::new);
-    reader
+        .map(async_reader::Reader::new)
 }
 
 /// Creates a local uncompressed BED reader
@@ -168,10 +166,9 @@ pub fn get_local_bed_reader<const N: usize>(
     file_path: String,
 ) -> Result<noodles_bed::io::Reader<N, std::io::BufReader<File>>, Error> {
     debug!("Reading BED file from local storage with sync reader");
-    let reader = File::open(file_path)
-        .map(|f| std::io::BufReader::new(f))
-        .map(noodles_bed::io::Reader::new);
-    reader
+    File::open(file_path)
+        .map(std::io::BufReader::new)
+        .map(noodles_bed::io::Reader::new)
 }
 
 /// Remote BED reader supporting multiple compression formats

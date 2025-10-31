@@ -225,7 +225,7 @@ fn load_attributes_unnest_from_string(
 /// Load attributes directly from parsed Attribute structs - preserves original order
 fn load_attributes_from_vec(
     attributes: Vec<Attribute>,
-    builder: &mut Vec<OptionalField>,
+    builder: &mut [OptionalField],
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
     builder[0].append_array_struct(attributes)?;
     Ok(())
@@ -294,7 +294,7 @@ fn load_attributes_unnest(
 #[allow(dead_code)] // TODO: Implement for fast/SIMD parsers
 fn load_attributes(
     record: &RecordBuf,
-    builder: &mut Vec<OptionalField>,
+    builder: &mut [OptionalField],
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
     let attributes = record.attributes();
 
@@ -431,14 +431,14 @@ async fn get_remote_gff_stream(
     let reader = GffRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
 
     // Determine which core GFF fields we need to parse based on projection
-    let needs_chrom = projection.as_ref().map_or(true, |proj| proj.contains(&0));
-    let needs_start = projection.as_ref().map_or(true, |proj| proj.contains(&1));
-    let needs_end = projection.as_ref().map_or(true, |proj| proj.contains(&2));
-    let needs_type = projection.as_ref().map_or(true, |proj| proj.contains(&3));
-    let needs_source = projection.as_ref().map_or(true, |proj| proj.contains(&4));
-    let needs_score = projection.as_ref().map_or(true, |proj| proj.contains(&5));
-    let needs_strand = projection.as_ref().map_or(true, |proj| proj.contains(&6));
-    let needs_phase = projection.as_ref().map_or(true, |proj| proj.contains(&7));
+    let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+    let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+    let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+    let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
+    let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
+    let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
+    let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
+    let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
 
     debug!(
         "GFF remote projection {:?}: needs_chrom={}, needs_end={}, needs_type={}, needs_source={}",
@@ -634,6 +634,7 @@ async fn get_remote_gff_stream(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_local_gff(
     file_path: String,
     attr_fields: Option<Vec<String>>,
@@ -646,14 +647,14 @@ async fn get_local_gff(
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     // Determine which core GFF fields we need to parse based on projection
-    let needs_chrom = projection.as_ref().map_or(true, |proj| proj.contains(&0));
-    let needs_start = projection.as_ref().map_or(true, |proj| proj.contains(&1));
-    let needs_end = projection.as_ref().map_or(true, |proj| proj.contains(&2));
-    let needs_type = projection.as_ref().map_or(true, |proj| proj.contains(&3));
-    let needs_source = projection.as_ref().map_or(true, |proj| proj.contains(&4));
-    let needs_score = projection.as_ref().map_or(true, |proj| proj.contains(&5));
-    let needs_strand = projection.as_ref().map_or(true, |proj| proj.contains(&6));
-    let needs_phase = projection.as_ref().map_or(true, |proj| proj.contains(&7));
+    let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+    let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+    let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+    let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
+    let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
+    let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
+    let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
+    let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
 
     let mut chroms: Vec<String> = if needs_chrom {
         Vec::<String>::with_capacity(batch_size)
@@ -894,6 +895,7 @@ async fn get_local_gff(
 
 // NOTE: Removed build_record_batch function - replaced with optimized build_record_batch_optimized
 
+#[allow(clippy::too_many_arguments)]
 fn build_record_batch_optimized(
     schema: SchemaRef,
     chroms: &[String],
@@ -1070,6 +1072,7 @@ fn build_record_batch_optimized(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     attr_fields: Option<Vec<String>>,

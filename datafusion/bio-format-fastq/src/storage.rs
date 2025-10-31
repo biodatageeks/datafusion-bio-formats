@@ -111,15 +111,14 @@ pub fn get_local_fastq_bgzf_reader(
     file_path: String,
     thread_num: usize,
 ) -> Result<fastq::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
-    let reader = std::fs::File::open(file_path)
+    std::fs::File::open(file_path)
         .map(|f| {
             bgzf::MultithreadedReader::with_worker_count(
                 std::num::NonZero::new(thread_num).unwrap(),
                 f,
             )
         })
-        .map(fastq::io::Reader::new);
-    reader
+        .map(fastq::io::Reader::new)
 }
 
 /// Creates a synchronous FASTQ reader for uncompressed local files
@@ -136,10 +135,9 @@ pub fn get_local_fastq_bgzf_reader(
 ///
 /// Returns an error if the file cannot be opened
 pub fn get_local_fastq_reader(file_path: String) -> Result<Reader<BufReader<File>>, Error> {
-    let reader = std::fs::File::open(file_path)
+    std::fs::File::open(file_path)
         .map(BufReader::new)
-        .map(fastq::io::Reader::new);
-    reader
+        .map(fastq::io::Reader::new)
 }
 
 /// Creates an async GZIP-decompressing FASTQ reader for local files
@@ -163,13 +161,12 @@ pub async fn get_local_fastq_gz_reader(
     >,
     Error,
 > {
-    let reader = tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
         .map(GzipDecoder::new)
         .map(tokio::io::BufReader::new)
-        .map(fastq::r#async::io::Reader::new);
-    reader
+        .map(fastq::r#async::io::Reader::new)
 }
 
 /// An async FASTQ reader that automatically detects and handles remote file compression

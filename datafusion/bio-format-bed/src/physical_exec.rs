@@ -160,10 +160,7 @@ async fn get_remote_bed_stream(
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.feature_start()?.get() as u32);
             pose.push(record.feature_end().unwrap()?.get() as u32);
-            name.push(match record.name(){
-                Some(n) => Some(n.to_string()),
-                _ => None,
-            });
+            name.push(record.name().map(|n| n.to_string()));
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
@@ -249,10 +246,7 @@ async fn get_local_bed(
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.feature_start()?.get() as u32);
             pose.push(record.feature_end().unwrap()?.get() as u32);
-            name.push(match record.name(){
-                Some(n) => Some(n.to_string()),
-                _ => None,
-            });
+            name.push(record.name().map(|n| n.to_string()));
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
@@ -309,7 +303,7 @@ fn build_record_batch(
     chroms: &[String],
     poss: &[u32],
     pose: &[u32],
-    name: &Vec<Option<String>>,
+    name: &[Option<String>],
     projection: Option<Vec<usize>>,
 ) -> datafusion::error::Result<RecordBatch> {
     let chrom_array = Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>;
