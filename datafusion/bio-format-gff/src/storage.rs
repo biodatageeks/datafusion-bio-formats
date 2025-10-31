@@ -13,40 +13,61 @@ use noodles_gff::feature::record_buf::Attributes;
 
 /// Unified GFF record that can hold different fast parser types
 pub enum UnifiedGffRecord {
+    /// Record parsed with the optimized fast parser
     Fast(DynGffRecord),
+    /// Record parsed with the SIMD-optimized parser
     Simd(DynGffRecord),
 }
 
 /// Trait for unified GFF record access
 pub trait GffRecordTrait {
+    /// Returns the reference sequence name (seqid) field
     fn reference_sequence_name(&self) -> String;
+    /// Returns the start position (1-based, inclusive)
     fn start(&self) -> u32;
+    /// Returns the end position (1-based, inclusive)
     fn end(&self) -> u32;
+    /// Returns the feature type
     fn ty(&self) -> String;
+    /// Returns the source of this annotation
     fn source(&self) -> String;
+    /// Returns the score, or None if score is not available
     fn score(&self) -> Option<f32>;
+    /// Returns the strand ('+', '-', or '.')
     fn strand(&self) -> String;
+    /// Returns the phase (0, 1, 2) for coding features, or None if not applicable
     fn phase(&self) -> Option<u8>;
+    /// Returns the raw attributes string
     fn attributes_string(&self) -> String;
 }
 
-/// Iterator that can return different record types  
+/// Iterator that can return different record types
 pub enum UnifiedGffIterator {
-    // Use dynamic dispatch since the exact types are private
+    /// Iterator using fast parser
     Fast(Box<dyn Iterator<Item = std::io::Result<DynGffRecord>> + Send>),
+    /// Iterator using SIMD parser
     Simd(Box<dyn Iterator<Item = std::io::Result<DynGffRecord>> + Send>),
 }
 
 /// Dynamic GFF record that holds the actual fast record types
 pub struct DynGffRecord {
+    /// Sequence ID (chromosome/contig name)
     pub seqid: String,
+    /// Source of the annotation
     pub source: String,
+    /// Feature type
     pub ty: String,
+    /// Start position (1-based, inclusive)
     pub start: u32,
+    /// End position (1-based, inclusive)
     pub end: u32,
+    /// Score or None if not provided
     pub score: Option<f32>,
+    /// Strand direction
     pub strand: String,
+    /// Phase as a string for parsing flexibility
     pub phase: String,
+    /// Raw attribute string
     pub attributes: String,
 }
 
@@ -212,6 +233,14 @@ impl GffParserType {
     }
 }
 
+/// Creates an async GFF reader for GZIP-compressed remote files
+///
+/// # Arguments
+/// * `file_path` - Path to the remote GFF file (e.g., S3, GCS, Azure)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+/// An async GFF reader configured for GZIP-compressed streams
 pub async fn get_remote_gff_gz_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -230,6 +259,14 @@ pub async fn get_remote_gff_gz_reader(
     Ok(reader)
 }
 
+/// Creates an async GFF reader for BGZF-compressed remote files
+///
+/// # Arguments
+/// * `file_path` - Path to the remote GFF file (e.g., S3, GCS, Azure)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+/// An async GFF reader configured for BGZF-compressed streams
 pub async fn get_remote_gff_bgzf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -242,6 +279,14 @@ pub async fn get_remote_gff_bgzf_reader(
     Ok(reader)
 }
 
+/// Creates an async GFF reader for uncompressed remote files
+///
+/// # Arguments
+/// * `file_path` - Path to the remote GFF file (e.g., S3, GCS, Azure)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+/// An async GFF reader configured for uncompressed streams
 pub async fn get_remote_gff_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -251,8 +296,12 @@ pub async fn get_remote_gff_reader(
     Ok(reader)
 }
 
+/// Async GFF reader for remote files with multiple compression and parser type variants
+///
+/// Combines compression type (GZIP, BGZF, PLAIN) with parser selection (Standard, Fast, SIMD)
+/// to provide optimal performance for different use cases.
 pub enum GffRemoteReader {
-    // Standard parsers
+    /// Standard parser with GZIP compression
     GZIP(
         gff::r#async::io::Reader<
             tokio::io::BufReader<
@@ -262,10 +311,12 @@ pub enum GffRemoteReader {
             >,
         >,
     ),
+    /// Standard parser with BGZF compression
     BGZF(gff::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>),
+    /// Standard parser with no compression
     PLAIN(gff::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 
-    // Fast parsers (same reader types but used with fast_record_bufs() method)
+    /// Fast parser with GZIP compression
     GzipFast(
         gff::r#async::io::Reader<
             tokio::io::BufReader<
@@ -275,12 +326,14 @@ pub enum GffRemoteReader {
             >,
         >,
     ),
+    /// Fast parser with BGZF compression
     BgzfFast(
         gff::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
     ),
+    /// Fast parser with no compression
     PlainFast(gff::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 
-    // SIMD parsers (same reader types but used with simd_record_bufs() method)
+    /// SIMD parser with GZIP compression
     GzipSimd(
         gff::r#async::io::Reader<
             tokio::io::BufReader<
@@ -290,13 +343,23 @@ pub enum GffRemoteReader {
             >,
         >,
     ),
+    /// SIMD parser with BGZF compression
     BgzfSimd(
         gff::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
     ),
+    /// SIMD parser with no compression
     PlainSimd(gff::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 }
 
 impl GffRemoteReader {
+    /// Creates a new remote GFF reader with default parser selection
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the remote GFF file
+    /// * `object_storage_options` - Cloud storage configuration
+    ///
+    /// # Returns
+    /// A configured GffRemoteReader using the default parser type (Fast)
     pub async fn new(
         file_path: String,
         object_storage_options: ObjectStorageOptions,
@@ -304,6 +367,15 @@ impl GffRemoteReader {
         Self::new_with_parser(file_path, object_storage_options, GffParserType::default()).await
     }
 
+    /// Creates a new remote GFF reader with explicit parser type selection
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the remote GFF file
+    /// * `object_storage_options` - Cloud storage configuration
+    /// * `parser_type` - Parser type to use (Standard, Fast, or SIMD)
+    ///
+    /// # Returns
+    /// A configured GffRemoteReader with the specified parser type
     pub async fn new_with_parser(
         file_path: String,
         object_storage_options: ObjectStorageOptions,
@@ -363,6 +435,14 @@ impl GffRemoteReader {
             ),
         }
     }
+    /// Returns a stream of parsed GFF records
+    ///
+    /// The stream uses the appropriate parser method based on the reader type:
+    /// - Standard and Fast variants use `fast_record_bufs()`
+    /// - SIMD variants use `simd_record_bufs()`
+    ///
+    /// # Returns
+    /// A boxed stream of GFF record buffers
     pub fn read_records(self) -> BoxStream<'static, Result<RecordBuf, Error>> {
         match self {
             // Standard parsers - use fast methods to avoid borrowing issues
@@ -381,6 +461,11 @@ impl GffRemoteReader {
             GffRemoteReader::PlainSimd(reader) => reader.simd_record_bufs().boxed(),
         }
     }
+
+    /// Reads and returns the attributes from the first GFF record
+    ///
+    /// # Returns
+    /// The attributes structure from the first record in the file
     pub async fn get_attributes(self) -> Attributes {
         match self {
             // Standard parsers - use fast methods to avoid borrowing issues
@@ -404,6 +489,13 @@ impl GffRemoteReader {
     }
 }
 
+/// Creates a synchronous GFF reader for GZIP-compressed local files
+///
+/// # Arguments
+/// * `file_path` - Path to the local GFF file
+///
+/// # Returns
+/// A synchronous GFF reader configured for GZIP-compressed files
 pub fn get_local_gff_gz_sync_reader(
     file_path: String,
 ) -> Result<gff::io::Reader<std::io::BufReader<flate2::read::GzDecoder<std::fs::File>>>, Error> {
@@ -413,6 +505,14 @@ pub fn get_local_gff_gz_sync_reader(
     Ok(reader)
 }
 
+/// Creates a synchronous GFF reader for BGZF-compressed local files with multithreading
+///
+/// # Arguments
+/// * `file_path` - Path to the local GFF file
+/// * `thread_num` - Number of threads to use for decompression
+///
+/// # Returns
+/// A synchronous GFF reader configured for BGZF-compressed files with parallel decompression
 pub fn get_local_gff_bgzf_sync_reader(
     file_path: String,
     thread_num: usize,
@@ -425,6 +525,13 @@ pub fn get_local_gff_bgzf_sync_reader(
     Ok(gff::io::Reader::new(reader))
 }
 
+/// Creates a synchronous GFF reader for uncompressed local files
+///
+/// # Arguments
+/// * `file_path` - Path to the local GFF file
+///
+/// # Returns
+/// A synchronous GFF reader configured for uncompressed files
 pub fn get_local_gff_plain_sync_reader(
     file_path: String,
 ) -> Result<gff::io::Reader<std::io::BufReader<std::fs::File>>, Error> {
@@ -433,6 +540,13 @@ pub fn get_local_gff_plain_sync_reader(
     Ok(reader)
 }
 
+/// Creates an async GFF reader for GZIP-compressed local files
+///
+/// # Arguments
+/// * `file_path` - Path to the local GZIP-compressed GFF file
+///
+/// # Returns
+/// An async GFF reader configured for GZIP-compressed local files
 pub async fn get_local_gff_gz_reader(
     file_path: String,
 ) -> Result<
@@ -450,6 +564,13 @@ pub async fn get_local_gff_gz_reader(
     reader
 }
 
+/// Creates an async GFF reader for BGZF-compressed local files
+///
+/// # Arguments
+/// * `file_path` - Path to the local BGZF-compressed GFF file
+///
+/// # Returns
+/// An async GFF reader configured for BGZF-compressed local files with async I/O
 pub async fn get_local_gff_bgzf_async_reader(
     file_path: String,
 ) -> Result<
@@ -465,6 +586,13 @@ pub async fn get_local_gff_bgzf_async_reader(
     Ok(reader)
 }
 
+/// Creates an async GFF reader for uncompressed local files
+///
+/// # Arguments
+/// * `file_path` - Path to the local uncompressed GFF file
+///
+/// # Returns
+/// An async GFF reader configured for uncompressed local files with async I/O
 pub async fn get_local_gff_async_reader(
     file_path: String,
 ) -> Result<gff::r#async::io::Reader<tokio::io::BufReader<tokio::fs::File>>, Error> {
@@ -473,24 +601,43 @@ pub async fn get_local_gff_async_reader(
     Ok(reader)
 }
 
+/// Synchronous GFF reader for local files with multiple compression and parser type variants
+///
+/// Combines compression type (GZIP, BGZF, PLAIN) with parser selection (Standard, Fast, SIMD)
+/// to provide optimal performance for different use cases with blocking I/O.
 pub enum GffLocalReader {
-    // Standard parsers - using sync readers with regular record_bufs
+    /// Standard parser with GZIP compression
     GZIP(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    /// Standard parser with BGZF compression
     BGZF(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    /// Standard parser with no compression
     PLAIN(gff::io::Reader<BufReader<File>>),
 
-    // Fast parsers - using sync readers with fast_records iterator
+    /// Fast parser with GZIP compression
     GzipFast(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    /// Fast parser with BGZF compression
     BgzfFast(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    /// Fast parser with no compression
     PlainFast(gff::io::Reader<BufReader<File>>),
 
-    // SIMD parsers - using sync readers with simd_records iterator
+    /// SIMD parser with GZIP compression
     GzipSimd(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    /// SIMD parser with BGZF compression
     BgzfSimd(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    /// SIMD parser with no compression
     PlainSimd(gff::io::Reader<BufReader<File>>),
 }
 
 impl GffLocalReader {
+    /// Creates a new local GFF reader with default parser selection
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the local GFF file
+    /// * `thread_num` - Number of threads for BGZF decompression
+    /// * `object_storage_options` - Storage configuration (unused for local files)
+    ///
+    /// # Returns
+    /// A configured GffLocalReader using the default parser type (Fast)
     pub async fn new(
         file_path: String,
         thread_num: usize,
@@ -505,6 +652,16 @@ impl GffLocalReader {
         .await
     }
 
+    /// Creates a new local GFF reader with explicit parser type selection
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the local GFF file
+    /// * `thread_num` - Number of threads for BGZF decompression
+    /// * `object_storage_options` - Storage configuration (unused for local files)
+    /// * `parser_type` - Parser type to use (Standard, Fast, or SIMD)
+    ///
+    /// # Returns
+    /// A configured GffLocalReader with the specified parser type
     pub async fn new_with_parser(
         file_path: String,
         thread_num: usize,
@@ -569,6 +726,10 @@ impl GffLocalReader {
         }
     }
 
+    /// Converts this reader into a unified iterator over GFF records
+    ///
+    /// # Returns
+    /// A UnifiedGffIterator that yields parsed GFF records with the selected parser type
     pub fn into_sync_iterator(self) -> UnifiedGffIterator {
         match self {
             // Standard parsers - but we still use fast_records for API consistency
@@ -721,6 +882,10 @@ impl GffLocalReader {
         }
     }
 
+    /// Reads and returns the attributes from the first GFF record
+    ///
+    /// # Returns
+    /// The attributes structure from the first record in the file, or an error if reading fails
     pub fn get_attributes(self) -> Result<Attributes, Error> {
         match self {
             // Standard parsers use record_bufs()

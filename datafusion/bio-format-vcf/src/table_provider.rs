@@ -23,6 +23,22 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+/// Determines the Arrow schema for a VCF file by reading its header.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the VCF file
+/// * `info_fields` - Optional list of INFO fields to include (if None, all are included)
+/// * `format_fields` - Optional list of FORMAT fields to include (if None, all are included)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+///
+/// An Arrow SchemaRef representing the VCF table structure
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or the header is invalid
 async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
@@ -73,10 +89,32 @@ async fn determine_schema_from_header(
     Ok(Arc::new(schema))
 }
 
+/// Determines if a VCF INFO field type is nullable.
+///
+/// FLAG type fields are not nullable (always present as true/false), while other
+/// types can be absent for specific variants.
+///
+/// # Arguments
+///
+/// * `ty` - The VCF INFO field type
+///
+/// # Returns
+///
+/// `true` if the field can be null/missing, `false` if it's always present
 pub fn is_nullable(ty: &InfoType) -> bool {
     !matches!(ty, InfoType::Flag)
 }
 
+/// Converts a VCF FORMAT field type to an Arrow DataType.
+///
+/// # Arguments
+///
+/// * `formats` - The VCF header FORMAT definitions
+/// * `field` - The FORMAT field name
+///
+/// # Returns
+///
+/// The corresponding Arrow DataType
 fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
     let format = formats.get(field).unwrap();
     match format.ty() {
@@ -87,17 +125,45 @@ fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
     }
 }
 
+/// A DataFusion table provider for reading VCF files.
+///
+/// This provider enables SQL queries on VCF files by implementing the DataFusion
+/// TableProvider interface. It supports local and remote files, multiple compression formats,
+/// and projection pushdown optimization.
 #[derive(Clone, Debug)]
 pub struct VcfTableProvider {
+    /// Path to the VCF file (local path or cloud URI)
     file_path: String,
+    /// Optional list of INFO fields to include (if None, all are included)
     info_fields: Option<Vec<String>>,
+    /// Optional list of FORMAT fields to include (if None, all are included)
     format_fields: Option<Vec<String>>,
+    /// Arrow schema representing the VCF table structure
     schema: SchemaRef,
+    /// Optional number of worker threads for BGZF decompression
     thread_num: Option<usize>,
+    /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
 impl VcfTableProvider {
+    /// Creates a new VCF table provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the VCF file
+    /// * `info_fields` - Optional list of INFO fields to include
+    /// * `format_fields` - Optional list of FORMAT fields to include
+    /// * `thread_num` - Optional number of worker threads for BGZF decompression
+    /// * `object_storage_options` - Configuration for cloud storage access
+    ///
+    /// # Returns
+    ///
+    /// A new `VcfTableProvider` instance with schema determined from the VCF header
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or the header is invalid
     pub fn new(
         file_path: String,
         info_fields: Option<Vec<String>>,
@@ -183,6 +249,19 @@ impl TableProvider for VcfTableProvider {
     }
 }
 
+/// Converts a VCF INFO field type to an Arrow DataType.
+///
+/// Handles scalar types (Integer, Float, String, Character, Flag) and array types
+/// based on the Number field of the INFO definition.
+///
+/// # Arguments
+///
+/// * `infos` - The VCF header INFO definitions
+/// * `field` - The INFO field name
+///
+/// # Returns
+///
+/// The corresponding Arrow DataType, defaulting to Utf8 if field is not found
 pub fn info_to_arrow_type(infos: &Infos, field: &str) -> DataType {
     match infos.get(field) {
         Some(t) => {

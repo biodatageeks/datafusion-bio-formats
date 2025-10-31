@@ -14,14 +14,32 @@ use log::debug;
 use std::any::Any;
 use std::sync::Arc;
 
+/// Enumeration of supported BED format variants based on number of columns
+///
+/// BED (Browser Extensible Data) files support different column counts:
+/// - BED3: 3 columns (chrom, start, end)
+/// - BED4: 4 columns (chrom, start, end, name)
+/// - BED5: 5 columns (chrom, start, end, name, score)
+/// - BED6: 6 columns (chrom, start, end, name, score, strand)
 #[derive(Debug, Clone)]
 pub enum BEDFields {
+    /// 3-column BED format: chrom, start, end
     BED3,
+    /// 4-column BED format: chrom, start, end, name
     BED4,
+    /// 5-column BED format: chrom, start, end, name, score
     BED5,
+    /// 6-column BED format: chrom, start, end, name, score, strand
     BED6,
 }
 
+/// Determines the schema for BED table data
+///
+/// Returns a schema with the following fields:
+/// - `chrom` (Utf8, not nullable): Chromosome name
+/// - `start` (UInt32, not nullable): Start position (0-based)
+/// - `end` (UInt32, not nullable): End position (exclusive)
+/// - `name` (Utf8, nullable): Feature name
 fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     let fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -34,16 +52,59 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     Ok(Arc::new(schema))
 }
 
+/// A DataFusion TableProvider for reading BED files
+///
+/// This struct implements the [`TableProvider`] trait to enable SQL queries over BED files.
+/// It supports both local and remote (cloud) storage backends, with configurable
+/// parallelism and compression handling.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use datafusion_bio_format_bed::table_provider::{BedTableProvider, BEDFields};
+/// use std::sync::Arc;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let table = BedTableProvider::new(
+///     "data/genes.bed".to_string(),
+///     BEDFields::BED4,
+///     Some(4),  // Use 4 threads for parallel reading
+///     None,     // No cloud storage options
+/// )?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug)]
 pub struct BedTableProvider {
+    /// Path to the BED file (local or remote)
     file_path: String,
+    /// BED format variant specifying column count
     bed_fields: BEDFields,
+    /// Arrow schema for the table
     schema: SchemaRef,
+    /// Optional number of threads for parallel reading
     thread_num: Option<usize>,
+    /// Optional cloud storage configuration
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
 impl BedTableProvider {
+    /// Creates a new BED table provider
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the BED file (local filesystem or cloud storage URL)
+    /// * `bed_fields` - BED format variant (BED3, BED4, BED5, BED6)
+    /// * `thread_num` - Optional number of threads for parallel BGZF decompression
+    /// * `object_storage_options` - Optional cloud storage configuration for remote files
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `BedTableProvider` or an error if schema initialization fails
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the schema cannot be created
     pub fn new(
         file_path: String,
         bed_fields: BEDFields,
@@ -63,20 +124,31 @@ impl BedTableProvider {
 
 #[async_trait]
 impl TableProvider for BedTableProvider {
+    /// Returns `self` as `Any` for dynamic type casting
     fn as_any(&self) -> &dyn Any {
         self
         // todo!()
     }
 
+    /// Returns the schema of the table
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 
+    /// Returns the table type (always Base for BED files)
     fn table_type(&self) -> TableType {
         TableType::Base
         // todo!()
     }
 
+    /// Creates an execution plan for scanning the BED file
+    ///
+    /// # Arguments
+    ///
+    /// * `_state` - Session state (unused)
+    /// * `projection` - Optional column indices to project
+    /// * `_filters` - Filter expressions (not currently applied)
+    /// * `limit` - Optional row limit
     async fn scan(
         &self,
         _state: &dyn Session,

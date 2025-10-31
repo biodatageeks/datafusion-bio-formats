@@ -1,7 +1,13 @@
 [package]
 name = "datafusion-bio-format-gff"
 version = "0.1.0"
-edition = "2024"
+description = "GFF file format support for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
 
 [dependencies]
 datafusion.workspace = true

@@ -1,7 +1,13 @@
 [package]
 name = "datafusion-bio-format-core"
 version = "0.1.0"
-edition = "2024"
+description = "Core utilities for DataFusion bioinformatics table providers"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
 
 [dependencies]
 datafusion-execution.workspace = true

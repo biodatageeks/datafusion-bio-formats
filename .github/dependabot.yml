@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Cargo dependencies
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      datafusion:
+        patterns:
+          - "datafusion*"
+      noodles:
+        patterns:
+          - "noodles*"
+      tokio:
+        patterns:
+          - "tokio*"
+    open-pull-requests-limit: 10
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5

@@ -23,6 +23,16 @@ use tokio_util::io::StreamReader;
 use vcf::io::Reader;
 use vcf::{Header, Record};
 
+/// Creates a remote BGZF-compressed VCF reader for cloud storage.
+///
+/// # Arguments
+///
+/// * `file_path` - Path or URI to the remote VCF file (e.g., `s3://bucket/file.vcf.bgz`)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+///
+/// An async VCF reader for BGZF-compressed data
 pub async fn get_remote_vcf_bgzf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -34,6 +44,20 @@ pub async fn get_remote_vcf_bgzf_reader(
     reader
 }
 
+/// Creates a remote GZIP-compressed VCF reader for cloud storage.
+///
+/// # Arguments
+///
+/// * `file_path` - Path or URI to the remote VCF file (e.g., `s3://bucket/file.vcf.gz`)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+///
+/// An async VCF reader for GZIP-compressed data
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_vcf_gz_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -52,6 +76,20 @@ pub async fn get_remote_vcf_gz_reader(
     Ok(reader)
 }
 
+/// Creates a remote uncompressed VCF reader for cloud storage.
+///
+/// # Arguments
+///
+/// * `file_path` - Path or URI to the remote VCF file (e.g., `s3://bucket/file.vcf`)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+///
+/// An async VCF reader for uncompressed data
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_vcf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -63,6 +101,20 @@ pub async fn get_remote_vcf_reader(
     Ok(vcf::r#async::io::Reader::new(inner))
 }
 
+/// Creates a local BGZF-compressed VCF reader with multithreading support.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the local VCF file
+/// * `thread_num` - Number of worker threads for parallel decompression
+///
+/// # Returns
+///
+/// A VCF reader with multithreaded BGZF decompression
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened
 pub fn get_local_vcf_bgzf_reader(
     file_path: String,
     thread_num: usize,
@@ -81,6 +133,19 @@ pub fn get_local_vcf_bgzf_reader(
         .map(vcf::io::Reader::new)
 }
 
+/// Creates a local GZIP-compressed VCF reader.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the local VCF file
+///
+/// # Returns
+///
+/// An async VCF reader for GZIP-compressed data
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened
 pub async fn get_local_vcf_gz_reader(
     file_path: String,
 ) -> Result<
@@ -98,6 +163,19 @@ pub async fn get_local_vcf_gz_reader(
     reader
 }
 
+/// Creates a local uncompressed VCF reader.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the local VCF file
+///
+/// # Returns
+///
+/// An async VCF reader for uncompressed data
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened
 pub async fn get_local_vcf_reader(
     file_path: String,
 ) -> Result<vcf::r#async::io::Reader<BufReader<tokio::fs::File>>, Error> {
@@ -109,6 +187,21 @@ pub async fn get_local_vcf_reader(
     Ok(reader)
 }
 
+/// Gets the VCF header from a local file, auto-detecting compression.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the local VCF file
+/// * `thread_num` - Number of worker threads for BGZF decompression
+/// * `object_storage_options` - Configuration for compression detection
+///
+/// # Returns
+///
+/// The parsed VCF header
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or the header is invalid
 pub async fn get_local_vcf_header(
     file_path: String,
     thread_num: usize,
@@ -139,6 +232,20 @@ pub async fn get_local_vcf_header(
     Ok(header)
 }
 
+/// Gets the VCF header from a remote file, auto-detecting compression.
+///
+/// # Arguments
+///
+/// * `file_path` - Path or URI to the remote VCF file
+/// * `object_storage_options` - Configuration for cloud storage and compression detection
+///
+/// # Returns
+///
+/// The parsed VCF header
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the header is invalid
 pub async fn get_remote_vcf_header(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -172,6 +279,20 @@ pub async fn get_remote_vcf_header(
     Ok(header)
 }
 
+/// Gets the VCF header from either a local or remote file, auto-detecting storage type and compression.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the VCF file (local path or cloud URI)
+/// * `object_storage_options` - Configuration for cloud storage and compression detection
+///
+/// # Returns
+///
+/// The parsed VCF header
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the header is invalid
 pub async fn get_header(
     file_path: String,
     object_storage_options: Option<ObjectStorageOptions>,
@@ -186,13 +307,30 @@ pub async fn get_header(
     Ok(header)
 }
 
+/// Unified reader for remote VCF files with multiple compression format support.
+///
+/// This enum handles BGZF, GZIP, and uncompressed remote VCF files from cloud storage.
+/// The appropriate variant is created based on the detected compression type.
 pub enum VcfRemoteReader {
+    /// Reader for BGZF-compressed remote VCF files.
     BGZF(vcf::r#async::io::Reader<AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>),
+    /// Reader for GZIP-compressed remote VCF files.
     GZIP(vcf::r#async::io::Reader<BufReader<GzipDecoder<StreamReader<FuturesBytesStream, Bytes>>>>),
+    /// Reader for uncompressed remote VCF files.
     PLAIN(vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 }
 
 impl VcfRemoteReader {
+    /// Creates a new remote VCF reader with automatic compression detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path or URI to the remote VCF file
+    /// * `object_storage_options` - Configuration for cloud storage access
+    ///
+    /// # Returns
+    ///
+    /// A `VcfRemoteReader` instance with the appropriate variant for the detected compression
     pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
         info!("Creating remote VCF reader: {}", object_storage_options);
         let compression_type = get_compression_type(
@@ -223,6 +361,15 @@ impl VcfRemoteReader {
         }
     }
 
+    /// Reads the VCF header.
+    ///
+    /// # Returns
+    ///
+    /// The parsed VCF header
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header cannot be read
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
             VcfRemoteReader::BGZF(reader) => reader.read_header().await,
@@ -231,6 +378,15 @@ impl VcfRemoteReader {
         }
     }
 
+    /// Reads INFO field metadata from the VCF header.
+    ///
+    /// # Returns
+    ///
+    /// A RecordBatch containing field names, types, and descriptions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header cannot be read
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfRemoteReader::BGZF(reader) => {
@@ -248,6 +404,11 @@ impl VcfRemoteReader {
         }
     }
 
+    /// Reads VCF records as an async stream.
+    ///
+    /// # Returns
+    ///
+    /// A boxed async stream of VCF records
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             VcfRemoteReader::BGZF(reader) => reader.records().boxed(),
@@ -257,13 +418,31 @@ impl VcfRemoteReader {
     }
 }
 
+/// Unified reader for local VCF files with multiple compression format support.
+///
+/// This enum handles BGZF (multithreaded), GZIP, and uncompressed local VCF files.
+/// The appropriate variant is created based on the detected compression type.
 pub enum VcfLocalReader {
+    /// Reader for BGZF-compressed local VCF files with multithreading support.
     BGZF(Reader<MultithreadedReader<File>>),
+    /// Reader for GZIP-compressed local VCF files.
     GZIP(vcf::r#async::io::Reader<BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>>),
+    /// Reader for uncompressed local VCF files.
     PLAIN(vcf::r#async::io::Reader<BufReader<tokio::fs::File>>),
 }
 
 impl VcfLocalReader {
+    /// Creates a new local VCF reader with automatic compression detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the local VCF file
+    /// * `thread_num` - Number of worker threads for BGZF decompression
+    /// * `object_storage_options` - Configuration for compression detection
+    ///
+    /// # Returns
+    ///
+    /// A `VcfLocalReader` instance with the appropriate variant for the detected compression
     pub async fn new(
         file_path: String,
         thread_num: usize,
@@ -293,6 +472,15 @@ impl VcfLocalReader {
         }
     }
 
+    /// Reads the VCF header.
+    ///
+    /// # Returns
+    ///
+    /// The parsed VCF header
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header cannot be read
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
             VcfLocalReader::BGZF(reader) => reader.read_header(),
@@ -301,6 +489,11 @@ impl VcfLocalReader {
         }
     }
 
+    /// Reads VCF records as a stream.
+    ///
+    /// # Returns
+    ///
+    /// A boxed stream of VCF records
     pub fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             VcfLocalReader::BGZF(reader) => stream::iter(reader.records()).boxed(),
@@ -309,6 +502,15 @@ impl VcfLocalReader {
         }
     }
 
+    /// Reads INFO field metadata from the VCF header.
+    ///
+    /// # Returns
+    ///
+    /// A RecordBatch containing field names, types, and descriptions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header cannot be read
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfLocalReader::BGZF(reader) => {
@@ -327,6 +529,15 @@ impl VcfLocalReader {
     }
 }
 
+/// Extracts INFO field metadata from a VCF header into a RecordBatch.
+///
+/// # Arguments
+///
+/// * `header` - The VCF header to extract INFO fields from
+///
+/// # Returns
+///
+/// A RecordBatch with columns: name (String), type (String), description (String)
 pub async fn get_info_fields(header: &Header) -> arrow::array::RecordBatch {
     let info_fields = header.infos();
     let mut field_names = StringBuilder::new();
@@ -358,12 +569,29 @@ pub async fn get_info_fields(header: &Header) -> arrow::array::RecordBatch {
     record_batch
 }
 
+/// Unified reader for both local and remote VCF files.
+///
+/// This is the primary entry point for reading VCF files from any source (local, S3, GCS, etc).
+/// It automatically detects the storage type and compression format.
 pub enum VcfReader {
+    /// Reader for local VCF files.
     Local(VcfLocalReader),
+    /// Reader for remote VCF files.
     Remote(VcfRemoteReader),
 }
 
 impl VcfReader {
+    /// Creates a new VCF reader with automatic storage type and compression detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the VCF file (local path or cloud URI)
+    /// * `thread_num` - Optional number of worker threads for BGZF decompression
+    /// * `object_storage_options` - Optional configuration for cloud storage and compression
+    ///
+    /// # Returns
+    ///
+    /// A `VcfReader` instance configured for the detected storage and compression type
     pub async fn new(
         file_path: String,
         thread_num: Option<usize>,
@@ -389,6 +617,15 @@ impl VcfReader {
         }
     }
 
+    /// Reads the VCF header.
+    ///
+    /// # Returns
+    ///
+    /// The parsed VCF header
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header cannot be read
     pub async fn read_header(&mut self) -> Result<vcf::Header, Error> {
         match self {
             VcfReader::Local(reader) => reader.read_header().await,
@@ -396,6 +633,15 @@ impl VcfReader {
         }
     }
 
+    /// Reads INFO field metadata from the VCF header.
+    ///
+    /// # Returns
+    ///
+    /// A RecordBatch containing field names, types, and descriptions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header cannot be read
     pub async fn describe(&mut self) -> Result<arrow::array::RecordBatch, Error> {
         match self {
             VcfReader::Local(reader) => reader.describe().await,
@@ -403,6 +649,11 @@ impl VcfReader {
         }
     }
 
+    /// Reads VCF records as an async stream.
+    ///
+    /// # Returns
+    ///
+    /// A boxed async stream of VCF records
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             VcfReader::Local(reader) => reader.read_records(),

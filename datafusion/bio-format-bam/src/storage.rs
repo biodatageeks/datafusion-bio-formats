@@ -15,6 +15,16 @@ use std::io::Error;
 use std::num::NonZero;
 use tokio_util::io::StreamReader;
 
+/// Creates a remote BAM reader for cloud storage (GCS, S3, Azure).
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the BAM file on cloud storage
+/// * `object_storage_options` - Configuration for object storage access
+///
+/// # Returns
+///
+/// A remote BAM async reader that can be used to stream records
 pub async fn get_remote_bam_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -27,6 +37,16 @@ pub async fn get_remote_bam_reader(
     Ok(reader)
 }
 
+/// Creates a local BAM reader with multithreaded decompression.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the local BAM file
+/// * `thread_num` - Number of threads to use for BGZF decompression
+///
+/// # Returns
+///
+/// A local BAM reader with multithreaded BGZF decompression capability
 pub async fn get_local_bam_reader(
     file_path: String,
     thread_num: usize,
@@ -42,8 +62,14 @@ pub async fn get_local_bam_reader(
     reader
 }
 
+/// An enum representing either a local or remote BAM file reader.
+///
+/// This type abstracts over the different reader implementations needed for local
+/// files with multithreaded decompression and remote files accessed via cloud storage.
 pub enum BamReader {
+    /// Local BAM reader with multithreaded BGZF decompression
     Local(Reader<MultithreadedReader<File>>),
+    /// Remote BAM reader for cloud storage access
     Remote(
         bam::r#async::io::Reader<
             noodles_bgzf::AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>,
@@ -52,6 +78,17 @@ pub enum BamReader {
 }
 
 impl BamReader {
+    /// Creates a new BAM reader for either local or remote files.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the BAM file (local or remote URL)
+    /// * `thread_num` - Optional number of threads for local BGZF decompression
+    /// * `object_storage_options` - Optional cloud storage configuration
+    ///
+    /// # Returns
+    ///
+    /// A BamReader variant appropriate for the storage type detected from the file path
     pub async fn new(
         file_path: String,
         thread_num: Option<usize>,
@@ -75,6 +112,11 @@ impl BamReader {
             _ => panic!("Unsupported storage type for BAM file: {:?}", storage_type),
         }
     }
+    /// Reads BAM records from the file as an async stream.
+    ///
+    /// # Returns
+    ///
+    /// A boxed future stream yielding BAM records or IO errors
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             BamReader::Local(reader) => {
@@ -87,6 +129,11 @@ impl BamReader {
             }
         }
     }
+    /// Reads the BAM file header and returns the reference sequences.
+    ///
+    /// # Returns
+    ///
+    /// Reference sequences from the BAM header
     pub async fn read_sequences(&mut self) -> ReferenceSequences {
         match self {
             BamReader::Local(reader) => {

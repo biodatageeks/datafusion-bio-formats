@@ -1,3 +1,10 @@
+//! Storage layer for reading FASTQ files from local and remote sources
+//!
+//! This module provides functions for creating FASTQ readers with support for:
+//! - Multiple compression formats (BGZF, GZIP, uncompressed)
+//! - Local and remote file sources (GCS, S3, Azure Blob Storage)
+//! - Multi-threaded reading for BGZF files
+
 use async_compression::tokio::bufread::GzipDecoder;
 use bytes::Bytes;
 use datafusion_bio_format_core::object_storage::{
@@ -15,6 +22,16 @@ use std::fs::File;
 use std::io::{BufReader, Error};
 use tokio_util::io::StreamReader;
 
+/// Creates an async BGZF-decompressing FASTQ reader for remote files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the BGZF-compressed FASTQ file (remote URL)
+/// * `object_storage_options` - Configuration for accessing remote storage
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_fastq_bgzf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -27,6 +44,16 @@ pub async fn get_remote_fastq_bgzf_reader(
     Ok(reader)
 }
 
+/// Creates an async FASTQ reader for uncompressed remote files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the uncompressed FASTQ file (remote URL)
+/// * `object_storage_options` - Configuration for accessing remote storage
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_fastq_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -36,6 +63,16 @@ pub async fn get_remote_fastq_reader(
     Ok(reader)
 }
 
+/// Creates an async GZIP-decompressing FASTQ reader for remote files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the GZIP-compressed FASTQ file (remote URL)
+/// * `object_storage_options` - Configuration for accessing remote storage
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_fastq_gz_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -54,6 +91,22 @@ pub async fn get_remote_fastq_gz_reader(
     Ok(reader)
 }
 
+/// Creates a synchronous BGZF-decompressing FASTQ reader for local files
+///
+/// Utilizes multiple worker threads for improved decompression performance.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the BGZF-compressed FASTQ file (local filesystem)
+/// * `thread_num` - Number of worker threads for BGZF decompression
+///
+/// # Returns
+///
+/// A synchronous BGZF reader wrapping a FASTQ reader
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened
 pub fn get_local_fastq_bgzf_reader(
     file_path: String,
     thread_num: usize,
@@ -69,6 +122,19 @@ pub fn get_local_fastq_bgzf_reader(
     reader
 }
 
+/// Creates a synchronous FASTQ reader for uncompressed local files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the uncompressed FASTQ file (local filesystem)
+///
+/// # Returns
+///
+/// A buffered synchronous FASTQ reader
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened
 pub fn get_local_fastq_reader(file_path: String) -> Result<Reader<BufReader<File>>, Error> {
     let reader = std::fs::File::open(file_path)
         .map(BufReader::new)
@@ -76,6 +142,19 @@ pub fn get_local_fastq_reader(file_path: String) -> Result<Reader<BufReader<File
     reader
 }
 
+/// Creates an async GZIP-decompressing FASTQ reader for local files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the GZIP-compressed FASTQ file (local filesystem)
+///
+/// # Returns
+///
+/// An async GZIP reader wrapping a FASTQ reader
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or read
 pub async fn get_local_fastq_gz_reader(
     file_path: String,
 ) -> Result<
@@ -93,10 +172,17 @@ pub async fn get_local_fastq_gz_reader(
     reader
 }
 
+/// An async FASTQ reader that automatically detects and handles remote file compression
+///
+/// This enum wraps different reader implementations based on the compression format
+/// detected from the remote file. It provides a unified interface for reading FASTQ
+/// data from cloud storage sources (GCS, S3, Azure Blob Storage, etc.).
 pub enum FastqRemoteReader {
+    /// BGZF-compressed remote FASTQ file reader
     BGZF(
         fastq::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
     ),
+    /// GZIP-compressed remote FASTQ file reader
     GZIP(
         fastq::r#async::io::Reader<
             tokio::io::BufReader<
@@ -106,10 +192,26 @@ pub enum FastqRemoteReader {
             >,
         >,
     ),
+    /// Uncompressed remote FASTQ file reader
     PLAIN(fastq::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 }
 
 impl FastqRemoteReader {
+    /// Creates a new remote FASTQ reader, automatically detecting compression format
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the remote FASTQ file (URL)
+    /// * `object_storage_options` - Configuration for accessing remote storage
+    ///
+    /// # Returns
+    ///
+    /// A `FastqRemoteReader` enum variant matching the detected compression format
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the compression type cannot be detected, file cannot be accessed,
+    /// or the reader cannot be created
     pub async fn new(
         file_path: String,
         object_storage_options: ObjectStorageOptions,
@@ -138,6 +240,11 @@ impl FastqRemoteReader {
             ),
         }
     }
+    /// Returns a boxed async stream of FASTQ records from the remote file
+    ///
+    /// # Returns
+    ///
+    /// A boxed stream yielding `Result<Record, Error>` for each FASTQ record in the file
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             FastqRemoteReader::BGZF(reader) => reader.records().boxed(),
@@ -147,17 +254,41 @@ impl FastqRemoteReader {
     }
 }
 
+/// A FASTQ reader that automatically detects and handles local file compression
+///
+/// This enum wraps different reader implementations based on the compression format
+/// detected from the local file. For BGZF files, it uses multi-threaded decompression
+/// for improved performance.
 pub enum FastqLocalReader {
+    /// BGZF-compressed local FASTQ file reader with multi-threaded decompression
     BGZF(fastq::io::Reader<bgzf::MultithreadedReader<std::fs::File>>),
+    /// GZIP-compressed local FASTQ file reader
     GZIP(
         fastq::r#async::io::Reader<
             tokio::io::BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>,
         >,
     ),
+    /// Uncompressed local FASTQ file reader
     PLAIN(Reader<BufReader<File>>),
 }
 
 impl FastqLocalReader {
+    /// Creates a new local FASTQ reader, automatically detecting compression format
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the local FASTQ file (filesystem path)
+    /// * `thread_num` - Number of worker threads for BGZF decompression (used only for BGZF files)
+    /// * `object_storage_options` - Configuration for compression type detection
+    ///
+    /// # Returns
+    ///
+    /// A `FastqLocalReader` enum variant matching the detected compression format
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the compression type cannot be detected, file cannot be opened,
+    /// or the reader cannot be created
     pub async fn new(
         file_path: String,
         thread_num: usize,
@@ -191,6 +322,13 @@ impl FastqLocalReader {
         }
     }
 
+    /// Returns a boxed async stream of FASTQ records from the local file
+    ///
+    /// Note: For synchronous readers (BGZF and PLAIN), records are wrapped in an async stream.
+    ///
+    /// # Returns
+    ///
+    /// A boxed stream yielding `Result<Record, Error>` for each FASTQ record in the file
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             FastqLocalReader::BGZF(reader) => stream::iter(reader.records()).boxed(),

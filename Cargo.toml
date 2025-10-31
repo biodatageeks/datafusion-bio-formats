@@ -7,6 +7,13 @@ members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bed",
     "datafusion/bio-format-cram",
 ]
 
+[workspace.package]
+license = "Apache-2.0"
+authors = ["BiodataGeeks Team"]
+repository = "https://github.com/biodatageeks/datafusion-bio-formats"
+homepage = "https://github.com/biodatageeks/datafusion-bio-formats"
+edition = "2024"
+
 
 [workspace.dependencies]
 datafusion = {version = "50.3.0"}

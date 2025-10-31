@@ -29,15 +29,40 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids};
 use std::path::PathBuf;
 
+/// A DataFusion table provider for reading BGZF-compressed VCF files with parallel execution.
+///
+/// This provider reads VCF files that are compressed with BGZF (Blocked GNU Zip Format) and
+/// leverages the BGZF index (`.gzi` file) to partition the file into blocks for parallel reading.
+/// It's optimized for large genomic datasets where the `.gzi` index file is available.
 #[derive(Debug, Clone)]
 pub struct BgzfVcfTableProvider {
+    /// Path to the VCF file.
     path: PathBuf,
+    /// Arrow schema representing the VCF table structure.
     schema: SchemaRef,
+    /// List of INFO field names from the VCF header.
     all_info_fields: Vec<String>,
+    /// List of FORMAT field names from the VCF header.
     all_format_fields: Vec<String>,
 }
 
 impl BgzfVcfTableProvider {
+    /// Creates a new BGZF VCF table provider.
+    ///
+    /// Reads the VCF header to determine the table schema, including core columns and
+    /// all INFO/FORMAT fields defined in the header.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the BGZF-compressed VCF file
+    ///
+    /// # Returns
+    ///
+    /// A new `BgzfVcfTableProvider` instance with schema determined from the VCF header
+    ///
+    /// # Errors
+    ///
+    /// Returns an `io::Error` if the file cannot be read or the VCF header is invalid.
     pub fn try_new(path: impl Into<PathBuf>) -> io::Result<Self> {
         let path = path.into();
 

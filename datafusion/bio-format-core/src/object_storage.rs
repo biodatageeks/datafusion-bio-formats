@@ -12,14 +12,23 @@ use std::fmt::Display;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
 use url::Url;
+
+/// Configuration options for object storage operations
 #[derive(Clone, Debug)]
 pub struct ObjectStorageOptions {
+    /// Chunk size in MB for reading data
     pub chunk_size: Option<usize>,
+    /// Number of concurrent fetch operations
     pub concurrent_fetches: Option<usize>,
+    /// Allow anonymous access to cloud storage
     pub allow_anonymous: bool,
+    /// Enable request payer for S3
     pub enable_request_payer: bool,
+    /// Maximum number of retry attempts
     pub max_retries: Option<usize>,
+    /// Timeout in seconds for operations
     pub timeout: Option<usize>,
+    /// Type of compression to use
     pub compression_type: Option<CompressionType>,
 }
 
@@ -39,15 +48,29 @@ impl Display for ObjectStorageOptions {
     }
 }
 
+/// Type of compression used for data files
 #[derive(Clone, Debug, PartialEq)]
 pub enum CompressionType {
+    /// Standard GZIP compression
     GZIP,
+    /// BGZF (Block GZIP Format) compression for parallel reading
     BGZF,
+    /// No compression
     NONE,
+    /// Automatically detect compression type
     AUTO,
 }
 
 impl CompressionType {
+    /// Creates a CompressionType from a string representation
+    ///
+    /// # Arguments
+    ///
+    /// * `compression_type` - String representing the compression type ("gz", "bgz", "none", "auto")
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compression type string is not recognized
     pub fn from_string(compression_type: String) -> Self {
         match compression_type.to_lowercase().as_str() {
             "gz" => CompressionType::GZIP,
@@ -72,16 +95,31 @@ impl Default for ObjectStorageOptions {
         }
     }
 }
+/// Type of storage backend for data files
 #[derive(Debug)]
 pub enum StorageType {
+    /// Google Cloud Storage
     GCS,
+    /// Amazon S3
     S3,
+    /// Azure Blob Storage
     AZBLOB,
+    /// HTTP/HTTPS endpoint
     HTTP,
+    /// Local filesystem
     LOCAL,
 }
 
 impl StorageType {
+    /// Creates a StorageType from a URL prefix
+    ///
+    /// # Arguments
+    ///
+    /// * `object_storage_type` - URL scheme prefix ("gs", "s3", "abfs", "local", "file", "http", "https")
+    ///
+    /// # Panics
+    ///
+    /// Panics if the storage type prefix is not recognized
     pub fn from_prefix(object_storage_type: String) -> Self {
         match object_storage_type.to_lowercase().as_str() {
             "gs" => StorageType::GCS,
@@ -109,6 +147,21 @@ fn get_file_path(file_path: String) -> String {
     file_path.to_string()
 }
 
+/// Detects the compression type of a file by examining its header
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the file (local or remote URL)
+/// * `compression_type` - Optional compression type hint; if AUTO or None, detection will be performed
+/// * `object_storage_options` - Configuration options for accessing remote files
+///
+/// # Returns
+///
+/// The detected compression type (GZIP, BGZF, or NONE)
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or read
 pub async fn get_compression_type(
     file_path: String,
     compression_type: Option<CompressionType>,
@@ -195,6 +248,20 @@ pub async fn get_compression_type(
     Ok(CompressionType::NONE)
 }
 
+/// Creates a BGZF-decompressing async reader for a remote file
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the BGZF-compressed file (local or remote URL)
+/// * `object_storage_options` - Configuration options for accessing the file
+///
+/// # Returns
+///
+/// An async reader that decompresses BGZF data on the fly
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or if stream creation fails
 pub async fn get_remote_stream_bgzf_async(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -205,6 +272,20 @@ pub async fn get_remote_stream_bgzf_async(
     Ok(bgzf::AsyncReader::new(remote_stream))
 }
 
+/// Creates a GZIP-decompressing async reader for a remote file
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the GZIP-compressed file (local or remote URL)
+/// * `object_storage_options` - Configuration options for accessing the file
+///
+/// # Returns
+///
+/// An async reader that decompresses GZIP data on the fly
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or if stream creation fails
 pub async fn get_remote_stream_gz_async(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -218,6 +299,15 @@ pub async fn get_remote_stream_gz_async(
     Ok(GzipDecoder::new(remote_stream))
 }
 
+/// Determines the storage type from a file path or URL
+///
+/// # Arguments
+///
+/// * `file_path` - File path or URL to analyze
+///
+/// # Returns
+///
+/// The detected storage type (GCS, S3, AZBLOB, HTTP, or LOCAL)
 pub fn get_storage_type(file_path: String) -> StorageType {
     //extract the file system prefix from the file path
     let file_system_prefix = file_path.split("://").next();
@@ -346,6 +436,21 @@ fn is_azure_blob_url(url_str: &str) -> bool {
     }
     false
 }
+/// Creates a byte stream for reading from a file (local or remote)
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the file (local path or remote URL)
+/// * `object_storage_options` - Configuration options for accessing remote files
+/// * `byte_limit` - Optional limit on number of bytes to read
+///
+/// # Returns
+///
+/// A byte stream for reading file contents
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or if the storage backend is not supported
 pub async fn get_remote_stream(
     file_path: String,
     object_storage_options: ObjectStorageOptions,

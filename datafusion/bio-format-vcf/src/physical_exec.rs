@@ -26,6 +26,32 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
 use std::str;
 
+/// Constructs a DataFusion RecordBatch from VCF variant data.
+///
+/// This function assembles core VCF columns (chrom, pos, ref, alt, etc.) and INFO fields
+/// into a RecordBatch for execution. It supports projection pushdown to optimize queries.
+///
+/// # Arguments
+///
+/// * `schema` - The target Arrow schema
+/// * `chroms` - Chromosome names
+/// * `poss` - Variant start positions (0-based)
+/// * `pose` - Variant end positions (0-based, inclusive)
+/// * `ids` - Variant identifiers (semicolon-separated if multiple)
+/// * `refs` - Reference bases
+/// * `alts` - Alternate bases (pipe-separated if multiple)
+/// * `quals` - Quality scores (optional)
+/// * `filters` - FILTER field values (semicolon-separated)
+/// * `infos` - Optional arrow arrays for INFO fields
+/// * `projection` - Optional list of column indices to project (None = all columns)
+///
+/// # Returns
+///
+/// A DataFusion RecordBatch with the specified data
+///
+/// # Errors
+///
+/// Returns an error if the RecordBatch cannot be created
 pub fn build_record_batch(
     schema: SchemaRef,
     chroms: &[String],

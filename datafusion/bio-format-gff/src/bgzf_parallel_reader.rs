@@ -27,6 +27,12 @@ use noodles_gff as gff;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// Table provider for BGZF-compressed GFF files with parallel processing support
+///
+/// Implements Apache DataFusion's TableProvider trait with support for:
+/// - Parallel reading of BGZF-compressed blocks
+/// - Filter pushdown optimization for efficient predicate evaluation
+/// - Dynamic schema construction based on requested attributes
 #[derive(Debug, Clone)]
 pub struct BgzfGffTableProvider {
     path: PathBuf,
@@ -35,6 +41,14 @@ pub struct BgzfGffTableProvider {
 }
 
 impl BgzfGffTableProvider {
+    /// Creates a new BGZF GFF table provider
+    ///
+    /// # Arguments
+    /// * `path` - Path to the BGZF-compressed GFF file
+    /// * `attr_fields` - Optional list of specific attributes to extract as columns
+    ///
+    /// # Returns
+    /// A configured table provider or IO error if schema construction fails
     pub fn try_new(path: impl Into<PathBuf>, attr_fields: Option<Vec<String>>) -> io::Result<Self> {
         let schema = determine_schema_on_demand(attr_fields.clone())
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Schema error: {}", e)))?;

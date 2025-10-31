@@ -15,6 +15,12 @@ use log::debug;
 use std::any::Any;
 use std::sync::Arc;
 
+/// Determines the Arrow schema for FASTA file records.
+///
+/// Returns a schema with three fields:
+/// - `name` (Utf8, non-null): Sequence identifier
+/// - `description` (Utf8, nullable): Sequence description
+/// - `sequence` (Utf8, non-null): The actual sequence data
 fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     let fields = vec![
         Field::new("name", DataType::Utf8, false),
@@ -26,15 +32,53 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     Ok(Arc::new(schema))
 }
 
+/// DataFusion table provider for FASTA files.
+///
+/// This struct implements the `TableProvider` trait to enable querying FASTA files
+/// using DataFusion SQL queries. It supports local files and cloud storage with
+/// automatic compression detection.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use datafusion::prelude::*;
+/// use datafusion_bio_format_fasta::table_provider::FastaTableProvider;
+/// use std::sync::Arc;
+///
+/// # async fn example() -> datafusion::error::Result<()> {
+/// let ctx = SessionContext::new();
+/// let table = FastaTableProvider::new("sequences.fasta".to_string(), None, None)?;
+/// ctx.register_table("fasta", Arc::new(table))?;
+///
+/// let df = ctx.sql("SELECT name, sequence FROM fasta WHERE length(sequence) > 100").await?;
+/// df.show().await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug)]
 pub struct FastaTableProvider {
+    /// Path to the FASTA file
     file_path: String,
+    /// Arrow schema describing FASTA records
     schema: SchemaRef,
+    /// Number of threads for parallel decompression
     thread_num: Option<usize>,
+    /// Cloud storage configuration
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
 impl FastaTableProvider {
+    /// Creates a new FASTA table provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the FASTA file (local or cloud storage URI)
+    /// * `thread_num` - Optional number of threads for BGZF decompression (defaults to 1)
+    /// * `object_storage_options` - Optional cloud storage configuration
+    ///
+    /// # Returns
+    ///
+    /// A new `FastaTableProvider` instance or an error if schema determination fails.
     pub fn new(
         file_path: String,
         thread_num: Option<usize>,

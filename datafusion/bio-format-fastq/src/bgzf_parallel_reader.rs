@@ -23,6 +23,10 @@ use noodles_fastq as fastq;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// DataFusion table provider for FASTQ files with BGZF parallel reading support
+///
+/// This provider enables multi-threaded reading of BGZF-compressed FASTQ files
+/// by partitioning the file based on BGZF block boundaries.
 #[derive(Debug, Clone)]
 pub struct BgzfFastqTableProvider {
     path: PathBuf,
@@ -30,6 +34,19 @@ pub struct BgzfFastqTableProvider {
 }
 
 impl BgzfFastqTableProvider {
+    /// Creates a new BGZF FASTQ table provider
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the BGZF-compressed FASTQ file (local or remote URL)
+    ///
+    /// # Returns
+    ///
+    /// A new BgzfFastqTableProvider instance
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be accessed
     pub fn try_new(path: impl Into<PathBuf>) -> io::Result<Self> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, false),
