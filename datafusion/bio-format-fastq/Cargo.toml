@@ -24,6 +24,6 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
 
 [[example]]
-name = "test_reader"
+name = "test_fastq_reader"
 # Some issue when publishing and path isn't specified, so adding here
-path = "./examples/test_reader.rs"
+path = "./examples/test_fastq_reader.rs"

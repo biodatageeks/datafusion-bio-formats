@@ -13,9 +13,14 @@ chr2	source2	gene	300	400	.	-	.	ID=gene2;Name=GeneB;Alias=B,b
 "#;
 
 async fn create_test_gff_file_with_attributes() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_attribute_projection.gff";
-    fs::write(temp_file, SAMPLE_GFF_CONTENT_WITH_ATTRIBUTES).await?;
-    Ok(temp_file.to_string())
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_file = format!("/tmp/test_attribute_projection_{}.gff", nanos);
+    fs::write(&temp_file, SAMPLE_GFF_CONTENT_WITH_ATTRIBUTES).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {

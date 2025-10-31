@@ -18,9 +18,14 @@ chrX	havana	gene	10000	15000	50.0	-	.	ID=geneX;Biotype=pseudogene
 "#;
 
 async fn create_test_gff_file() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_filter_pushdown.gff3";
-    fs::write(temp_file, SAMPLE_GFF_CONTENT).await?;
-    Ok(temp_file.to_string())
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_file = format!("/tmp/test_filter_pushdown_{}.gff3", nanos);
+    fs::write(&temp_file, SAMPLE_GFF_CONTENT).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {

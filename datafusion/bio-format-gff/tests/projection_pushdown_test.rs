@@ -11,9 +11,14 @@ chr2	ensembl	gene	3000	4000	.	-	0	ID=gene2;Name=GENE2;Type=lncRNA
 "#;
 
 async fn create_test_gff_file() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_projection.gff3";
-    fs::write(temp_file, SAMPLE_GFF_CONTENT).await?;
-    Ok(temp_file.to_string())
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_file = format!("/tmp/test_projection_{}.gff3", nanos);
+    fs::write(&temp_file, SAMPLE_GFF_CONTENT).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {

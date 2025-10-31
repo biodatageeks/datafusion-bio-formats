@@ -23,6 +23,6 @@ noodles-bed = "0.26.0"
 futures-util = "0.3.31"
 
 [[example]]
-name = "test_reader"
+name = "test_bed_reader"
 # Some issue when publishing and path isn't specified, so adding here
-path = "./examples/test_reader.rs"
+path = "./examples/test_bed_reader.rs"
