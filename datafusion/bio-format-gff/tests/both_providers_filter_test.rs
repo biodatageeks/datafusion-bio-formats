@@ -3,7 +3,6 @@ use datafusion::logical_expr::{TableProviderFilterPushDown, col, lit};
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use datafusion_bio_format_gff::bgzf_parallel_reader::BgzfGffTableProvider;
 use datafusion_bio_format_gff::table_provider::GffTableProvider;
-use std::sync::Arc;
 use tokio::fs;
 
 const SAMPLE_GFF_CONTENT: &str = r#"##gff-version 3

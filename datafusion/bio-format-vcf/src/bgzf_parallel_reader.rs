@@ -29,9 +29,6 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids};
 use std::path::PathBuf;
 
-#[cfg(test)]
-use tempfile::tempdir;
-
 #[derive(Debug, Clone)]
 pub struct BgzfVcfTableProvider {
     path: PathBuf,
