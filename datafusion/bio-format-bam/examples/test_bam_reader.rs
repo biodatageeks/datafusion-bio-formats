@@ -18,7 +18,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         BamTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options)).unwrap();
 
     let ctx = datafusion::execution::context::SessionContext::new();
-    ctx.sql("set datafusion.execution.skip_physical_aggregate_schema_check=true");
+    ctx.sql("set datafusion.execution.skip_physical_aggregate_schema_check=true")
+        .await?;
     ctx.register_table("example", Arc::new(table)).unwrap();
     let df = ctx.sql("SELECT * FROM example").await?;
     // let results = df.count().await?;

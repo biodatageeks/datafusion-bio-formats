@@ -41,7 +41,7 @@ impl ReferenceSequenceRepository {
     /// # Example
     /// ```no_run
     /// # use std::io;
-    /// # use bio_format_cram::storage::ReferenceSequenceRepository;
+    /// # use datafusion_bio_format_cram::storage::ReferenceSequenceRepository;
     /// let repo = ReferenceSequenceRepository::from_fasta_path("/path/to/reference.fasta")?;
     /// # Ok::<(), io::Error>(())
     /// ```

@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     ctx.register_table("example", Arc::new(table)).unwrap();
     let df = ctx.sql("SELECT * FROM example limit 2").await?;
-    let results = df.show().await?;
+    let _results = df.show().await?;
     // println!("Count: {:?}", results);
 
     // read all records

@@ -15,10 +15,10 @@ chr1	200	rs2	C	T	40	PASS	DP=20;AF=0.3
 chr1	300	.	G	A	50	PASS	DP=15;AF=0.7
 "#;
 
-async fn create_test_vcf_file() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_projection.vcf";
-    fs::write(temp_file, SAMPLE_VCF_CONTENT).await?;
-    Ok(temp_file.to_string())
+async fn create_test_vcf_file(test_name: &str) -> std::io::Result<String> {
+    let temp_file = format!("/tmp/test_projection_{}.vcf", test_name);
+    fs::write(&temp_file, SAMPLE_VCF_CONTENT).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {
@@ -35,7 +35,7 @@ fn create_object_storage_options() -> ObjectStorageOptions {
 
 #[tokio::test]
 async fn test_vcf_projection_single_column_chrom() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("single_column_chrom").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -76,7 +76,7 @@ async fn test_vcf_projection_single_column_chrom() -> Result<(), Box<dyn std::er
 
 #[tokio::test]
 async fn test_vcf_projection_position_columns() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("position_columns").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -91,7 +91,9 @@ async fn test_vcf_projection_position_columns() -> Result<(), Box<dyn std::error
     ctx.register_table("test_vcf", Arc::new(table))?;
 
     // Test selecting position columns
-    let df = ctx.sql("SELECT chrom, start, end FROM test_vcf").await?;
+    let df = ctx
+        .sql("SELECT chrom, start, \"end\" FROM test_vcf")
+        .await?;
     let results = df.collect().await?;
 
     assert_eq!(results.len(), 1);
@@ -133,7 +135,7 @@ async fn test_vcf_projection_position_columns() -> Result<(), Box<dyn std::error
 
 #[tokio::test]
 async fn test_vcf_projection_variant_data() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("variant_data").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -218,7 +220,7 @@ async fn test_vcf_projection_variant_data() -> Result<(), Box<dyn std::error::Er
 
 #[tokio::test]
 async fn test_vcf_projection_info_fields() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("info_fields").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -269,7 +271,7 @@ async fn test_vcf_projection_info_fields() -> Result<(), Box<dyn std::error::Err
 
 #[tokio::test]
 async fn test_vcf_no_projection_all_columns() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("no_projection").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -308,7 +310,7 @@ async fn test_vcf_no_projection_all_columns() -> Result<(), Box<dyn std::error::
 
 #[tokio::test]
 async fn test_vcf_projection_with_count() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("with_count").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -343,7 +345,7 @@ async fn test_vcf_projection_with_count() -> Result<(), Box<dyn std::error::Erro
 
 #[tokio::test]
 async fn test_vcf_projection_reordered_columns() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("reordered_columns").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -406,7 +408,7 @@ async fn test_vcf_projection_reordered_columns() -> Result<(), Box<dyn std::erro
 
 #[tokio::test]
 async fn test_vcf_projection_with_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("with_limit").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -457,7 +459,7 @@ async fn test_vcf_projection_with_limit() -> Result<(), Box<dyn std::error::Erro
 
 #[tokio::test]
 async fn test_vcf_multithreaded_projection() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("multithreaded").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -506,7 +508,7 @@ async fn test_vcf_multithreaded_projection() -> Result<(), Box<dyn std::error::E
 
 #[tokio::test]
 async fn test_vcf_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("count_star_bug").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -569,7 +571,7 @@ async fn test_vcf_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::test]
 async fn test_vcf_select_position_columns_bug() -> Result<(), Box<dyn std::error::Error>> {
-    let file_path = create_test_vcf_file().await?;
+    let file_path = create_test_vcf_file("select_position_bug").await?;
     let object_storage_options = create_object_storage_options();
 
     let table = VcfTableProvider::new(
@@ -606,7 +608,7 @@ async fn test_vcf_select_position_columns_bug() -> Result<(), Box<dyn std::error
 
     // Test SELECT start, end - this may also return 0 rows due to bug
     println!("Testing SELECT start, end...");
-    let df2 = ctx.sql("SELECT start, end FROM vcf_table").await?;
+    let df2 = ctx.sql("SELECT start, \"end\" FROM vcf_table").await?;
     let results2 = df2.collect().await?;
 
     println!(

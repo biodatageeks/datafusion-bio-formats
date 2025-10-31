@@ -9,8 +9,8 @@ members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bed",
 
 
 [workspace.dependencies]
-datafusion = {version = "48.0.1"}
-datafusion-execution = "48.0.1"
+datafusion = {version = "50.3.0"}
+datafusion-execution = "50.3.0"
 async-trait = "0.1.85"
 opendal = { version = "0.53.3", features = ["services-gcs", "services-s3","layers-blocking", "services-azblob", "services-http"] }
 noodles = { version = "0.93.0",  features = ["bam", "vcf", "bgzf", "cram", "async"]}

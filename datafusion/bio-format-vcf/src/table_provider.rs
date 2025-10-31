@@ -150,7 +150,8 @@ impl TableProvider for VcfTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
+                    // For empty projections (COUNT(*)), return an empty schema
+                    Arc::new(Schema::empty())
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =

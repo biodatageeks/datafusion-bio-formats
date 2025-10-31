@@ -6,7 +6,7 @@ use crate::storage::{VcfLocalReader, VcfRemoteReader};
 use crate::table_provider::info_to_arrow_type;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, Float64Array, NullArray, StringArray, UInt32Array};
+use datafusion::arrow::array::{Array, Float64Array, StringArray, UInt32Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
@@ -65,8 +65,8 @@ pub fn build_record_batch(
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(ids.len());
             if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(chrom_array.len())) as Arc<dyn Array>);
+                // For empty projections (COUNT(*)), return an empty vector
+                // The schema should already be empty from the table provider
             } else {
                 for i in proj_ids.clone() {
                     match i {
@@ -85,8 +85,18 @@ pub fn build_record_batch(
             arrays
         }
     };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+
+    // For empty projections (COUNT(*)), we need to specify row count
+    if arrays.is_empty() {
+        let row_count = chroms.len();
+        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(Some(row_count));
+        RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    } else {
+        RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    }
 }
 
 fn load_infos(

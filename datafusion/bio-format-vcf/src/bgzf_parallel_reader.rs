@@ -29,9 +29,6 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids};
 use std::path::PathBuf;
 
-#[cfg(test)]
-use tempfile::tempdir;
-
 #[derive(Debug, Clone)]
 pub struct BgzfVcfTableProvider {
     path: PathBuf,
@@ -232,13 +229,6 @@ impl DisplayAs for BgzfVcfExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "BgzfVcfExec")
     }
-}
-
-fn find_line_end(buf: &[u8], start: usize) -> Option<usize> {
-    buf[start..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map(|pos| start + pos)
 }
 
 fn synchronize_vcf_reader<R: BufRead>(
@@ -704,7 +694,7 @@ impl ExecutionPlan for BgzfVcfExec {
             self.schema(),
             rx.map(move |(item, count)| {
                 debug!("VCF Partition {}: processed {} rows", partition, count);
-                item.map_err(|e| DataFusionError::ArrowError(e, None))
+                item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
             }),
         )))
     }

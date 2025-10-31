@@ -20,6 +20,5 @@ log = "0.4.27"
 async-trait = "0.1.88"
 
 [[example]]
-name = "test_reader"
-
-path = "./examples/test_reader.rs"
+name = "test_bam_reader"
+path = "./examples/test_bam_reader.rs"

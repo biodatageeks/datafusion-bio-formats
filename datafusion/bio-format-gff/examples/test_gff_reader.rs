@@ -1,5 +1,4 @@
 use datafusion_bio_format_gff::table_provider::GffTableProvider;
-use futures_util::StreamExt;
 use std::sync::Arc;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -7,15 +6,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
     // let file_path = "gs://polars-bio-it/gencode.v38.annotation.gff3.bgz".to_string();
     let file_path = "/Users/mwiewior/Downloads/gencode.v38.annotation.gff3.bgz".to_string();
-    let object_storage_options = datafusion_bio_format_core::object_storage::ObjectStorageOptions {
-        allow_anonymous: false,
-        enable_request_payer: false,
-        max_retries: Some(1),
-        timeout: Some(300),
-        chunk_size: Some(16),        // 16 MB
-        concurrent_fetches: Some(8), // Number of concurrent requests
-        compression_type: None,
-    };
+    let _object_storage_options =
+        datafusion_bio_format_core::object_storage::ObjectStorageOptions {
+            allow_anonymous: false,
+            enable_request_payer: false,
+            max_retries: Some(1),
+            timeout: Some(300),
+            chunk_size: Some(16),        // 16 MB
+            concurrent_fetches: Some(8), // Number of concurrent requests
+            compression_type: None,
+        };
     // let mut reader = GffRemoteReader::new(file_path, object_storage_options).await?;
     // let mut reader = GffRemoteReader::new(file_path, object_storage_options).await?;
     let table = GffTableProvider::new(
