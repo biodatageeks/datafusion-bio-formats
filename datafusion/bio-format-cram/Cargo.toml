@@ -23,5 +23,5 @@ noodles-cram.workspace = true
 noodles-sam.workspace = true
 noodles-fasta.workspace = true
 async-stream = "0.3.6"
-log = "0.4.27"
+log = "0.4.28"
 async-trait = "0.1.88"
