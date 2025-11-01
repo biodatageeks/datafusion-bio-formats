@@ -22,7 +22,7 @@ futures-util.workspace = true
 noodles-bam = {version = "0.81.0" , features = ["async"]}
 noodles-sam = "0.77.0"
 async-stream = "0.3.6"
-log = "0.4.27"
+log = "0.4.28"
 async-trait = "0.1.88"
 
 [[example]]
