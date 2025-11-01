@@ -40,7 +40,7 @@ jobs:
           components: 'clippy, rustfmt'
 
       - name: Install cargo-edit for version bumping
-        run: cargo install cargo-edit
+        run: cargo install cargo-edit --locked
 
       - name: Configure git
         run: |
