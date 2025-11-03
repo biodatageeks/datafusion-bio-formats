@@ -97,20 +97,11 @@ jobs:
           echo "  Target: $TARGET"
           echo "  Mode: $MODE"
 
-  benchmark:
-    name: Run Benchmarks
+  benchmark-linux:
+    name: Run Benchmarks (Linux)
     needs: prepare
-    strategy:
-      matrix:
-        include:
-          - platform: linux
-            runner: ubuntu-22.04
-            enabled: ${{ needs.prepare.outputs.run_linux == 'true' }}
-          - platform: macos
-            runner: macos-latest
-            enabled: ${{ needs.prepare.outputs.run_macos == 'true' }}
-    runs-on: ${{ matrix.runner }}
-    if: ${{ matrix.enabled == 'true' }}
+    if: ${{ needs.prepare.outputs.run_linux == 'true' }}
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout Target
         uses: actions/checkout@v4
@@ -149,10 +140,10 @@ jobs:
       - name: Collect System Info
         run: |
           mkdir -p benchmark_results/metadata
-          cat > benchmark_results/metadata/${{ matrix.platform }}.json << EOF
+          cat > benchmark_results/metadata/linux.json << EOF
           {
-            "platform": "${{ matrix.platform }}",
-            "runner": "${{ matrix.runner }}",
+            "platform": "linux",
+            "runner": "ubuntu-22.04",
             "os": "$(uname -s)",
             "os_version": "$(uname -r)",
             "arch": "$(uname -m)",
@@ -167,13 +158,79 @@ jobs:
       - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results-${{ matrix.platform }}
+          name: benchmark-results-linux
+          path: benchmark_results/
+          retention-days: 90
+
+  benchmark-macos:
+    name: Run Benchmarks (macOS)
+    needs: prepare
+    if: ${{ needs.prepare.outputs.run_macos == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_ref }}
+          submodules: recursive
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.85.0'
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-benchmark-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-benchmark-
+            ${{ runner.os }}-cargo-
+
+      - name: Build Benchmark Runner
+        run: |
+          cargo build --release --package datafusion-bio-benchmarks-runner
+
+      - name: Run GFF Benchmarks
+        run: |
+          mkdir -p benchmark_results
+          ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir benchmark_results
+        env:
+          RUST_LOG: info
+
+      - name: Collect System Info
+        run: |
+          mkdir -p benchmark_results/metadata
+          cat > benchmark_results/metadata/macos.json << EOF
+          {
+            "platform": "macos",
+            "runner": "macos-latest",
+            "os": "$(uname -s)",
+            "os_version": "$(uname -r)",
+            "arch": "$(uname -m)",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "baseline_tag": "${{ needs.prepare.outputs.baseline_tag }}",
+            "target_ref": "${{ needs.prepare.outputs.target_ref }}",
+            "commit_sha": "${{ github.sha }}",
+            "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
+          }
+          EOF
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-macos
           path: benchmark_results/
           retention-days: 90
 
   aggregate:
     name: Aggregate and Publish Results
-    needs: [prepare, benchmark]
+    needs: [prepare, benchmark-linux, benchmark-macos]
+    if: ${{ always() }}
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
