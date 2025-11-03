@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use datafusion::prelude::*;
 use datafusion_bio_benchmarks_common::{
-    BenchmarkCategory, BenchmarkResultBuilder, DataDownloader, TestDataFile, extract_drive_id,
-    write_result,
+    extract_drive_id, write_result, BenchmarkCategory, BenchmarkResultBuilder, DataDownloader,
+    TestDataFile,
 };
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use serde::Deserialize;
