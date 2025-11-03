@@ -163,7 +163,8 @@
       "Bash(/tmp/fastq_table_provider.txt)",
       "Bash(git reset:*)",
       "Bash(git commit:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []
