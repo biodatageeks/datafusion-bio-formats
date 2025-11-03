@@ -110,7 +110,7 @@ jobs:
             runner: macos-latest
             enabled: ${{ needs.prepare.outputs.run_macos == 'true' }}
     runs-on: ${{ matrix.runner }}
-    if: matrix.enabled == true
+    if: ${{ matrix.enabled == 'true' }}
     steps:
       - name: Checkout Target
         uses: actions/checkout@v4
