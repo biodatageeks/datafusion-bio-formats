@@ -1,0 +1,50 @@
+# GFF3 Benchmark Configuration
+# This configuration defines benchmarks for the GFF3 file format using gencode.49 test data
+
+format: gff
+table_name: gencode_annotations
+
+# Test data files stored on Google Drive
+test_data:
+  - filename: gencode.v49.annotation.gff3.gz
+    drive_url: https://drive.google.com/file/d/1PsHqKG-gyRJy5-sNzuH3xRntw4Er--Si/view
+    # Checksum will be calculated on first download
+    checksum: null
+  - filename: gencode.v49.annotation.gff3.gz.tbi
+    drive_url: https://drive.google.com/file/d/173RT5Afi2jAh64uCJwNRGHF4ozYU-xzX/view
+    checksum: null
+
+# Parallelism benchmarks - test BGZF parallel decompression
+# Tests with different thread counts to measure parallel speedup
+parallelism_tests:
+  thread_counts: [1, 2, 4, 8, max]  # "max" uses all available CPU cores
+  repetitions: 3
+  query: "SELECT COUNT(*) FROM {table_name}"
+
+# Predicate pushdown benchmarks - test filter optimization efficiency
+# Each test measures how well filters are pushed down to reduce data scanning
+predicate_pushdown_tests:
+  repetitions: 3
+  tests:
+    - name: chromosome_filter
+      query: "SELECT COUNT(*) FROM {table_name} WHERE seqid = 'chr1'"
+
+    - name: range_filter
+      query: "SELECT * FROM {table_name} WHERE start > 1000000 AND end < 2000000"
+
+    - name: type_filter
+      query: "SELECT * FROM {table_name} WHERE type = 'gene'"
+
+# Projection pushdown benchmarks - test column pruning optimization
+# Each test selects different column subsets to measure I/O and parse time reduction
+projection_pushdown_tests:
+  repetitions: 3
+  tests:
+    - name: full_schema
+      query: "SELECT * FROM {table_name} LIMIT 100000"
+
+    - name: core_fields
+      query: "SELECT seqid, start, end, type FROM {table_name} LIMIT 100000"
+
+    - name: single_column
+      query: "SELECT type FROM {table_name} LIMIT 100000"

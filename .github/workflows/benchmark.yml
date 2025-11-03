@@ -1,0 +1,303 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner platform'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - linux
+          - macos
+      benchmark_suite:
+        description: 'Benchmark suite'
+        required: true
+        default: 'fast'
+        type: choice
+        options:
+          - fast
+          - full
+      baseline_tag:
+        description: 'Baseline tag (leave empty for latest)'
+        required: false
+        type: string
+      target_ref:
+        description: 'Target ref (leave empty for current branch)'
+        required: false
+        type: string
+
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    name: Prepare Configuration
+    runs-on: ubuntu-22.04
+    outputs:
+      baseline_tag: ${{ steps.config.outputs.baseline_tag }}
+      target_ref: ${{ steps.config.outputs.target_ref }}
+      run_linux: ${{ steps.config.outputs.run_linux }}
+      run_macos: ${{ steps.config.outputs.run_macos }}
+      benchmark_mode: ${{ steps.config.outputs.benchmark_mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Configuration
+        id: config
+        run: |
+          # Determine baseline tag
+          if [ -n "${{ inputs.baseline_tag }}" ]; then
+            BASELINE="${{ inputs.baseline_tag }}"
+          else
+            BASELINE=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          fi
+          echo "baseline_tag=$BASELINE" >> $GITHUB_OUTPUT
+
+          # Determine target ref
+          if [ -n "${{ inputs.target_ref }}" ]; then
+            TARGET="${{ inputs.target_ref }}"
+          else
+            TARGET="${{ github.ref_name }}"
+          fi
+          echo "target_ref=$TARGET" >> $GITHUB_OUTPUT
+
+          # Determine runners
+          RUNNER="${{ inputs.runner || 'all' }}"
+          if [ "$RUNNER" = "all" ] || [ "$RUNNER" = "linux" ]; then
+            echo "run_linux=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_linux=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$RUNNER" = "all" ] || [ "$RUNNER" = "macos" ]; then
+            echo "run_macos=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_macos=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Benchmark mode
+          MODE="${{ inputs.benchmark_suite || 'fast' }}"
+          echo "benchmark_mode=$MODE" >> $GITHUB_OUTPUT
+
+          echo "Configuration:"
+          echo "  Baseline: $BASELINE"
+          echo "  Target: $TARGET"
+          echo "  Mode: $MODE"
+
+  benchmark:
+    name: Run Benchmarks
+    needs: prepare
+    strategy:
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-22.04
+            enabled: ${{ needs.prepare.outputs.run_linux == 'true' }}
+          - platform: macos
+            runner: macos-latest
+            enabled: ${{ needs.prepare.outputs.run_macos == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    if: matrix.enabled == true
+    steps:
+      - name: Checkout Target
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.target_ref }}
+          submodules: recursive
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.85.0'
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-benchmark-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-benchmark-
+            ${{ runner.os }}-cargo-
+
+      - name: Build Benchmark Runner
+        run: |
+          cargo build --release --package datafusion-bio-benchmarks-runner
+
+      - name: Run GFF Benchmarks
+        run: |
+          mkdir -p benchmark_results
+          ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir benchmark_results
+        env:
+          RUST_LOG: info
+
+      - name: Collect System Info
+        run: |
+          mkdir -p benchmark_results/metadata
+          cat > benchmark_results/metadata/${{ matrix.platform }}.json << EOF
+          {
+            "platform": "${{ matrix.platform }}",
+            "runner": "${{ matrix.runner }}",
+            "os": "$(uname -s)",
+            "os_version": "$(uname -r)",
+            "arch": "$(uname -m)",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "baseline_tag": "${{ needs.prepare.outputs.baseline_tag }}",
+            "target_ref": "${{ needs.prepare.outputs.target_ref }}",
+            "commit_sha": "${{ github.sha }}",
+            "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
+          }
+          EOF
+
+      - name: Upload Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ matrix.platform }}
+          path: benchmark_results/
+          retention-days: 90
+
+  aggregate:
+    name: Aggregate and Publish Results
+    needs: [prepare, benchmark]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download All Results
+        uses: actions/download-artifact@v4
+        with:
+          path: all_results
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          pip install -r benchmarks/python/requirements.txt
+
+      - name: Prepare GitHub Pages Directory
+        run: |
+          git fetch origin gh-pages:gh-pages || echo "No gh-pages branch yet"
+          git checkout gh-pages || git checkout --orphan gh-pages
+          git rm -rf . || true
+
+          mkdir -p benchmark/data/{tags,commits}
+
+          # Create initial index if it doesn't exist
+          if [ ! -f benchmark/data/index.json ]; then
+            echo '{"datasets": []}' > benchmark/data/index.json
+          fi
+
+      - name: Organize Results
+        run: |
+          TARGET_REF="${{ needs.prepare.outputs.target_ref }}"
+          COMMIT_SHA="${{ github.sha }}"
+
+          # Determine storage location
+          if [[ "$TARGET_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # This is a tag
+            DEST_DIR="benchmark/data/tags/$TARGET_REF"
+          else
+            # This is a commit
+            DEST_DIR="benchmark/data/commits/${COMMIT_SHA:0:8}"
+          fi
+
+          mkdir -p "$DEST_DIR"
+
+          # Copy results from artifacts
+          for platform in linux macos; do
+            if [ -d "all_results/benchmark-results-$platform" ]; then
+              cp -r "all_results/benchmark-results-$platform/"* "$DEST_DIR/" || true
+            fi
+          done
+
+          echo "Results organized in: $DEST_DIR"
+
+      - name: Generate Comparison Report
+        run: |
+          python benchmarks/python/generate_interactive_comparison.py \
+            benchmark/data \
+            benchmark/comparison.html || echo "Report generation failed (MVP mode)"
+
+      - name: Create Index Page
+        run: |
+          cat > benchmark/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>DataFusion Bio-Formats Benchmarks</title>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 1200px; margin: 40px auto; padding: 0 20px; }
+              h1 { color: #333; }
+              .card { background: #f9f9f9; padding: 20px; margin: 20px 0; border-radius: 8px; }
+              a { color: #2196F3; text-decoration: none; }
+              a:hover { text-decoration: underline; }
+            </style>
+          </head>
+          <body>
+            <h1>🚀 DataFusion Bio-Formats Benchmarks</h1>
+            <div class="card">
+              <h2>Available Reports</h2>
+              <ul>
+                <li><a href="comparison.html">Interactive Comparison Tool</a></li>
+                <li><a href="data/">Browse Raw Data</a></li>
+              </ul>
+            </div>
+            <p style="color: #666;">
+              Latest update: $(date -u +%Y-%m-%d %H:%M:%S UTC)<br>
+              Commit: <code>${{ github.sha }}</code>
+            </p>
+          </body>
+          </html>
+          EOF
+
+      - name: Commit and Push to gh-pages
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add benchmark/
+          git commit -m "Update benchmarks for ${{ needs.prepare.outputs.target_ref }}" || echo "No changes"
+          git push origin gh-pages
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `## 📊 Benchmark Results
+
+            Benchmarks have been completed for this PR.
+
+            **View Results:** https://biodatageeks.github.io/datafusion-bio-formats/benchmark/
+
+            - **Target:** ${{ needs.prepare.outputs.target_ref }}
+            - **Baseline:** ${{ needs.prepare.outputs.baseline_tag }}
+            - **Platforms:** Linux, macOS
+            - **Mode:** ${{ needs.prepare.outputs.benchmark_mode }}
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });

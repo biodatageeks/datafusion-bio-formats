@@ -1,0 +1,39 @@
+# Benchmark Configuration Template
+# Copy this file to {format}.yml and customize for your file format
+
+# Format name (gff, vcf, fastq, bam, bed, fasta, cram)
+format: FORMAT_NAME
+
+# Table name to use when registering in DataFusion
+table_name: my_table
+
+# Test data files - typically stored on Google Drive for large genomic files
+test_data:
+  - filename: test_file.gz  # Local cache filename
+    drive_url: https://drive.google.com/file/d/FILE_ID/view  # Google Drive sharing URL
+    checksum: null  # Optional: SHA-256 checksum for validation
+
+# Parallelism benchmarks - test BGZF parallel decompression
+parallelism_tests:
+  thread_counts: [1, 2, 4, 8, max]  # List of thread counts to test, "max" = all cores
+  repetitions: 3  # Number of times to repeat each test
+  query: "SELECT COUNT(*) FROM {table_name}"  # Simple query to measure throughput
+
+# Predicate pushdown benchmarks - test filter optimization
+predicate_pushdown_tests:
+  repetitions: 3
+  tests:
+    - name: example_filter
+      query: "SELECT * FROM {table_name} WHERE column = 'value'"
+    # Add more test cases as needed
+
+# Projection pushdown benchmarks - test column pruning
+projection_pushdown_tests:
+  repetitions: 3
+  tests:
+    - name: full_schema
+      query: "SELECT * FROM {table_name} LIMIT 100000"
+    - name: subset_columns
+      query: "SELECT col1, col2 FROM {table_name} LIMIT 100000"
+    - name: single_column
+      query: "SELECT col1 FROM {table_name} LIMIT 100000"

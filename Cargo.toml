@@ -5,6 +5,7 @@ members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bed",
     "datafusion/bio-format-core", "datafusion/bio-format-fastq", "datafusion/bio-format-gff",
     "datafusion/bio-format-vcf", "datafusion/bio-format-bam", "datafusion/bio-format-fasta",
     "datafusion/bio-format-cram",
+    "benchmarks/common", "benchmarks/runner",
 ]
 
 [workspace.package]
