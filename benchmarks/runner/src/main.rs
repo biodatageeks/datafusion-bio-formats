@@ -40,7 +40,8 @@ struct ParallelismConfig {
 #[serde(untagged)]
 enum ThreadCount {
     Number(usize),
-    Max(()), // "max" - unit type to avoid unused field warning
+    #[allow(dead_code)]
+    Max(String), // "max" string from YAML
 }
 
 /// Predicate pushdown test configuration
