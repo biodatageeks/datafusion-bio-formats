@@ -4,6 +4,7 @@ use datafusion_bio_benchmarks_common::{
     BenchmarkCategory, BenchmarkResultBuilder, DataDownloader, TestDataFile, extract_drive_id,
     write_result,
 };
+use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -207,9 +208,11 @@ async fn register_table(
 
     match format.to_lowercase().as_str() {
         "gff" => {
+            let storage_options = ObjectStorageOptions::default();
             use datafusion_bio_format_gff::table_provider::GffTableProvider;
-            let provider = GffTableProvider::new(file_path.to_string(), None, None, None)
-                .context("Failed to create GFF table provider")?;
+            let provider =
+                GffTableProvider::new(file_path.to_string(), None, None, Some(storage_options))
+                    .context("Failed to create GFF table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register GFF table")?;
         }

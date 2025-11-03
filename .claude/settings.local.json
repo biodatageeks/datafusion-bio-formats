@@ -148,7 +148,22 @@
       "WebFetch(domain:opendal.apache.org)",
       "Bash(./test_remote_range_reading)",
       "Read(//Users/mwiewior/.cargo/git/checkouts/noodles-b4f93bd9cc0a0e76/7e127da/noodles-cram/src/container/compression_header/preservation_map/**)",
-      "Bash(awk:*)"
+      "Bash(awk:*)",
+      "Bash(pre-commit install:*)",
+      "Bash(pre-commit run:*)",
+      "Bash(/tmp/fasta_storage_backup.txt)",
+      "Bash(while read file)",
+      "Bash(do if [ -f \"$file\" ])",
+      "Bash([ ! -s \"$file\" ])",
+      "Bash(then echo \"$file\")",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(/tmp/cram_storage.txt)",
+      "Bash(/tmp/vcf_storage.txt)",
+      "Bash(/tmp/fastq_table_provider.txt)",
+      "Bash(git reset:*)",
+      "Bash(git commit:*)",
+      "Bash(git log:*)"
     ],
     "deny": [],
     "ask": []
