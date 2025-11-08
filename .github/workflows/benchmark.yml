@@ -29,6 +29,13 @@ on:
         required: false
         type: string
 
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'datafusion/**'
+      - 'benchmarks/**'
+      - '.github/workflows/benchmark.yml'
+
   push:
     tags:
       - 'v*.*.*'
@@ -74,8 +81,13 @@ jobs:
           fi
           echo "target_ref=$TARGET" >> $GITHUB_OUTPUT
 
-          # Determine runners
-          RUNNER="${{ inputs.runner || 'all' }}"
+          # Determine runners (default to 'all' for PR triggers)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RUNNER="all"
+          else
+            RUNNER="${{ inputs.runner || 'all' }}"
+          fi
+
           if [ "$RUNNER" = "all" ] || [ "$RUNNER" = "linux" ]; then
             echo "run_linux=true" >> $GITHUB_OUTPUT
           else
@@ -88,13 +100,19 @@ jobs:
             echo "run_macos=false" >> $GITHUB_OUTPUT
           fi
 
-          # Benchmark mode
-          MODE="${{ inputs.benchmark_suite || 'fast' }}"
+          # Benchmark mode (default to 'fast' for PR triggers)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            MODE="fast"
+          else
+            MODE="${{ inputs.benchmark_suite || 'fast' }}"
+          fi
           echo "benchmark_mode=$MODE" >> $GITHUB_OUTPUT
 
           echo "Configuration:"
+          echo "  Event: ${{ github.event_name }}"
           echo "  Baseline: $BASELINE"
           echo "  Target: $TARGET"
+          echo "  Runners: $RUNNER"
           echo "  Mode: $MODE"
 
   benchmark-linux:
