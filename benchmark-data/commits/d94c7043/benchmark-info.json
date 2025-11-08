@@ -1,0 +1,8 @@
+{
+  "target_ref": "29/merge",
+  "baseline_tag": "v0.1.1",
+  "commit_sha": "d94c70439216fbe35c7d09aa4bbf17aa01d84507",
+  "timestamp": "2025-11-08T10:15:38Z",
+  "platforms": ["linux", "macos"],
+  "benchmark_mode": "fast"
+}
