@@ -156,8 +156,8 @@ jobs:
       - name: Copy Benchmark Framework to Baseline
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
-          # Save current benchmark framework
-          git checkout ${{ github.sha }} -- benchmarks/
+          # Save current benchmark framework and workspace config
+          git checkout ${{ github.sha }} -- benchmarks/ Cargo.toml
           echo "✓ Copied current benchmark framework to baseline tag"
 
       - name: Build Baseline Benchmark Runner
@@ -274,8 +274,8 @@ jobs:
       - name: Copy Benchmark Framework to Baseline
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
-          # Save current benchmark framework
-          git checkout ${{ github.sha }} -- benchmarks/
+          # Save current benchmark framework and workspace config
+          git checkout ${{ github.sha }} -- benchmarks/ Cargo.toml
           echo "✓ Copied current benchmark framework to baseline tag"
 
       - name: Build Baseline Benchmark Runner
