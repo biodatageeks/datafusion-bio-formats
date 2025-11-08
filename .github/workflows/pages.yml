@@ -1,0 +1,192 @@
+name: Generate Benchmark Reports
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - gh-pages
+    paths:
+      - 'benchmark-data/**'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  generate-reports:
+    name: Generate HTML Reports
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+
+      - name: Checkout main branch scripts
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-repo
+          sparse-checkout: |
+            benchmarks/python
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r main-repo/benchmarks/python/requirements.txt
+
+      - name: Generate Interactive Comparison Report
+        run: |
+          python main-repo/benchmarks/python/generate_interactive_comparison.py \
+            benchmark-data \
+            benchmark-comparison/index.html
+        continue-on-error: true
+
+      - name: Generate Comparison Charts
+        run: |
+          # This will be implemented later to generate per-dataset comparison charts
+          echo "Comparison charts generation placeholder"
+        continue-on-error: true
+
+      - name: Create Landing Page
+        run: |
+          mkdir -p benchmark-comparison
+          cat > benchmark-comparison/landing.html << 'EOF'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>DataFusion Bio-Formats Benchmarks</title>
+            <style>
+              body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 40px 20px;
+                background: #f5f5f5;
+              }
+              .container {
+                background: white;
+                padding: 40px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+              }
+              h1 {
+                color: #333;
+                border-bottom: 3px solid #4CAF50;
+                padding-bottom: 15px;
+              }
+              .card {
+                background: #f9f9f9;
+                padding: 25px;
+                margin: 25px 0;
+                border-radius: 6px;
+                border-left: 4px solid #4CAF50;
+              }
+              .card h2 {
+                margin-top: 0;
+                color: #4CAF50;
+              }
+              a {
+                color: #2196F3;
+                text-decoration: none;
+                font-weight: 500;
+              }
+              a:hover {
+                text-decoration: underline;
+              }
+              ul {
+                line-height: 1.8;
+              }
+              .footer {
+                text-align: center;
+                margin-top: 40px;
+                padding-top: 20px;
+                border-top: 1px solid #ddd;
+                color: #666;
+              }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <h1>🚀 DataFusion Bio-Formats Benchmark Dashboard</h1>
+
+              <div class="card">
+                <h2>📊 Interactive Comparison</h2>
+                <p>Compare performance between different versions, tags, and commits.</p>
+                <p><a href="index.html">→ Open Interactive Comparison Tool</a></p>
+              </div>
+
+              <div class="card">
+                <h2>📁 Raw Benchmark Data</h2>
+                <p>Browse and download raw benchmark results in JSON format.</p>
+                <ul>
+                  <li><a href="../benchmark-data/tags/">Tagged Releases</a></li>
+                  <li><a href="../benchmark-data/commits/">Commit Benchmarks</a></li>
+                </ul>
+              </div>
+
+              <div class="card">
+                <h2>📖 Documentation</h2>
+                <ul>
+                  <li><a href="https://github.com/biodatageeks/datafusion-bio-formats/blob/master/benchmarks/README.md">Benchmark Framework Guide</a></li>
+                  <li><a href="https://github.com/biodatageeks/datafusion-bio-formats">GitHub Repository</a></li>
+                  <li><a href="https://github.com/biodatageeks/datafusion-bio-formats/actions/workflows/benchmark.yml">Run Benchmarks</a></li>
+                </ul>
+              </div>
+
+              <div class="footer">
+                <p>Generated with ❤️ by DataFusion Bio-Formats Benchmark Framework</p>
+                <p><a href="https://github.com/biodatageeks/datafusion-bio-formats">🤖 View on GitHub</a></p>
+              </div>
+            </div>
+          </body>
+          </html>
+          EOF
+
+      - name: Commit Reports
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add benchmark-comparison/
+          git commit -m "Update benchmark comparison reports" || echo "No changes to commit"
+          git push origin gh-pages
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: generate-reports
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
