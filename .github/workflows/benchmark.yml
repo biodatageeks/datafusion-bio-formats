@@ -455,11 +455,36 @@ jobs:
           # In production, use jq or Python to properly update JSON
           echo "✓ Dataset added to index: $DEST_BASE"
 
+      - name: Checkout Python Scripts from Main
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          sparse-checkout: |
+            benchmarks/python
+          sparse-checkout-cone-mode: false
+          path: main-repo
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install plotly pandas
+
+      - name: Generate HTML Report
+        run: |
+          python main-repo/benchmarks/python/generate_interactive_comparison.py \
+            benchmark-data \
+            benchmark-comparison/index.html
+        continue-on-error: true
+
       - name: Commit and Push Results
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add benchmark-data/
+          git add benchmark-data/ benchmark-comparison/
           git commit -m "Add benchmark results for ${{ needs.prepare.outputs.target_ref }}" || echo "No changes to commit"
           git push origin gh-pages
 
