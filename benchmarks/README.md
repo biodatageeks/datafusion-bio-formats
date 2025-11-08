@@ -195,11 +195,11 @@ The benchmark system uses **two separate workflows** following polars-bio's arch
 
 ### View Results
 
-**Landing Page**: https://biodatageeks.github.io/datafusion-bio-formats/benchmark-comparison/
+**Landing Page**: https://biodatageeks.org/datafusion-bio-formats/benchmark-comparison/
 
-**Interactive Comparison**: https://biodatageeks.github.io/datafusion-bio-formats/benchmark-comparison/index.html
+**Interactive Comparison**: https://biodatageeks.org/datafusion-bio-formats/benchmark-comparison/index.html
 
-**Raw Data**: https://biodatageeks.github.io/datafusion-bio-formats/benchmark-data/
+**Raw Data**: https://biodatageeks.org/datafusion-bio-formats/benchmark-data/
 
 ## Directory Structure
 

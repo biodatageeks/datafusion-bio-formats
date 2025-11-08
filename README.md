@@ -116,7 +116,7 @@ let table = BgzfFastqTableProvider::try_new(
 
 This project includes a comprehensive benchmark framework to track performance across releases and validate optimizations.
 
-📊 **[View Benchmark Results](https://biodatageeks.github.io/datafusion-bio-formats/benchmark/)**
+📊 **[View Benchmark Results](https://biodatageeks.org/datafusion-bio-formats/benchmark-comparison/)**
 
 ### Run Benchmarks Locally
 

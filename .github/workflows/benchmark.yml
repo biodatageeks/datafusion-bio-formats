@@ -146,32 +146,27 @@ jobs:
             ${{ runner.os }}-cargo-benchmark-
             ${{ runner.os }}-cargo-
 
-      # Run BASELINE benchmarks
-      - name: Checkout Baseline
+      # Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
+      - name: Checkout Baseline Code
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           git checkout ${{ needs.prepare.outputs.baseline_tag }}
           git submodule update --init --recursive
 
-      - name: Check if Benchmarks Exist in Baseline
+      - name: Copy Benchmark Framework to Baseline
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
-        id: check_baseline_benchmarks
         run: |
-          if [ -d "benchmarks" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "✓ Benchmarks directory exists in baseline"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠ Benchmarks directory does not exist in baseline tag"
-          fi
+          # Save current benchmark framework
+          git checkout ${{ github.sha }} -- benchmarks/
+          echo "✓ Copied current benchmark framework to baseline tag"
 
       - name: Build Baseline Benchmark Runner
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
 
       - name: Run Baseline Benchmarks
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           mkdir -p baseline_results
           ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
@@ -180,7 +175,7 @@ jobs:
 
       # Clean build artifacts before target build
       - name: Clean Build Artifacts
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           cargo clean
 
@@ -269,32 +264,27 @@ jobs:
             ${{ runner.os }}-cargo-benchmark-
             ${{ runner.os }}-cargo-
 
-      # Run BASELINE benchmarks
-      - name: Checkout Baseline
+      # Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
+      - name: Checkout Baseline Code
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           git checkout ${{ needs.prepare.outputs.baseline_tag }}
           git submodule update --init --recursive
 
-      - name: Check if Benchmarks Exist in Baseline
+      - name: Copy Benchmark Framework to Baseline
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
-        id: check_baseline_benchmarks
         run: |
-          if [ -d "benchmarks" ]; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "✓ Benchmarks directory exists in baseline"
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-            echo "⚠ Benchmarks directory does not exist in baseline tag"
-          fi
+          # Save current benchmark framework
+          git checkout ${{ github.sha }} -- benchmarks/
+          echo "✓ Copied current benchmark framework to baseline tag"
 
       - name: Build Baseline Benchmark Runner
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
 
       - name: Run Baseline Benchmarks
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           mkdir -p baseline_results
           ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
@@ -303,7 +293,7 @@ jobs:
 
       # Clean build artifacts before target build
       - name: Clean Build Artifacts
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           cargo clean
 
@@ -478,14 +468,14 @@ jobs:
 
             Benchmarks have been completed and stored for this PR.
 
-            **View Results:** https://biodatageeks.github.io/datafusion-bio-formats/benchmark-comparison/
+            **View Results:** https://biodatageeks.org/datafusion-bio-formats/benchmark-comparison/
 
             - **Target:** ${{ needs.prepare.outputs.target_ref }}
             - **Baseline:** ${{ needs.prepare.outputs.baseline_tag }}
             - **Platforms:** Linux, macOS
             - **Mode:** ${{ needs.prepare.outputs.benchmark_mode }}
 
-            Raw data: https://biodatageeks.github.io/datafusion-bio-formats/benchmark-data/
+            Raw data: https://biodatageeks.org/datafusion-bio-formats/benchmark-data/
             `;
 
             github.rest.issues.createComment({
