@@ -167,7 +167,7 @@
 
     <script>
         // Embedded data
-        const datasets = [{"type": "commit", "name": "d94c7043", "path": "commits/d94c7043", "display": "29/merge"}, {"type": "commit", "name": "cfe3eb0f", "path": "commits/cfe3eb0f", "display": "benchmarking"}, {"type": "commit", "name": "c41ad54c", "path": "commits/c41ad54c", "display": "benchmarking"}, {"type": "commit", "name": "a7804a6a", "path": "commits/a7804a6a", "display": "benchmarking"}, {"type": "commit", "name": "928e33e3", "path": "commits/928e33e3", "display": "benchmarking"}, {"type": "commit", "name": "91d688da", "path": "commits/91d688da", "display": "benchmarking"}, {"type": "commit", "name": "48739f5d", "path": "commits/48739f5d", "display": "benchmarking"}, {"type": "commit", "name": "34f6d7b5", "path": "commits/34f6d7b5", "display": "benchmarking"}];
+        const datasets = [{"type": "commit", "name": "dbd88558", "path": "commits/dbd88558", "display": "benchmarking"}, {"type": "commit", "name": "d94c7043", "path": "commits/d94c7043", "display": "29/merge"}, {"type": "commit", "name": "cfe3eb0f", "path": "commits/cfe3eb0f", "display": "benchmarking"}, {"type": "commit", "name": "c41ad54c", "path": "commits/c41ad54c", "display": "benchmarking"}, {"type": "commit", "name": "a7804a6a", "path": "commits/a7804a6a", "display": "benchmarking"}, {"type": "commit", "name": "928e33e3", "path": "commits/928e33e3", "display": "benchmarking"}, {"type": "commit", "name": "91d688da", "path": "commits/91d688da", "display": "benchmarking"}, {"type": "commit", "name": "48739f5d", "path": "commits/48739f5d", "display": "benchmarking"}, {"type": "commit", "name": "34f6d7b5", "path": "commits/34f6d7b5", "display": "benchmarking"}];
         const dataPath = "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/benchmark-data";
 
         // State
@@ -176,26 +176,77 @@
         let targetData = null;
         let availablePlatforms = [];
 
-        // Initialize dropdowns
+        // Initialize dropdowns with optgroups for tags and commits
         function initializeDropdowns() {
             const baselineSelect = document.getElementById('baseline-select');
             const targetSelect = document.getElementById('target-select');
 
-            datasets.forEach(dataset => {
-                const option1 = document.createElement('option');
-                option1.value = dataset.path;
-                option1.textContent = dataset.display;
-                baselineSelect.appendChild(option1);
+            // Separate tags and commits
+            const tags = datasets.filter(d => d.type === 'tag');
+            const commits = datasets.filter(d => d.type === 'commit');
 
-                const option2 = document.createElement('option');
-                option2.value = dataset.path;
-                option2.textContent = dataset.display;
-                targetSelect.appendChild(option2);
-            });
+            // Add tags optgroup
+            if (tags.length > 0) {
+                const baselineTagGroup = document.createElement('optgroup');
+                baselineTagGroup.label = 'Tags';
+                const targetTagGroup = document.createElement('optgroup');
+                targetTagGroup.label = 'Tags';
+
+                tags.forEach((dataset, index) => {
+                    const option1 = document.createElement('option');
+                    option1.value = dataset.path;
+                    option1.textContent = dataset.display;
+                    baselineTagGroup.appendChild(option1);
+
+                    const option2 = document.createElement('option');
+                    option2.value = dataset.path;
+                    option2.textContent = dataset.display;
+                    targetTagGroup.appendChild(option2);
+
+                    // Set latest tag as default baseline
+                    if (index === 0) {
+                        option1.selected = true;
+                    }
+                });
+
+                baselineSelect.appendChild(baselineTagGroup);
+                targetSelect.appendChild(targetTagGroup);
+            }
+
+            // Add commits optgroup
+            if (commits.length > 0) {
+                const baselineCommitGroup = document.createElement('optgroup');
+                baselineCommitGroup.label = 'Commits';
+                const targetCommitGroup = document.createElement('optgroup');
+                targetCommitGroup.label = 'Commits';
+
+                commits.forEach((dataset, index) => {
+                    const option1 = document.createElement('option');
+                    option1.value = dataset.path;
+                    option1.textContent = dataset.display;
+                    baselineCommitGroup.appendChild(option1);
+
+                    const option2 = document.createElement('option');
+                    option2.value = dataset.path;
+                    option2.textContent = dataset.display;
+                    targetCommitGroup.appendChild(option2);
+
+                    // Set latest commit as default target
+                    if (index === 0) {
+                        option2.selected = true;
+                    }
+                });
+
+                baselineSelect.appendChild(baselineCommitGroup);
+                targetSelect.appendChild(targetCommitGroup);
+            }
 
             // Enable compare button when both selections are made
             baselineSelect.addEventListener('change', validateSelections);
             targetSelect.addEventListener('change', validateSelections);
+
+            // Initial validation
+            validateSelections();
         }
 
         function validateSelections() {
@@ -211,20 +262,63 @@
         }
 
         // Load benchmark data from a dataset path
-        async function loadBenchmarkData(datasetPath, type) {
-            const chartsDiv = document.getElementById('charts');
-            chartsDiv.innerHTML = '<div class="loading">Loading benchmark data...</div>';
+        async function loadBenchmarkData(datasetPath) {
+            const baseUrl = window.location.origin + window.location.pathname.replace('/benchmark-comparison/index.html', '');
+            const dataUrl = `${baseUrl}/benchmark-data/${datasetPath}`;
 
-            // For now, show a placeholder message
-            // In a real implementation, this would fetch JSON files via AJAX
-            return {
-                platforms: [],
-                results: {}
-            };
+            // Load benchmark-info.json
+            const infoResponse = await fetch(`${dataUrl}/benchmark-info.json`);
+            if (!infoResponse.ok) {
+                throw new Error(`Failed to load benchmark info from ${datasetPath}`);
+            }
+            const info = await infoResponse.json();
+
+            // Discover available platforms
+            const platforms = [];
+            const results = {};
+
+            // Try to load data from both linux and macos directories
+            for (const platform of ['linux', 'macos']) {
+                try {
+                    const platformUrl = `${dataUrl}/${platform}/${platform}.json`;
+                    const platformResponse = await fetch(platformUrl);
+                    if (platformResponse.ok) {
+                        const platformInfo = await platformResponse.json();
+                        platforms.push({
+                            name: platform,
+                            label: platformInfo.runner || platform,
+                            info: platformInfo
+                        });
+
+                        // Load all JSON result files from baseline and target
+                        const platformResults = [];
+                        for (const variant of ['baseline', 'target']) {
+                            const variantUrl = `${dataUrl}/${platform}/${variant}/results`;
+                            try {
+                                // We'll need to discover files - for now, try common patterns
+                                // In production, you'd list directory contents or have an index
+                                const testResponse = await fetch(`${variantUrl}/gff_parallelism_1threads.json`);
+                                if (testResponse.ok) {
+                                    const result = await testResponse.json();
+                                    result.variant = variant;
+                                    platformResults.push(result);
+                                }
+                            } catch (e) {
+                                console.warn(`Could not load ${variant} results for ${platform}`, e);
+                            }
+                        }
+                        results[platform] = platformResults;
+                    }
+                } catch (e) {
+                    console.warn(`Platform ${platform} not available`, e);
+                }
+            }
+
+            return { platforms, results, info };
         }
 
         // Generate comparison charts
-        function generateComparison() {
+        async function generateComparison() {
             const baseline = document.getElementById('baseline-select').value;
             const target = document.getElementById('target-select').value;
 
@@ -235,26 +329,176 @@
             const chartsDiv = document.getElementById('charts');
             const errorDiv = document.getElementById('error-container');
             errorDiv.innerHTML = '';
+            chartsDiv.innerHTML = '<div class="loading">Loading benchmark data...</div>';
 
-            chartsDiv.innerHTML = `
-                <div class="info">
-                    <h3>Comparison: ${baseline} (baseline) vs ${target} (target)</h3>
-                    <p>Full comparison functionality requires running benchmarks first. Benchmark data will be loaded dynamically from the <code>gh-pages</code> branch.</p>
-                    <p><strong>To see comparisons:</strong></p>
-                    <ol>
-                        <li>Trigger the benchmark workflow from GitHub Actions</li>
-                        <li>Wait for the workflow to complete</li>
-                        <li>Refresh this page to see the comparison charts</li>
-                    </ol>
-                    <p>The benchmark framework is fully implemented and ready to use. Charts will display:</p>
-                    <ul>
-                        <li>Total runtime comparison (baseline vs target)</li>
-                        <li>Per-test-case breakdown with grouped bar charts</li>
-                        <li>Platform-specific results (Linux/macOS tabs)</li>
-                        <li>Performance improvements/regressions with color coding</li>
-                    </ul>
-                </div>
-            `;
+            try {
+                // Load both baseline and target data
+                baselineData = await loadBenchmarkData(baseline);
+                targetData = await loadBenchmarkData(target);
+
+                // Find common platforms
+                const baselinePlatforms = baselineData.platforms.map(p => p.name);
+                const targetPlatforms = targetData.platforms.map(p => p.name);
+                availablePlatforms = baselinePlatforms.filter(p => targetPlatforms.includes(p));
+
+                if (availablePlatforms.length === 0) {
+                    errorDiv.innerHTML = `
+                        <div class="error">
+                            <strong>No common platforms found</strong><br>
+                            Baseline has: ${baselinePlatforms.join(', ')}<br>
+                            Target has: ${targetPlatforms.join(', ')}
+                        </div>
+                    `;
+                    chartsDiv.innerHTML = '';
+                    return;
+                }
+
+                // Set up platform tabs
+                const tabsContainer = document.getElementById('platform-tabs-container');
+                const tabsDiv = document.getElementById('platform-tabs');
+                tabsDiv.innerHTML = '';
+
+                if (availablePlatforms.length > 1) {
+                    tabsContainer.style.display = 'block';
+                    availablePlatforms.forEach((platform, index) => {
+                        const tab = document.createElement('button');
+                        tab.className = 'platform-tab' + (index === 0 ? ' active' : '');
+                        const platformInfo = baselineData.platforms.find(p => p.name === platform);
+                        tab.textContent = platformInfo ? platformInfo.label : platform;
+                        tab.onclick = () => switchPlatform(platform);
+                        tabsDiv.appendChild(tab);
+                    });
+                } else if (availablePlatforms.length === 1) {
+                    tabsContainer.style.display = 'block';
+                    const platformInfo = baselineData.platforms.find(p => p.name === availablePlatforms[0]);
+                    tabsDiv.innerHTML = `<div style="padding: 10px; color: #666;">Platform: ${platformInfo ? platformInfo.label : availablePlatforms[0]}</div>`;
+                }
+
+                // Display charts for first available platform
+                currentPlatform = availablePlatforms[0];
+                displayChartsForPlatform(currentPlatform);
+
+            } catch (error) {
+                console.error('Error loading benchmark data:', error);
+                errorDiv.innerHTML = `
+                    <div class="error">
+                        <strong>Error loading benchmark data</strong><br>
+                        ${error.message}<br><br>
+                        This usually means benchmark data hasn't been generated yet.
+                        Run the benchmark workflow from GitHub Actions to generate data.
+                    </div>
+                `;
+                chartsDiv.innerHTML = '';
+            }
+        }
+
+        // Switch between platforms
+        function switchPlatform(platform) {
+            currentPlatform = platform;
+
+            // Update tab styling
+            document.querySelectorAll('.platform-tab').forEach(tab => {
+                tab.classList.remove('active');
+                const platformInfo = baselineData.platforms.find(p => p.name === platform);
+                if (tab.textContent === (platformInfo ? platformInfo.label : platform)) {
+                    tab.classList.add('active');
+                }
+            });
+
+            displayChartsForPlatform(platform);
+        }
+
+        // Display charts for a specific platform
+        function displayChartsForPlatform(platform) {
+            const chartsDiv = document.getElementById('charts');
+
+            const baselineResults = baselineData.results[platform] || [];
+            const targetResults = targetData.results[platform] || [];
+
+            if (baselineResults.length === 0 && targetResults.length === 0) {
+                chartsDiv.innerHTML = `
+                    <div class="info">
+                        <h3>No benchmark data available for ${platform}</h3>
+                        <p>Run benchmarks on this platform to see comparison charts.</p>
+                    </div>
+                `;
+                return;
+            }
+
+            // Group results by category
+            const categories = new Set();
+            [...baselineResults, ...targetResults].forEach(r => {
+                if (r.category) categories.add(r.category);
+            });
+
+            let html = '<div style="margin: 20px 0;">';
+            html += `<h3>Benchmark Comparison</h3>`;
+            html += `<p><strong>Baseline:</strong> ${document.getElementById('baseline-select').selectedOptions[0].text}</p>`;
+            html += `<p><strong>Target:</strong> ${document.getElementById('target-select').selectedOptions[0].text}</p>`;
+            html += '</div>';
+
+            categories.forEach(category => {
+                html += `<div id="chart-${category}" class="chart"></div>`;
+            });
+
+            chartsDiv.innerHTML = html;
+
+            // Generate Plotly charts for each category
+            categories.forEach(category => {
+                const baselineCategoryResults = baselineResults.filter(r => r.category === category);
+                const targetCategoryResults = targetResults.filter(r => r.category === category);
+
+                createComparisonChart(
+                    `chart-${category}`,
+                    category,
+                    baselineCategoryResults,
+                    targetCategoryResults
+                );
+            });
+        }
+
+        // Create a comparison chart using Plotly
+        function createComparisonChart(divId, category, baselineResults, targetResults) {
+            const benchmarkNames = [...new Set([
+                ...baselineResults.map(r => r.benchmark_name),
+                ...targetResults.map(r => r.benchmark_name)
+            ])];
+
+            const baselineTimes = benchmarkNames.map(name => {
+                const result = baselineResults.find(r => r.benchmark_name === name);
+                return result ? result.metrics.elapsed_seconds : 0;
+            });
+
+            const targetTimes = benchmarkNames.map(name => {
+                const result = targetResults.find(r => r.benchmark_name === name);
+                return result ? result.metrics.elapsed_seconds : 0;
+            });
+
+            const trace1 = {
+                x: benchmarkNames,
+                y: baselineTimes,
+                name: 'Baseline',
+                type: 'bar',
+                marker: { color: '#636EFA' }
+            };
+
+            const trace2 = {
+                x: benchmarkNames,
+                y: targetTimes,
+                name: 'Target',
+                type: 'bar',
+                marker: { color: '#EF553B' }
+            };
+
+            const layout = {
+                title: `${category} Benchmarks`,
+                xaxis: { title: 'Benchmark' },
+                yaxis: { title: 'Time (seconds)' },
+                barmode: 'group',
+                height: 400
+            };
+
+            Plotly.newPlot(divId, [trace1, trace2], layout);
         }
 
         // Initialize on page load

@@ -1,0 +1,8 @@
+{
+  "target_ref": "benchmarking",
+  "baseline_tag": "v0.1.1",
+  "commit_sha": "dbd88558119bb99fa03bde4322167ecc3c3f090f",
+  "timestamp": "2025-11-08T14:35:39Z",
+  "platforms": ["linux", "macos"],
+  "benchmark_mode": "fast"
+}
