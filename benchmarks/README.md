@@ -159,27 +159,51 @@ Use `{table_name}` in queries, which will be replaced with the configured table 
 
 ## GitHub Actions Workflow
 
-### Manual Trigger
+The benchmark system uses **two separate workflows** following polars-bio's architecture:
 
-1. Go to **Actions** → **Benchmark**
-2. Click **Run workflow**
-3. Select options:
-   - **Runner**: `all`, `linux`, or `macos`
-   - **Suite**: `fast` (3 reps) or `full` (10 reps)
-   - **Baseline**: Tag to compare against (optional)
-   - **Target**: Branch to benchmark (optional)
+### 1. Benchmark Workflow (`benchmark.yml`)
 
-### Automatic on Release
+**Purpose**: Execute benchmarks and store raw JSON results
 
-Benchmarks run automatically when you create a release tag (e.g., `v0.1.2`).
+**Triggers**:
+- Manual: Actions → Benchmark → Run workflow
+- Automatic: On release tags (e.g., `v0.1.2`)
+
+**What it does**:
+1. Runs benchmarks for baseline (latest tag) and target (PR/branch)
+2. Stores raw JSON results in `gh-pages` branch under `benchmark-data/`
+3. No report generation (separation of concerns)
+
+**Options**:
+- **Runner**: `all`, `linux`, or `macos`
+- **Suite**: `fast` (3 reps) or `full` (10 reps)
+- **Baseline**: Tag to compare against (defaults to latest)
+- **Target**: Branch to benchmark (defaults to current)
+
+### 2. Pages Workflow (`pages.yml`)
+
+**Purpose**: Generate HTML reports from stored benchmark data
+
+**Triggers**:
+- Automatic: When benchmark data is pushed to `gh-pages`
+- Manual: workflow_dispatch
+
+**What it does**:
+1. Scans `benchmark-data/` for all available results
+2. Generates interactive comparison HTML
+3. Deploys to GitHub Pages
 
 ### View Results
 
-Results are published to GitHub Pages:
+**Landing Page**: https://biodatageeks.github.io/datafusion-bio-formats/benchmark-comparison/
 
-**https://biodatageeks.github.io/datafusion-bio-formats/benchmark/**
+**Interactive Comparison**: https://biodatageeks.github.io/datafusion-bio-formats/benchmark-comparison/index.html
+
+**Raw Data**: https://biodatageeks.github.io/datafusion-bio-formats/benchmark-data/
 
 ## Directory Structure
+
+### Source Code (main branch)
 
 ```
 benchmarks/
@@ -195,10 +219,36 @@ benchmarks/
 ├── configs/               # YAML configurations
 │   ├── TEMPLATE.yml      # Template for new formats
 │   └── gff.yml           # GFF3 configuration
-├── python/                # Report generation
+├── python/                # Report generation scripts
 │   ├── generate_interactive_comparison.py
 │   └── requirements.txt
 └── README.md
+```
+
+### GitHub Pages (gh-pages branch)
+
+```
+benchmark-data/            # Raw benchmark results
+├── index.json            # Master index of all datasets
+├── tags/
+│   └── v0.1.0/
+│       ├── benchmark-info.json  # Run metadata
+│       ├── linux/
+│       │   ├── baseline/results/*.json
+│       │   ├── target/results/*.json
+│       │   └── linux.json       # Platform metadata
+│       └── macos/
+│           ├── baseline/results/*.json
+│           ├── target/results/*.json
+│           └── macos.json
+└── commits/
+    └── {short_sha}/
+        └── {platform}/...
+
+benchmark-comparison/      # Generated HTML reports
+├── landing.html          # Dashboard
+├── index.html            # Interactive comparison tool
+└── {branch}/             # Per-branch reports (future)
 ```
 
 ## Result JSON Schema

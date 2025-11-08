@@ -112,6 +112,24 @@ let table = BgzfFastqTableProvider::try_new(
 ).await?;
 ```
 
+## Performance Benchmarks
+
+This project includes a comprehensive benchmark framework to track performance across releases and validate optimizations.
+
+📊 **[View Benchmark Results](https://biodatageeks.github.io/datafusion-bio-formats/benchmark/)**
+
+### Run Benchmarks Locally
+
+```bash
+# Build the benchmark runner
+cargo build --release --package datafusion-bio-benchmarks-runner
+
+# Run GFF benchmarks
+./target/release/benchmark-runner benchmarks/configs/gff.yml
+```
+
+See [benchmarks/README.md](benchmarks/README.md) for detailed documentation on running benchmarks and adding new formats.
+
 ## Development
 
 ### Build

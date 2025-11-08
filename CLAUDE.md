@@ -45,6 +45,12 @@ Each format has example files in `datafusion/bio-format-{format}/examples/`:
 - `cargo test --package datafusion-bio-format-vcf`
 - `cargo test --package datafusion-bio-format-core`
 
+### Running Benchmarks
+- `cargo build --release --package datafusion-bio-benchmarks-runner` - Build benchmark runner
+- `./target/release/benchmark-runner benchmarks/configs/gff.yml` - Run GFF benchmarks
+- `./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir my_results` - Run with custom output directory
+- See `benchmarks/README.md` for full documentation on the benchmark framework
+
 ## Architecture
 
 ### Workspace Structure
@@ -52,9 +58,14 @@ Each format has example files in `datafusion/bio-format-{format}/examples/`:
 - **bio-format-fastq**: FASTQ file format support with BGZF parallel reading
 - **bio-format-vcf**: VCF file format support
 - **bio-format-bam**: BAM file format support
-- **bio-format-bed**: BED file format support  
+- **bio-format-bed**: BED file format support
 - **bio-format-gff**: GFF file format support
 - **bio-format-fasta**: FASTA file format support
+- **benchmarks/**: Performance benchmark framework
+  - **benchmarks/common**: Shared benchmark infrastructure (harness, data downloader)
+  - **benchmarks/runner**: Generic benchmark runner binary
+  - **benchmarks/configs**: YAML configuration files for each format
+  - **benchmarks/python**: Report generation scripts
 
 ### Key Components
 Each format crate follows a consistent pattern:
