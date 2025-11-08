@@ -76,6 +76,9 @@ jobs:
           # Determine target ref
           if [ -n "${{ inputs.target_ref }}" ]; then
             TARGET="${{ inputs.target_ref }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, use the head branch name
+            TARGET="${{ github.head_ref }}"
           else
             TARGET="${{ github.ref_name }}"
           fi
