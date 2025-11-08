@@ -132,13 +132,25 @@ jobs:
           git checkout ${{ needs.prepare.outputs.baseline_tag }}
           git submodule update --init --recursive
 
-      - name: Build Baseline Benchmark Runner
+      - name: Check if Benchmarks Exist in Baseline
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        id: check_baseline_benchmarks
+        run: |
+          if [ -d "benchmarks" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✓ Benchmarks directory exists in baseline"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠ Benchmarks directory does not exist in baseline tag"
+          fi
+
+      - name: Build Baseline Benchmark Runner
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
 
       - name: Run Baseline Benchmarks
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
         run: |
           mkdir -p baseline_results
           ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
@@ -147,7 +159,7 @@ jobs:
 
       # Clean build artifacts before target build
       - name: Clean Build Artifacts
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
         run: |
           cargo clean
 
@@ -243,13 +255,25 @@ jobs:
           git checkout ${{ needs.prepare.outputs.baseline_tag }}
           git submodule update --init --recursive
 
-      - name: Build Baseline Benchmark Runner
+      - name: Check if Benchmarks Exist in Baseline
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        id: check_baseline_benchmarks
+        run: |
+          if [ -d "benchmarks" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✓ Benchmarks directory exists in baseline"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "⚠ Benchmarks directory does not exist in baseline tag"
+          fi
+
+      - name: Build Baseline Benchmark Runner
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
 
       - name: Run Baseline Benchmarks
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
         run: |
           mkdir -p baseline_results
           ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
@@ -258,7 +282,7 @@ jobs:
 
       # Clean build artifacts before target build
       - name: Clean Build Artifacts
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.check_baseline_benchmarks.outputs.exists == 'true' }}
         run: |
           cargo clean
 
@@ -387,6 +411,7 @@ jobs:
           done
 
           # Create index metadata
+          mkdir -p "$DEST_BASE"
           cat > "$DEST_BASE/benchmark-info.json" << EOF
           {
             "target_ref": "$TARGET_REF",
