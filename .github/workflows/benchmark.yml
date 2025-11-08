@@ -178,6 +178,8 @@ jobs:
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           cargo clean
+          # Reset any changes to Cargo.lock from baseline build
+          git checkout HEAD -- Cargo.lock || true
 
       # Run TARGET benchmarks
       - name: Checkout Target
@@ -296,6 +298,8 @@ jobs:
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           cargo clean
+          # Reset any changes to Cargo.lock from baseline build
+          git checkout HEAD -- Cargo.lock || true
 
       # Run TARGET benchmarks
       - name: Checkout Target
