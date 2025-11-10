@@ -1,6 +1,6 @@
 {
-  "ref": "v0.1.1",
-  "ref_type": "tag",
+  "ref": "benchmarking",
+  "ref_type": "branch",
   "commit_sha": "b52d73a607e2d209f4e153a5748fdf83d7cc0f9a",
   "timestamp": "2025-11-10T08:05:30Z",
   "benchmark_mode": "fast"
