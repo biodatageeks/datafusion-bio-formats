@@ -179,7 +179,7 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
 
       - name: Run Baseline Benchmarks
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
@@ -209,7 +209,7 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
 
       - name: Run Target Benchmarks
         run: |
@@ -319,7 +319,7 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
 
       - name: Run Baseline Benchmarks
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
@@ -349,7 +349,7 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
 
       - name: Run Target Benchmarks
         run: |
