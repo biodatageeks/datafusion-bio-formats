@@ -135,6 +135,9 @@ jobs:
         with:
           toolchain: '1.86.0'
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
@@ -165,7 +168,9 @@ jobs:
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
         env:
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Baseline Benchmarks
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
@@ -175,11 +180,10 @@ jobs:
         env:
           RUST_LOG: info
 
-      # Clean build artifacts before target build
-      - name: Clean Build Artifacts
+      # Reset Cargo.lock before target build (keep compiled artifacts)
+      - name: Reset Cargo.lock
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
-          cargo clean
           # Reset any changes to Cargo.lock from baseline build
           git checkout HEAD -- Cargo.lock || true
 
@@ -193,7 +197,9 @@ jobs:
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
         env:
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Target Benchmarks
         run: |
@@ -259,6 +265,9 @@ jobs:
         with:
           toolchain: '1.86.0'
 
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
       - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
@@ -289,7 +298,9 @@ jobs:
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
         env:
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Baseline Benchmarks
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
@@ -299,11 +310,10 @@ jobs:
         env:
           RUST_LOG: info
 
-      # Clean build artifacts before target build
-      - name: Clean Build Artifacts
+      # Reset Cargo.lock before target build (keep compiled artifacts)
+      - name: Reset Cargo.lock
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
-          cargo clean
           # Reset any changes to Cargo.lock from baseline build
           git checkout HEAD -- Cargo.lock || true
 
@@ -317,7 +327,9 @@ jobs:
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
         env:
-          CARGO_INCREMENTAL: "1"
+          CARGO_INCREMENTAL: "0"
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Target Benchmarks
         run: |
