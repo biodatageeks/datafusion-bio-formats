@@ -501,7 +501,7 @@ jobs:
                    --arg sha "$COMMIT_SHA" \
                    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                    --arg runner "$platform" \
-                   --arg label "$RUNNER_LABEL" \
+                   --arg runnerlabel "$RUNNER_LABEL" \
                    --arg path "tags/$BASELINE_TAG/$platform" \
                    '.datasets += [{
                      id: ($ref + "@" + $sha + "@" + $runner),
@@ -510,7 +510,7 @@ jobs:
                      ref_type: $type,
                      timestamp: $ts,
                      runner: $runner,
-                     runner_label: $label,
+                     runner_label: $runnerlabel,
                      path: $path,
                      commit_sha: $sha,
                      is_latest_tag: false
@@ -533,7 +533,7 @@ jobs:
                  --arg sha "$COMMIT_SHA" \
                  --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
                  --arg runner "$platform" \
-                 --arg label "$RUNNER_LABEL" \
+                 --arg runnerlabel "$RUNNER_LABEL" \
                  --arg path "${DEST_BASE#benchmark-data/}/$platform" \
                  --arg display "$LABEL" \
                  '.datasets += [{
@@ -543,7 +543,7 @@ jobs:
                    ref_type: $type,
                    timestamp: $ts,
                    runner: $runner,
-                   runner_label: $label,
+                   runner_label: $runnerlabel,
                    path: $path,
                    commit_sha: $sha
                  }] | .datasets |= unique_by(.id)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
