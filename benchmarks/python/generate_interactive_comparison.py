@@ -436,6 +436,206 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
         optgroup {{
             font-weight: 600;
         }}
+
+        /* ========================================
+           MOBILE-FRIENDLY RESPONSIVE STYLES
+           ======================================== */
+
+        /* Phase 1: Critical Mobile Fixes (< 480px) */
+        @media (max-width: 480px) {{
+            /* Improve base typography for readability */
+            body {{
+                font-size: 16px;
+                padding: 10px;
+            }}
+
+            /* Selection Panel Adjustments */
+            .selection-panel {{
+                padding: 15px;
+            }}
+
+            .selection-panel h2 {{
+                font-size: 16px;
+                margin-bottom: 12px;
+            }}
+
+            /* Stack labels vertically on very small screens */
+            .selection-row {{
+                flex-direction: column;
+                align-items: stretch;
+                gap: 8px;
+                margin-bottom: 12px;
+            }}
+
+            .selection-row label {{
+                min-width: auto;
+                font-size: 14px;
+            }}
+
+            /* Fix dropdown overflow - remove min-width, allow full width */
+            .selection-row select {{
+                width: 100%;
+                min-width: auto;
+                max-width: 100%;
+                padding: 12px;
+                font-size: 16px; /* Prevent zoom on iOS */
+            }}
+
+            .vs-label {{
+                text-align: center;
+                padding: 8px 0;
+                font-size: 16px;
+            }}
+
+            /* Stack buttons vertically with better touch targets */
+            .button-group {{
+                flex-direction: column;
+                gap: 10px;
+                margin-top: 12px;
+            }}
+
+            button {{
+                width: 100%;
+                padding: 14px 20px; /* Increase to 44px min touch target */
+                font-size: 16px;
+            }}
+
+            /* Improve tab touch targets and wrapping */
+            .runner-tabs-wrapper {{
+                padding: 10px 10px 0 10px;
+            }}
+
+            .runner-tabs {{
+                flex-wrap: wrap;
+                gap: 6px;
+            }}
+
+            .runner-tab {{
+                padding: 14px 18px; /* Increase touch target */
+                font-size: 13px;
+                flex: 1 1 auto;
+                text-align: center;
+                min-width: 120px;
+            }}
+
+            /* Format tabs - make scrollable horizontally if needed */
+            .format-tabs-wrapper {{
+                padding: 8px 10px;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }}
+
+            .format-tabs {{
+                gap: 6px;
+                flex-wrap: nowrap; /* Keep in single row, allow scroll */
+                min-width: min-content;
+            }}
+
+            .format-tab {{
+                padding: 12px 16px; /* Better touch target */
+                font-size: 11px;
+                white-space: nowrap;
+                flex-shrink: 0;
+            }}
+
+            /* Reduce chart container padding */
+            .chart-container {{
+                padding: 12px;
+                margin-bottom: 15px;
+            }}
+
+            h2 {{
+                font-size: 16px;
+            }}
+
+            /* Optimize error/info boxes */
+            .error, .info {{
+                padding: 12px;
+                font-size: 14px;
+            }}
+
+            .loading {{
+                padding: 30px;
+                font-size: 14px;
+            }}
+        }}
+
+        /* Phase 2: Tablet Optimizations (481px - 768px) */
+        @media (min-width: 481px) and (max-width: 768px) {{
+            body {{
+                padding: 15px;
+            }}
+
+            .selection-panel {{
+                padding: 20px;
+                max-width: 600px;
+                margin-left: auto;
+                margin-right: auto;
+            }}
+
+            /* Keep labels and dropdowns side-by-side but optimize spacing */
+            .selection-row {{
+                gap: 12px;
+            }}
+
+            .selection-row label {{
+                min-width: 90px;
+            }}
+
+            .selection-row select {{
+                font-size: 15px;
+                padding: 11px;
+            }}
+
+            /* Improve button sizing */
+            button {{
+                padding: 12px 22px;
+                font-size: 15px;
+            }}
+
+            /* Tab improvements */
+            .runner-tab {{
+                padding: 13px 22px;
+                font-size: 13px;
+            }}
+
+            .format-tab {{
+                padding: 10px 18px;
+                font-size: 11px;
+            }}
+
+            /* Chart container */
+            .chart-container {{
+                padding: 16px;
+            }}
+        }}
+
+        /* Phase 3: Desktop and Large Tablets (> 768px) */
+        @media (min-width: 769px) {{
+            .selection-panel {{
+                max-width: 800px;
+                margin-left: auto;
+                margin-right: auto;
+            }}
+        }}
+
+        /* Ensure touch-friendly focus states */
+        @media (hover: none) and (pointer: coarse) {{
+            /* Enhanced focus indicators for touch devices */
+            button:active {{
+                transform: scale(0.98);
+                transition: transform 0.1s;
+            }}
+
+            .runner-tab:active, .format-tab:active {{
+                transform: scale(0.97);
+                transition: transform 0.1s;
+            }}
+
+            select:focus {{
+                border-width: 2px;
+            }}
+        }}
     </style>
 </head>
 <body>
@@ -899,10 +1099,24 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
                         xaxis: {{ title: 'Benchmark' }},
                         yaxis: {{ title: 'Elapsed Time (seconds)' }},
                         showlegend: true,
-                        height: 500
+                        height: 500,
+                        // Responsive layout for mobile
+                        autosize: true,
+                        margin: {{
+                            l: window.innerWidth < 480 ? 40 : 60,
+                            r: window.innerWidth < 480 ? 10 : 30,
+                            t: window.innerWidth < 480 ? 60 : 80,
+                            b: window.innerWidth < 480 ? 40 : 60
+                        }}
                     }};
 
-                    Plotly.newPlot(categoryId, [trace1, trace2], layout);
+                    const config = {{
+                        responsive: true,
+                        displayModeBar: window.innerWidth >= 768, // Hide mode bar on mobile
+                        displaylogo: false
+                    }};
+
+                    Plotly.newPlot(categoryId, [trace1, trace2], layout, config);
                 }});
             }}
         }};
