@@ -1,741 +1,678 @@
 #!/usr/bin/env python3
 """
-Generate interactive HTML comparison report for benchmarks.
-
-This script creates an interactive HTML page with Plotly charts comparing
-benchmark results across different versions, platforms (Linux/macOS), and
-test categories (parallelism, predicate pushdown, projection pushdown).
-
-Usage:
-    python generate_interactive_comparison.py <data_dir> <output_html>
-
-Example:
-    python generate_interactive_comparison.py benchmark/data benchmark/comparison.html
+Generate interactive HTML benchmark comparison report with historical data selection.
+Based on polars-bio's implementation - simplified dropdowns, dynamic tabs, improved styling.
 """
 
 import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
-from collections import defaultdict
-
-try:
-    import plotly.graph_objects as go
-    from plotly.subplots import make_subplots
-    import pandas as pd
-except ImportError as e:
-    print(f"Error: {e}", file=sys.stderr)
-    print("\nPlease install required dependencies:", file=sys.stderr)
-    print("  pip install -r requirements.txt", file=sys.stderr)
-    sys.exit(1)
+from typing import Any, Dict, List
 
 
 def load_index(data_dir: Path) -> Dict[str, Any]:
     """Load the master index of all benchmark datasets."""
     index_file = data_dir / "index.json"
     if not index_file.exists():
-        return {"datasets": [], "tags": [], "latest_tag": "", "last_updated": ""}
+        return {"datasets": [], "tags": [], "latest_tag": None, "last_updated": ""}
 
     with open(index_file) as f:
         return json.load(f)
 
 
-def get_datasets_from_index(index_data: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
-    """Extract datasets from index and organize by ref type.
-
-    Returns a dict mapping ref keys to their datasets:
-    {
-        "v0.1.1": [{"runner": "linux", "label": "v0.1.1", ...}, ...],
-        "benchmarking": [{"runner": "linux", "label": "benchmarking(abc123)", ...}, ...]
-    }
+def organize_datasets_by_ref(index_data: Dict[str, Any]) -> Dict[str, Dict]:
     """
-    refs_data = {}
+    Organize datasets by ref, grouping runners under each ref.
+    For branches, each commit gets a unique entry using ref@sha as key.
+
+    Returns:
+        refs_by_type: {
+            "tag": {
+                "v0.1.1": {
+                    "label": "v0.1.1",
+                    "ref": "v0.1.1",
+                    "ref_type": "tag",
+                    "commit_sha": "abc123",
+                    "is_latest_tag": True,
+                    "runners": {
+                        "linux": "tag-v0.1.1-linux",
+                        "macos": "tag-v0.1.1-macos"
+                    }
+                }
+            },
+            "branch": {
+                "benchmarking@abc123": {
+                    "label": "benchmarking(abc123)",
+                    "ref": "benchmarking",
+                    "ref_type": "branch",
+                    "commit_sha": "abc123",
+                    "is_latest_tag": False,
+                    "runners": {
+                        "linux": "benchmarking@abc123@linux",
+                        "macos": "benchmarking@abc123@macos"
+                    }
+                }
+            }
+        }
+    """
+    refs_by_type = {"tag": {}, "branch": {}}
 
     for dataset in index_data.get("datasets", []):
         ref = dataset["ref"]
+        ref_type = dataset["ref_type"]
+        runner = dataset["runner"]
+        commit_sha = dataset.get("commit_sha", "unknown")
 
-        if ref not in refs_data:
-            refs_data[ref] = {
-                "ref": ref,
-                "ref_type": dataset["ref_type"],
+        # For branches, use ref@sha as unique key; for tags, use ref name
+        if ref_type == "branch":
+            unique_key = f"{ref}@{commit_sha}"
+            # Use the dataset ID directly (should be ref@sha@runner format from workflow)
+            dataset_id = dataset["id"]
+        else:
+            unique_key = ref
+            dataset_id = dataset["id"]
+
+        # Create ref entry if it doesn't exist
+        if unique_key not in refs_by_type[ref_type]:
+            refs_by_type[ref_type][unique_key] = {
                 "label": dataset["label"],
-                "commit_sha": dataset["commit_sha"],
-                "runners": []
+                "ref": ref,
+                "ref_type": ref_type,
+                "commit_sha": commit_sha,
+                "is_latest_tag": dataset.get("is_latest_tag", False),
+                "runners": {},
             }
 
-        refs_data[ref]["runners"].append({
-            "runner": dataset["runner"],
-            "runner_label": dataset["runner_label"],
-            "path": dataset["path"]
-        })
+        # Add this dataset to the runners dict
+        refs_by_type[ref_type][unique_key]["runners"][runner] = dataset_id
 
-    return refs_data
+    return refs_by_type
 
 
-def load_benchmark_results(results_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
-    """Load all benchmark JSON files from a directory, organized by platform."""
-    results_by_platform = defaultdict(list)
+def load_dataset_results(data_dir: Path, dataset_id: str, dataset_info: Dict) -> Dict:
+    """
+    Load benchmark results for a specific dataset.
 
-    if not results_dir.exists():
-        return results_by_platform
+    For now, returns metadata only since our benchmark results are in JSON format
+    and need custom parsing. This will be extended based on actual result format.
+    """
+    dataset_path = data_dir / dataset_info.get("path", "")
 
-    # Scan for platform subdirectories
-    for platform_dir in results_dir.iterdir():
-        if not platform_dir.is_dir():
-            continue
+    if not dataset_path.exists():
+        return None
 
-        platform = platform_dir.name
+    # Load metadata
+    metadata = {}
+    for metadata_file in [dataset_path / "metadata.json", dataset_path.parent / "metadata.json"]:
+        if metadata_file.exists():
+            with open(metadata_file) as f:
+                metadata = json.load(f)
+            break
 
-        # Look for JSON result files
-        for json_file in platform_dir.rglob("*.json"):
-            if json_file.name in ["linux.json", "macos.json"]:
-                # Skip metadata files
-                continue
-
-            try:
-                with open(json_file) as f:
-                    result = json.load(f)
-                    results_by_platform[platform].append(result)
-            except (json.JSONDecodeError, IOError) as e:
-                print(f"Warning: Could not load {json_file}: {e}", file=sys.stderr)
-
-    return dict(results_by_platform)
-
-
-def aggregate_results_by_category(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    """Aggregate benchmark results by category."""
-    by_category = defaultdict(lambda: {"benchmarks": [], "total_time": 0.0})
-
-    for result in results:
-        category = result.get("category", "unknown")
-        benchmark_name = result.get("benchmark_name", "")
-        elapsed = result.get("metrics", {}).get("elapsed_seconds", 0.0)
-
-        by_category[category]["benchmarks"].append({
-            "name": benchmark_name,
-            "elapsed": elapsed,
-            "throughput": result.get("metrics", {}).get("throughput_records_per_sec", 0),
-            "records": result.get("metrics", {}).get("total_records", 0)
-        })
-        by_category[category]["total_time"] += elapsed
-
-    return dict(by_category)
+    # For now, return basic structure
+    # TODO: Load actual benchmark results from JSON files
+    return {
+        "id": dataset_id,
+        "label": dataset_info["label"],
+        "ref": dataset_info["ref"],
+        "runner": dataset_info.get("runner", "unknown"),
+        "runner_label": dataset_info.get("runner_label", "Unknown"),
+        "metadata": metadata,
+        "results": {},  # Will be populated when we parse result files
+    }
 
 
 def generate_html_report(data_dir: Path, output_file: Path):
-    """Generate the interactive HTML comparison report."""
+    """Generate interactive HTML comparison report."""
 
     print("Loading benchmark index...")
-    index_data = load_index(data_dir)
+    index = load_index(data_dir)
 
-    if not index_data.get("datasets"):
+    if not index.get("datasets"):
         print("Warning: No benchmark datasets found in index", file=sys.stderr)
 
-    # Get organized refs data
-    refs_data = get_datasets_from_index(index_data)
+    # Organize datasets by ref type
+    refs_by_type = organize_datasets_by_ref(index)
 
-    print(f"Found {len(refs_data)} unique refs with {len(index_data.get('datasets', []))} total datasets")
+    print(f"Found {len(index.get('datasets', []))} total datasets")
+    print(f"  Tags: {len(refs_by_type['tag'])}")
+    print(f"  Branches/Commits: {len(refs_by_type['branch'])}")
 
-    # Embed the full index in HTML for client-side processing
-    index_json = json.dumps(index_data, indent=2)
-    refs_json = json.dumps(refs_data, indent=2)
+    # Load all dataset metadata (lightweight - just metadata for now)
+    all_datasets = {}
+    for dataset in index.get("datasets", []):
+        dataset_data = load_dataset_results(data_dir, dataset["id"], dataset)
+        if dataset_data:
+            all_datasets[dataset["id"]] = dataset_data
 
-    html_content = f"""<!DOCTYPE html>
+    # Generate HTML
+    html = generate_html_template(index, all_datasets, refs_by_type)
+
+    # Write output
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(html)
+
+    print(f"\n✅ Interactive report generated: {output_file}")
+
+
+def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> str:
+    """Generate the complete HTML template."""
+
+    # Embed all data as JSON
+    embedded_data = {
+        "index": index,
+        "datasets": datasets,
+        "refs_by_type": refs_by_type,
+    }
+
+    html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DataFusion Bio-Formats Benchmark Comparison</title>
-    <script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+        * {{
             margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
             padding: 20px;
             background-color: #f5f5f5;
         }}
-        .container {{
-            max-width: 1400px;
-            margin: 0 auto;
+
+        /* Selection Panel Styles */
+        .selection-panel {{
             background-color: white;
-            padding: 30px;
+            padding: 25px;
+            margin-bottom: 20px;
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }}
-        h1 {{
+
+        .selection-panel h2 {{
+            margin: 0 0 15px 0;
             color: #333;
-            border-bottom: 3px solid #4CAF50;
-            padding-bottom: 10px;
-            margin-bottom: 20px;
-        }}
-        .controls {{
-            margin: 20px 0;
-            padding: 20px;
-            background-color: #f9f9f9;
-            border-radius: 4px;
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 15px;
-        }}
-        .control-group {{
-            display: flex;
-            flex-direction: column;
-        }}
-        label {{
+            font-size: 18px;
             font-weight: 600;
-            margin-bottom: 5px;
-            color: #555;
         }}
-        select {{
-            padding: 8px 12px;
-            border: 1px solid #ddd;
+
+        .selection-row {{
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+        }}
+
+        .selection-row label {{
+            font-weight: 600;
+            min-width: 80px;
+            color: #495057;
+        }}
+
+        .selection-row select {{
+            flex: 1;
+            padding: 10px 15px;
+            border: 1px solid #ced4da;
             border-radius: 4px;
             font-size: 14px;
-            background-color: white;
+            background: white;
             cursor: pointer;
         }}
-        select:hover {{
-            border-color: #4CAF50;
+
+        .selection-row select:focus {{
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 0 3px rgba(0,123,255,0.25);
         }}
-        button {{
-            padding: 10px 20px;
-            background-color: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            font-size: 14px;
-            cursor: pointer;
-            margin-top: auto;
+
+        .vs-label {{
+            font-weight: 700;
+            color: #6c757d;
+            font-size: 18px;
+            padding: 0 10px;
         }}
-        button:hover {{
-            background-color: #45a049;
-        }}
-        button:disabled {{
-            background-color: #ccc;
-            cursor: not-allowed;
-        }}
-        .chart {{
-            margin: 30px 0;
-        }}
-        .info {{
-            background-color: #e3f2fd;
-            border-left: 4px solid #2196F3;
-            padding: 15px;
-            margin: 20px 0;
-        }}
-        .error {{
-            background-color: #ffebee;
-            border-left: 4px solid #f44336;
-            padding: 15px;
-            margin: 20px 0;
-        }}
-        .platform-tabs {{
+
+        .button-group {{
             display: flex;
             gap: 10px;
-            margin: 20px 0;
-            border-bottom: 2px solid #ddd;
+            margin-top: 15px;
         }}
-        .platform-tab {{
+
+        button {{
             padding: 10px 20px;
-            cursor: pointer;
             border: none;
-            background: none;
+            border-radius: 4px;
             font-size: 14px;
+            cursor: pointer;
+            font-weight: 500;
+        }}
+
+        .btn-primary {{
+            background: #007bff;
+            color: white;
+        }}
+
+        .btn-primary:hover {{
+            background: #0056b3;
+        }}
+
+        .btn-secondary {{
+            background: #6c757d;
+            color: white;
+        }}
+
+        .btn-secondary:hover {{
+            background: #545b62;
+        }}
+
+        /* Header Styles */
+        .header {{
+            background-color: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+
+        h1 {{
+            margin: 0 0 10px 0;
+            color: #333;
+        }}
+
+        .subtitle {{
             color: #666;
-            border-bottom: 3px solid transparent;
+            font-size: 14px;
         }}
-        .platform-tab.active {{
-            color: #4CAF50;
-            border-bottom-color: #4CAF50;
+
+        /* Runner Tabs - More Visible */
+        .runner-tabs-wrapper {{
+            background-color: white;
+            padding: 15px 20px 0 20px;
+            margin-bottom: 0;
+            border-radius: 8px 8px 0 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+
+        .runner-tabs {{
+            display: flex;
+            gap: 10px;
+            border-bottom: 2px solid #e9ecef;
+        }}
+
+        .runner-tab {{
+            padding: 12px 24px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            cursor: pointer;
+            font-size: 14px;
             font-weight: 600;
+            color: #495057;
+            transition: all 0.2s;
+            margin-bottom: -2px;
         }}
-        .platform-tab:hover {{
-            color: #4CAF50;
+
+        .runner-tab:hover {{
+            background: #e9ecef;
         }}
-        #charts {{
-            min-height: 400px;
+
+        .runner-tab.active {{
+            background: white;
+            color: #007bff;
+            border-color: #007bff;
+            border-bottom-color: white;
         }}
+
+        /* Chart Container Styles */
+        .chart-container {{
+            background-color: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+
+        h2 {{
+            margin-top: 0;
+            color: #333;
+        }}
+
         .loading {{
             text-align: center;
             padding: 40px;
-            color: #666;
+            color: #6c757d;
+        }}
+
+        .error {{
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }}
+
+        .info {{
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }}
+
+        optgroup {{
+            font-weight: 600;
         }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>🚀 DataFusion Bio-Formats Benchmark Comparison</h1>
+    <div class="selection-panel">
+        <h2>📊 Select Datasets to Compare</h2>
 
-        <div class="info">
-            <strong>Interactive Benchmark Comparison Tool</strong><br>
-            Select a baseline version and a target version to compare performance across different platforms and benchmark categories.
+        <div class="selection-row">
+            <label for="baseline-select">Baseline:</label>
+            <select id="baseline-select">
+                <option value="">Loading...</option>
+            </select>
         </div>
 
-        <div class="controls">
-            <div class="control-group">
-                <label for="baseline-select">Baseline Version:</label>
-                <select id="baseline-select">
-                    <option value="">Select baseline...</option>
-                </select>
-            </div>
-
-            <div class="control-group">
-                <label for="target-select">Target Version:</label>
-                <select id="target-select">
-                    <option value="">Select target...</option>
-                </select>
-            </div>
-
-            <div class="control-group">
-                <label>&nbsp;</label>
-                <button id="compare-btn" disabled>Generate Comparison</button>
-            </div>
+        <div class="selection-row">
+            <span class="vs-label">vs</span>
         </div>
 
-        <div id="platform-tabs-container" style="display: none;">
-            <div class="platform-tabs" id="platform-tabs"></div>
+        <div class="selection-row">
+            <label for="target-select">Target:</label>
+            <select id="target-select">
+                <option value="">Loading...</option>
+            </select>
         </div>
 
-        <div id="error-container"></div>
-        <div id="charts"></div>
-
-        <hr style="margin: 40px 0;">
-
-        <p style="color: #666; text-align: center;">
-            Generated with ❤️ by DataFusion Bio-Formats Benchmark Framework<br>
-            🤖 <a href="https://github.com/biodatageeks/datafusion-bio-formats">View on GitHub</a>
-        </p>
+        <div class="button-group">
+            <button class="btn-primary" onclick="app.loadComparison()">Compare</button>
+            <button class="btn-secondary" onclick="app.resetToDefault()">Reset to Default</button>
+        </div>
     </div>
 
+    <div id="runner-tabs-container"></div>
+    <div id="charts-container"></div>
+
     <script>
-        // Embedded data from index.json
-        const INDEX = {index_json};
-        const REFS = {refs_json};
+        // Embedded data
+        const DATA = {json.dumps(embedded_data, indent=2)};
 
-        // State
-        let currentPlatform = null;
-        let baselineRef = null;
-        let targetRef = null;
-        let availablePlatforms = [];
+        // Application state
+        const app = {{
+            currentBaseline: null,  // unique key (ref or ref@sha)
+            currentTarget: null,    // unique key (ref or ref@sha)
+            currentRunner: null,
+            availableRunners: [],
 
-        // Initialize dropdowns with optgroups for tags and commits
-        function initializeDropdowns() {{
-            const baselineSelect = document.getElementById('baseline-select');
-            const targetSelect = document.getElementById('target-select');
+            init() {{
+                this.populateDropdowns();
+                this.setDefaults();
+            }},
 
-            // Separate by ref_type
-            const tags = [];
-            const branches = [];
+            populateDropdowns() {{
+                const baselineSelect = document.getElementById('baseline-select');
+                const targetSelect = document.getElementById('target-select');
 
-            Object.entries(REFS).forEach(([ref, data]) => {{
-                if (data.ref_type === 'tag') {{
-                    tags.push({{ ref, ...data }});
-                }} else {{
-                    branches.push({{ ref, ...data }});
+                baselineSelect.innerHTML = '';
+                targetSelect.innerHTML = '';
+
+                // Tags
+                const tags = Object.entries(DATA.refs_by_type.tag).map(([key, data]) => ({{
+                    key: key,
+                    ...data
+                }}));
+
+                if (tags.length > 0) {{
+                    const tagGroup = document.createElement('optgroup');
+                    tagGroup.label = 'Tags';
+
+                    tags.forEach(ref => {{
+                        const option = document.createElement('option');
+                        option.value = ref.key;
+                        option.textContent = ref.label + (ref.is_latest_tag ? ' ⭐ Latest' : '');
+                        tagGroup.appendChild(option);
+                    }});
+
+                    baselineSelect.appendChild(tagGroup.cloneNode(true));
+                    targetSelect.appendChild(tagGroup.cloneNode(true));
                 }}
-            }});
 
-            // Sort tags (reverse version order)
-            tags.sort((a, b) => b.ref.localeCompare(a.ref));
-            // Sort branches by commit timestamp (latest first)
-            branches.sort((a, b) => b.commit_sha.localeCompare(a.commit_sha));
+                // Branches (each commit gets a separate entry)
+                const branches = Object.entries(DATA.refs_by_type.branch).map(([key, data]) => ({{
+                    key: key,
+                    ...data
+                }}));
 
-            // Add tags optgroup
-            if (tags.length > 0) {{
-                const baselineTagGroup = document.createElement('optgroup');
-                baselineTagGroup.label = 'Tags';
-                const targetTagGroup = document.createElement('optgroup');
-                targetTagGroup.label = 'Tags';
+                if (branches.length > 0) {{
+                    const branchGroup = document.createElement('optgroup');
+                    branchGroup.label = 'Branches/Commits';
 
-                tags.forEach((item, index) => {{
-                    const displayLabel = item.ref === INDEX.latest_tag ? `⭐ ${{item.label}}` : item.label;
+                    branches.forEach(ref => {{
+                        const option = document.createElement('option');
+                        option.value = ref.key;  // Use unique key (ref@sha)
+                        option.textContent = ref.label;  // Display with commit SHA
+                        branchGroup.appendChild(option);
+                    }});
 
-                    const option1 = document.createElement('option');
-                    option1.value = item.ref;
-                    option1.textContent = displayLabel;
-                    baselineTagGroup.appendChild(option1);
-
-                    const option2 = document.createElement('option');
-                    option2.value = item.ref;
-                    option2.textContent = displayLabel;
-                    targetTagGroup.appendChild(option2);
-
-                    // Set latest tag as default baseline
-                    if (item.ref === INDEX.latest_tag) {{
-                        option1.selected = true;
-                    }}
-                }});
-
-                baselineSelect.appendChild(baselineTagGroup);
-                targetSelect.appendChild(targetTagGroup);
-            }}
-
-            // Add branches/commits optgroup
-            if (branches.length > 0) {{
-                const baselineCommitGroup = document.createElement('optgroup');
-                baselineCommitGroup.label = 'Commits';
-                const targetCommitGroup = document.createElement('optgroup');
-                targetCommitGroup.label = 'Commits';
-
-                branches.forEach((item, index) => {{
-                    const option1 = document.createElement('option');
-                    option1.value = item.ref;
-                    option1.textContent = item.label;
-                    baselineCommitGroup.appendChild(option1);
-
-                    const option2 = document.createElement('option');
-                    option2.value = item.ref;
-                    option2.textContent = item.label;
-                    targetCommitGroup.appendChild(option2);
-
-                    // Set latest commit as default target
-                    if (index === 0) {{
-                        option2.selected = true;
-                    }}
-                }});
-
-                baselineSelect.appendChild(baselineCommitGroup);
-                targetSelect.appendChild(targetCommitGroup);
-            }}
-
-            // Enable compare button when both selections are made
-            baselineSelect.addEventListener('change', validateSelections);
-            targetSelect.addEventListener('change', validateSelections);
-
-            // Initial validation
-            validateSelections();
-        }}
-
-        function validateSelections() {{
-            const baseline = document.getElementById('baseline-select').value;
-            const target = document.getElementById('target-select').value;
-            const compareBtn = document.getElementById('compare-btn');
-
-            if (baseline && target && baseline !== target) {{
-                compareBtn.disabled = false;
-            }} else {{
-                compareBtn.disabled = true;
-            }}
-        }}
-
-        // Load benchmark data for a ref
-        async function loadBenchmarkData(refKey) {{
-            const refData = REFS[refKey];
-            if (!refData) {{
-                throw new Error(`Reference not found: ${{refKey}}`);
-            }}
-
-            const baseUrl = window.location.origin + window.location.pathname.replace('/benchmark-comparison/index.html', '');
-            const results = {{}};
-
-            // Load data for each runner/platform
-            for (const runner of refData.runners) {{
-                const dataUrl = `${{baseUrl}}/benchmark-data/${{runner.path}}`;
-                try {{
-                    // Load metadata
-                    const metadataResponse = await fetch(`${{dataUrl}}/../metadata.json`);
-                    const metadata = metadataResponse.ok ? await metadataResponse.json() : {{}};
-
-                    results[runner.runner] = {{
-                        runner: runner.runner,
-                        runner_label: runner.runner_label,
-                        metadata: metadata,
-                        benchmarks: []
-                    }};
-
-                    // Try to load benchmark results
-                    const resultsUrl = `${{dataUrl}}/results`;
-                    // Note: We'll need a way to list files or have a known structure
-                    // For now, we'll try common patterns
-                    console.log(`Would load from: ${{resultsUrl}}`);
-                }} catch (e) {{
-                    console.warn(`Could not load data for ${{runner.runner}}:`, e);
+                    baselineSelect.appendChild(branchGroup.cloneNode(true));
+                    targetSelect.appendChild(branchGroup.cloneNode(true));
                 }}
-            }}
+            }},
 
-            return {{
-                ref: refData.ref,
-                ref_type: refData.ref_type,
-                label: refData.label,
-                results: results
-            }};
-        }}
+            setDefaults() {{
+                // Find latest tag
+                const latestTagEntry = Object.entries(DATA.refs_by_type.tag).find(([key, ref]) => ref.is_latest_tag);
 
-        // OLD VERSION - keeping structure for reference
-        async function loadBenchmarkDataOld(datasetPath) {{
-            const baseUrl = window.location.origin + window.location.pathname.replace('/benchmark-comparison/index.html', '');
-            const dataUrl = `${{baseUrl}}/benchmark-data/${{datasetPath}}`;
+                // Find first branch (most recent commit)
+                const firstBranchEntry = Object.entries(DATA.refs_by_type.branch)[0];
+                const targetEntry = firstBranchEntry || Object.entries(DATA.refs_by_type.tag)[0];
 
-            // Load benchmark-info.json
-            const infoResponse = await fetch(`${{dataUrl}}/benchmark-info.json`);
-            if (!infoResponse.ok) {{
-                throw new Error(`Failed to load benchmark info from ${{datasetPath}}`);
-            }}
-            const info = await infoResponse.json();
-
-            // Discover available platforms
-            const platforms = [];
-            const results = {{}};
-
-            // Try to load data from both linux and macos directories
-            for (const platform of ['linux', 'macos']) {{
-                try {{
-                    const platformUrl = `${{dataUrl}}/${{platform}}/${{platform}}.json`;
-                    const platformResponse = await fetch(platformUrl);
-                    if (platformResponse.ok) {{
-                        const platformInfo = await platformResponse.json();
-                        platforms.push({{
-                            name: platform,
-                            label: platformInfo.runner || platform,
-                            info: platformInfo
-                        }});
-
-                        // Load all JSON result files from baseline and target
-                        const platformResults = [];
-                        for (const variant of ['baseline', 'target']) {{
-                            const variantUrl = `${{dataUrl}}/${{platform}}/${{variant}}/results`;
-                            try {{
-                                // We'll need to discover files - for now, try common patterns
-                                // In production, you'd list directory contents or have an index
-                                const testResponse = await fetch(`${{variantUrl}}/gff_parallelism_1threads.json`);
-                                if (testResponse.ok) {{
-                                    const result = await testResponse.json();
-                                    result.variant = variant;
-                                    platformResults.push(result);
-                                }}
-                            }} catch (e) {{
-                                console.warn(`Could not load ${{variant}} results for ${{platform}}`, e);
-                            }}
-                        }}
-                        results[platform] = platformResults;
-                    }}
-                }} catch (e) {{
-                    console.warn(`Platform ${{platform}} not available`, e);
+                if (latestTagEntry) {{
+                    const [tagKey, tagData] = latestTagEntry;
+                    document.getElementById('baseline-select').value = tagKey;
+                    this.currentBaseline = tagKey;
                 }}
-            }}
 
-            return {{ platforms, results, info }};
-        }}
+                if (targetEntry) {{
+                    const [targetKey, targetData] = targetEntry;
+                    document.getElementById('target-select').value = targetKey;
+                    this.currentTarget = targetKey;
+                }}
 
-        // Generate comparison charts
-        async function generateComparison() {{
-            const baseline = document.getElementById('baseline-select').value;
-            const target = document.getElementById('target-select').value;
+                // Auto-load comparison if both are set
+                if (this.currentBaseline && this.currentTarget) {{
+                    this.loadComparison();
+                }}
+            }},
 
-            if (!baseline || !target || baseline === target) {{
-                return;
-            }}
+            resetToDefault() {{
+                this.setDefaults();
+                this.loadComparison();
+            }},
 
-            const chartsDiv = document.getElementById('charts');
-            const errorDiv = document.getElementById('error-container');
-            errorDiv.innerHTML = '';
-            chartsDiv.innerHTML = '<div class="loading">Loading benchmark data...</div>';
+            getRefData(refKey) {{
+                // Find ref in tags or branches using unique key
+                return DATA.refs_by_type.tag[refKey] || DATA.refs_by_type.branch[refKey];
+            }},
 
-            try {{
-                // Load both baseline and target data
-                baselineData = await loadBenchmarkData(baseline);
-                targetData = await loadBenchmarkData(target);
+            loadComparison() {{
+                const baselineRef = document.getElementById('baseline-select').value;
+                const targetRef = document.getElementById('target-select').value;
 
-                // Find common platforms
-                const baselinePlatforms = baselineData.platforms.map(p => p.name);
-                const targetPlatforms = targetData.platforms.map(p => p.name);
-                availablePlatforms = baselinePlatforms.filter(p => targetPlatforms.includes(p));
-
-                if (availablePlatforms.length === 0) {{
-                    errorDiv.innerHTML = `
-                        <div class="error">
-                            <strong>No common platforms found</strong><br>
-                            Baseline has: ${{baselinePlatforms.join(', ')}}<br>
-                            Target has: ${{targetPlatforms.join(', ')}}
-                        </div>
-                    `;
-                    chartsDiv.innerHTML = '';
+                if (!baselineRef || !targetRef) {{
+                    alert('Please select both baseline and target datasets');
                     return;
                 }}
 
-                // Set up platform tabs
-                const tabsContainer = document.getElementById('platform-tabs-container');
-                const tabsDiv = document.getElementById('platform-tabs');
-                tabsDiv.innerHTML = '';
-
-                if (availablePlatforms.length > 1) {{
-                    tabsContainer.style.display = 'block';
-                    availablePlatforms.forEach((platform, index) => {{
-                        const tab = document.createElement('button');
-                        tab.className = 'platform-tab' + (index === 0 ? ' active' : '');
-                        const platformInfo = baselineData.platforms.find(p => p.name === platform);
-                        tab.textContent = platformInfo ? platformInfo.label : platform;
-                        tab.onclick = () => switchPlatform(platform);
-                        tabsDiv.appendChild(tab);
-                    }});
-                }} else if (availablePlatforms.length === 1) {{
-                    tabsContainer.style.display = 'block';
-                    const platformInfo = baselineData.platforms.find(p => p.name === availablePlatforms[0]);
-                    tabsDiv.innerHTML = `<div style="padding: 10px; color: #666;">Platform: ${{platformInfo ? platformInfo.label : availablePlatforms[0]}}</div>`;
+                if (baselineRef === targetRef) {{
+                    alert('Please select different datasets for comparison');
+                    return;
                 }}
 
-                // Display charts for first available platform
-                currentPlatform = availablePlatforms[0];
-                displayChartsForPlatform(currentPlatform);
+                this.currentBaseline = baselineRef;
+                this.currentTarget = targetRef;
 
-            }} catch (error) {{
-                console.error('Error loading benchmark data:', error);
-                errorDiv.innerHTML = `
-                    <div class="error">
-                        <strong>Error loading benchmark data</strong><br>
-                        ${{error.message}}<br><br>
-                        This usually means benchmark data hasn't been generated yet.
-                        Run the benchmark workflow from GitHub Actions to generate data.
-                    </div>
-                `;
-                chartsDiv.innerHTML = '';
-            }}
-        }}
+                const baselineRefData = this.getRefData(baselineRef);
+                const targetRefData = this.getRefData(targetRef);
 
-        // Switch between platforms
-        function switchPlatform(platform) {{
-            currentPlatform = platform;
-
-            // Update tab styling
-            document.querySelectorAll('.platform-tab').forEach(tab => {{
-                tab.classList.remove('active');
-                const platformInfo = baselineData.platforms.find(p => p.name === platform);
-                if (tab.textContent === (platformInfo ? platformInfo.label : platform)) {{
-                    tab.classList.add('active');
+                if (!baselineRefData || !targetRefData) {{
+                    document.getElementById('charts-container').innerHTML =
+                        '<div class="error">Error: Could not load dataset data</div>';
+                    return;
                 }}
-            }});
 
-            displayChartsForPlatform(platform);
-        }}
+                // Find common runners
+                const baselineRunners = Object.keys(baselineRefData.runners);
+                const targetRunners = Object.keys(targetRefData.runners);
+                const commonRunners = baselineRunners.filter(r => targetRunners.includes(r));
 
-        // Display charts for a specific platform
-        function displayChartsForPlatform(platform) {{
-            const chartsDiv = document.getElementById('charts');
+                if (commonRunners.length === 0) {{
+                    document.getElementById('charts-container').innerHTML =
+                        '<div class="error">Error: No common runners between selected datasets</div>';
+                    return;
+                }}
 
-            const baselineResults = baselineData.results[platform] || [];
-            const targetResults = targetData.results[platform] || [];
+                this.availableRunners = commonRunners;
 
-            if (baselineResults.length === 0 && targetResults.length === 0) {{
-                chartsDiv.innerHTML = `
-                    <div class="info">
-                        <h3>No benchmark data available for ${{platform}}</h3>
-                        <p>Run benchmarks on this platform to see comparison charts.</p>
+                // Setup runner tabs
+                this.setupRunnerTabs();
+
+                // Generate charts for first runner
+                this.currentRunner = commonRunners[0];
+                this.generateCharts();
+            }},
+
+            setupRunnerTabs() {{
+                const tabsContainer = document.getElementById('runner-tabs-container');
+
+                if (this.availableRunners.length === 1) {{
+                    // Single runner - show simple label
+                    const runner = this.availableRunners[0];
+                    const baselineRefData = this.getRefData(this.currentBaseline);
+                    const datasetId = baselineRefData.runners[runner];
+                    const dataset = DATA.datasets[datasetId];
+
+                    tabsContainer.innerHTML = `
+                        <div class="runner-tabs-wrapper">
+                            <div class="runner-tabs">
+                                <div class="runner-tab active">
+                                    ${{dataset.runner_label}}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }} else {{
+                    // Multiple runners - show clickable tabs
+                    const tabs = this.availableRunners.map((runner, idx) => {{
+                        const baselineRefData = this.getRefData(this.currentBaseline);
+                        const datasetId = baselineRefData.runners[runner];
+                        const dataset = DATA.datasets[datasetId];
+                        const active = idx === 0 ? 'active' : '';
+
+                        return `<button class="runner-tab ${{active}}" onclick="app.switchRunner('${{runner}}')">
+                            ${{dataset.runner_label}}
+                        </button>`;
+                    }}).join('');
+
+                    tabsContainer.innerHTML = `
+                        <div class="runner-tabs-wrapper">
+                            <div class="runner-tabs">
+                                ${{tabs}}
+                            </div>
+                        </div>
+                    `;
+                }}
+            }},
+
+            switchRunner(runner) {{
+                this.currentRunner = runner;
+
+                // Update active tab
+                document.querySelectorAll('.runner-tab').forEach(tab => {{
+                    tab.classList.remove('active');
+                }});
+                event.target.classList.add('active');
+
+                // Regenerate charts
+                this.generateCharts();
+            }},
+
+            generateCharts() {{
+                const container = document.getElementById('charts-container');
+                const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+
+                // Get datasets for current runner
+                const baselineRefData = this.getRefData(this.currentBaseline);
+                const targetRefData = this.getRefData(this.currentTarget);
+
+                const baselineDatasetId = baselineRefData.runners[this.currentRunner];
+                const targetDatasetId = targetRefData.runners[this.currentRunner];
+
+                const baseline = DATA.datasets[baselineDatasetId];
+                const target = DATA.datasets[targetDatasetId];
+
+                if (!baseline || !target) {{
+                    container.innerHTML = `
+                        <div class="error">
+                            <strong>Error: Dataset not found</strong><br>
+                            Baseline ID: ${{baselineDatasetId}}<br>
+                            Target ID: ${{targetDatasetId}}
+                        </div>
+                    `;
+                    return;
+                }}
+
+                // Generate header
+                let html = `
+                    <div class="header">
+                        <h1>DataFusion Bio-Formats Benchmark Comparison</h1>
+                        <div class="subtitle">
+                            <strong>Baseline:</strong> ${{baseline.label}} &nbsp;|&nbsp;
+                            <strong>Target:</strong> ${{target.label}} &nbsp;|&nbsp;
+                            <strong>Platform:</strong> ${{baseline.runner_label}} &nbsp;|&nbsp;
+                            <strong>Generated:</strong> ${{timestamp}}
+                        </div>
                     </div>
                 `;
-                return;
-            }}
 
-            // Group results by category
-            const categories = new Set();
-            [...baselineResults, ...targetResults].forEach(r => {{
-                if (r.category) categories.add(r.category);
-            }});
-
-            let html = '<div style="margin: 20px 0;">';
-            html += `<h3>Benchmark Comparison</h3>`;
-            html += `<p><strong>Baseline:</strong> ${{document.getElementById('baseline-select').selectedOptions[0].text}}</p>`;
-            html += `<p><strong>Target:</strong> ${{document.getElementById('target-select').selectedOptions[0].text}}</p>`;
-            html += '</div>';
-
-            categories.forEach(category => {{
-                html += `<div id="chart-${{category}}" class="chart"></div>`;
-            }});
-
-            chartsDiv.innerHTML = html;
-
-            // Generate Plotly charts for each category
-            categories.forEach(category => {{
-                const baselineCategoryResults = baselineResults.filter(r => r.category === category);
-                const targetCategoryResults = targetResults.filter(r => r.category === category);
-
-                createComparisonChart(
-                    `chart-${{category}}`,
-                    category,
-                    baselineCategoryResults,
-                    targetCategoryResults
-                );
-            }});
-        }}
-
-        // Create a comparison chart using Plotly
-        function createComparisonChart(divId, category, baselineResults, targetResults) {{
-            const benchmarkNames = [...new Set([
-                ...baselineResults.map(r => r.benchmark_name),
-                ...targetResults.map(r => r.benchmark_name)
-            ])];
-
-            const baselineTimes = benchmarkNames.map(name => {{
-                const result = baselineResults.find(r => r.benchmark_name === name);
-                return result ? result.metrics.elapsed_seconds : 0;
-            }});
-
-            const targetTimes = benchmarkNames.map(name => {{
-                const result = targetResults.find(r => r.benchmark_name === name);
-                return result ? result.metrics.elapsed_seconds : 0;
-            }});
-
-            const trace1 = {{
-                x: benchmarkNames,
-                y: baselineTimes,
-                name: 'Baseline',
-                type: 'bar',
-                marker: {{ color: '#636EFA' }}
-            }};
-
-            const trace2 = {{
-                x: benchmarkNames,
-                y: targetTimes,
-                name: 'Target',
-                type: 'bar',
-                marker: {{ color: '#EF553B' }}
-            }};
-
-            const layout = {{
-                title: `${{category}} Benchmarks`,
-                xaxis: {{ title: 'Benchmark' }},
-                yaxis: {{ title: 'Time (seconds)' }},
-                barmode: 'group',
-                height: 400
-            }};
-
-            Plotly.newPlot(divId, [trace1, trace2], layout);
-        }}
-
-        // Initialize on page load
-        document.addEventListener('DOMContentLoaded', function() {{
-            initializeDropdowns();
-
-            document.getElementById('compare-btn').addEventListener('click', generateComparison);
-
-            // Show welcome message if no datasets available
-            if (datasets.length === 0) {{
-                document.getElementById('charts').innerHTML = `
+                // TODO: Add actual benchmark charts when result parsing is implemented
+                html += `
                     <div class="info">
-                        <h3>No benchmark data available yet</h3>
-                        <p>Run the benchmark workflow to generate comparison data.</p>
-                        <p><strong>To generate benchmarks:</strong></p>
-                        <ol>
-                            <li>Go to the GitHub Actions tab</li>
-                            <li>Select the "Benchmark" workflow</li>
-                            <li>Click "Run workflow"</li>
-                            <li>Select your options and run</li>
-                        </ol>
+                        <h3>Benchmark data loaded successfully</h3>
+                        <p><strong>Baseline:</strong> ${{baseline.label}} (${{baseline.ref}})</p>
+                        <p><strong>Target:</strong> ${{target.label}} (${{target.ref}})</p>
+                        <p><strong>Platform:</strong> ${{baseline.runner_label}}</p>
+                        <br>
+                        <p><em>Chart generation will be implemented when benchmark result files are available.</em></p>
+                        <p><em>The framework is ready - we just need to parse the actual benchmark JSON/CSV files.</em></p>
                     </div>
                 `;
+
+                container.innerHTML = html;
             }}
+        }};
+
+        // Initialize app
+        document.addEventListener('DOMContentLoaded', () => {{
+            app.init();
         }});
     </script>
 </body>
 </html>
 """
 
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_file, 'w') as f:
-        f.write(html_content)
-
-    print(f"✓ Report generated: {output_file}")
-    print(f"  Found {len(datasets)} dataset(s)")
+    return html
 
 
 def main():
@@ -745,12 +682,17 @@ def main():
     parser.add_argument(
         "data_dir",
         type=Path,
-        help="Directory containing benchmark data (with tags/ and commits/ subdirs)"
+        help="Directory containing benchmark-data (with index.json)"
     )
     parser.add_argument(
         "output_file",
         type=Path,
         help="Output HTML file path"
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output"
     )
 
     args = parser.parse_args()
@@ -759,7 +701,14 @@ def main():
         print(f"Error: Data directory not found: {args.data_dir}", file=sys.stderr)
         sys.exit(1)
 
-    generate_html_report(args.data_dir, args.output_file)
+    try:
+        generate_html_report(args.data_dir, args.output_file)
+    except Exception as e:
+        print(f"❌ Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
