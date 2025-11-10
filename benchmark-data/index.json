@@ -234,7 +234,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "099537d7c02b3defed13675896e65a817590d3cc",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@099537d7c02b3defed13675896e65a817590d3cc@macos",
@@ -246,7 +246,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "099537d7c02b3defed13675896e65a817590d3cc",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@2982a4ba8a9e10a33e752d00ada3d9c215e47899@linux",
@@ -258,7 +258,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "2982a4ba8a9e10a33e752d00ada3d9c215e47899",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@2982a4ba8a9e10a33e752d00ada3d9c215e47899@macos",
@@ -270,7 +270,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "2982a4ba8a9e10a33e752d00ada3d9c215e47899",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@4906a6ab4d044860972cde8af820225461d81060@linux",
@@ -282,7 +282,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "4906a6ab4d044860972cde8af820225461d81060",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@4906a6ab4d044860972cde8af820225461d81060@macos",
@@ -294,7 +294,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "4906a6ab4d044860972cde8af820225461d81060",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@7c33c0ccb81453dc72dad60caeb8296ea59c9f56@linux",
@@ -306,7 +306,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "7c33c0ccb81453dc72dad60caeb8296ea59c9f56",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@7c33c0ccb81453dc72dad60caeb8296ea59c9f56@macos",
@@ -318,7 +318,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "7c33c0ccb81453dc72dad60caeb8296ea59c9f56",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@8d79bfe7639d7bec9901742824237bf2f8cff8ee@linux",
@@ -330,7 +330,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "8d79bfe7639d7bec9901742824237bf2f8cff8ee",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@8d79bfe7639d7bec9901742824237bf2f8cff8ee@macos",
@@ -342,7 +342,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "8d79bfe7639d7bec9901742824237bf2f8cff8ee",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@ac23372bc4721047d2fe292750ee744d1a9872b3@linux",
@@ -354,7 +354,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "ac23372bc4721047d2fe292750ee744d1a9872b3",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@ac23372bc4721047d2fe292750ee744d1a9872b3@macos",
@@ -366,7 +366,31 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "ac23372bc4721047d2fe292750ee744d1a9872b3",
-      "is_latest_tag": false
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@af7f34e44707459e271ea1a2188a21a6f23b159b@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-11-10T10:35:42Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "af7f34e44707459e271ea1a2188a21a6f23b159b",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@af7f34e44707459e271ea1a2188a21a6f23b159b@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-11-10T10:35:43Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "af7f34e44707459e271ea1a2188a21a6f23b159b",
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@b52d73a607e2d209f4e153a5748fdf83d7cc0f9a@linux",
@@ -378,7 +402,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "b52d73a607e2d209f4e153a5748fdf83d7cc0f9a",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@b52d73a607e2d209f4e153a5748fdf83d7cc0f9a@macos",
@@ -390,7 +414,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "b52d73a607e2d209f4e153a5748fdf83d7cc0f9a",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@b9d1cffb855377ccab2cfe8d580ebd7215da36dd@linux",
@@ -402,7 +426,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@b9d1cffb855377ccab2cfe8d580ebd7215da36dd@macos",
@@ -414,7 +438,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@c48e61db231fdbb399a699a654921fab0e2cc237@linux",
@@ -426,7 +450,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "c48e61db231fdbb399a699a654921fab0e2cc237",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@c48e61db231fdbb399a699a654921fab0e2cc237@macos",
@@ -438,7 +462,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "c48e61db231fdbb399a699a654921fab0e2cc237",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@d4505c807f2c721100d8d70b499338d8ca81f327@linux",
@@ -450,7 +474,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "d4505c807f2c721100d8d70b499338d8ca81f327",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@d4505c807f2c721100d8d70b499338d8ca81f327@macos",
@@ -462,7 +486,7 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "d4505c807f2c721100d8d70b499338d8ca81f327",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@e74a7a024f6805becb036ac28636f8aaec5248ae@linux",
@@ -474,7 +498,7 @@
       "runner_label": "Linux AMD64",
       "path": "tags/v0.1.1/linux",
       "commit_sha": "e74a7a024f6805becb036ac28636f8aaec5248ae",
-      "is_latest_tag": false
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@e74a7a024f6805becb036ac28636f8aaec5248ae@macos",
@@ -486,11 +510,12 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "e74a7a024f6805becb036ac28636f8aaec5248ae",
-      "is_latest_tag": false
+      "is_latest_tag": true
     }
   ],
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2025-11-10T09:26:14Z"
+  "last_updated": "2025-11-10T10:35:43Z",
+  "latest_tag": "v0.1.1"
 }
