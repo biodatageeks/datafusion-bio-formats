@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_predicate_range_filter",
+  "format": "gff",
+  "category": "predicate_pushdown",
+  "timestamp": "2025-11-10T08:29:59.527986033Z",
+  "system_info": {
+    "os": "Ubuntu 22.04",
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "cpu_cores": 4,
+    "total_memory_gb": 15.6209716796875
+  },
+  "configuration": {
+    "query": "SELECT * FROM gencode_annotations WHERE start > 1000000 AND end < 2000000",
+    "repetitions": 3,
+    "test_name": "range_filter"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 0.0,
+    "elapsed_seconds": 0.001150373,
+    "total_records": 0,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
