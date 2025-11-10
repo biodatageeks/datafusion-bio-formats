@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1041-azure",
+  "arch": "x86_64",
+  "timestamp": "2025-11-10T06:42:49Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "benchmarking",
+  "commit_sha": "cebfaeba8e759bc1bb77bffea27432de0c1003ec",
+  "benchmark_mode": "fast"
+}
