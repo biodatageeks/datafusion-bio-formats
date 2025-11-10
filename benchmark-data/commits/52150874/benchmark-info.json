@@ -1,6 +1,6 @@
 {
-  "target_ref": "v0.1.1",
-  "baseline_tag": "none",
+  "target_ref": "benchmarking",
+  "baseline_tag": "v0.1.1",
   "commit_sha": "52150874efceb9c5a21fe040214fb05b9ccfe2d6",
   "timestamp": "2025-11-10T07:01:50Z",
   "platforms": ["linux", "macos"],
