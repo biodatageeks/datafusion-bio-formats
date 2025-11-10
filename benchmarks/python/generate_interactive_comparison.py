@@ -122,12 +122,17 @@ def load_dataset_results(data_dir: Path, dataset_id: str, dataset_info: Dict) ->
                     with open(json_file) as f:
                         result = json.load(f)
 
-                        # Organize by category
+                        # Organize by format, then category
+                        format_type = result.get("format", "unknown")
                         category = result.get("category", "unknown")
-                        if category not in results:
-                            results[category] = []
 
-                        results[category].append(result)
+                        if format_type not in results:
+                            results[format_type] = {}
+
+                        if category not in results[format_type]:
+                            results[format_type][category] = []
+
+                        results[format_type][category].append(result)
                 except (json.JSONDecodeError, IOError) as e:
                     print(f"Warning: Could not load {json_file}: {e}", file=sys.stderr)
 
@@ -351,6 +356,43 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
             border-bottom-color: white;
         }}
 
+        /* Format Tabs - Subtabs within platform */
+        .format-tabs-wrapper {{
+            background-color: #f8f9fa;
+            padding: 10px 20px;
+            margin-bottom: 20px;
+        }}
+
+        .format-tabs {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+
+        .format-tab {{
+            padding: 8px 16px;
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            color: #6c757d;
+            text-transform: uppercase;
+            transition: all 0.2s;
+        }}
+
+        .format-tab:hover {{
+            background: #e9ecef;
+            border-color: #adb5bd;
+        }}
+
+        .format-tab.active {{
+            background: #007bff;
+            color: white;
+            border-color: #007bff;
+        }}
+
         /* Chart Container Styles */
         .chart-container {{
             background-color: white;
@@ -423,6 +465,7 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
     </div>
 
     <div id="runner-tabs-container"></div>
+    <div id="format-tabs-container"></div>
     <div id="charts-container"></div>
 
     <script>
@@ -434,7 +477,9 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
             currentBaseline: null,  // unique key (ref or ref@sha)
             currentTarget: null,    // unique key (ref or ref@sha)
             currentRunner: null,
+            currentFormat: null,     // current file format (gff, vcf, etc.)
             availableRunners: [],
+            availableFormats: [],
 
             init() {{
                 this.populateDropdowns();
@@ -575,11 +620,25 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
 
                 this.availableRunners = commonRunners;
 
+                // Find available formats across both datasets
+                const baselineDatasetId = baselineRefData.runners[commonRunners[0]];
+                const targetDatasetId = targetRefData.runners[commonRunners[0]];
+                const baselineDataset = DATA.datasets[baselineDatasetId];
+                const targetDataset = DATA.datasets[targetDatasetId];
+
+                const baselineFormats = Object.keys(baselineDataset.results || {{}});
+                const targetFormats = Object.keys(targetDataset.results || {{}});
+                const commonFormats = [...new Set([...baselineFormats, ...targetFormats])].sort();
+
+                this.availableFormats = commonFormats;
+
                 // Setup runner tabs
                 this.setupRunnerTabs();
 
-                // Generate charts for first runner
+                // Set initial format and generate charts
                 this.currentRunner = commonRunners[0];
+                this.currentFormat = commonFormats.length > 0 ? commonFormats[0] : null;
+                this.setupFormatTabs();
                 this.generateCharts();
             }},
 
@@ -630,6 +689,73 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
 
                 // Update active tab
                 document.querySelectorAll('.runner-tab').forEach(tab => {{
+                    tab.classList.remove('active');
+                }});
+                event.target.classList.add('active');
+
+                // Update available formats for new runner
+                const baselineRefData = this.getRefData(this.currentBaseline);
+                const targetRefData = this.getRefData(this.currentTarget);
+                const baselineDatasetId = baselineRefData.runners[runner];
+                const targetDatasetId = targetRefData.runners[runner];
+                const baselineDataset = DATA.datasets[baselineDatasetId];
+                const targetDataset = DATA.datasets[targetDatasetId];
+
+                const baselineFormats = Object.keys(baselineDataset.results || {{}});
+                const targetFormats = Object.keys(targetDataset.results || {{}});
+                const commonFormats = [...new Set([...baselineFormats, ...targetFormats])].sort();
+
+                this.availableFormats = commonFormats;
+                this.currentFormat = commonFormats.length > 0 ? commonFormats[0] : null;
+
+                // Regenerate format tabs and charts
+                this.setupFormatTabs();
+                this.generateCharts();
+            }},
+
+            setupFormatTabs() {{
+                const tabsContainer = document.getElementById('format-tabs-container');
+
+                if (this.availableFormats.length === 0) {{
+                    tabsContainer.innerHTML = '';
+                    return;
+                }}
+
+                if (this.availableFormats.length === 1) {{
+                    // Single format - show simple label
+                    tabsContainer.innerHTML = `
+                        <div class="format-tabs-wrapper">
+                            <div class="format-tabs">
+                                <div class="format-tab active">
+                                    ${{this.availableFormats[0].toUpperCase()}}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }} else {{
+                    // Multiple formats - show clickable tabs
+                    const tabs = this.availableFormats.map((format, idx) => {{
+                        const active = idx === 0 ? 'active' : '';
+                        return `<button class="format-tab ${{active}}" onclick="app.switchFormat('${{format}}')">
+                            ${{format.toUpperCase()}}
+                        </button>`;
+                    }}).join('');
+
+                    tabsContainer.innerHTML = `
+                        <div class="format-tabs-wrapper">
+                            <div class="format-tabs">
+                                ${{tabs}}
+                            </div>
+                        </div>
+                    `;
+                }}
+            }},
+
+            switchFormat(format) {{
+                this.currentFormat = format;
+
+                // Update active tab
+                document.querySelectorAll('.format-tab').forEach(tab => {{
                     tab.classList.remove('active');
                 }});
                 event.target.classList.add('active');
@@ -695,11 +821,26 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
                     return;
                 }}
 
-                // Generate charts for each category
-                const categories = new Set([...Object.keys(baselineResults), ...Object.keys(targetResults)]);
+                // Filter results by current format
+                const baselineFormatResults = (this.currentFormat && baselineResults[this.currentFormat]) || {{}};
+                const targetFormatResults = (this.currentFormat && targetResults[this.currentFormat]) || {{}};
+
+                if (Object.keys(baselineFormatResults).length === 0 && Object.keys(targetFormatResults).length === 0) {{
+                    html += `
+                        <div class="info">
+                            <h3>No results for format: ${{this.currentFormat}}</h3>
+                            <p><em>Select a different format or wait for benchmark results.</em></p>
+                        </div>
+                    `;
+                    container.innerHTML = html;
+                    return;
+                }}
+
+                // Generate charts for each category within the current format
+                const categories = new Set([...Object.keys(baselineFormatResults), ...Object.keys(targetFormatResults)]);
 
                 categories.forEach(category => {{
-                    const categoryId = 'chart-' + category.replace(/\\s+/g, '-');
+                    const categoryId = 'chart-' + this.currentFormat + '-' + category.replace(/\\s+/g, '-');
                     html += `<div id="${{categoryId}}" class="chart"></div>`;
                 }});
 
@@ -707,9 +848,9 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
 
                 // Generate Plotly charts for each category
                 categories.forEach(category => {{
-                    const categoryId = 'chart-' + category.replace(/\\s+/g, '-');
-                    const baselineCategoryResults = baselineResults[category] || [];
-                    const targetCategoryResults = targetResults[category] || [];
+                    const categoryId = 'chart-' + this.currentFormat + '-' + category.replace(/\\s+/g, '-');
+                    const baselineCategoryResults = baselineFormatResults[category] || [];
+                    const targetCategoryResults = targetFormatResults[category] || [];
 
                     // Create benchmark name mapping
                     const benchmarkNames = new Set();
