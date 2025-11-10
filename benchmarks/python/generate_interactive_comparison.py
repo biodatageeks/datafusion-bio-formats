@@ -82,8 +82,14 @@ def scan_available_datasets(data_dir: Path) -> List[Dict[str, str]]:
                 try:
                     with open(info_file) as f:
                         info = json.load(f)
-                        target_ref = info.get("target_ref", commit_dir.name)
-                        display_name = target_ref if target_ref != commit_dir.name else commit_dir.name
+                        target_ref = info.get("target_ref", "")
+                        commit_sha = commit_dir.name
+
+                        # Format: branch(gitsha) or just gitsha if no branch
+                        if target_ref and target_ref != commit_sha:
+                            display_name = f"{target_ref}({commit_sha})"
+                        else:
+                            display_name = commit_sha
                 except:
                     display_name = commit_dir.name
 

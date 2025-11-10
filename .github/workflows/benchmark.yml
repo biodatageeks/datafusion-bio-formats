@@ -146,16 +146,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Cache Cargo target
-        uses: actions/cache@v4
-        with:
-          path: target/
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-cargo-target-
-
-      # Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
+# Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
       - name: Checkout Baseline Code
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
@@ -279,16 +270,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Cache Cargo target
-        uses: actions/cache@v4
-        with:
-          path: target/
-          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}-
-            ${{ runner.os }}-cargo-target-
-
-      # Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
+# Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
       - name: Checkout Baseline Code
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
