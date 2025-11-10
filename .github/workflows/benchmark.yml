@@ -566,22 +566,23 @@ jobs:
           # Update tags array if target is a tag
           if [ "$REF_TYPE" = "tag" ]; then
             jq --arg tag "$TARGET_REF" '.tags += [$tag] | .tags |= unique | .tags |= sort' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+          fi
 
-            # Update latest_tag (simple: last in sorted array)
-            jq '.latest_tag = (.tags | sort_by(.) | last)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+          # Always update latest_tag and mark datasets (runs for both tag and branch targets)
+          # Update latest_tag (simple: last in sorted array)
+          jq '.latest_tag = (.tags | sort_by(.) | last)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
 
-            # Mark datasets with latest tag
-            LATEST_TAG=$(jq -r '.latest_tag' "$INDEX_FILE")
-            if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
-              jq --arg latest "$LATEST_TAG" '
-                .datasets |= map(
-                  if .ref_type == "tag" and .ref == $latest
-                  then . + {is_latest_tag: true}
-                  else .
-                  end
-                )
-              ' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
-            fi
+          # Mark datasets with latest tag
+          LATEST_TAG=$(jq -r '.latest_tag' "$INDEX_FILE")
+          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
+            jq --arg latest "$LATEST_TAG" '
+              .datasets |= map(
+                if .ref_type == "tag" and .ref == $latest
+                then . + {is_latest_tag: true}
+                else .
+                end
+              )
+            ' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
           fi
 
           # Update last_updated timestamp
