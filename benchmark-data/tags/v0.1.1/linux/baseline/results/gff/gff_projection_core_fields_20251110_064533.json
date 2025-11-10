@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_projection_core_fields",
+  "format": "gff",
+  "category": "projection_pushdown",
+  "timestamp": "2025-11-10T06:45:33.647116193Z",
+  "system_info": {
+    "os": "Ubuntu 22.04",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+    "cpu_cores": 4,
+    "total_memory_gb": 15.620002746582031
+  },
+  "configuration": {
+    "query": "SELECT chrom, start, `end`, type FROM gencode_annotations LIMIT 100000",
+    "repetitions": 3,
+    "test_name": "core_fields"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 0.0,
+    "elapsed_seconds": 0.000453531,
+    "total_records": 0,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
