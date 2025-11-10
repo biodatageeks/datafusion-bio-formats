@@ -94,24 +94,45 @@ def load_dataset_results(data_dir: Path, dataset_id: str, dataset_info: Dict) ->
     """
     Load benchmark results for a specific dataset.
 
-    For now, returns metadata only since our benchmark results are in JSON format
-    and need custom parsing. This will be extended based on actual result format.
+    Loads both metadata and actual benchmark result JSON files.
     """
     dataset_path = data_dir / dataset_info.get("path", "")
 
-    if not dataset_path.exists():
-        return None
-
-    # Load metadata
+    # Load metadata if path exists
     metadata = {}
-    for metadata_file in [dataset_path / "metadata.json", dataset_path.parent / "metadata.json"]:
-        if metadata_file.exists():
-            with open(metadata_file) as f:
-                metadata = json.load(f)
-            break
+    if dataset_path.exists():
+        for metadata_file in [dataset_path / "metadata.json", dataset_path.parent / "metadata.json"]:
+            if metadata_file.exists():
+                with open(metadata_file) as f:
+                    metadata = json.load(f)
+                break
 
-    # For now, return basic structure
-    # TODO: Load actual benchmark results from JSON files
+    # Load benchmark results from results/ directory
+    results = {}
+    if dataset_path.exists():
+        results_dir = dataset_path / "results"
+        if results_dir.exists():
+            # Scan all subdirectories for JSON files
+            for json_file in results_dir.rglob("*.json"):
+                # Skip metadata files
+                if json_file.name in ["metadata.json", "linux.json", "macos.json"]:
+                    continue
+
+                try:
+                    with open(json_file) as f:
+                        result = json.load(f)
+
+                        # Organize by category
+                        category = result.get("category", "unknown")
+                        if category not in results:
+                            results[category] = []
+
+                        results[category].append(result)
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"Warning: Could not load {json_file}: {e}", file=sys.stderr)
+
+    # Always return dataset structure (even if path doesn't exist)
+    # The index.json contains all the essential info we need for the UI
     return {
         "id": dataset_id,
         "label": dataset_info["label"],
@@ -119,7 +140,7 @@ def load_dataset_results(data_dir: Path, dataset_id: str, dataset_info: Dict) ->
         "runner": dataset_info.get("runner", "unknown"),
         "runner_label": dataset_info.get("runner_label", "Unknown"),
         "metadata": metadata,
-        "results": {},  # Will be populated when we parse result files
+        "results": results,
     }
 
 
@@ -655,20 +676,88 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
                     </div>
                 `;
 
-                // TODO: Add actual benchmark charts when result parsing is implemented
-                html += `
-                    <div class="info">
-                        <h3>Benchmark data loaded successfully</h3>
-                        <p><strong>Baseline:</strong> ${{baseline.label}} (${{baseline.ref}})</p>
-                        <p><strong>Target:</strong> ${{target.label}} (${{target.ref}})</p>
-                        <p><strong>Platform:</strong> ${{baseline.runner_label}}</p>
-                        <br>
-                        <p><em>Chart generation will be implemented when benchmark result files are available.</em></p>
-                        <p><em>The framework is ready - we just need to parse the actual benchmark JSON/CSV files.</em></p>
-                    </div>
-                `;
+                // Check if we have results to display
+                const baselineResults = baseline.results || {{}};
+                const targetResults = target.results || {{}};
+
+                if (Object.keys(baselineResults).length === 0 && Object.keys(targetResults).length === 0) {{
+                    html += `
+                        <div class="info">
+                            <h3>No benchmark results found</h3>
+                            <p><strong>Baseline:</strong> ${{baseline.label}} (${{baseline.ref}})</p>
+                            <p><strong>Target:</strong> ${{target.label}} (${{target.ref}})</p>
+                            <p><strong>Platform:</strong> ${{baseline.runner_label}}</p>
+                            <br>
+                            <p><em>Benchmark results will appear here once the workflow completes.</em></p>
+                        </div>
+                    `;
+                    container.innerHTML = html;
+                    return;
+                }}
+
+                // Generate charts for each category
+                const categories = new Set([...Object.keys(baselineResults), ...Object.keys(targetResults)]);
+
+                categories.forEach(category => {{
+                    const categoryId = 'chart-' + category.replace(/\\s+/g, '-');
+                    html += `<div id="${{categoryId}}" class="chart"></div>`;
+                }});
 
                 container.innerHTML = html;
+
+                // Generate Plotly charts for each category
+                categories.forEach(category => {{
+                    const categoryId = 'chart-' + category.replace(/\\s+/g, '-');
+                    const baselineCategoryResults = baselineResults[category] || [];
+                    const targetCategoryResults = targetResults[category] || [];
+
+                    // Create benchmark name mapping
+                    const benchmarkNames = new Set();
+                    baselineCategoryResults.forEach(r => benchmarkNames.add(r.benchmark_name));
+                    targetCategoryResults.forEach(r => benchmarkNames.add(r.benchmark_name));
+
+                    // Prepare data for grouped bar chart
+                    const baselineValues = [];
+                    const targetValues = [];
+                    const labels = [];
+
+                    Array.from(benchmarkNames).sort().forEach(name => {{
+                        const baselineBench = baselineCategoryResults.find(r => r.benchmark_name === name);
+                        const targetBench = targetCategoryResults.find(r => r.benchmark_name === name);
+
+                        labels.push(name);
+                        baselineValues.push(baselineBench ? baselineBench.metrics.elapsed_seconds : null);
+                        targetValues.push(targetBench ? targetBench.metrics.elapsed_seconds : null);
+                    }});
+
+                    // Create traces
+                    const trace1 = {{
+                        x: labels,
+                        y: baselineValues,
+                        name: `${{baseline.label}} (baseline)`,
+                        type: 'bar',
+                        marker: {{ color: 'rgb(55, 128, 191)' }}
+                    }};
+
+                    const trace2 = {{
+                        x: labels,
+                        y: targetValues,
+                        name: `${{target.label}} (target)`,
+                        type: 'bar',
+                        marker: {{ color: 'rgb(219, 64, 82)' }}
+                    }};
+
+                    const layout = {{
+                        title: `${{category.charAt(0).toUpperCase() + category.slice(1)}} Benchmarks - Elapsed Time (seconds)`,
+                        barmode: 'group',
+                        xaxis: {{ title: 'Benchmark' }},
+                        yaxis: {{ title: 'Elapsed Time (seconds)' }},
+                        showlegend: true,
+                        height: 500
+                    }};
+
+                    Plotly.newPlot(categoryId, [trace1, trace2], layout);
+                }});
             }}
         }};
 
