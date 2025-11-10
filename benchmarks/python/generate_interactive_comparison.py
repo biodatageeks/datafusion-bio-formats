@@ -35,72 +35,42 @@ def load_index(data_dir: Path) -> Dict[str, Any]:
     """Load the master index of all benchmark datasets."""
     index_file = data_dir / "index.json"
     if not index_file.exists():
-        return {"datasets": []}
+        return {"datasets": [], "tags": [], "latest_tag": "", "last_updated": ""}
 
     with open(index_file) as f:
         return json.load(f)
 
 
-def scan_available_datasets(data_dir: Path) -> List[Dict[str, str]]:
-    """Scan data directory to find all available benchmark runs.
+def get_datasets_from_index(index_data: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
+    """Extract datasets from index and organize by ref type.
 
-    Expected structure (polars-bio compatible):
-    benchmark-data/
-      tags/
-        v0.1.0/
-          {platform}/
-            baseline/results/*.json
-            target/results/*.json
-            metadata.json
-      commits/
-        {short_sha}/
-          {platform}/
-            baseline/results/*.json
-            target/results/*.json
+    Returns a dict mapping ref keys to their datasets:
+    {
+        "v0.1.1": [{"runner": "linux", "label": "v0.1.1", ...}, ...],
+        "benchmarking": [{"runner": "linux", "label": "benchmarking(abc123)", ...}, ...]
+    }
     """
-    datasets = []
+    refs_data = {}
 
-    # Scan tags
-    tags_dir = data_dir / "tags"
-    if tags_dir.exists():
-        for tag_dir in sorted(tags_dir.iterdir(), reverse=True):
-            if tag_dir.is_dir() and (tag_dir / "benchmark-info.json").exists():
-                datasets.append({
-                    "type": "tag",
-                    "name": tag_dir.name,
-                    "path": str(tag_dir.relative_to(data_dir)),
-                    "display": f"⭐ {tag_dir.name}"
-                })
+    for dataset in index_data.get("datasets", []):
+        ref = dataset["ref"]
 
-    # Scan commits
-    commits_dir = data_dir / "commits"
-    if commits_dir.exists():
-        for commit_dir in sorted(commits_dir.iterdir(), reverse=True):
-            if commit_dir.is_dir() and (commit_dir / "benchmark-info.json").exists():
-                # Try to get more info from metadata
-                info_file = commit_dir / "benchmark-info.json"
-                try:
-                    with open(info_file) as f:
-                        info = json.load(f)
-                        target_ref = info.get("target_ref", "")
-                        commit_sha = commit_dir.name
+        if ref not in refs_data:
+            refs_data[ref] = {
+                "ref": ref,
+                "ref_type": dataset["ref_type"],
+                "label": dataset["label"],
+                "commit_sha": dataset["commit_sha"],
+                "runners": []
+            }
 
-                        # Format: branch(gitsha) or just gitsha if no branch
-                        if target_ref and target_ref != commit_sha:
-                            display_name = f"{target_ref}({commit_sha})"
-                        else:
-                            display_name = commit_sha
-                except:
-                    display_name = commit_dir.name
+        refs_data[ref]["runners"].append({
+            "runner": dataset["runner"],
+            "runner_label": dataset["runner_label"],
+            "path": dataset["path"]
+        })
 
-                datasets.append({
-                    "type": "commit",
-                    "name": commit_dir.name,
-                    "path": str(commit_dir.relative_to(data_dir)),
-                    "display": display_name
-                })
-
-    return datasets
+    return refs_data
 
 
 def load_benchmark_results(results_dir: Path) -> Dict[str, List[Dict[str, Any]]]:
@@ -156,17 +126,20 @@ def aggregate_results_by_category(results: List[Dict[str, Any]]) -> Dict[str, Di
 def generate_html_report(data_dir: Path, output_file: Path):
     """Generate the interactive HTML comparison report."""
 
-    print("Scanning for available benchmark datasets...")
-    datasets = scan_available_datasets(data_dir)
+    print("Loading benchmark index...")
+    index_data = load_index(data_dir)
 
-    if not datasets:
-        print("Warning: No benchmark datasets found", file=sys.stderr)
+    if not index_data.get("datasets"):
+        print("Warning: No benchmark datasets found in index", file=sys.stderr)
 
-    # Convert datasets to JSON for embedding
-    datasets_json = json.dumps(datasets)
+    # Get organized refs data
+    refs_data = get_datasets_from_index(index_data)
 
-    # Create data directory path mapping
-    data_path_json = json.dumps(str(data_dir.resolve()))
+    print(f"Found {len(refs_data)} unique refs with {len(index_data.get('datasets', []))} total datasets")
+
+    # Embed the full index in HTML for client-side processing
+    index_json = json.dumps(index_data, indent=2)
+    refs_json = json.dumps(refs_data, indent=2)
 
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -336,14 +309,14 @@ def generate_html_report(data_dir: Path, output_file: Path):
     </div>
 
     <script>
-        // Embedded data
-        const datasets = {datasets_json};
-        const dataPath = {data_path_json};
+        // Embedded data from index.json
+        const INDEX = {index_json};
+        const REFS = {refs_json};
 
         // State
         let currentPlatform = null;
-        let baselineData = null;
-        let targetData = null;
+        let baselineRef = null;
+        let targetRef = null;
         let availablePlatforms = [];
 
         // Initialize dropdowns with optgroups for tags and commits
@@ -351,9 +324,22 @@ def generate_html_report(data_dir: Path, output_file: Path):
             const baselineSelect = document.getElementById('baseline-select');
             const targetSelect = document.getElementById('target-select');
 
-            // Separate tags and commits
-            const tags = datasets.filter(d => d.type === 'tag');
-            const commits = datasets.filter(d => d.type === 'commit');
+            // Separate by ref_type
+            const tags = [];
+            const branches = [];
+
+            Object.entries(REFS).forEach(([ref, data]) => {{
+                if (data.ref_type === 'tag') {{
+                    tags.push({{ ref, ...data }});
+                }} else {{
+                    branches.push({{ ref, ...data }});
+                }}
+            }});
+
+            // Sort tags (reverse version order)
+            tags.sort((a, b) => b.ref.localeCompare(a.ref));
+            // Sort branches by commit timestamp (latest first)
+            branches.sort((a, b) => b.commit_sha.localeCompare(a.commit_sha));
 
             // Add tags optgroup
             if (tags.length > 0) {{
@@ -362,19 +348,21 @@ def generate_html_report(data_dir: Path, output_file: Path):
                 const targetTagGroup = document.createElement('optgroup');
                 targetTagGroup.label = 'Tags';
 
-                tags.forEach((dataset, index) => {{
+                tags.forEach((item, index) => {{
+                    const displayLabel = item.ref === INDEX.latest_tag ? `⭐ ${{item.label}}` : item.label;
+
                     const option1 = document.createElement('option');
-                    option1.value = dataset.path;
-                    option1.textContent = dataset.display;
+                    option1.value = item.ref;
+                    option1.textContent = displayLabel;
                     baselineTagGroup.appendChild(option1);
 
                     const option2 = document.createElement('option');
-                    option2.value = dataset.path;
-                    option2.textContent = dataset.display;
+                    option2.value = item.ref;
+                    option2.textContent = displayLabel;
                     targetTagGroup.appendChild(option2);
 
                     // Set latest tag as default baseline
-                    if (index === 0) {{
+                    if (item.ref === INDEX.latest_tag) {{
                         option1.selected = true;
                     }}
                 }});
@@ -383,22 +371,22 @@ def generate_html_report(data_dir: Path, output_file: Path):
                 targetSelect.appendChild(targetTagGroup);
             }}
 
-            // Add commits optgroup
-            if (commits.length > 0) {{
+            // Add branches/commits optgroup
+            if (branches.length > 0) {{
                 const baselineCommitGroup = document.createElement('optgroup');
                 baselineCommitGroup.label = 'Commits';
                 const targetCommitGroup = document.createElement('optgroup');
                 targetCommitGroup.label = 'Commits';
 
-                commits.forEach((dataset, index) => {{
+                branches.forEach((item, index) => {{
                     const option1 = document.createElement('option');
-                    option1.value = dataset.path;
-                    option1.textContent = dataset.display;
+                    option1.value = item.ref;
+                    option1.textContent = item.label;
                     baselineCommitGroup.appendChild(option1);
 
                     const option2 = document.createElement('option');
-                    option2.value = dataset.path;
-                    option2.textContent = dataset.display;
+                    option2.value = item.ref;
+                    option2.textContent = item.label;
                     targetCommitGroup.appendChild(option2);
 
                     // Set latest commit as default target
@@ -431,8 +419,51 @@ def generate_html_report(data_dir: Path, output_file: Path):
             }}
         }}
 
-        // Load benchmark data from a dataset path
-        async function loadBenchmarkData(datasetPath) {{
+        // Load benchmark data for a ref
+        async function loadBenchmarkData(refKey) {{
+            const refData = REFS[refKey];
+            if (!refData) {{
+                throw new Error(`Reference not found: ${{refKey}}`);
+            }}
+
+            const baseUrl = window.location.origin + window.location.pathname.replace('/benchmark-comparison/index.html', '');
+            const results = {{}};
+
+            // Load data for each runner/platform
+            for (const runner of refData.runners) {{
+                const dataUrl = `${{baseUrl}}/benchmark-data/${{runner.path}}`;
+                try {{
+                    // Load metadata
+                    const metadataResponse = await fetch(`${{dataUrl}}/../metadata.json`);
+                    const metadata = metadataResponse.ok ? await metadataResponse.json() : {{}};
+
+                    results[runner.runner] = {{
+                        runner: runner.runner,
+                        runner_label: runner.runner_label,
+                        metadata: metadata,
+                        benchmarks: []
+                    }};
+
+                    // Try to load benchmark results
+                    const resultsUrl = `${{dataUrl}}/results`;
+                    // Note: We'll need a way to list files or have a known structure
+                    // For now, we'll try common patterns
+                    console.log(`Would load from: ${{resultsUrl}}`);
+                }} catch (e) {{
+                    console.warn(`Could not load data for ${{runner.runner}}:`, e);
+                }}
+            }}
+
+            return {{
+                ref: refData.ref,
+                ref_type: refData.ref_type,
+                label: refData.label,
+                results: results
+            }};
+        }}
+
+        // OLD VERSION - keeping structure for reference
+        async function loadBenchmarkDataOld(datasetPath) {{
             const baseUrl = window.location.origin + window.location.pathname.replace('/benchmark-comparison/index.html', '');
             const dataUrl = `${{baseUrl}}/benchmark-data/${{datasetPath}}`;
 
