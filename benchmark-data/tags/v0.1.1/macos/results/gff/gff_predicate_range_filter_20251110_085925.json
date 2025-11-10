@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_predicate_range_filter",
+  "format": "gff",
+  "category": "predicate_pushdown",
+  "timestamp": "2025-11-10T08:59:25.024422Z",
+  "system_info": {
+    "os": "Darwin 15.7.1",
+    "cpu_model": "Apple M1 (Virtual)",
+    "cpu_cores": 3,
+    "total_memory_gb": 7.0
+  },
+  "configuration": {
+    "query": "SELECT * FROM gencode_annotations WHERE start > 1000000 AND end < 2000000",
+    "repetitions": 3,
+    "test_name": "range_filter"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 0.0,
+    "elapsed_seconds": 0.001769833,
+    "total_records": 0,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
