@@ -545,7 +545,8 @@ jobs:
                    runner: $runner,
                    runner_label: $runnerlabel,
                    path: $path,
-                   commit_sha: $sha
+                   commit_sha: $sha,
+                   is_latest_tag: false
                  }] | .datasets |= unique_by(.id)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
             fi
           done
@@ -564,7 +565,7 @@ jobs:
                 .datasets |= map(
                   if .ref_type == "tag" and .ref == $latest
                   then . + {is_latest_tag: true}
-                  else . + {is_latest_tag: false}
+                  else .
                   end
                 )
               ' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
