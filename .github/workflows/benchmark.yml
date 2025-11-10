@@ -389,7 +389,7 @@ jobs:
           BASELINE_TAG="${{ needs.prepare.outputs.baseline_tag }}"
           COMMIT_SHA="${{ github.sha }}"
 
-          # Determine storage location
+          # Determine storage location for target
           if [[ "$TARGET_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             # This is a tag
             DEST_BASE="benchmark-data/tags/$TARGET_REF"
@@ -399,18 +399,51 @@ jobs:
             DEST_BASE="benchmark-data/commits/$SHORT_SHA"
           fi
 
-          echo "Storing results in: $DEST_BASE"
+          echo "Storing target results in: $DEST_BASE"
 
-          # Store baseline results
+          # Store baseline results (both in target location AND in tags/ if baseline is a tag)
           if [ "$BASELINE_TAG" != "none" ]; then
             for platform in linux macos; do
               if [ -d "all_results/baseline-results-$platform" ]; then
+                # Store in target location for comparison
                 DEST_DIR="$DEST_BASE/$platform/baseline/results"
                 mkdir -p "$DEST_DIR"
                 cp -r all_results/baseline-results-$platform/* "$DEST_DIR/" || true
                 echo "✓ Copied baseline results for $platform to $DEST_DIR"
+
+                # ALSO store in tags/ directory so tag appears in dropdown
+                if [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  TAG_DEST_DIR="benchmark-data/tags/$BASELINE_TAG/$platform/target/results"
+                  mkdir -p "$TAG_DEST_DIR"
+                  cp -r all_results/baseline-results-$platform/* "$TAG_DEST_DIR/" || true
+                  echo "✓ Also copied baseline as tag results to $TAG_DEST_DIR"
+
+                  # Create metadata for the tag
+                  TAG_PLATFORM_DIR="benchmark-data/tags/$BASELINE_TAG/$platform"
+                  mkdir -p "$TAG_PLATFORM_DIR"
+                  if [ -f "all_results/metadata-$platform/$platform.json" ]; then
+                    cp "all_results/metadata-$platform/$platform.json" "$TAG_PLATFORM_DIR/" || true
+                  fi
+                fi
               fi
             done
+
+            # Create benchmark-info.json for the tag
+            if [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              TAG_INFO_DIR="benchmark-data/tags/$BASELINE_TAG"
+              mkdir -p "$TAG_INFO_DIR"
+              cat > "$TAG_INFO_DIR/benchmark-info.json" << EOF
+          {
+            "target_ref": "$BASELINE_TAG",
+            "baseline_tag": "none",
+            "commit_sha": "$COMMIT_SHA",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": ["linux", "macos"],
+            "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
+          }
+          EOF
+              echo "✓ Created benchmark-info.json for tag $BASELINE_TAG"
+            fi
           fi
 
           # Store target results
