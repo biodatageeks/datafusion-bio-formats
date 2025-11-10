@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_predicate_chromosome_filter",
+  "format": "gff",
+  "category": "predicate_pushdown",
+  "timestamp": "2025-11-10T07:16:10.524716Z",
+  "system_info": {
+    "os": "Darwin 15.7.1",
+    "cpu_model": "Apple M1 (Virtual)",
+    "cpu_cores": 3,
+    "total_memory_gb": 7.0
+  },
+  "configuration": {
+    "query": "SELECT COUNT(*) FROM gencode_annotations WHERE chrom = 'chr1'",
+    "repetitions": 3,
+    "test_name": "chromosome_filter"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 501.9835881485691,
+    "elapsed_seconds": 0.001992097,
+    "total_records": 1,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}

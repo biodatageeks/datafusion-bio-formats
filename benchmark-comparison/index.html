@@ -166,14 +166,20 @@
     </div>
 
     <script>
-        // Embedded data
-        const datasets = [{"type": "tag", "name": "v0.1.1", "path": "tags/v0.1.1", "display": "\u2b50 v0.1.1"}, {"type": "commit", "name": "e0117dba", "path": "commits/e0117dba", "display": "benchmarking(e0117dba)"}, {"type": "commit", "name": "dbd88558", "path": "commits/dbd88558", "display": "benchmarking(dbd88558)"}, {"type": "commit", "name": "d94c7043", "path": "commits/d94c7043", "display": "29/merge(d94c7043)"}, {"type": "commit", "name": "cfe3eb0f", "path": "commits/cfe3eb0f", "display": "benchmarking(cfe3eb0f)"}, {"type": "commit", "name": "cebfaeba", "path": "commits/cebfaeba", "display": "benchmarking(cebfaeba)"}, {"type": "commit", "name": "c41ad54c", "path": "commits/c41ad54c", "display": "benchmarking(c41ad54c)"}, {"type": "commit", "name": "a7804a6a", "path": "commits/a7804a6a", "display": "benchmarking(a7804a6a)"}, {"type": "commit", "name": "928e33e3", "path": "commits/928e33e3", "display": "benchmarking(928e33e3)"}, {"type": "commit", "name": "91d688da", "path": "commits/91d688da", "display": "benchmarking(91d688da)"}, {"type": "commit", "name": "6714d46f", "path": "commits/6714d46f", "display": "benchmarking(6714d46f)"}, {"type": "commit", "name": "52150874", "path": "commits/52150874", "display": "benchmarking(52150874)"}, {"type": "commit", "name": "48739f5d", "path": "commits/48739f5d", "display": "benchmarking(48739f5d)"}, {"type": "commit", "name": "34f6d7b5", "path": "commits/34f6d7b5", "display": "benchmarking(34f6d7b5)"}, {"type": "commit", "name": "1cd1dfd4", "path": "commits/1cd1dfd4", "display": "benchmarking(1cd1dfd4)"}, {"type": "commit", "name": "121e4db1", "path": "commits/121e4db1", "display": "benchmarking(121e4db1)"}];
-        const dataPath = "/home/runner/work/datafusion-bio-formats/datafusion-bio-formats/benchmark-data";
+        // Embedded data from index.json
+        const INDEX = {
+  "datasets": [],
+  "tags": [
+    "v0.1.1"
+  ],
+  "last_updated": "2025-11-10T07:16:35Z"
+};
+        const REFS = {};
 
         // State
         let currentPlatform = null;
-        let baselineData = null;
-        let targetData = null;
+        let baselineRef = null;
+        let targetRef = null;
         let availablePlatforms = [];
 
         // Initialize dropdowns with optgroups for tags and commits
@@ -181,9 +187,22 @@
             const baselineSelect = document.getElementById('baseline-select');
             const targetSelect = document.getElementById('target-select');
 
-            // Separate tags and commits
-            const tags = datasets.filter(d => d.type === 'tag');
-            const commits = datasets.filter(d => d.type === 'commit');
+            // Separate by ref_type
+            const tags = [];
+            const branches = [];
+
+            Object.entries(REFS).forEach(([ref, data]) => {
+                if (data.ref_type === 'tag') {
+                    tags.push({ ref, ...data });
+                } else {
+                    branches.push({ ref, ...data });
+                }
+            });
+
+            // Sort tags (reverse version order)
+            tags.sort((a, b) => b.ref.localeCompare(a.ref));
+            // Sort branches by commit timestamp (latest first)
+            branches.sort((a, b) => b.commit_sha.localeCompare(a.commit_sha));
 
             // Add tags optgroup
             if (tags.length > 0) {
@@ -192,19 +211,21 @@
                 const targetTagGroup = document.createElement('optgroup');
                 targetTagGroup.label = 'Tags';
 
-                tags.forEach((dataset, index) => {
+                tags.forEach((item, index) => {
+                    const displayLabel = item.ref === INDEX.latest_tag ? `⭐ ${item.label}` : item.label;
+
                     const option1 = document.createElement('option');
-                    option1.value = dataset.path;
-                    option1.textContent = dataset.display;
+                    option1.value = item.ref;
+                    option1.textContent = displayLabel;
                     baselineTagGroup.appendChild(option1);
 
                     const option2 = document.createElement('option');
-                    option2.value = dataset.path;
-                    option2.textContent = dataset.display;
+                    option2.value = item.ref;
+                    option2.textContent = displayLabel;
                     targetTagGroup.appendChild(option2);
 
                     // Set latest tag as default baseline
-                    if (index === 0) {
+                    if (item.ref === INDEX.latest_tag) {
                         option1.selected = true;
                     }
                 });
@@ -213,22 +234,22 @@
                 targetSelect.appendChild(targetTagGroup);
             }
 
-            // Add commits optgroup
-            if (commits.length > 0) {
+            // Add branches/commits optgroup
+            if (branches.length > 0) {
                 const baselineCommitGroup = document.createElement('optgroup');
                 baselineCommitGroup.label = 'Commits';
                 const targetCommitGroup = document.createElement('optgroup');
                 targetCommitGroup.label = 'Commits';
 
-                commits.forEach((dataset, index) => {
+                branches.forEach((item, index) => {
                     const option1 = document.createElement('option');
-                    option1.value = dataset.path;
-                    option1.textContent = dataset.display;
+                    option1.value = item.ref;
+                    option1.textContent = item.label;
                     baselineCommitGroup.appendChild(option1);
 
                     const option2 = document.createElement('option');
-                    option2.value = dataset.path;
-                    option2.textContent = dataset.display;
+                    option2.value = item.ref;
+                    option2.textContent = item.label;
                     targetCommitGroup.appendChild(option2);
 
                     // Set latest commit as default target
@@ -261,8 +282,51 @@
             }
         }
 
-        // Load benchmark data from a dataset path
-        async function loadBenchmarkData(datasetPath) {
+        // Load benchmark data for a ref
+        async function loadBenchmarkData(refKey) {
+            const refData = REFS[refKey];
+            if (!refData) {
+                throw new Error(`Reference not found: ${refKey}`);
+            }
+
+            const baseUrl = window.location.origin + window.location.pathname.replace('/benchmark-comparison/index.html', '');
+            const results = {};
+
+            // Load data for each runner/platform
+            for (const runner of refData.runners) {
+                const dataUrl = `${baseUrl}/benchmark-data/${runner.path}`;
+                try {
+                    // Load metadata
+                    const metadataResponse = await fetch(`${dataUrl}/../metadata.json`);
+                    const metadata = metadataResponse.ok ? await metadataResponse.json() : {};
+
+                    results[runner.runner] = {
+                        runner: runner.runner,
+                        runner_label: runner.runner_label,
+                        metadata: metadata,
+                        benchmarks: []
+                    };
+
+                    // Try to load benchmark results
+                    const resultsUrl = `${dataUrl}/results`;
+                    // Note: We'll need a way to list files or have a known structure
+                    // For now, we'll try common patterns
+                    console.log(`Would load from: ${resultsUrl}`);
+                } catch (e) {
+                    console.warn(`Could not load data for ${runner.runner}:`, e);
+                }
+            }
+
+            return {
+                ref: refData.ref,
+                ref_type: refData.ref_type,
+                label: refData.label,
+                results: results
+            };
+        }
+
+        // OLD VERSION - keeping structure for reference
+        async function loadBenchmarkDataOld(datasetPath) {
             const baseUrl = window.location.origin + window.location.pathname.replace('/benchmark-comparison/index.html', '');
             const dataUrl = `${baseUrl}/benchmark-data/${datasetPath}`;
 
