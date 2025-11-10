@@ -367,10 +367,34 @@
       "path": "tags/v0.1.1/macos",
       "commit_sha": "c48e61db231fdbb399a699a654921fab0e2cc237",
       "is_latest_tag": false
+    },
+    {
+      "id": "v0.1.1@d4505c807f2c721100d8d70b499338d8ca81f327@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-11-10T09:15:51Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "d4505c807f2c721100d8d70b499338d8ca81f327",
+      "is_latest_tag": false
+    },
+    {
+      "id": "v0.1.1@d4505c807f2c721100d8d70b499338d8ca81f327@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-11-10T09:15:51Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "d4505c807f2c721100d8d70b499338d8ca81f327",
+      "is_latest_tag": false
     }
   ],
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2025-11-10T09:05:04Z"
+  "last_updated": "2025-11-10T09:15:51Z"
 }
