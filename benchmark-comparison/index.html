@@ -168,13 +168,97 @@
     <script>
         // Embedded data from index.json
         const INDEX = {
-  "datasets": [],
+  "datasets": [
+    {
+      "id": "benchmarking@b9d1cffb855377ccab2cfe8d580ebd7215da36dd@linux",
+      "label": "benchmarking(b9d1cffb)",
+      "ref": "benchmarking",
+      "ref_type": "branch",
+      "timestamp": "2025-11-10T07:46:01Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/b9d1cffb/linux",
+      "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd"
+    },
+    {
+      "id": "benchmarking@b9d1cffb855377ccab2cfe8d580ebd7215da36dd@macos",
+      "label": "benchmarking(b9d1cffb)",
+      "ref": "benchmarking",
+      "ref_type": "branch",
+      "timestamp": "2025-11-10T07:46:01Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/b9d1cffb/macos",
+      "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd"
+    },
+    {
+      "id": "v0.1.1@b9d1cffb855377ccab2cfe8d580ebd7215da36dd@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-11-10T07:46:01Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd",
+      "is_latest_tag": false
+    },
+    {
+      "id": "v0.1.1@b9d1cffb855377ccab2cfe8d580ebd7215da36dd@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-11-10T07:46:01Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd",
+      "is_latest_tag": false
+    }
+  ],
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2025-11-10T07:29:27Z"
+  "last_updated": "2025-11-10T07:46:01Z"
 };
-        const REFS = {};
+        const REFS = {
+  "benchmarking": {
+    "ref": "benchmarking",
+    "ref_type": "branch",
+    "label": "benchmarking(b9d1cffb)",
+    "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd",
+    "runners": [
+      {
+        "runner": "linux",
+        "runner_label": "Linux AMD64",
+        "path": "commits/b9d1cffb/linux"
+      },
+      {
+        "runner": "macos",
+        "runner_label": "macOS ARM64",
+        "path": "commits/b9d1cffb/macos"
+      }
+    ]
+  },
+  "v0.1.1": {
+    "ref": "v0.1.1",
+    "ref_type": "tag",
+    "label": "v0.1.1",
+    "commit_sha": "b9d1cffb855377ccab2cfe8d580ebd7215da36dd",
+    "runners": [
+      {
+        "runner": "linux",
+        "runner_label": "Linux AMD64",
+        "path": "tags/v0.1.1/linux"
+      },
+      {
+        "runner": "macos",
+        "runner_label": "macOS ARM64",
+        "path": "tags/v0.1.1/macos"
+      }
+    ]
+  }
+};
 
         // State
         let currentPlatform = null;
