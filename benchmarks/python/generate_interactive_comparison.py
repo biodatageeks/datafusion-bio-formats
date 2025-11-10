@@ -427,11 +427,17 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
                 baselineSelect.innerHTML = '';
                 targetSelect.innerHTML = '';
 
+                // Safety check for refs_by_type
+                if (!DATA.refs_by_type) {{
+                    console.error('DATA.refs_by_type is not defined');
+                    return;
+                }}
+
                 // Tags
-                const tags = Object.entries(DATA.refs_by_type.tag).map(([key, data]) => ({{
+                const tags = DATA.refs_by_type.tag ? Object.entries(DATA.refs_by_type.tag).map(([key, data]) => ({{
                     key: key,
                     ...data
-                }}));
+                }})) : [];
 
                 if (tags.length > 0) {{
                     const tagGroup = document.createElement('optgroup');
@@ -449,10 +455,10 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
                 }}
 
                 // Branches (each commit gets a separate entry)
-                const branches = Object.entries(DATA.refs_by_type.branch).map(([key, data]) => ({{
+                const branches = DATA.refs_by_type.branch ? Object.entries(DATA.refs_by_type.branch).map(([key, data]) => ({{
                     key: key,
                     ...data
-                }}));
+                }})) : [];
 
                 if (branches.length > 0) {{
                     const branchGroup = document.createElement('optgroup');
@@ -472,11 +478,14 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
 
             setDefaults() {{
                 // Find latest tag
-                const latestTagEntry = Object.entries(DATA.refs_by_type.tag).find(([key, ref]) => ref.is_latest_tag);
+                const latestTagEntry = DATA.refs_by_type.tag ?
+                    Object.entries(DATA.refs_by_type.tag).find(([key, ref]) => ref.is_latest_tag) : null;
 
                 // Find first branch (most recent commit)
-                const firstBranchEntry = Object.entries(DATA.refs_by_type.branch)[0];
-                const targetEntry = firstBranchEntry || Object.entries(DATA.refs_by_type.tag)[0];
+                const firstBranchEntry = DATA.refs_by_type.branch ?
+                    Object.entries(DATA.refs_by_type.branch)[0] : null;
+                const targetEntry = firstBranchEntry ||
+                    (DATA.refs_by_type.tag ? Object.entries(DATA.refs_by_type.tag)[0] : null);
 
                 if (latestTagEntry) {{
                     const [tagKey, tagData] = latestTagEntry;
