@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2025-11-10T13:34:23Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "benchmarking",
+  "commit_sha": "75d34edab9a4f8d7b00e5d49e4f5f55cc2fd34d0",
+  "benchmark_mode": "fast"
+}
