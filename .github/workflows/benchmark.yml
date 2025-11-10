@@ -556,6 +556,19 @@ jobs:
 
             # Update latest_tag (simple: last in sorted array)
             jq '.latest_tag = (.tags | sort_by(.) | last)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+
+            # Mark datasets with latest tag
+            LATEST_TAG=$(jq -r '.latest_tag' "$INDEX_FILE")
+            if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
+              jq --arg latest "$LATEST_TAG" '
+                .datasets |= map(
+                  if .ref_type == "tag" and .ref == $latest
+                  then . + {is_latest_tag: true}
+                  else . + {is_latest_tag: false}
+                  end
+                )
+              ' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+            fi
           fi
 
           # Update last_updated timestamp

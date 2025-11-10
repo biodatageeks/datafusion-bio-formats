@@ -63,6 +63,7 @@ def organize_datasets_by_ref(index_data: Dict[str, Any]) -> Dict[str, Dict]:
         ref_type = dataset["ref_type"]
         runner = dataset["runner"]
         commit_sha = dataset.get("commit_sha", "unknown")
+        timestamp = dataset.get("timestamp", "")
 
         # For branches, use ref@sha as unique key; for tags, use ref name
         if ref_type == "branch":
@@ -80,6 +81,7 @@ def organize_datasets_by_ref(index_data: Dict[str, Any]) -> Dict[str, Dict]:
                 "ref": ref,
                 "ref_type": ref_type,
                 "commit_sha": commit_sha,
+                "timestamp": timestamp,
                 "is_latest_tag": dataset.get("is_latest_tag", False),
                 "runners": {},
             }
@@ -520,11 +522,14 @@ def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> s
                     targetSelect.appendChild(tagGroup.cloneNode(true));
                 }}
 
-                // Branches (each commit gets a separate entry)
+                // Branches (each commit gets a separate entry) - sort by timestamp descending
                 const branches = DATA.refs_by_type.branch ? Object.entries(DATA.refs_by_type.branch).map(([key, data]) => ({{
                     key: key,
                     ...data
-                }})) : [];
+                }})).sort((a, b) => {{
+                    // Sort by timestamp descending (most recent first)
+                    return new Date(b.timestamp) - new Date(a.timestamp);
+                }}) : [];
 
                 if (branches.length > 0) {{
                     const branchGroup = document.createElement('optgroup');
