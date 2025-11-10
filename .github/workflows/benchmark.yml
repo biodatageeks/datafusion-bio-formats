@@ -388,113 +388,181 @@ jobs:
           TARGET_REF="${{ needs.prepare.outputs.target_ref }}"
           BASELINE_TAG="${{ needs.prepare.outputs.baseline_tag }}"
           COMMIT_SHA="${{ github.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:8}"
 
-          # Determine storage location for target
-          if [[ "$TARGET_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            # This is a tag
-            DEST_BASE="benchmark-data/tags/$TARGET_REF"
-          else
-            # This is a commit/branch
-            SHORT_SHA="${COMMIT_SHA:0:8}"
-            DEST_BASE="benchmark-data/commits/$SHORT_SHA"
-          fi
+          # Store BASELINE results if present (as standalone tag entry)
+          if [ "$BASELINE_TAG" != "none" ] && [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            BASELINE_BASE="benchmark-data/tags/$BASELINE_TAG"
+            echo "Storing baseline tag results in: $BASELINE_BASE"
 
-          echo "Storing target results in: $DEST_BASE"
-
-          # Store baseline results (both in target location AND in tags/ if baseline is a tag)
-          if [ "$BASELINE_TAG" != "none" ]; then
             for platform in linux macos; do
               if [ -d "all_results/baseline-results-$platform" ]; then
-                # Store in target location for comparison
-                DEST_DIR="$DEST_BASE/$platform/baseline/results"
+                DEST_DIR="$BASELINE_BASE/$platform/results"
                 mkdir -p "$DEST_DIR"
                 cp -r all_results/baseline-results-$platform/* "$DEST_DIR/" || true
                 echo "✓ Copied baseline results for $platform to $DEST_DIR"
 
-                # ALSO store in tags/ directory so tag appears in dropdown
-                if [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                  TAG_DEST_DIR="benchmark-data/tags/$BASELINE_TAG/$platform/target/results"
-                  mkdir -p "$TAG_DEST_DIR"
-                  cp -r all_results/baseline-results-$platform/* "$TAG_DEST_DIR/" || true
-                  echo "✓ Also copied baseline as tag results to $TAG_DEST_DIR"
-
-                  # Create metadata for the tag
-                  TAG_PLATFORM_DIR="benchmark-data/tags/$BASELINE_TAG/$platform"
-                  mkdir -p "$TAG_PLATFORM_DIR"
-                  if [ -f "all_results/metadata-$platform/$platform.json" ]; then
-                    cp "all_results/metadata-$platform/$platform.json" "$TAG_PLATFORM_DIR/" || true
-                  fi
+                # Copy metadata
+                if [ -d "all_results/metadata-$platform" ]; then
+                  cp all_results/metadata-$platform/*.json "$BASELINE_BASE/$platform/" || true
                 fi
               fi
             done
 
-            # Create benchmark-info.json for the tag
-            if [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              TAG_INFO_DIR="benchmark-data/tags/$BASELINE_TAG"
-              mkdir -p "$TAG_INFO_DIR"
-              cat > "$TAG_INFO_DIR/benchmark-info.json" << EOF
+            # Create metadata.json for baseline tag
+            cat > "$BASELINE_BASE/metadata.json" << EOF
           {
-            "target_ref": "$BASELINE_TAG",
-            "baseline_tag": "none",
+            "ref": "$BASELINE_TAG",
+            "ref_type": "tag",
             "commit_sha": "$COMMIT_SHA",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": ["linux", "macos"],
             "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
           }
           EOF
-              echo "✓ Created benchmark-info.json for tag $BASELINE_TAG"
-            fi
           fi
 
-          # Store target results
+          # Store TARGET results (as standalone entry)
+          if [[ "$TARGET_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # Target is a tag
+            DEST_BASE="benchmark-data/tags/$TARGET_REF"
+            REF_TYPE="tag"
+          else
+            # Target is a commit/branch
+            DEST_BASE="benchmark-data/commits/$SHORT_SHA"
+            REF_TYPE="branch"
+          fi
+
+          echo "Storing target results in: $DEST_BASE"
+
           for platform in linux macos; do
             if [ -d "all_results/target-results-$platform" ]; then
-              DEST_DIR="$DEST_BASE/$platform/target/results"
+              DEST_DIR="$DEST_BASE/$platform/results"
               mkdir -p "$DEST_DIR"
               cp -r all_results/target-results-$platform/* "$DEST_DIR/" || true
               echo "✓ Copied target results for $platform to $DEST_DIR"
+
+              # Copy metadata
+              if [ -d "all_results/metadata-$platform" ]; then
+                cp all_results/metadata-$platform/*.json "$DEST_BASE/$platform/" || true
+              fi
             fi
           done
 
-          # Store metadata
-          for platform in linux macos; do
-            if [ -d "all_results/metadata-$platform" ]; then
-              DEST_DIR="$DEST_BASE/$platform"
-              mkdir -p "$DEST_DIR"
-              cp all_results/metadata-$platform/*.json "$DEST_DIR/" || true
-              echo "✓ Copied metadata for $platform"
-            fi
-          done
-
-          # Create index metadata
+          # Create metadata.json for target
           mkdir -p "$DEST_BASE"
-          cat > "$DEST_BASE/benchmark-info.json" << EOF
+          cat > "$DEST_BASE/metadata.json" << EOF
           {
-            "target_ref": "$TARGET_REF",
-            "baseline_tag": "$BASELINE_TAG",
+            "ref": "$TARGET_REF",
+            "ref_type": "$REF_TYPE",
             "commit_sha": "$COMMIT_SHA",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "platforms": ["linux", "macos"],
             "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
           }
           EOF
 
           echo "DEST_BASE=$DEST_BASE" >> $GITHUB_ENV
+          echo "REF_TYPE=$REF_TYPE" >> $GITHUB_ENV
+          echo "TARGET_REF=$TARGET_REF" >> $GITHUB_ENV
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          echo "BASELINE_TAG=$BASELINE_TAG" >> $GITHUB_ENV
 
       - name: Update Master Index
         run: |
           DEST_BASE="${{ env.DEST_BASE }}"
-          TARGET_REF="${{ needs.prepare.outputs.target_ref }}"
+          TARGET_REF="${{ env.TARGET_REF }}"
+          REF_TYPE="${{ env.REF_TYPE }}"
+          SHORT_SHA="${{ env.SHORT_SHA }}"
+          BASELINE_TAG="${{ env.BASELINE_TAG }}"
+          COMMIT_SHA="${{ github.sha }}"
 
           # Create index.json if it doesn't exist
           INDEX_FILE="benchmark-data/index.json"
           if [ ! -f "$INDEX_FILE" ]; then
-            echo '{"datasets": []}' > "$INDEX_FILE"
+            cat > "$INDEX_FILE" << EOF
+          {
+            "last_updated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "datasets": [],
+            "tags": [],
+            "latest_tag": ""
+          }
+          EOF
           fi
 
-          # Add this dataset to the index (basic implementation)
-          # In production, use jq or Python to properly update JSON
-          echo "✓ Dataset added to index: $DEST_BASE"
+          # Install jq for JSON manipulation
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # Add baseline tag to index if present
+          if [ "$BASELINE_TAG" != "none" ] && [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            for platform in linux macos; do
+              if [ -d "benchmark-data/tags/$BASELINE_TAG/$platform" ]; then
+                RUNNER_LABEL=$([ "$platform" = "linux" ] && echo "Linux AMD64" || echo "macOS ARM64")
+                jq --arg ref "$BASELINE_TAG" \
+                   --arg type "tag" \
+                   --arg sha "$COMMIT_SHA" \
+                   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                   --arg runner "$platform" \
+                   --arg label "$RUNNER_LABEL" \
+                   --arg path "tags/$BASELINE_TAG/$platform" \
+                   '.datasets += [{
+                     id: ($ref + "@" + $sha + "@" + $runner),
+                     label: $ref,
+                     ref: $ref,
+                     ref_type: $type,
+                     timestamp: $ts,
+                     runner: $runner,
+                     runner_label: $label,
+                     path: $path,
+                     commit_sha: $sha,
+                     is_latest_tag: false
+                   }] | .datasets |= unique_by(.id)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+              fi
+            done
+
+            # Update tags array
+            jq --arg tag "$BASELINE_TAG" '.tags += [$tag] | .tags |= unique | .tags |= sort' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+          fi
+
+          # Add target dataset to index
+          for platform in linux macos; do
+            if [ -d "$DEST_BASE/$platform" ]; then
+              RUNNER_LABEL=$([ "$platform" = "linux" ] && echo "Linux AMD64" || echo "macOS ARM64")
+              LABEL=$([ "$REF_TYPE" = "tag" ] && echo "$TARGET_REF" || echo "$TARGET_REF($SHORT_SHA)")
+
+              jq --arg ref "$TARGET_REF" \
+                 --arg type "$REF_TYPE" \
+                 --arg sha "$COMMIT_SHA" \
+                 --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                 --arg runner "$platform" \
+                 --arg label "$RUNNER_LABEL" \
+                 --arg path "${DEST_BASE#benchmark-data/}/$platform" \
+                 --arg display "$LABEL" \
+                 '.datasets += [{
+                   id: ($ref + "@" + $sha + "@" + $runner),
+                   label: $display,
+                   ref: $ref,
+                   ref_type: $type,
+                   timestamp: $ts,
+                   runner: $runner,
+                   runner_label: $label,
+                   path: $path,
+                   commit_sha: $sha
+                 }] | .datasets |= unique_by(.id)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+            fi
+          done
+
+          # Update tags array if target is a tag
+          if [ "$REF_TYPE" = "tag" ]; then
+            jq --arg tag "$TARGET_REF" '.tags += [$tag] | .tags |= unique | .tags |= sort' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+
+            # Update latest_tag (simple: last in sorted array)
+            jq '.latest_tag = (.tags | sort_by(.) | last)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+          fi
+
+          # Update last_updated timestamp
+          jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.last_updated = $ts' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+
+          echo "✓ Updated index.json with new datasets"
+          cat "$INDEX_FILE" | jq '.'
 
       - name: Checkout Python Scripts from Main
         uses: actions/checkout@v4
