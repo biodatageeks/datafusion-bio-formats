@@ -1,6 +1,6 @@
 {
-  "ref": "v0.1.1",
-  "ref_type": "tag",
+  "ref": "feature/coordinate-system-parameter",
+  "ref_type": "branch",
   "commit_sha": "8241274f3b91c79e91903bc286a56783b70e13d3",
   "timestamp": "2025-12-06T14:21:00Z",
   "benchmark_mode": "fast"
