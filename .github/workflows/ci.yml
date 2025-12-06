@@ -48,3 +48,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --all
+
+      - name: Build benchmark runner
+        run: cargo build --package datafusion-bio-benchmarks-runner
