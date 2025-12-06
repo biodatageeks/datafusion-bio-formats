@@ -62,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
             Some(1),
             Some(ObjectStorageOptions::default()),
+            true, // Use 0-based coordinates (default)
         )?;
         ctx.register_table("gff_single", std::sync::Arc::new(provider))?;
         let start = Instant::now();

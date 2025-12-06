@@ -44,6 +44,7 @@ async fn test_vcf_projection_single_column_chrom() -> Result<(), Box<dyn std::er
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -85,6 +86,7 @@ async fn test_vcf_projection_position_columns() -> Result<(), Box<dyn std::error
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -124,11 +126,11 @@ async fn test_vcf_projection_position_columns() -> Result<(), Box<dyn std::error
         .unwrap();
 
     assert_eq!(chrom_array.value(0), "chr1");
-    assert_eq!(start_array.value(0), 100);
+    assert_eq!(start_array.value(0), 99); // 0-based coordinate
     assert_eq!(end_array.value(0), 100); // SNP, so end = start
 
-    assert_eq!(start_array.value(1), 200);
-    assert_eq!(start_array.value(2), 300);
+    assert_eq!(start_array.value(1), 199); // 0-based coordinate
+    assert_eq!(start_array.value(2), 299); // 0-based coordinate
 
     Ok(())
 }
@@ -144,6 +146,7 @@ async fn test_vcf_projection_variant_data() -> Result<(), Box<dyn std::error::Er
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -229,6 +232,7 @@ async fn test_vcf_projection_info_fields() -> Result<(), Box<dyn std::error::Err
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -264,7 +268,7 @@ async fn test_vcf_projection_info_fields() -> Result<(), Box<dyn std::error::Err
         .unwrap();
 
     assert_eq!(chrom_array.value(0), "chr1");
-    assert_eq!(start_array.value(0), 100);
+    assert_eq!(start_array.value(0), 99); // 0-based coordinate
 
     Ok(())
 }
@@ -280,6 +284,7 @@ async fn test_vcf_no_projection_all_columns() -> Result<(), Box<dyn std::error::
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -319,6 +324,7 @@ async fn test_vcf_projection_with_count() -> Result<(), Box<dyn std::error::Erro
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -354,6 +360,7 @@ async fn test_vcf_projection_reordered_columns() -> Result<(), Box<dyn std::erro
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -401,7 +408,7 @@ async fn test_vcf_projection_reordered_columns() -> Result<(), Box<dyn std::erro
     assert_eq!(alt_array.value(0), "G");
     assert_eq!(ref_array.value(0), "A");
     assert_eq!(chrom_array.value(0), "chr1");
-    assert_eq!(start_array.value(0), 100);
+    assert_eq!(start_array.value(0), 99); // 0-based coordinate
 
     Ok(())
 }
@@ -417,6 +424,7 @@ async fn test_vcf_projection_with_limit() -> Result<(), Box<dyn std::error::Erro
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -450,9 +458,9 @@ async fn test_vcf_projection_with_limit() -> Result<(), Box<dyn std::error::Erro
         .unwrap();
 
     assert_eq!(chrom_array.value(0), "chr1");
-    assert_eq!(start_array.value(0), 100);
+    assert_eq!(start_array.value(0), 99); // 0-based coordinate
     assert_eq!(chrom_array.value(1), "chr1");
-    assert_eq!(start_array.value(1), 200);
+    assert_eq!(start_array.value(1), 199); // 0-based coordinate
 
     Ok(())
 }
@@ -468,6 +476,7 @@ async fn test_vcf_multithreaded_projection() -> Result<(), Box<dyn std::error::E
         None,
         Some(4), // Use 4 threads
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -499,9 +508,9 @@ async fn test_vcf_multithreaded_projection() -> Result<(), Box<dyn std::error::E
         .unwrap();
 
     assert_eq!(chrom_array.value(0), "chr1");
-    assert_eq!(start_array.value(0), 100);
-    assert_eq!(start_array.value(1), 200);
-    assert_eq!(start_array.value(2), 300);
+    assert_eq!(start_array.value(0), 99); // 0-based coordinate
+    assert_eq!(start_array.value(1), 199); // 0-based coordinate
+    assert_eq!(start_array.value(2), 299); // 0-based coordinate
 
     Ok(())
 }
@@ -517,6 +526,7 @@ async fn test_vcf_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -580,6 +590,7 @@ async fn test_vcf_select_position_columns_bug() -> Result<(), Box<dyn std::error
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();

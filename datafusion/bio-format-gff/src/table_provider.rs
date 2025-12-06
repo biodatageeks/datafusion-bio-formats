@@ -10,9 +10,11 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
+use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use log::debug;
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Constructs schema on-demand based on requested attribute fields from Python layer
@@ -22,6 +24,7 @@ use std::sync::Arc;
 /// Mode 2 (Projection): Specific attributes requested -> flattened individual columns
 fn determine_schema_on_demand(
     attr_fields: Option<Vec<String>>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::common::Result<SchemaRef> {
     // Always include 8 static GFF fields
     let mut fields = vec![
@@ -72,7 +75,13 @@ fn determine_schema_on_demand(
         }
     }
 
-    let schema = Schema::new(fields);
+    // Add coordinate system metadata to schema
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        COORDINATE_SYSTEM_METADATA_KEY.to_string(),
+        coordinate_system_zero_based.to_string(),
+    );
+    let schema = Schema::new_with_metadata(fields, metadata);
     Ok(Arc::new(schema))
 }
 
@@ -91,6 +100,8 @@ pub struct GffTableProvider {
     schema: SchemaRef,
     thread_num: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
+    /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
+    coordinate_system_zero_based: bool,
 }
 
 impl GffTableProvider {
@@ -99,14 +110,24 @@ impl GffTableProvider {
     /// The schema is built immediately based on the attr_fields parameter from Python:
     /// - None: Creates default schema with nested attributes (9 columns)
     /// - Some(attrs): Creates projection schema with flattened attributes (8 + N columns)
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the GFF file
+    /// * `attr_fields` - Optional list of attribute fields to include
+    /// * `thread_num` - Optional number of threads for parallel reading
+    /// * `object_storage_options` - Optional cloud storage configuration
+    /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
+    ///   if false, output 1-based closed coordinates
     pub fn new(
         file_path: String,
         attr_fields: Option<Vec<String>>,
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
-        // NEW: Schema construction based on Python-provided attribute fields
-        let schema = determine_schema_on_demand(attr_fields.clone())?;
+        // Schema construction based on Python-provided attribute fields
+        let schema = determine_schema_on_demand(attr_fields.clone(), coordinate_system_zero_based)?;
 
         debug!(
             "GffTableProvider::new - constructed schema for file: {}",
@@ -119,6 +140,7 @@ impl GffTableProvider {
             schema,      // Pre-constructed based on request
             thread_num,
             object_storage_options,
+            coordinate_system_zero_based,
         })
     }
 }
@@ -179,13 +201,20 @@ impl TableProvider for GffTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    // For empty projections (COUNT(*)), return an empty schema
-                    Arc::new(Schema::empty())
+                    // For empty projections (COUNT(*)), return an empty schema with preserved metadata
+                    let empty_fields: Vec<Field> = vec![];
+                    Arc::new(Schema::new_with_metadata(
+                        empty_fields,
+                        schema.metadata().clone(),
+                    ))
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
                         indices.iter().map(|&i| schema.field(i).clone()).collect();
-                    Arc::new(Schema::new(projected_fields))
+                    Arc::new(Schema::new_with_metadata(
+                        projected_fields,
+                        schema.metadata().clone(),
+                    ))
                 }
                 None => schema.clone(),
             }
@@ -227,6 +256,7 @@ impl TableProvider for GffTableProvider {
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
+            coordinate_system_zero_based: self.coordinate_system_zero_based,
         }))
     }
 }

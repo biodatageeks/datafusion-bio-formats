@@ -21,7 +21,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a BED file as a table
-//! let table = BedTableProvider::new("data/genes.bed".to_string(), BEDFields::BED3, None, None)?;
+//! let table = BedTableProvider::new("data/genes.bed".to_string(), BEDFields::BED3, None, None, true)?;
 //! ctx.register_table("genes", Arc::new(table))?;
 //!
 //! // Query with SQL

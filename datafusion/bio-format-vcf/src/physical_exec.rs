@@ -213,6 +213,7 @@ fn get_variant_end(record: &dyn Record, header: &Header) -> u32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_local_vcf(
     file_path: String,
     schema_ref: SchemaRef,
@@ -221,6 +222,7 @@ async fn get_local_vcf(
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
@@ -257,7 +259,9 @@ async fn get_local_vcf(
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
             chroms.push(record.reference_sequence_name().to_string());
-            poss.push(record.variant_start().unwrap()?.get() as u32);
+            // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
+            let start_pos = record.variant_start().unwrap()?.get() as u32;
+            poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
             pose.push(get_variant_end(&record, &header));
             ids.push(record.ids().iter().map(|v| v.to_string()).collect::<Vec<String>>().join(";"));
             refs.push(record.reference_bases().to_string());
@@ -327,6 +331,7 @@ async fn get_remote_vcf_stream(
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
@@ -361,7 +366,9 @@ async fn get_remote_vcf_stream(
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
             chroms.push(record.reference_sequence_name().to_string());
-            poss.push(record.variant_start().unwrap()?.get() as u32);
+            // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
+            let start_pos = record.variant_start().unwrap()?.get() as u32;
+            poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
             pose.push(get_variant_end(&record, &header));
             ids.push(record.ids().iter().map(|v| v.to_string()).collect::<Vec<String>>().join(";"));
             refs.push(record.reference_bases().to_string());
@@ -439,6 +446,7 @@ fn set_info_builders(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,
@@ -447,6 +455,7 @@ async fn get_stream(
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
 
@@ -464,6 +473,7 @@ async fn get_stream(
                 info_fields,
                 projection,
                 object_storage_options,
+                coordinate_system_zero_based,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -476,6 +486,7 @@ async fn get_stream(
                 info_fields,
                 projection,
                 object_storage_options,
+                coordinate_system_zero_based,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -495,6 +506,8 @@ pub struct VcfExec {
     pub(crate) limit: Option<usize>,
     pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
+    /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
+    pub(crate) coordinate_system_zero_based: bool,
 }
 
 impl Debug for VcfExec {
@@ -550,6 +563,7 @@ impl ExecutionPlan for VcfExec {
             self.info_fields.clone(),
             self.projection.clone(),
             self.object_storage_options.clone(),
+            self.coordinate_system_zero_based,
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))

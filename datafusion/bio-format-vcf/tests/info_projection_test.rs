@@ -53,6 +53,7 @@ async fn test_info_projection_single_info_field() -> Result<(), Box<dyn std::err
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -119,6 +120,7 @@ async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -183,6 +185,7 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -239,7 +242,7 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
             .unwrap();
         assert_eq!(af_float_array.value(0), 0.5);
 
-        assert_eq!(start_array.value(0), 100);
+        assert_eq!(start_array.value(0), 99); // 0-based coordinate
 
         let ac_first_list = ac_array.value(0);
         let ac_int_array = ac_first_list
@@ -271,6 +274,7 @@ async fn test_info_projection_no_info_fields_queried() -> Result<(), Box<dyn std
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -320,7 +324,7 @@ async fn test_info_projection_no_info_fields_queried() -> Result<(), Box<dyn std
             .unwrap();
 
         assert_eq!(chrom_array.value(0), "chr1");
-        assert_eq!(start_array.value(0), 100);
+        assert_eq!(start_array.value(0), 99); // 0-based coordinate
         assert_eq!(ref_array.value(0), "A");
         assert_eq!(alt_array.value(0), "T");
     }
@@ -344,6 +348,7 @@ async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -434,6 +439,7 @@ async fn test_info_projection_with_count_aggregation() -> Result<(), Box<dyn std
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -475,6 +481,7 @@ async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Err
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -542,6 +549,7 @@ async fn test_info_projection_no_projection_all_fields() -> Result<(), Box<dyn s
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();

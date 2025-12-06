@@ -65,6 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,    // No specific attribute fields for core benchmarks
         Some(4), // Use 4 threads for parallel processing
         Some(object_storage_options),
+        true, // Use 0-based coordinates (default)
     )?;
 
     let ctx = SessionContext::new();

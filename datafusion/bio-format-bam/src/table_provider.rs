@@ -9,12 +9,14 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
+use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use log::debug;
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-fn determine_schema() -> datafusion::common::Result<SchemaRef> {
+fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::Result<SchemaRef> {
     let fields = vec![
         Field::new("name", DataType::Utf8, true),
         Field::new("chrom", DataType::Utf8, true),
@@ -28,7 +30,13 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
     ];
-    let schema = Schema::new(fields);
+    // Add coordinate system metadata to schema
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        COORDINATE_SYSTEM_METADATA_KEY.to_string(),
+        coordinate_system_zero_based.to_string(),
+    );
+    let schema = Schema::new_with_metadata(fields, metadata);
     debug!("Schema: {:?}", schema);
     Ok(Arc::new(schema))
 }
@@ -48,6 +56,8 @@ pub struct BamTableProvider {
     thread_num: Option<usize>,
     /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
+    /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
+    coordinate_system_zero_based: bool,
 }
 
 impl BamTableProvider {
@@ -58,6 +68,8 @@ impl BamTableProvider {
     /// * `file_path` - Path to the BAM file (local or remote URL)
     /// * `thread_num` - Optional number of threads for BGZF decompression
     /// * `object_storage_options` - Optional configuration for cloud storage access
+    /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
+    ///   if false, output 1-based closed coordinates
     ///
     /// # Returns
     ///
@@ -73,6 +85,7 @@ impl BamTableProvider {
     ///     "data/alignments.bam".to_string(),
     ///     Some(4),  // Use 4 threads
     ///     None,     // No cloud storage
+    ///     true,     // Use 0-based coordinates (default)
     /// )?;
     /// # Ok(())
     /// # }
@@ -81,13 +94,15 @@ impl BamTableProvider {
         file_path: String,
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema()?;
+        let schema = determine_schema(coordinate_system_zero_based)?;
         Ok(Self {
             file_path,
             schema,
             thread_num,
             object_storage_options,
+            coordinate_system_zero_based,
         })
     }
 }
@@ -120,12 +135,19 @@ impl TableProvider for BamTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
+                    // For empty projections (COUNT(*)), use a dummy field with preserved metadata
+                    Arc::new(Schema::new_with_metadata(
+                        vec![Field::new("dummy", DataType::Null, true)],
+                        schema.metadata().clone(),
+                    ))
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
                         indices.iter().map(|&i| schema.field(i).clone()).collect();
-                    Arc::new(Schema::new(projected_fields))
+                    Arc::new(Schema::new_with_metadata(
+                        projected_fields,
+                        schema.metadata().clone(),
+                    ))
                 }
                 None => schema.clone(),
             }
@@ -146,6 +168,7 @@ impl TableProvider for BamTableProvider {
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
+            coordinate_system_zero_based: self.coordinate_system_zero_based,
         }))
     }
 }

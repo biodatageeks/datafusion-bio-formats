@@ -40,7 +40,8 @@ async fn test_main_gff_provider_supports_filter_pushdown() -> Result<(), Box<dyn
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options))?;
+    let table =
+        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
 
     // Test filter support detection
     let filter_expr = col("chrom").eq(lit("chr1"));
@@ -91,6 +92,7 @@ async fn test_both_providers_unsupported_filter() -> Result<(), Box<dyn std::err
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     // BGZF provider
@@ -131,6 +133,7 @@ async fn test_filter_support_consistency() -> Result<(), Box<dyn std::error::Err
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     // BGZF provider

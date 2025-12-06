@@ -40,6 +40,7 @@ async fn test_special_info_fields() -> Result<(), Box<dyn std::error::Error>> {
         None,
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();

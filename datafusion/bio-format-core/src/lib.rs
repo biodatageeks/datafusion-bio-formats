@@ -38,6 +38,15 @@
 
 #![warn(missing_docs)]
 
+/// Key for storing coordinate system metadata in Arrow schema.
+///
+/// When set to "true", coordinates are 0-based half-open `[start, end)`.
+/// When set to "false", coordinates are 1-based closed `[start, end]`.
+///
+/// This metadata is stored in the Arrow schema's metadata HashMap and allows
+/// downstream consumers to correctly interpret coordinate values.
+pub const COORDINATE_SYSTEM_METADATA_KEY: &str = "bio.coordinate_system_zero_based";
+
 /// Object storage integration for cloud and local file access
 pub mod object_storage;
 /// Table utilities for building DataFusion table providers

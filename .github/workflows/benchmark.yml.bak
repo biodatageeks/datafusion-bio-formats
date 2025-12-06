@@ -164,29 +164,21 @@ jobs:
           echo "✓ Copied current benchmark framework to baseline tag"
 
       - name: Build Baseline Benchmark Runner
-        id: build_baseline_linux
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
-        continue-on-error: true
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
         env:
           CARGO_INCREMENTAL: "0"
           # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
-          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Baseline Benchmarks
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.build_baseline_linux.outcome == 'success' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           mkdir -p baseline_results
           ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
         env:
           RUST_LOG: info
-
-      - name: Skip Baseline Notice
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.build_baseline_linux.outcome != 'success' }}
-        run: |
-          echo "⚠️ Baseline benchmarks skipped due to API incompatibility with baseline tag"
-          echo "This typically happens when table provider function signatures have changed"
 
       # Reset Cargo.lock before target build (keep compiled artifacts)
       - name: Reset Cargo.lock
@@ -207,7 +199,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
-          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Target Benchmarks
         run: |
@@ -302,29 +294,21 @@ jobs:
           echo "✓ Copied current benchmark framework to baseline tag"
 
       - name: Build Baseline Benchmark Runner
-        id: build_baseline_macos
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
-        continue-on-error: true
         run: |
           cargo build --release --package datafusion-bio-benchmarks-runner
         env:
           CARGO_INCREMENTAL: "0"
           # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
-          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Baseline Benchmarks
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.build_baseline_macos.outcome == 'success' }}
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
         run: |
           mkdir -p baseline_results
           ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
         env:
           RUST_LOG: info
-
-      - name: Skip Baseline Notice
-        if: ${{ needs.prepare.outputs.baseline_tag != 'none' && steps.build_baseline_macos.outcome != 'success' }}
-        run: |
-          echo "⚠️ Baseline benchmarks skipped due to API incompatibility with baseline tag"
-          echo "This typically happens when table provider function signatures have changed"
 
       # Reset Cargo.lock before target build (keep compiled artifacts)
       - name: Reset Cargo.lock
@@ -345,7 +329,7 @@ jobs:
         env:
           CARGO_INCREMENTAL: "0"
           # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
-          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+          SCCACHE_GHA_ENABLED: "true"
 
       - name: Run Target Benchmarks
         run: |

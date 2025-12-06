@@ -9,9 +9,11 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
+use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use log::debug;
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Enumeration of supported BED format variants based on number of columns
@@ -40,14 +42,20 @@ pub enum BEDFields {
 /// - `start` (UInt32, not nullable): Start position (0-based)
 /// - `end` (UInt32, not nullable): End position (exclusive)
 /// - `name` (Utf8, nullable): Feature name
-fn determine_schema() -> datafusion::common::Result<SchemaRef> {
+fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::Result<SchemaRef> {
     let fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt32, false),
         Field::new("end", DataType::UInt32, false),
         Field::new("name", DataType::Utf8, true),
     ];
-    let schema = Schema::new(fields);
+    // Add coordinate system metadata to schema
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        COORDINATE_SYSTEM_METADATA_KEY.to_string(),
+        coordinate_system_zero_based.to_string(),
+    );
+    let schema = Schema::new_with_metadata(fields, metadata);
     debug!("Schema: {:?}", schema);
     Ok(Arc::new(schema))
 }
@@ -70,6 +78,7 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
 ///     BEDFields::BED4,
 ///     Some(4),  // Use 4 threads for parallel reading
 ///     None,     // No cloud storage options
+///     true,     // Use 0-based coordinates (default)
 /// )?;
 /// # Ok(())
 /// # }
@@ -86,6 +95,8 @@ pub struct BedTableProvider {
     thread_num: Option<usize>,
     /// Optional cloud storage configuration
     object_storage_options: Option<ObjectStorageOptions>,
+    /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
+    coordinate_system_zero_based: bool,
 }
 
 impl BedTableProvider {
@@ -97,6 +108,8 @@ impl BedTableProvider {
     /// * `bed_fields` - BED format variant (BED3, BED4, BED5, BED6)
     /// * `thread_num` - Optional number of threads for parallel BGZF decompression
     /// * `object_storage_options` - Optional cloud storage configuration for remote files
+    /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
+    ///   if false, output 1-based closed coordinates
     ///
     /// # Returns
     ///
@@ -110,14 +123,16 @@ impl BedTableProvider {
         bed_fields: BEDFields,
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema()?;
+        let schema = determine_schema(coordinate_system_zero_based)?;
         Ok(Self {
             file_path,
             bed_fields,
             schema,
             thread_num,
             object_storage_options,
+            coordinate_system_zero_based,
         })
     }
 }
@@ -161,12 +176,19 @@ impl TableProvider for BedTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
+                    // For empty projections (COUNT(*)), use a dummy field with preserved metadata
+                    Arc::new(Schema::new_with_metadata(
+                        vec![Field::new("dummy", DataType::Null, true)],
+                        schema.metadata().clone(),
+                    ))
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
                         indices.iter().map(|&i| schema.field(i).clone()).collect();
-                    Arc::new(Schema::new(projected_fields))
+                    Arc::new(Schema::new_with_metadata(
+                        projected_fields,
+                        schema.metadata().clone(),
+                    ))
                 }
                 None => schema.clone(),
             }
@@ -188,6 +210,7 @@ impl TableProvider for BedTableProvider {
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
+            coordinate_system_zero_based: self.coordinate_system_zero_based,
         }))
     }
 }

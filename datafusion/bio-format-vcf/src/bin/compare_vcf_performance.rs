@@ -23,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,    // No specific format fields
         Some(4), // Use 4 threads
         Some(ObjectStorageOptions::default()),
+        true, // Use 0-based coordinates (default)
     )?;
 
     ctx.register_table("vcf_regular", Arc::new(table_provider))?;
