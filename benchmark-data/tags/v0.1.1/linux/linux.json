@@ -4,9 +4,9 @@
   "os": "Linux",
   "os_version": "6.8.0-1041-azure",
   "arch": "x86_64",
-  "timestamp": "2025-11-10T13:40:45Z",
+  "timestamp": "2025-12-06T14:09:37Z",
   "baseline_tag": "v0.1.1",
-  "target_ref": "benchmarking",
-  "commit_sha": "a6130e7b08efed34da5b9c7291b39354ff503269",
+  "target_ref": "dependabot/github_actions/actions/checkout-6",
+  "commit_sha": "1e0791e0a1c4664321866baa4b20d2a95e046f4c",
   "benchmark_mode": "fast"
 }
