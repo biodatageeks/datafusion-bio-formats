@@ -29,7 +29,7 @@ noodles-sam = { git = "https://github.com/biodatageeks/noodles.git",rev = "d6f20
 noodles-fasta = { git = "https://github.com/biodatageeks/noodles.git",rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a", features = ["async"] }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "rt", "macros"] }
 tokio-util = {  version="0.7.13", features = ["io-util", "compat"] }
-bytes = "1.10.0"
+bytes = "1.11.0"
 futures = "0.3.31"
 async-stream = "0.3.6"
 futures-util = "0.3.31"
