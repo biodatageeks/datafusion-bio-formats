@@ -285,6 +285,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "dependabot/cargo/tracing-0.1.43@c077247b86efec9e0bb820506294b6ef27961535@linux",
+      "label": "dependabot/cargo/tracing-0.1.43(c077247b)",
+      "ref": "dependabot/cargo/tracing-0.1.43",
+      "ref_type": "branch",
+      "timestamp": "2025-12-06T14:16:09Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/c077247b/linux",
+      "commit_sha": "c077247b86efec9e0bb820506294b6ef27961535",
+      "is_latest_tag": false
+    },
+    {
+      "id": "dependabot/cargo/tracing-0.1.43@c077247b86efec9e0bb820506294b6ef27961535@macos",
+      "label": "dependabot/cargo/tracing-0.1.43(c077247b)",
+      "ref": "dependabot/cargo/tracing-0.1.43",
+      "ref_type": "branch",
+      "timestamp": "2025-12-06T14:16:09Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/c077247b/macos",
+      "commit_sha": "c077247b86efec9e0bb820506294b6ef27961535",
+      "is_latest_tag": false
+    },
+    {
       "id": "dependabot/github_actions/actions/checkout-6@1e0791e0a1c4664321866baa4b20d2a95e046f4c@linux",
       "label": "dependabot/github_actions/actions/checkout-6(1e0791e0)",
       "ref": "dependabot/github_actions/actions/checkout-6",
@@ -645,6 +669,30 @@
       "is_latest_tag": true
     },
     {
+      "id": "v0.1.1@c077247b86efec9e0bb820506294b6ef27961535@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-12-06T14:16:09Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "c077247b86efec9e0bb820506294b6ef27961535",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@c077247b86efec9e0bb820506294b6ef27961535@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2025-12-06T14:16:09Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "c077247b86efec9e0bb820506294b6ef27961535",
+      "is_latest_tag": true
+    },
+    {
       "id": "v0.1.1@c48e61db231fdbb399a699a654921fab0e2cc237@linux",
       "label": "v0.1.1",
       "ref": "v0.1.1",
@@ -768,6 +816,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2025-12-06T14:12:07Z",
+  "last_updated": "2025-12-06T14:16:09Z",
   "latest_tag": "v0.1.1"
 }
