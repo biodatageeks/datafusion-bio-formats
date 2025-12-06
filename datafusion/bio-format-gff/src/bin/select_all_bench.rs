@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let config = SessionConfig::new().with_target_partitions(threads);
         let ctx = SessionContext::new_with_config(config);
 
-        let provider = BgzfGffTableProvider::try_new(&file_path, None)?;
+        let provider = BgzfGffTableProvider::try_new(&file_path, None, true)?;
         ctx.register_table("gff", std::sync::Arc::new(provider))?;
 
         let start = Instant::now();

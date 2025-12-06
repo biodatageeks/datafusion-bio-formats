@@ -63,7 +63,7 @@ async fn test_bgzf_gff_provider_supports_filter_pushdown() -> Result<(), Box<dyn
 {
     let file_path = create_test_gff_file().await?;
 
-    let table = BgzfGffTableProvider::try_new(file_path, None)
+    let table = BgzfGffTableProvider::try_new(file_path, None, true)
         .map_err(|e| format!("Failed to create BGZF table provider: {}", e))?;
 
     // Test filter support detection
@@ -96,7 +96,7 @@ async fn test_both_providers_unsupported_filter() -> Result<(), Box<dyn std::err
     )?;
 
     // BGZF provider
-    let bgzf_table = BgzfGffTableProvider::try_new(file_path, None)
+    let bgzf_table = BgzfGffTableProvider::try_new(file_path, None, true)
         .map_err(|e| format!("Failed to create BGZF table provider: {}", e))?;
 
     // Test unsupported filter (function call)
@@ -137,7 +137,7 @@ async fn test_filter_support_consistency() -> Result<(), Box<dyn std::error::Err
     )?;
 
     // BGZF provider
-    let bgzf_table = BgzfGffTableProvider::try_new(file_path, None)
+    let bgzf_table = BgzfGffTableProvider::try_new(file_path, None, true)
         .map_err(|e| format!("Failed to create BGZF table provider: {}", e))?;
 
     // Test various filter types
