@@ -25,7 +25,7 @@ async-compression.workspace = true
 async-stream = "0.3.6"
 log = { version = "0.4.27", features = ["release_max_level_debug"] }
 async-trait = "0.1.88"
-tracing = "0.1.40"
+tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
 
