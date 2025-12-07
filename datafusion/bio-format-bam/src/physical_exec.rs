@@ -98,6 +98,7 @@ impl ExecutionPlan for BamExec {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     fields: Option<Vec<String>>,
@@ -135,7 +136,7 @@ async fn get_stream(
             let bytes_stream = get_remote_stream(file_path.clone(), object_storage_options, None)
                 .await
                 .map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to get remote bytes stream: {}", e))
+                    DataFusionError::Execution(format!("Failed to get remote bytes stream: {e}"))
                 })?;
             let mut reader = noodles::bam::r#async::io::Reader::from(
                 noodles::bgzf::AsyncReader::new(StreamReader::new(bytes_stream)),
@@ -150,7 +151,7 @@ async fn get_stream(
                 Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
             }
         }
-        _ => panic!("Unsupported storage type for BAM file: {:?}", storage_type),
+        _ => panic!("Unsupported storage type for BAM file: {storage_type:?}"),
     }
 }
 
@@ -185,7 +186,7 @@ where
                         }
                     },
                     Err(e) => {
-                        yield Err(DataFusionError::IoError(e.into()));
+                        yield Err(DataFusionError::IoError(e));
                         return;
                     }
                 }
@@ -231,7 +232,7 @@ where
                         }
                     },
                     Err(e) => {
-                        yield Err(DataFusionError::IoError(e.into()));
+                        yield Err(DataFusionError::IoError(e));
                         return;
                     }
                 }
@@ -270,7 +271,7 @@ where
                         total_count += 1;
                     },
                     Err(e) => {
-                        yield Err(DataFusionError::IoError(e.into()));
+                        yield Err(DataFusionError::IoError(e));
                         return;
                     }
                 }
@@ -314,7 +315,7 @@ where
                         total_count += 1;
                     },
                     Err(e) => {
-                        yield Err(DataFusionError::IoError(e.into()));
+                        yield Err(DataFusionError::IoError(e));
                         return;
                     }
                 }

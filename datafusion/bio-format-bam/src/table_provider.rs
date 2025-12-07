@@ -143,7 +143,7 @@ impl TableProvider for BamTableProvider {
                     indices
                         .iter()
                         .filter_map(|&i| {
-                            if self.schema.field(i).name().to_string() == "tags" {
+                            if *self.schema.field(i).name() == "tags" {
                                 self.tag_defs.clone()
                             } else {
                                 None
@@ -176,15 +176,15 @@ impl TableProvider for BamTableProvider {
 }
 
 async fn get_header(
-    file_path: &String,
+    file_path: &str,
     thread_num: usize,
     object_storage_options: &Option<ObjectStorageOptions>,
 ) -> datafusion::common::Result<noodles::sam::Header> {
-    let storage_type = get_storage_type(file_path.clone());
+    let storage_type = get_storage_type(file_path.to_owned());
     let header = match storage_type {
         StorageType::LOCAL => {
             // For local files, use spawn_blocking to avoid blocking the async runtime
-            let file_path = file_path.clone();
+            let file_path = file_path.to_owned();
             tokio::task::spawn_blocking(move || {
                 let mut reader = std::fs::File::open(&file_path)
                     .map(|f| {
@@ -197,19 +197,18 @@ async fn get_header(
                 reader.read_header()
             })
             .await
-            .map_err(|e| DataFusionError::Execution(format!("Join error: {}", e)))?
+            .map_err(|e| DataFusionError::Execution(format!("Join error: {e}")))?
         }
         StorageType::AZBLOB | StorageType::GCS | StorageType::S3 => {
             let object_storage_options = object_storage_options
                 .as_ref()
                 .expect("Object storage options must be provided for remote BAM files");
             let bytes_stream =
-                get_remote_stream(file_path.clone(), object_storage_options.clone(), None)
+                get_remote_stream(file_path.to_owned(), object_storage_options.clone(), None)
                     .await
                     .map_err(|e| {
                         DataFusionError::Execution(format!(
-                            "Failed to get remote bytes stream: {}",
-                            e
+                            "Failed to get remote bytes stream: {e}"
                         ))
                     })?;
             let mut reader = noodles::bam::r#async::io::Reader::from(
@@ -217,7 +216,7 @@ async fn get_header(
             );
             reader.read_header().await
         }
-        _ => panic!("Unsupported storage type for BAM file: {:?}", storage_type),
+        _ => panic!("Unsupported storage type for BAM file: {storage_type:?}"),
     }?;
     Ok(header)
 }
