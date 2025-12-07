@@ -1,34 +1,36 @@
-use crate::storage::BamReader;
-use async_stream::__private::AsyncStream;
-use async_stream::try_stream;
-use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, UInt32Array};
+use std::any::Any;
+use std::fmt::{Debug, Formatter};
+use std::sync::Arc;
+
+use async_stream::stream;
+use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
-    ObjectStorageOptions, StorageType, get_storage_type,
+    ObjectStorageOptions, StorageType, get_remote_stream, get_storage_type,
 };
-
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use log::debug;
-use noodles_sam::alignment::Record;
-use noodles_sam::alignment::record::cigar::Op;
-use noodles_sam::alignment::record::cigar::op::Kind as OpKind;
-use std::any::Any;
-use std::fmt::{Debug, Formatter};
-use std::io;
-use std::sync::Arc;
+use tokio::io::AsyncBufRead;
+use tokio_stream::Stream;
+use tokio_util::io::StreamReader;
+
+use arrow::array::{ArrayRef, RecordBatchOptions};
+use oxbow::alignment::model::BatchBuilder;
+use oxbow::alignment::model::Push as _;
 
 #[allow(dead_code)]
 pub struct BamExec {
     pub(crate) file_path: String,
     pub(crate) schema: SchemaRef,
-    pub(crate) projection: Option<Vec<usize>>,
+    pub(crate) fields: Option<Vec<String>>,
+    pub(crate) tag_defs: Option<Vec<(String, String)>>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
-    pub(crate) thread_num: Option<usize>,
+    pub(crate) thread_num: usize,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
 }
 
@@ -74,478 +76,260 @@ impl ExecutionPlan for BamExec {
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
         debug!("BamExec::execute");
-        debug!("Projection: {:?}", self.projection);
+        debug!("Fields: {:?}", self.fields);
+        debug!("Tag defs: {:?}", self.tag_defs);
         let batch_size = context.session_config().batch_size();
-        let schema = self.schema.clone();
+        let thread_num = self.thread_num;
+        let storage_type = get_storage_type(self.file_path.clone());
         let fut = get_stream(
             self.file_path.clone(),
-            schema.clone(),
+            self.fields.clone(),
+            self.tag_defs.clone(),
+            self.schema.clone(),
+            storage_type,
             batch_size,
-            self.thread_num,
-            self.projection.clone(),
+            self.limit,
+            thread_num,
             self.object_storage_options.clone(),
         );
+        let schema = self.schema.clone();
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
-async fn get_remote_bam_stream(
-    file_path: String,
-    schema: SchemaRef,
-    batch_size: usize,
-    projection: Option<Vec<usize>>,
-    object_storage_options: Option<ObjectStorageOptions>,
-) -> datafusion::error::Result<
-    AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
-> {
-    let mut reader = BamReader::new(file_path.clone(), None, object_storage_options).await;
-
-    let stream = try_stream! {
-        // Create vectors for accumulating record data.
-        let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
-        let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-        let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-        let mut end : Vec<Option<u32>> = Vec::with_capacity(batch_size);
-
-        let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-        let mut flag : Vec<u32> = Vec::with_capacity(batch_size);
-        let mut cigar : Vec<String> = Vec::with_capacity(batch_size);
-        let mut mate_chrom : Vec<Option<String>> = Vec::with_capacity(batch_size);
-        let mut mate_start : Vec<Option<u32>> = Vec::with_capacity(batch_size);
-        let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
-        let mut sequence : Vec<String> = Vec::with_capacity(batch_size);
-
-        let mut record_num = 0;
-        let mut batch_num = 0;
-
-        // Process records one by one.
-
-        let ref_sequences = reader.read_sequences().await;
-        let mut records = reader.read_records().await;
-        let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
-        while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
-            match record.name() {
-                Some(read_name) => {
-                    name.push(Some(read_name.to_string()));
-                },
-                _ => {
-                    name.push(None);
-                }
-            };
-            let chrom_name = get_chrom_by_seq_id(
-                record.reference_sequence_id(),
-                &names,
-            );
-            chrom.push(chrom_name);
-            match record.alignment_start() {
-                Some(start_pos) => {
-                    start.push(Some(start_pos?.get() as u32));
-                },
-                None => {
-                    start.push(None);
-                }
-            }
-            match record.alignment_end() {
-                Some(end_pos) => {
-                    end.push(Some(end_pos?.get() as u32));
-                },
-                None => {
-                    end.push(None);
-                }
-            };
-            match record.mapping_quality() {
-                Some(mapping_quality_value) => {
-                    mapping_quality.push(Some(mapping_quality_value.get() as u32));
-                },
-                _ => {
-                    mapping_quality.push(None);
-                }
-            };
-           let seq_string = record.sequence().iter()
-               .map(char::from)
-               .collect();
-            sequence.push(seq_string);
-            quality_scores.push(record.quality_scores().iter()
-                .map(|p| char::from(p+33))
-                .collect::<String>());
-
-            flag.push(record.flags().bits() as u32);
-            cigar.push(record.cigar().iter().map(|p| p.unwrap())
-                .map(cigar_op_to_string)
-                .collect::<Vec<String>>().join(""));
-            let chrom_name = get_chrom_by_seq_id(
-                record.mate_reference_sequence_id(),
-                &names,
-            );
-            mate_chrom.push(chrom_name);
-            match record.mate_alignment_start()  {
-                Some(start) => mate_start.push(Some(start?.get() as u32)),
-                _ => mate_start.push(None),
-            };
-
-
-            record_num += 1;
-            // Once the batch size is reached, build and yield a record batch.
-            if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
-                let batch = build_record_batch(
-                    Arc::clone(&schema.clone()),
-                    &name,
-                    &chrom,
-                    &start,
-                    &end,
-                    &flag,
-                    &cigar,
-                    &mapping_quality,
-                    &mate_chrom,
-                    &mate_start,
-                    &sequence,
-                    &quality_scores,
-                    projection.clone(),
-                )?;
-                batch_num += 1;
-                debug!("Batch number: {}", batch_num);
-                yield batch;
-                // Clear vectors for the next batch.
-                name.clear();
-                chrom.clear();
-                start.clear();
-                end.clear();
-                flag.clear();
-                cigar.clear();
-                mapping_quality.clear();
-                mate_chrom.clear();
-                mate_start.clear();
-                sequence.clear();
-                quality_scores.clear();
-            }
-        }
-        // If there are remaining records that don't fill a complete batch,
-        // yield them as well.
-        if !name.is_empty() {
-            let batch = build_record_batch(
-                Arc::clone(&schema.clone()),
-                &name,
-                &chrom,
-                &start,
-                &end,
-                &flag,
-                &cigar,
-                &mapping_quality,
-                &mate_chrom,
-                &mate_start,
-                &sequence,
-                &quality_scores,
-                projection.clone(),
-                // if infos.is_empty() { None } else { Some(&infos) },
-            )?;
-            yield batch;
-        }
-    };
-    Ok(stream)
-}
-
-async fn get_local_bam(
-    file_path: String,
-    schema: SchemaRef,
-    batch_size: usize,
-    thread_num: Option<usize>,
-    projection: Option<Vec<usize>>,
-) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
-{
-    let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
-    let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-    let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-    let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-
-    let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-    let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
-    let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
-    let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-    let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-    let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
-    let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
-
-    // let mut count: usize = 0;
-    let mut batch_num = 0;
-    let file_path = file_path.clone();
-    let mut reader = BamReader::new(file_path.clone(), thread_num, None).await;
-    let mut record_num = 0;
-
-    let stream = try_stream! {
-        let ref_sequences = reader.read_sequences().await;
-        let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
-        let mut records = reader.read_records().await;
-        // let iter_start_time = Instant::now();
-        while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
-            let seq_string = record.sequence().iter()
-                   .map(char::from)
-                   .collect();
-            let chrom_name = get_chrom_by_seq_id(
-                record.reference_sequence_id(),
-                &names,
-            );
-            chrom.push(chrom_name);
-            match record.name() {
-                Some(read_name) => {
-                    name.push(Some(read_name.to_string()));
-                },
-                _ => {
-                    name.push(None);
-                }
-            };
-            match record.alignment_start() {
-                Some(start_pos) => {
-                    start.push(Some(start_pos?.get() as u32));
-                },
-                None => {
-                    start.push(None);
-                }
-            }
-            match record.alignment_end() {
-                Some(end_pos) => {
-                    end.push(Some(end_pos?.get() as u32));
-                },
-                None => {
-                    end.push(None);
-                }
-            };
-            sequence.push(seq_string);
-            quality_scores.push(record.quality_scores().iter()
-                .map(|p| char::from(p+33))
-                .collect::<String>());
-
-            match record.mapping_quality() {
-                Some(mapping_quality_value) => {
-                    mapping_quality.push(Some(mapping_quality_value.get() as u32));
-                },
-                None => {
-                    mapping_quality.push(None);
-                }
-            };
-            flag.push(record.flags().bits() as u32);
-            cigar.push(record.cigar().iter().map(|p| p.unwrap())
-                .map(cigar_op_to_string)
-                .collect::<Vec<String>>().join(""));
-             let chrom_name = get_chrom_by_seq_id(
-                record.mate_reference_sequence_id(),
-                &names,
-            );
-            mate_chrom.push(chrom_name);
-            match record.mate_alignment_start()  {
-                Some(start) => mate_start.push(Some(start?.get() as u32)),
-                None => mate_start.push(None),
-            };
-
-            record_num += 1;
-            // Once the batch size is reached, build and yield a record batch.
-            if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
-                let batch = build_record_batch(
-                    Arc::clone(&schema.clone()),
-                   &name,
-                    &chrom,
-                    &start,
-                    &end,
-                    &flag,
-                    &cigar,
-                    &mapping_quality,
-                    &mate_chrom,
-                    &mate_start,
-                    &sequence,
-                    &quality_scores,
-                    projection.clone(),
-                )?;
-                batch_num += 1;
-                debug!("Batch number: {}", batch_num);
-                yield batch;
-                // Clear vectors for the next batch.
-                name.clear();
-                chrom.clear();
-                start.clear();
-                end.clear();
-                flag.clear();
-                cigar.clear();
-                mapping_quality.clear();
-                mate_chrom.clear();
-                mate_start.clear();
-                sequence.clear();
-                quality_scores.clear();
-            }
-        }
-        // If there are remaining records that don't fill a complete batch,
-        // yield them as well.
-        if !name.is_empty() {
-            let batch = build_record_batch(
-                Arc::clone(&schema.clone()),
-               &name,
-                &chrom,
-                &start,
-                &end,
-                &flag,
-                &cigar,
-                &mapping_quality,
-                &mate_chrom,
-                &mate_start,
-                &sequence,
-                &quality_scores,
-                projection.clone(),
-            )?;
-            yield batch;
-        }
-    };
-    Ok(stream)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_record_batch(
-    schema: SchemaRef,
-    name: &[Option<String>],
-    chrom: &[Option<String>],
-    start: &[Option<u32>],
-    end: &[Option<u32>],
-    flag: &[u32],
-    cigar: &[String],
-    mapping_quality: &[Option<u32>],
-    mate_chrom: &[Option<String>],
-    mate_start: &[Option<u32>],
-    sequence: &[String],
-    quality_scores: &[String],
-    projection: Option<Vec<usize>>,
-) -> datafusion::error::Result<RecordBatch> {
-    let name_array = Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>;
-    let chrom_array = Arc::new(StringArray::from(chrom.to_vec())) as Arc<dyn Array>;
-    let start_array = Arc::new(UInt32Array::from(start.to_vec())) as Arc<dyn Array>;
-    let end_array = Arc::new(UInt32Array::from(end.to_vec())) as Arc<dyn Array>;
-    let flag_array = Arc::new(UInt32Array::from(flag.to_vec())) as Arc<dyn Array>;
-    let cigar_array = Arc::new(StringArray::from(cigar.to_vec())) as Arc<dyn Array>;
-    let mapping_quality_array =
-        Arc::new(UInt32Array::from(mapping_quality.to_vec())) as Arc<dyn Array>;
-    let mate_chrom_array = Arc::new(StringArray::from(mate_chrom.to_vec())) as Arc<dyn Array>;
-    let mate_start_array = Arc::new(UInt32Array::from(mate_start.to_vec())) as Arc<dyn Array>;
-    let sequence_array = Arc::new(StringArray::from(sequence.to_vec())) as Arc<dyn Array>;
-    let quality_scores_array =
-        Arc::new(StringArray::from(quality_scores.to_vec())) as Arc<dyn Array>;
-
-    let arrays = match projection {
-        None => {
-            let arrays: Vec<Arc<dyn Array>> = vec![
-                name_array,
-                chrom_array,
-                start_array,
-                end_array,
-                flag_array,
-                cigar_array,
-                mapping_quality_array,
-                mate_chrom_array,
-                mate_start_array,
-                sequence_array,
-                quality_scores_array,
-            ];
-            arrays
-        }
-        Some(proj_ids) => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(name.len());
-            if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(name_array.len())) as Arc<dyn Array>);
-            } else {
-                for i in proj_ids.clone() {
-                    match i {
-                        0 => arrays.push(name_array.clone()),
-                        1 => arrays.push(chrom_array.clone()),
-                        2 => arrays.push(start_array.clone()),
-                        3 => arrays.push(end_array.clone()),
-                        4 => arrays.push(flag_array.clone()),
-                        5 => arrays.push(cigar_array.clone()),
-                        6 => arrays.push(mapping_quality_array.clone()),
-                        7 => arrays.push(mate_chrom_array.clone()),
-                        8 => arrays.push(mate_start_array.clone()),
-                        9 => arrays.push(sequence_array.clone()),
-                        10 => arrays.push(quality_scores_array.clone()),
-                        _ => arrays
-                            .push(Arc::new(NullArray::new(name_array.len())) as Arc<dyn Array>),
-                    }
-                }
-            }
-            arrays
-        }
-    };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
-}
 
 async fn get_stream(
     file_path: String,
-    schema_ref: SchemaRef,
+    fields: Option<Vec<String>>,
+    tag_defs: Option<Vec<(String, String)>>,
+    schema: SchemaRef,
+    storage_type: StorageType,
     batch_size: usize,
-    thread_num: Option<usize>,
-    projection: Option<Vec<usize>>,
+    limit: Option<usize>,
+    thread_num: usize,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
-    // Open the BGZF-indexed VCF using IndexedReader.
-
-    let file_path = file_path.clone();
-    let store_type = get_storage_type(file_path.clone());
-    let schema = schema_ref.clone();
-
-    match store_type {
+    match storage_type {
         StorageType::LOCAL => {
-            let stream = get_local_bam(
-                file_path.clone(),
-                schema.clone(),
-                batch_size,
-                thread_num,
-                projection,
-            )
-            .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            let mut reader = std::fs::File::open(file_path)
+                .map(|f| {
+                    noodles_bgzf::MultithreadedReader::with_worker_count(
+                        std::num::NonZero::new(thread_num).unwrap(),
+                        f,
+                    )
+                })
+                .map(noodles::bam::io::Reader::from)?;
+            let header = reader.read_header()?;
+            if schema.fields().is_empty() {
+                let stream = columnless_batch_stream(reader, batch_size, limit);
+                Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+            } else {
+                let builder = BatchBuilder::new(header, fields, tag_defs, batch_size)?;
+                let stream = local_batch_stream(reader, builder, batch_size, limit);
+                Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+            }
         }
-        StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
-            let stream = get_remote_bam_stream(
-                file_path.clone(),
-                schema.clone(),
-                batch_size,
-                projection,
-                object_storage_options,
-            )
-            .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+        StorageType::AZBLOB | StorageType::GCS | StorageType::S3 => {
+            let object_storage_options = object_storage_options
+                .expect("Object storage options must be provided for remote BAM files");
+            let bytes_stream = get_remote_stream(file_path.clone(), object_storage_options, None)
+                .await
+                .map_err(|e| {
+                    DataFusionError::Execution(format!("Failed to get remote bytes stream: {}", e))
+                })?;
+            let mut reader = noodles::bam::r#async::io::Reader::from(
+                noodles::bgzf::AsyncReader::new(StreamReader::new(bytes_stream)),
+            );
+            let header = reader.read_header().await?;
+            if schema.fields().is_empty() {
+                let stream = remote_columnless_batch_stream(reader, batch_size, limit);
+                Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+            } else {
+                let builder = BatchBuilder::new(header, fields, tag_defs, batch_size)?;
+                let stream = remote_batch_stream(reader, builder, batch_size, limit);
+                Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+            }
         }
-        _ => unimplemented!("Unsupported storage type: {:?}", store_type),
+        _ => panic!("Unsupported storage type for BAM file: {:?}", storage_type),
     }
 }
 
-fn cigar_op_to_string(op: Op) -> String {
-    let kind = match op.kind() {
-        OpKind::Match => 'M',
-        OpKind::Insertion => 'I',
-        OpKind::Deletion => 'D',
-        OpKind::Skip => 'N',
-        OpKind::SoftClip => 'S',
-        OpKind::HardClip => 'H',
-        OpKind::Pad => 'P',
-        OpKind::SequenceMatch => '=',
-        OpKind::SequenceMismatch => 'X',
-    };
-    format!("{}{}", op.len(), kind)
+pub fn local_batch_stream<R>(
+    mut reader: noodles::bam::io::Reader<R>,
+    mut builder: BatchBuilder,
+    batch_size: usize,
+    limit: Option<usize>,
+) -> impl Stream<Item = Result<RecordBatch, DataFusionError>>
+where
+    R: std::io::Read,
+{
+    stream! {
+        let mut record = noodles::bam::Record::default();
+        let mut total_count = 0;
+        let limit = limit.unwrap_or(usize::MAX);
+
+        loop {
+            let mut count = 0;
+
+            while count < batch_size && total_count < limit {
+                match reader.read_record(&mut record) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => match builder.push(&record) {
+                        Ok(()) => {
+                            total_count += 1;
+                            count += 1;
+                        }
+                        Err(e) => {
+                            yield Err(e.into());
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        yield Err(DataFusionError::IoError(e.into()));
+                        return;
+                    }
+                }
+            }
+
+            if count == 0 {
+                break;
+            }
+
+            yield builder.finish().map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
+        }
+    }
 }
 
-fn get_chrom_by_seq_id(rid: Option<io::Result<usize>>, names: &[String]) -> Option<String> {
-    match rid {
-        Some(rid) => {
-            let idx = rid.unwrap();
-            let chrom_name = names
-                .get(idx)
-                .expect("reference_sequence_id() should be in bounds");
-            let mut chrom_name = chrom_name.to_string().to_lowercase();
-            if !chrom_name.starts_with("chr") {
-                chrom_name = format!("chr{}", chrom_name);
+pub fn remote_batch_stream<R>(
+    mut reader: noodles::bam::r#async::io::Reader<R>,
+    mut builder: BatchBuilder,
+    batch_size: usize,
+    limit: Option<usize>,
+) -> impl Stream<Item = Result<RecordBatch, DataFusionError>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    stream! {
+        let mut record = noodles::bam::Record::default();
+        let mut total_count = 0;
+        let limit = limit.unwrap_or(usize::MAX);
+
+        loop {
+            let mut count = 0;
+
+            while count < batch_size && total_count < limit {
+                match reader.read_record(&mut record).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => match builder.push(&record) {
+                        Ok(()) => {
+                            total_count += 1;
+                            count += 1;
+                        }
+                        Err(e) => {
+                            yield Err(e.into());
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        yield Err(DataFusionError::IoError(e.into()));
+                        return;
+                    }
+                }
             }
-            Some(chrom_name)
+
+            if count == 0 {
+                break;
+            }
+
+            yield builder.finish().map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
         }
-        _ => None,
+    }
+}
+
+pub fn columnless_batch_stream<R>(
+    mut reader: noodles::bam::io::Reader<R>,
+    batch_size: usize,
+    limit: Option<usize>,
+) -> impl Stream<Item = Result<RecordBatch, DataFusionError>>
+where
+    R: std::io::Read,
+{
+    stream! {
+        let mut record = noodles::bam::Record::default();
+        let mut total_count = 0;
+        let limit = limit.unwrap_or(usize::MAX);
+
+        loop {
+            let mut count = 0;
+
+            while count < batch_size && total_count < limit {
+                match reader.read_record(&mut record) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        count += 1;
+                        total_count += 1;
+                    },
+                    Err(e) => {
+                        yield Err(DataFusionError::IoError(e.into()));
+                        return;
+                    }
+                }
+            }
+
+            if count == 0 {
+                break;
+            }
+
+            let columns: Vec<ArrayRef> = vec![];
+            let schema = arrow::datatypes::Schema::new(vec![] as Vec<arrow::datatypes::Field>);
+            let options = RecordBatchOptions::new().with_row_count(Some(count));
+
+            yield RecordBatch::try_new_with_options(Arc::new(schema), columns, &options)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
+        }
+    }
+}
+
+pub fn remote_columnless_batch_stream<R>(
+    mut reader: noodles::bam::r#async::io::Reader<R>,
+    batch_size: usize,
+    limit: Option<usize>,
+) -> impl Stream<Item = Result<RecordBatch, DataFusionError>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    stream! {
+        let mut record = noodles::bam::Record::default();
+        let mut total_count = 0;
+        let limit = limit.unwrap_or(usize::MAX);
+
+        loop {
+            let mut count = 0;
+
+            while count < batch_size && total_count < limit {
+                match reader.read_record(&mut record).await {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        count += 1;
+                        total_count += 1;
+                    },
+                    Err(e) => {
+                        yield Err(DataFusionError::IoError(e.into()));
+                        return;
+                    }
+                }
+            }
+
+            if count == 0 {
+                break;
+            }
+
+            let columns: Vec<ArrayRef> = vec![];
+            let schema = arrow::datatypes::Schema::new(vec![] as Vec<arrow::datatypes::Field>);
+            let options = RecordBatchOptions::new().with_row_count(Some(count));
+
+            yield RecordBatch::try_new_with_options(Arc::new(schema), columns, &options)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
+        }
     }
 }

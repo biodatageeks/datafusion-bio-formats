@@ -1,7 +1,10 @@
-use crate::physical_exec::BamExec;
+use std::any::Any;
+use std::sync::Arc;
+
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::DataFusionError;
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
@@ -9,29 +12,13 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::object_storage::{
+    ObjectStorageOptions, StorageType, get_remote_stream, get_storage_type,
+};
 use log::debug;
-use std::any::Any;
-use std::sync::Arc;
+use tokio_util::io::StreamReader;
 
-fn determine_schema() -> datafusion::common::Result<SchemaRef> {
-    let fields = vec![
-        Field::new("name", DataType::Utf8, true),
-        Field::new("chrom", DataType::Utf8, true),
-        Field::new("start", DataType::UInt32, true),
-        Field::new("end", DataType::UInt32, true),
-        Field::new("flags", DataType::UInt32, false), //FIXME:: optimize storage
-        Field::new("cigar", DataType::Utf8, false),
-        Field::new("mapping_quality", DataType::UInt32, true),
-        Field::new("mate_chrom", DataType::Utf8, true),
-        Field::new("mate_start", DataType::UInt32, true),
-        Field::new("sequence", DataType::Utf8, false),
-        Field::new("quality_scores", DataType::Utf8, false),
-    ];
-    let schema = Schema::new(fields);
-    debug!("Schema: {:?}", schema);
-    Ok(Arc::new(schema))
-}
+use crate::physical_exec::BamExec;
 
 /// A DataFusion table provider for BAM (Binary Alignment Map) files.
 ///
@@ -42,10 +29,13 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
 pub struct BamTableProvider {
     /// Path to the BAM file (local or remote)
     file_path: String,
-    /// Arrow schema for the BAM records
+    // Fields and tag defs define the initial table schema
+    fields: Option<Vec<String>>,             // None means default fields
+    tag_defs: Option<Vec<(String, String)>>, // None means no tags column
+    /// Schema of the BAM file as an Arrow SchemaRef
     schema: SchemaRef,
     /// Number of threads to use for BGZF decompression
-    thread_num: Option<usize>,
+    thread_num: usize,
     /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
 }
@@ -69,22 +59,37 @@ impl BamTableProvider {
     /// use datafusion_bio_format_bam::table_provider::BamTableProvider;
     ///
     /// # async fn example() -> datafusion::common::Result<()> {
-    /// let provider = BamTableProvider::new(
+    /// let provider = BamTableProvider::try_new(
     ///     "data/alignments.bam".to_string(),
+    ///     None,     // No field filter
+    ///     None,     // No tag definitions
     ///     Some(4),  // Use 4 threads
     ///     None,     // No cloud storage
-    /// )?;
+    /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(
+    pub async fn try_new(
         file_path: String,
+        fields: Option<Vec<String>>,
+        tag_defs: Option<Vec<(String, String)>>,
+        // tag_scan_rows: Option<usize>,  // TODO: optional tag discovery
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema()?;
+        let thread_num = thread_num.unwrap_or(1);
+        let header = get_header(&file_path, thread_num, &object_storage_options).await?;
+        let builder = oxbow::alignment::model::BatchBuilder::new(
+            header.clone(),
+            fields.clone(),
+            tag_defs.clone(),
+            0,
+        )?;
+        let schema = Arc::new(builder.get_arrow_schema());
         Ok(Self {
             file_path,
+            fields,
+            tag_defs,
             schema,
             thread_num,
             object_storage_options,
@@ -117,35 +122,102 @@ impl TableProvider for BamTableProvider {
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         debug!("BamTableProvider::scan");
 
-        fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
-            match projection {
-                Some(indices) if indices.is_empty() => {
-                    Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
-                }
-                Some(indices) => {
-                    let projected_fields: Vec<Field> =
-                        indices.iter().map(|&i| schema.field(i).clone()).collect();
-                    Arc::new(Schema::new(projected_fields))
-                }
-                None => schema.clone(),
-            }
-        }
+        let (fields, tag_defs, projected_schema) = match projection {
+            None => (
+                self.fields.clone(),
+                self.tag_defs.clone(),
+                self.schema.clone(),
+            ),
+            Some(indices) => {
+                let projected_schema: SchemaRef = self.schema.project(indices)?.into();
 
-        let schema = project_schema(&self.schema, projection);
+                let fields: Option<Vec<String>> = Some(
+                    indices
+                        .iter()
+                        .map(|i| self.schema.field(*i).name().to_string())
+                        .filter(|name| name != "tags")
+                        .collect(),
+                );
+
+                let tag_defs: Option<Vec<(String, String)>> = Some(
+                    indices
+                        .iter()
+                        .filter_map(|&i| {
+                            if self.schema.field(i).name().to_string() == "tags" {
+                                self.tag_defs.clone()
+                            } else {
+                                None
+                            }
+                        })
+                        .flatten()
+                        .collect(),
+                );
+
+                (fields, tag_defs, projected_schema)
+            }
+        };
 
         Ok(Arc::new(BamExec {
             cache: PlanProperties::new(
-                EquivalenceProperties::new(schema.clone()),
+                EquivalenceProperties::new(projected_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
             ),
             file_path: self.file_path.clone(),
-            schema: schema.clone(),
-            projection: projection.cloned(),
+            fields,
+            tag_defs,
+            schema: projected_schema,
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
         }))
     }
+}
+
+async fn get_header(
+    file_path: &String,
+    thread_num: usize,
+    object_storage_options: &Option<ObjectStorageOptions>,
+) -> datafusion::common::Result<noodles::sam::Header> {
+    let storage_type = get_storage_type(file_path.clone());
+    let header = match storage_type {
+        StorageType::LOCAL => {
+            // For local files, use spawn_blocking to avoid blocking the async runtime
+            let file_path = file_path.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut reader = std::fs::File::open(&file_path)
+                    .map(|f| {
+                        noodles_bgzf::MultithreadedReader::with_worker_count(
+                            std::num::NonZero::new(thread_num).unwrap(),
+                            f,
+                        )
+                    })
+                    .map(noodles::bam::io::Reader::from)?;
+                reader.read_header()
+            })
+            .await
+            .map_err(|e| DataFusionError::Execution(format!("Join error: {}", e)))?
+        }
+        StorageType::AZBLOB | StorageType::GCS | StorageType::S3 => {
+            let object_storage_options = object_storage_options
+                .as_ref()
+                .expect("Object storage options must be provided for remote BAM files");
+            let bytes_stream =
+                get_remote_stream(file_path.clone(), object_storage_options.clone(), None)
+                    .await
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Failed to get remote bytes stream: {}",
+                            e
+                        ))
+                    })?;
+            let mut reader = noodles::bam::r#async::io::Reader::from(
+                noodles::bgzf::AsyncReader::new(StreamReader::new(bytes_stream)),
+            );
+            reader.read_header().await
+        }
+        _ => panic!("Unsupported storage type for BAM file: {:?}", storage_type),
+    }?;
+    Ok(header)
 }

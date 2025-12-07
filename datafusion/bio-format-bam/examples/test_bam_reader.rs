@@ -14,8 +14,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         concurrent_fetches: Some(1), // Number of concurrent requests
         compression_type: None,
     };
-    let table =
-        BamTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options)).unwrap();
+    let table = BamTableProvider::try_new(
+        file_path.clone(),
+        None,
+        None,
+        Some(1),
+        Some(object_storage_options),
+    )
+    .await?;
 
     let ctx = datafusion::execution::context::SessionContext::new();
     ctx.sql("set datafusion.execution.skip_physical_aggregate_schema_check=true")
