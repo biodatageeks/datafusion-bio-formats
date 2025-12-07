@@ -1,0 +1,651 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner platform'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - linux
+          - macos
+      benchmark_suite:
+        description: 'Benchmark suite'
+        required: true
+        default: 'fast'
+        type: choice
+        options:
+          - fast
+          - full
+      baseline_tag:
+        description: 'Baseline tag (leave empty for latest)'
+        required: false
+        type: string
+      target_ref:
+        description: 'Target ref (leave empty for current branch)'
+        required: false
+        type: string
+
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'datafusion/**'
+      - 'benchmarks/**'
+      - '.github/workflows/benchmark.yml'
+
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    name: Prepare Configuration
+    runs-on: ubuntu-22.04
+    outputs:
+      baseline_tag: ${{ steps.config.outputs.baseline_tag }}
+      target_ref: ${{ steps.config.outputs.target_ref }}
+      run_linux: ${{ steps.config.outputs.run_linux }}
+      run_macos: ${{ steps.config.outputs.run_macos }}
+      benchmark_mode: ${{ steps.config.outputs.benchmark_mode }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Configuration
+        id: config
+        run: |
+          # Determine baseline tag
+          if [ -n "${{ inputs.baseline_tag }}" ]; then
+            BASELINE="${{ inputs.baseline_tag }}"
+          else
+            BASELINE=$(git describe --tags --abbrev=0 2>/dev/null || echo "none")
+          fi
+          echo "baseline_tag=$BASELINE" >> $GITHUB_OUTPUT
+
+          # Determine target ref
+          if [ -n "${{ inputs.target_ref }}" ]; then
+            TARGET="${{ inputs.target_ref }}"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, use the head branch name
+            TARGET="${{ github.head_ref }}"
+          else
+            TARGET="${{ github.ref_name }}"
+          fi
+          echo "target_ref=$TARGET" >> $GITHUB_OUTPUT
+
+          # Determine runners (default to 'all' for PR triggers)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RUNNER="all"
+          else
+            RUNNER="${{ inputs.runner || 'all' }}"
+          fi
+
+          if [ "$RUNNER" = "all" ] || [ "$RUNNER" = "linux" ]; then
+            echo "run_linux=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_linux=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ "$RUNNER" = "all" ] || [ "$RUNNER" = "macos" ]; then
+            echo "run_macos=true" >> $GITHUB_OUTPUT
+          else
+            echo "run_macos=false" >> $GITHUB_OUTPUT
+          fi
+
+          # Benchmark mode (default to 'fast' for PR triggers)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            MODE="fast"
+          else
+            MODE="${{ inputs.benchmark_suite || 'fast' }}"
+          fi
+          echo "benchmark_mode=$MODE" >> $GITHUB_OUTPUT
+
+          echo "Configuration:"
+          echo "  Event: ${{ github.event_name }}"
+          echo "  Baseline: $BASELINE"
+          echo "  Target: $TARGET"
+          echo "  Runners: $RUNNER"
+          echo "  Mode: $MODE"
+
+  benchmark-linux:
+    name: Run Benchmarks (Linux)
+    needs: prepare
+    if: ${{ needs.prepare.outputs.run_linux == 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.86.0'
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+# Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
+      - name: Checkout Baseline Code
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          git checkout ${{ needs.prepare.outputs.baseline_tag }}
+          git submodule update --init --recursive
+
+      - name: Copy Benchmark Framework to Baseline
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          # Save current benchmark framework and workspace config
+          git checkout ${{ github.sha }} -- benchmarks/ Cargo.toml
+          echo "✓ Copied current benchmark framework to baseline tag"
+
+      - name: Build Baseline Benchmark Runner
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          cargo build --release --package datafusion-bio-benchmarks-runner
+        env:
+          CARGO_INCREMENTAL: "0"
+          # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
+          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+
+      - name: Run Baseline Benchmarks
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          mkdir -p baseline_results
+          ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
+        env:
+          RUST_LOG: info
+
+      # Reset Cargo.lock before target build (keep compiled artifacts)
+      - name: Reset Cargo.lock
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          # Reset any changes to Cargo.lock from baseline build
+          git checkout HEAD -- Cargo.lock || true
+
+      # Run TARGET benchmarks
+      - name: Checkout Target
+        run: |
+          git checkout ${{ needs.prepare.outputs.target_ref }}
+          git submodule update --init --recursive
+
+      - name: Build Target Benchmark Runner
+        run: |
+          cargo build --release --package datafusion-bio-benchmarks-runner
+        env:
+          CARGO_INCREMENTAL: "0"
+          # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
+          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+
+      - name: Run Target Benchmarks
+        run: |
+          mkdir -p target_results
+          ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir target_results
+        env:
+          RUST_LOG: info
+
+      - name: Collect System Info
+        run: |
+          mkdir -p metadata
+          cat > metadata/linux.json << EOF
+          {
+            "platform": "linux",
+            "runner": "ubuntu-22.04",
+            "os": "$(uname -s)",
+            "os_version": "$(uname -r)",
+            "arch": "$(uname -m)",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "baseline_tag": "${{ needs.prepare.outputs.baseline_tag }}",
+            "target_ref": "${{ needs.prepare.outputs.target_ref }}",
+            "commit_sha": "${{ github.sha }}",
+            "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
+          }
+          EOF
+
+      - name: Upload Baseline Results
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-results-linux
+          path: baseline_results/
+          retention-days: 90
+
+      - name: Upload Target Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-results-linux
+          path: target_results/
+          retention-days: 90
+
+      - name: Upload Metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-linux
+          path: metadata/
+          retention-days: 90
+
+  benchmark-macos:
+    name: Run Benchmarks (macOS)
+    needs: prepare
+    if: ${{ needs.prepare.outputs.run_macos == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.86.0'
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+# Run BASELINE benchmarks (always run by copying current benchmark framework to baseline)
+      - name: Checkout Baseline Code
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          git checkout ${{ needs.prepare.outputs.baseline_tag }}
+          git submodule update --init --recursive
+
+      - name: Copy Benchmark Framework to Baseline
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          # Save current benchmark framework and workspace config
+          git checkout ${{ github.sha }} -- benchmarks/ Cargo.toml
+          echo "✓ Copied current benchmark framework to baseline tag"
+
+      - name: Build Baseline Benchmark Runner
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          cargo build --release --package datafusion-bio-benchmarks-runner
+        env:
+          CARGO_INCREMENTAL: "0"
+          # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
+          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+
+      - name: Run Baseline Benchmarks
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          mkdir -p baseline_results
+          ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir baseline_results
+        env:
+          RUST_LOG: info
+
+      # Reset Cargo.lock before target build (keep compiled artifacts)
+      - name: Reset Cargo.lock
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        run: |
+          # Reset any changes to Cargo.lock from baseline build
+          git checkout HEAD -- Cargo.lock || true
+
+      # Run TARGET benchmarks
+      - name: Checkout Target
+        run: |
+          git checkout ${{ needs.prepare.outputs.target_ref }}
+          git submodule update --init --recursive
+
+      - name: Build Target Benchmark Runner
+        run: |
+          cargo build --release --package datafusion-bio-benchmarks-runner
+        env:
+          CARGO_INCREMENTAL: "0"
+          # RUSTC_WRAPPER: sccache  # Temporarily disabled due to GitHub Actions cache service outage
+          # SCCACHE_GHA_ENABLED: "true"  # Temporarily disabled
+
+      - name: Run Target Benchmarks
+        run: |
+          mkdir -p target_results
+          ./target/release/benchmark-runner benchmarks/configs/gff.yml --output-dir target_results
+        env:
+          RUST_LOG: info
+
+      - name: Collect System Info
+        run: |
+          mkdir -p metadata
+          cat > metadata/macos.json << EOF
+          {
+            "platform": "macos",
+            "runner": "macos-latest",
+            "os": "$(uname -s)",
+            "os_version": "$(uname -r)",
+            "arch": "$(uname -m)",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "baseline_tag": "${{ needs.prepare.outputs.baseline_tag }}",
+            "target_ref": "${{ needs.prepare.outputs.target_ref }}",
+            "commit_sha": "${{ github.sha }}",
+            "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
+          }
+          EOF
+
+      - name: Upload Baseline Results
+        if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-results-macos
+          path: baseline_results/
+          retention-days: 90
+
+      - name: Upload Target Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: target-results-macos
+          path: target_results/
+          retention-days: 90
+
+      - name: Upload Metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-macos
+          path: metadata/
+          retention-days: 90
+
+  aggregate:
+    name: Aggregate and Store Results
+    needs: [prepare, benchmark-linux, benchmark-macos]
+    if: ${{ always() }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          fetch-depth: 0
+
+      - name: Download All Results
+        uses: actions/download-artifact@v4
+        with:
+          path: all_results
+
+      - name: Organize Results in benchmark-data
+        run: |
+          TARGET_REF="${{ needs.prepare.outputs.target_ref }}"
+          BASELINE_TAG="${{ needs.prepare.outputs.baseline_tag }}"
+          COMMIT_SHA="${{ github.sha }}"
+          SHORT_SHA="${COMMIT_SHA:0:8}"
+
+          # Store BASELINE results if present (as standalone tag entry)
+          if [ "$BASELINE_TAG" != "none" ] && [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            BASELINE_BASE="benchmark-data/tags/$BASELINE_TAG"
+            echo "Storing baseline tag results in: $BASELINE_BASE"
+
+            for platform in linux macos; do
+              if [ -d "all_results/baseline-results-$platform" ]; then
+                DEST_DIR="$BASELINE_BASE/$platform/results"
+                mkdir -p "$DEST_DIR"
+                cp -r all_results/baseline-results-$platform/* "$DEST_DIR/" || true
+                echo "✓ Copied baseline results for $platform to $DEST_DIR"
+
+                # Copy metadata
+                if [ -d "all_results/metadata-$platform" ]; then
+                  cp all_results/metadata-$platform/*.json "$BASELINE_BASE/$platform/" || true
+                fi
+              fi
+            done
+
+            # Create metadata.json for baseline tag
+            cat > "$BASELINE_BASE/metadata.json" << EOF
+          {
+            "ref": "$BASELINE_TAG",
+            "ref_type": "tag",
+            "commit_sha": "$COMMIT_SHA",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
+          }
+          EOF
+          fi
+
+          # Store TARGET results (as standalone entry)
+          if [[ "$TARGET_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            # Target is a tag
+            DEST_BASE="benchmark-data/tags/$TARGET_REF"
+            REF_TYPE="tag"
+          else
+            # Target is a commit/branch
+            DEST_BASE="benchmark-data/commits/$SHORT_SHA"
+            REF_TYPE="branch"
+          fi
+
+          echo "Storing target results in: $DEST_BASE"
+
+          for platform in linux macos; do
+            if [ -d "all_results/target-results-$platform" ]; then
+              DEST_DIR="$DEST_BASE/$platform/results"
+              mkdir -p "$DEST_DIR"
+              cp -r all_results/target-results-$platform/* "$DEST_DIR/" || true
+              echo "✓ Copied target results for $platform to $DEST_DIR"
+
+              # Copy metadata
+              if [ -d "all_results/metadata-$platform" ]; then
+                cp all_results/metadata-$platform/*.json "$DEST_BASE/$platform/" || true
+              fi
+            fi
+          done
+
+          # Create metadata.json for target
+          mkdir -p "$DEST_BASE"
+          cat > "$DEST_BASE/metadata.json" << EOF
+          {
+            "ref": "$TARGET_REF",
+            "ref_type": "$REF_TYPE",
+            "commit_sha": "$COMMIT_SHA",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "benchmark_mode": "${{ needs.prepare.outputs.benchmark_mode }}"
+          }
+          EOF
+
+          echo "DEST_BASE=$DEST_BASE" >> $GITHUB_ENV
+          echo "REF_TYPE=$REF_TYPE" >> $GITHUB_ENV
+          echo "TARGET_REF=$TARGET_REF" >> $GITHUB_ENV
+          echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_ENV
+          echo "BASELINE_TAG=$BASELINE_TAG" >> $GITHUB_ENV
+
+      - name: Update Master Index
+        run: |
+          DEST_BASE="${{ env.DEST_BASE }}"
+          TARGET_REF="${{ env.TARGET_REF }}"
+          REF_TYPE="${{ env.REF_TYPE }}"
+          SHORT_SHA="${{ env.SHORT_SHA }}"
+          BASELINE_TAG="${{ env.BASELINE_TAG }}"
+          COMMIT_SHA="${{ github.sha }}"
+
+          # Create index.json if it doesn't exist
+          INDEX_FILE="benchmark-data/index.json"
+          if [ ! -f "$INDEX_FILE" ]; then
+            cat > "$INDEX_FILE" << EOF
+          {
+            "last_updated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "datasets": [],
+            "tags": [],
+            "latest_tag": ""
+          }
+          EOF
+          fi
+
+          # Install jq for JSON manipulation
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # Add baseline tag to index if present
+          if [ "$BASELINE_TAG" != "none" ] && [[ "$BASELINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            for platform in linux macos; do
+              if [ -d "benchmark-data/tags/$BASELINE_TAG/$platform" ]; then
+                RUNNER_LABEL=$([ "$platform" = "linux" ] && echo "Linux AMD64" || echo "macOS ARM64")
+                jq --arg ref "$BASELINE_TAG" \
+                   --arg type "tag" \
+                   --arg sha "$COMMIT_SHA" \
+                   --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                   --arg runner "$platform" \
+                   --arg runnerlabel "$RUNNER_LABEL" \
+                   --arg path "tags/$BASELINE_TAG/$platform" \
+                   '.datasets += [{
+                     id: ($ref + "@" + $sha + "@" + $runner),
+                     label: $ref,
+                     ref: $ref,
+                     ref_type: $type,
+                     timestamp: $ts,
+                     runner: $runner,
+                     runner_label: $runnerlabel,
+                     path: $path,
+                     commit_sha: $sha,
+                     is_latest_tag: false
+                   }] | .datasets |= unique_by(.id)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+              fi
+            done
+
+            # Update tags array
+            jq --arg tag "$BASELINE_TAG" '.tags += [$tag] | .tags |= unique | .tags |= sort' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+          fi
+
+          # Add target dataset to index
+          for platform in linux macos; do
+            if [ -d "$DEST_BASE/$platform" ]; then
+              RUNNER_LABEL=$([ "$platform" = "linux" ] && echo "Linux AMD64" || echo "macOS ARM64")
+              LABEL=$([ "$REF_TYPE" = "tag" ] && echo "$TARGET_REF" || echo "$TARGET_REF($SHORT_SHA)")
+
+              jq --arg ref "$TARGET_REF" \
+                 --arg type "$REF_TYPE" \
+                 --arg sha "$COMMIT_SHA" \
+                 --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                 --arg runner "$platform" \
+                 --arg runnerlabel "$RUNNER_LABEL" \
+                 --arg path "${DEST_BASE#benchmark-data/}/$platform" \
+                 --arg display "$LABEL" \
+                 '.datasets += [{
+                   id: ($ref + "@" + $sha + "@" + $runner),
+                   label: $display,
+                   ref: $ref,
+                   ref_type: $type,
+                   timestamp: $ts,
+                   runner: $runner,
+                   runner_label: $runnerlabel,
+                   path: $path,
+                   commit_sha: $sha,
+                   is_latest_tag: false
+                 }] | .datasets |= unique_by(.id)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+            fi
+          done
+
+          # Update tags array if target is a tag
+          if [ "$REF_TYPE" = "tag" ]; then
+            jq --arg tag "$TARGET_REF" '.tags += [$tag] | .tags |= unique | .tags |= sort' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+          fi
+
+          # Always update latest_tag and mark datasets (runs for both tag and branch targets)
+          # Update latest_tag (simple: last in sorted array)
+          jq '.latest_tag = (.tags | sort_by(.) | last)' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+
+          # Mark datasets with latest tag
+          LATEST_TAG=$(jq -r '.latest_tag' "$INDEX_FILE")
+          if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
+            jq --arg latest "$LATEST_TAG" '
+              .datasets |= map(
+                if .ref_type == "tag" and .ref == $latest
+                then . + {is_latest_tag: true}
+                else .
+                end
+              )
+            ' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+          fi
+
+          # Update last_updated timestamp
+          jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.last_updated = $ts' "$INDEX_FILE" > "$INDEX_FILE.tmp" && mv "$INDEX_FILE.tmp" "$INDEX_FILE"
+
+          echo "✓ Updated index.json with new datasets"
+          cat "$INDEX_FILE" | jq '.'
+
+      - name: Checkout Python Scripts from Main
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          sparse-checkout: |
+            benchmarks/python
+          sparse-checkout-cone-mode: false
+          path: main-repo
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install plotly pandas
+
+      - name: Generate HTML Report
+        run: |
+          python main-repo/benchmarks/python/generate_interactive_comparison.py \
+            benchmark-data \
+            benchmark-comparison/index.html
+        continue-on-error: true
+
+      - name: Commit and Push Results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add benchmark-data/ benchmark-comparison/
+          git commit -m "Add benchmark results for ${{ needs.prepare.outputs.target_ref }}" || echo "No changes to commit"
+          git push origin gh-pages
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `## 📊 Benchmark Results
+
+            Benchmarks have been completed and stored for this PR.
+
+            **View Results:** https://biodatageeks.org/datafusion-bio-formats/benchmark-comparison/
+
+            - **Target:** ${{ needs.prepare.outputs.target_ref }}
+            - **Baseline:** ${{ needs.prepare.outputs.baseline_tag }}
+            - **Platforms:** Linux, macOS
+            - **Mode:** ${{ needs.prepare.outputs.benchmark_mode }}
+
+            Raw data: https://biodatageeks.org/datafusion-bio-formats/benchmark-data/
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });

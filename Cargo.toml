@@ -10,6 +10,7 @@ members = [
     "datafusion/bio-format-fastq", 
     "datafusion/bio-format-gff",
     "datafusion/bio-format-vcf", 
+    "benchmarks/common", "benchmarks/runner",
 ]
 
 [workspace.package]
