@@ -42,7 +42,5 @@
 
 /// Physical execution plan for BAM file scanning.
 mod physical_exec;
-/// BAM file storage and I/O operations.
-pub mod storage;
 /// DataFusion table provider implementation for BAM files.
 pub mod table_provider;
