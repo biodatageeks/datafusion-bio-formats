@@ -3,8 +3,8 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_stream::stream;
-use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions};
+use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -18,7 +18,6 @@ use tokio::io::AsyncBufRead;
 use tokio_stream::Stream;
 use tokio_util::io::StreamReader;
 
-use arrow::array::{ArrayRef, RecordBatchOptions};
 use oxbow::alignment::model::BatchBuilder;
 use oxbow::alignment::model::Push as _;
 
@@ -282,7 +281,7 @@ where
             }
 
             let columns: Vec<ArrayRef> = vec![];
-            let schema = arrow::datatypes::Schema::new(vec![] as Vec<arrow::datatypes::Field>);
+            let schema = Schema::new(vec![] as Vec<Field>);
             let options = RecordBatchOptions::new().with_row_count(Some(count));
 
             yield RecordBatch::try_new_with_options(Arc::new(schema), columns, &options)
@@ -326,7 +325,7 @@ where
             }
 
             let columns: Vec<ArrayRef> = vec![];
-            let schema = arrow::datatypes::Schema::new(vec![] as Vec<arrow::datatypes::Field>);
+            let schema = Schema::new(vec![] as Vec<Field>);
             let options = RecordBatchOptions::new().with_row_count(Some(count));
 
             yield RecordBatch::try_new_with_options(Arc::new(schema), columns, &options)

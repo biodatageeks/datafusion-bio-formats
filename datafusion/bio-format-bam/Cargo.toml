@@ -10,7 +10,6 @@ edition.workspace = true
 readme = "README.md"
 
 [dependencies]
-arrow.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 datafusion.workspace = true
