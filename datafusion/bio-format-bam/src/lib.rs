@@ -22,7 +22,13 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a BAM file as a table
-//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None)?;
+//! let table = BamTableProvider::try_new(
+//!     "data/alignments.bam".to_string(),
+//!     None,  // No field filter
+//!     None,  // No tag definitions
+//!     None,  // Default thread count
+//!     None,  // No cloud storage options
+//! ).await?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!
 //! // Query with SQL
@@ -36,7 +42,5 @@
 
 /// Physical execution plan for BAM file scanning.
 mod physical_exec;
-/// BAM file storage and I/O operations.
-pub mod storage;
 /// DataFusion table provider implementation for BAM files.
 pub mod table_provider;

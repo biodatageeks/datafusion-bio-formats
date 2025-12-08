@@ -10,20 +10,21 @@ edition.workspace = true
 readme = "README.md"
 
 [dependencies]
+async-stream.workspace = true
+async-trait.workspace = true
 datafusion.workspace = true
 opendal.workspace = true
-noodles-bgzf.workspace = true
+log = "0.4.27"
 tokio-util.workspace = true
+tokio-stream.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 datafusion-bio-format-core = {path = "../bio-format-core"}
 futures.workspace = true
 futures-util.workspace = true
-noodles-bam = {version = "0.81.0" , features = ["async"]}
-noodles-sam = "0.77.0"
-async-stream = "0.3.6"
-log = "0.4.27"
-async-trait = "0.1.88"
+noodles-bgzf.workspace = true
+noodles = { version = "0.93.0",  features = ["sam", "bam", "async"]}
+oxbow.workspace = true
 
 [[example]]
 name = "test_bam_reader"
