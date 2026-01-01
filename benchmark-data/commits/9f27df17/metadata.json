@@ -1,0 +1,7 @@
+{
+  "ref": "dependabot/cargo/sysinfo-0.37.2",
+  "ref_type": "branch",
+  "commit_sha": "9f27df176a8ff6f33e4a5a6bf726793ebec3918a",
+  "timestamp": "2026-01-01T21:25:00Z",
+  "benchmark_mode": "fast"
+}
