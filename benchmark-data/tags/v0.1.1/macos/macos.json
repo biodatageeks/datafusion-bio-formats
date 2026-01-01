@@ -4,9 +4,9 @@
   "os": "Darwin",
   "os_version": "24.6.0",
   "arch": "arm64",
-  "timestamp": "2026-01-01T21:50:36Z",
+  "timestamp": "2026-01-01T21:52:34Z",
   "baseline_tag": "v0.1.1",
-  "target_ref": "dependabot/cargo/tempfile-3.24.0",
-  "commit_sha": "67e08229a91c7aecadb94628768b32bbd6039db2",
+  "target_ref": "dependabot/cargo/tracing-0.1.44",
+  "commit_sha": "8a7b6c8b43e9bee6299fc0446175e4cb2ab3e9f6",
   "benchmark_mode": "fast"
 }
