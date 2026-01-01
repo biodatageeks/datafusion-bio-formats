@@ -4,9 +4,9 @@
   "os": "Linux",
   "os_version": "6.8.0-1044-azure",
   "arch": "x86_64",
-  "timestamp": "2026-01-01T21:46:22Z",
+  "timestamp": "2026-01-01T21:48:23Z",
   "baseline_tag": "v0.1.1",
-  "target_ref": "dependabot/cargo/tracing-0.1.44",
-  "commit_sha": "8a7b6c8b43e9bee6299fc0446175e4cb2ab3e9f6",
+  "target_ref": "dependabot/cargo/log-0.4.29",
+  "commit_sha": "80b75c37555c657c3bb197f3cfec749b819b9dcf",
   "benchmark_mode": "fast"
 }
