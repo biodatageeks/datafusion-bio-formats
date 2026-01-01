@@ -285,6 +285,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "dependabot/cargo/tempfile-3.24.0@67e08229a91c7aecadb94628768b32bbd6039db2@linux",
+      "label": "dependabot/cargo/tempfile-3.24.0(67e08229)",
+      "ref": "dependabot/cargo/tempfile-3.24.0",
+      "ref_type": "branch",
+      "timestamp": "2026-01-01T21:51:28Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/67e08229/linux",
+      "commit_sha": "67e08229a91c7aecadb94628768b32bbd6039db2",
+      "is_latest_tag": false
+    },
+    {
+      "id": "dependabot/cargo/tempfile-3.24.0@67e08229a91c7aecadb94628768b32bbd6039db2@macos",
+      "label": "dependabot/cargo/tempfile-3.24.0(67e08229)",
+      "ref": "dependabot/cargo/tempfile-3.24.0",
+      "ref_type": "branch",
+      "timestamp": "2026-01-01T21:51:28Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/67e08229/macos",
+      "commit_sha": "67e08229a91c7aecadb94628768b32bbd6039db2",
+      "is_latest_tag": false
+    },
+    {
       "id": "dependabot/cargo/tracing-0.1.43@c077247b86efec9e0bb820506294b6ef27961535@linux",
       "label": "dependabot/cargo/tracing-0.1.43(c077247b)",
       "ref": "dependabot/cargo/tracing-0.1.43",
@@ -546,6 +570,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "4906a6ab4d044860972cde8af820225461d81060",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@67e08229a91c7aecadb94628768b32bbd6039db2@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-01T21:51:28Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "67e08229a91c7aecadb94628768b32bbd6039db2",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@67e08229a91c7aecadb94628768b32bbd6039db2@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-01T21:51:28Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "67e08229a91c7aecadb94628768b32bbd6039db2",
       "is_latest_tag": true
     },
     {
@@ -1032,6 +1080,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-01-01T21:38:39Z",
+  "last_updated": "2026-01-01T21:51:28Z",
   "latest_tag": "v0.1.1"
 }
