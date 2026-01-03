@@ -238,8 +238,33 @@ async fn get_local_vcf(
 
         let mut records = reader.read_records();
         // let iter_start_time = Instant::now();
-        while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+        loop {
+            let result = match records.next().await {
+                Some(r) => r,
+                None => break, // Stream ended normally
+            };
+            
+            // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
+            let record = match result {
+                Ok(record) => record,
+                Err(e) => {
+                    // Check if this is an EOF-related error that we should handle gracefully
+                    let error_msg = e.to_string().to_lowercase();
+                    let is_eof_error = error_msg.contains("eol") || 
+                                       error_msg.contains("eof") || 
+                                       error_msg.contains("unexpected end");
+                    
+                    // Check if it's an IO error with UnexpectedEof kind
+                    let is_io_eof = e.kind() == std::io::ErrorKind::UnexpectedEof;
+                    
+                    if is_eof_error || is_io_eof {
+                        // EOF reached - break gracefully
+                        break;
+                    }
+                    // For other errors, convert and propagate them using ?
+                    Err(DataFusionError::Execution(format!("VCF reading error: {}", e)))?
+                }
+            };
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.variant_start().unwrap()?.get() as u32);
             pose.push(get_variant_end(&record, &header));
@@ -363,8 +388,33 @@ async fn get_remote_vcf_stream(
         // Process records one by one.
 
         let mut records = reader.read_records().await;
-        while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+        loop {
+            let result = match records.next().await {
+                Some(r) => r,
+                None => break, // Stream ended normally
+            };
+            
+            // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
+            let record = match result {
+                Ok(record) => record,
+                Err(e) => {
+                    // Check if this is an EOF-related error that we should handle gracefully
+                    let error_msg = e.to_string().to_lowercase();
+                    let is_eof_error = error_msg.contains("eol") || 
+                                       error_msg.contains("eof") || 
+                                       error_msg.contains("unexpected end");
+                    
+                    // Check if it's an IO error with UnexpectedEof kind
+                    let is_io_eof = e.kind() == std::io::ErrorKind::UnexpectedEof;
+                    
+                    if is_eof_error || is_io_eof {
+                        // EOF reached - break gracefully
+                        break;
+                    }
+                    // For other errors, convert and propagate them using ?
+                    Err(DataFusionError::Execution(format!("VCF reading error: {}", e)))?
+                }
+            };
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.variant_start().unwrap()?.get() as u32);
             pose.push(get_variant_end(&record, &header));
