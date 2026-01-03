@@ -203,31 +203,27 @@ async fn get_local_vcf(
     let thread_num = thread_num.unwrap_or(1);
     
     // CRITICAL VCF-SPECIFIC: Header reading strategy
-    // If byte_range.start == 0: Read header from reader
-    // If byte_range.start > 0: Header was already read during schema inference (from byte 0)
+    // Always read header separately to avoid affecting the reader state for record reading
+    // The header is needed for schema but reading it from the same reader can cause issues
     let storage_opts = object_storage_options.clone().unwrap();
-    let mut reader = VcfLocalReader::new_with_range(
+    
+    // Read header separately (from byte 0, regardless of byte_range)
+    use crate::storage::get_local_vcf_header;
+    let header = get_local_vcf_header(
         file_path.clone(),
-        thread_num,
-        byte_range.clone(),
+        1,
         storage_opts.clone(),
     )
     .await?;
     
-    let header = if byte_range.as_ref().map(|r| r.start) == Some(0) {
-        // Read header from reader (byte_range.start == 0)
-        reader.read_header().await?
-    } else {
-        // Header already read during schema inference (from byte 0)
-        // We need to get it separately
-        use crate::storage::get_local_vcf_header;
-        get_local_vcf_header(
-            file_path.clone(),
-            1,
-            storage_opts,
-        )
-        .await?
-    };
+    // Create reader for reading records (after header is read separately)
+    let mut reader = VcfLocalReader::new_with_range(
+        file_path.clone(),
+        thread_num,
+        byte_range.clone(),
+        storage_opts,
+    )
+    .await?;
     let infos = header.infos();
     let mut record_num = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
@@ -238,15 +234,23 @@ async fn get_local_vcf(
 
         let mut records = reader.read_records();
         // let iter_start_time = Instant::now();
+        let mut records_read = 0;
         loop {
             let result = match records.next().await {
                 Some(r) => r,
-                None => break, // Stream ended normally
+                None => {
+                    // Stream ended normally (None means end of stream)
+                    debug!("VCF stream ended normally after reading {} records", records_read);
+                    break;
+                }
             };
             
             // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
             let record = match result {
-                Ok(record) => record,
+                Ok(record) => {
+                    records_read += 1;
+                    record
+                },
                 Err(e) => {
                     // Check if this is an EOF-related error that we should handle gracefully
                     let error_msg = e.to_string().to_lowercase();
@@ -259,6 +263,12 @@ async fn get_local_vcf(
                     
                     if is_eof_error || is_io_eof {
                         // EOF reached - break gracefully
+                        // Only log if we haven't read any records (might indicate a problem)
+                        if records_read == 0 {
+                            debug!("VCF stream hit EOF before reading any records. Error: {}", e);
+                        } else {
+                            debug!("VCF stream hit EOF after reading {} records", records_read);
+                        }
                         break;
                     }
                     // For other errors, convert and propagate them using ?
@@ -340,28 +350,26 @@ async fn get_remote_vcf_stream(
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
-    // CRITICAL VCF-SPECIFIC: Header reading strategy (same as local)
+    // CRITICAL VCF-SPECIFIC: Header reading strategy
+    // Always read header separately to avoid affecting the reader state for record reading
+    // The header is needed for schema but reading it from the same reader can cause issues
     let storage_opts = object_storage_options.clone().unwrap();
+    
+    // Read header separately (from byte 0, regardless of byte_range)
+    use crate::storage::get_remote_vcf_header;
+    let header = get_remote_vcf_header(
+        file_path.clone(),
+        storage_opts.clone(),
+    )
+    .await?;
+    
+    // Create reader for reading records (after header is read separately)
     let mut reader = VcfRemoteReader::new_with_range(
         file_path.clone(),
         byte_range.clone(),
-        storage_opts.clone(),
+        storage_opts,
     )
     .await;
-    
-    let header = if byte_range.as_ref().map(|r| r.start) == Some(0) {
-        // Read header from reader (byte_range.start == 0)
-        reader.read_header().await?
-    } else {
-        // Header already read during schema inference (from byte 0)
-        // We need to get it separately
-        use crate::storage::get_remote_vcf_header;
-        get_remote_vcf_header(
-            file_path.clone(),
-            storage_opts,
-        )
-        .await?
-    };
     let infos = header.infos();
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
@@ -388,15 +396,23 @@ async fn get_remote_vcf_stream(
         // Process records one by one.
 
         let mut records = reader.read_records().await;
+        let mut records_read = 0;
         loop {
             let result = match records.next().await {
                 Some(r) => r,
-                None => break, // Stream ended normally
+                None => {
+                    // Stream ended normally (None means end of stream)
+                    debug!("VCF stream ended normally after reading {} records", records_read);
+                    break;
+                }
             };
             
             // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
             let record = match result {
-                Ok(record) => record,
+                Ok(record) => {
+                    records_read += 1;
+                    record
+                },
                 Err(e) => {
                     // Check if this is an EOF-related error that we should handle gracefully
                     let error_msg = e.to_string().to_lowercase();
@@ -409,6 +425,12 @@ async fn get_remote_vcf_stream(
                     
                     if is_eof_error || is_io_eof {
                         // EOF reached - break gracefully
+                        // Only log if we haven't read any records (might indicate a problem)
+                        if records_read == 0 {
+                            debug!("VCF stream hit EOF before reading any records. Error: {}", e);
+                        } else {
+                            debug!("VCF stream hit EOF after reading {} records", records_read);
+                        }
                         break;
                     }
                     // For other errors, convert and propagate them using ?
