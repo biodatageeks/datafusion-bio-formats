@@ -224,6 +224,12 @@ async fn get_local_vcf(
         storage_opts,
     )
     .await?;
+    
+    // CRITICAL: noodles-vcf requires header to be read on the same reader instance
+    // before calling records(). Even though we already have the header for schema,
+    // we need to read it on this reader to position it correctly for record reading.
+    let _ = reader.read_header().await?;
+    
     let infos = header.infos();
     let mut record_num = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
@@ -370,6 +376,12 @@ async fn get_remote_vcf_stream(
         storage_opts,
     )
     .await;
+    
+    // CRITICAL: noodles-vcf requires header to be read on the same reader instance
+    // before calling records(). Even though we already have the header for schema,
+    // we need to read it on this reader to position it correctly for record reading.
+    let _ = reader.read_header().await?;
+    
     let infos = header.infos();
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
