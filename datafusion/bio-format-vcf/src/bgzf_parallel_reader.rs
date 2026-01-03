@@ -29,8 +29,6 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids};
 use std::path::PathBuf;
 
-#[cfg(test)]
-use tempfile::tempdir;
 
 #[derive(Debug, Clone)]
 pub struct BgzfVcfTableProvider {
@@ -207,7 +205,7 @@ impl BgzfVcfExec {
         index: gzi::Index,
         limit: Option<usize>,
         all_info_fields: Vec<String>,
-        all_format_fields: Vec<String>,
+        _all_format_fields: Vec<String>,
     ) -> Self {
         let properties = PlanProperties::new(
             datafusion::physical_expr::EquivalenceProperties::new(schema.clone()),

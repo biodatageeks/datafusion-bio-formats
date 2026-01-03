@@ -3,7 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use crate::storage::{VcfLocalReader, VcfRemoteReader};
-use crate::table_provider::info_to_arrow_type;
+use crate::table_provider::{info_to_arrow_type, VcfByteRange};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, Float64Array, NullArray, StringArray, UInt32Array};
@@ -183,6 +183,7 @@ async fn get_local_vcf(
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<VcfByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
@@ -200,13 +201,33 @@ async fn get_local_vcf(
     let schema = Arc::clone(&schema_ref);
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = VcfLocalReader::new(
+    
+    // CRITICAL VCF-SPECIFIC: Header reading strategy
+    // If byte_range.start == 0: Read header from reader
+    // If byte_range.start > 0: Header was already read during schema inference (from byte 0)
+    let storage_opts = object_storage_options.clone().unwrap();
+    let mut reader = VcfLocalReader::new_with_range(
         file_path.clone(),
         thread_num,
-        object_storage_options.unwrap(),
+        byte_range.clone(),
+        storage_opts.clone(),
     )
-    .await;
-    let header = reader.read_header().await?;
+    .await?;
+    
+    let header = if byte_range.as_ref().map(|r| r.start) == Some(0) {
+        // Read header from reader (byte_range.start == 0)
+        reader.read_header().await?
+    } else {
+        // Header already read during schema inference (from byte 0)
+        // We need to get it separately
+        use crate::storage::get_local_vcf_header;
+        get_local_vcf_header(
+            file_path.clone(),
+            1,
+            storage_opts,
+        )
+        .await?
+    };
     let infos = header.infos();
     let mut record_num = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
@@ -289,12 +310,33 @@ async fn get_remote_vcf_stream(
     batch_size: usize,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<VcfByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
-    let mut reader = VcfRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await;
-    let header = reader.read_header().await?;
+    // CRITICAL VCF-SPECIFIC: Header reading strategy (same as local)
+    let storage_opts = object_storage_options.clone().unwrap();
+    let mut reader = VcfRemoteReader::new_with_range(
+        file_path.clone(),
+        byte_range.clone(),
+        storage_opts.clone(),
+    )
+    .await;
+    
+    let header = if byte_range.as_ref().map(|r| r.start) == Some(0) {
+        // Read header from reader (byte_range.start == 0)
+        reader.read_header().await?
+    } else {
+        // Header already read during schema inference (from byte 0)
+        // We need to get it separately
+        use crate::storage::get_remote_vcf_header;
+        get_remote_vcf_header(
+            file_path.clone(),
+            storage_opts,
+        )
+        .await?
+    };
     let infos = header.infos();
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
@@ -409,6 +451,7 @@ async fn get_stream(
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<VcfByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
@@ -426,6 +469,7 @@ async fn get_stream(
                 thread_num,
                 info_fields,
                 projection,
+                byte_range,
                 object_storage_options,
             )
             .await?;
@@ -438,6 +482,7 @@ async fn get_stream(
                 batch_size,
                 info_fields,
                 projection,
+                byte_range,
                 object_storage_options,
             )
             .await?;
@@ -456,6 +501,7 @@ pub struct VcfExec {
     pub(crate) format_fields: Option<Vec<String>>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
+    pub(crate) byte_range: Option<VcfByteRange>,
     pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
 }
@@ -512,6 +558,7 @@ impl ExecutionPlan for VcfExec {
             self.thread_num,
             self.info_fields.clone(),
             self.projection.clone(),
+            self.byte_range.clone(),
             self.object_storage_options.clone(),
         );
         let stream = futures::stream::once(fut).try_flatten();
