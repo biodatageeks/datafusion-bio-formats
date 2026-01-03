@@ -18,14 +18,36 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+/// Physical execution plan for reading FASTA files.
+///
+/// This struct implements DataFusion's `ExecutionPlan` trait and is responsible for executing
+/// queries against FASTA files. It orchestrates the reading of FASTA records, optionally filtering
+/// columns via projection, and limits the number of records processed.
+///
+/// # Fields
+///
+/// - `file_path`: Path to the FASTA file (local or cloud storage URI)
+/// - `schema`: Arrow schema describing the FASTA record structure
+/// - `projection`: Optional column indices to project/filter the output columns
+/// - `cache`: Cached plan properties for performance
+/// - `limit`: Optional maximum number of records to read
+/// - `thread_num`: Number of threads to use for parallel BGZF decompression
+/// - `object_storage_options`: Configuration for cloud storage access
 #[allow(dead_code)]
 pub struct FastaExec {
+    /// File path for the FASTA file.
     pub(crate) file_path: String,
+    /// Arrow schema for the FASTA records.
     pub(crate) schema: SchemaRef,
+    /// Optional column projection indices.
     pub(crate) projection: Option<Vec<usize>>,
+    /// Cached plan properties.
     pub(crate) cache: PlanProperties,
+    /// Optional record limit.
     pub(crate) limit: Option<usize>,
+    /// Number of threads for decompression.
     pub(crate) thread_num: Option<usize>,
+    /// Cloud storage configuration options.
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
 }
 

@@ -18,15 +18,28 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+/// Physical execution plan for scanning BED files
+///
+/// This struct implements DataFusion's [`ExecutionPlan`] trait to handle
+/// the actual execution of BED file scans. It manages file I/O, record parsing,
+/// and record batch construction.
 #[allow(dead_code)]
 pub struct BedExec {
+    /// Path to the BED file
     pub(crate) file_path: String,
+    /// BED format variant (BED3, BED4, BED5, BED6)
     pub(crate) bed_fields: BEDFields,
+    /// Output schema for the execution plan
     pub(crate) schema: SchemaRef,
+    /// Optional column projection indices
     pub(crate) projection: Option<Vec<usize>>,
+    /// Plan properties for optimization
     pub(crate) cache: PlanProperties,
+    /// Optional maximum number of rows to return
     pub(crate) limit: Option<usize>,
+    /// Optional number of threads for parallel reading
     pub(crate) thread_num: Option<usize>,
+    /// Optional cloud storage configuration
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
 }
 
@@ -43,22 +56,27 @@ impl DisplayAs for BedExec {
 }
 
 impl ExecutionPlan for BedExec {
+    /// Returns the name of this execution plan
     fn name(&self) -> &str {
         "GffExec"
     }
 
+    /// Returns `self` as `Any` for dynamic type casting
     fn as_any(&self) -> &dyn Any {
         self
     }
 
+    /// Returns the properties (schema, partitioning, etc.) of this plan
     fn properties(&self) -> &PlanProperties {
         &self.cache
     }
 
+    /// Returns child execution plans (none for BED scanning)
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
     }
 
+    /// Returns a new plan with updated children
     fn with_new_children(
         self: Arc<Self>,
         _children: Vec<Arc<dyn ExecutionPlan>>,
@@ -66,6 +84,12 @@ impl ExecutionPlan for BedExec {
         Ok(self)
     }
 
+    /// Executes the BED file scan and returns a record batch stream
+    ///
+    /// # Arguments
+    ///
+    /// * `_partition` - Partition index (not used)
+    /// * `context` - Task execution context
     fn execute(
         &self,
         _partition: usize,
@@ -89,6 +113,16 @@ impl ExecutionPlan for BedExec {
     }
 }
 
+/// Reads BED records from remote storage and produces record batches
+///
+/// # Arguments
+///
+/// * `file_path` - Remote file path (GCS, S3, Azure URL)
+/// * `bed_fields` - BED format variant
+/// * `schema` - Output schema
+/// * `batch_size` - Number of records per batch
+/// * `projection` - Optional column projection
+/// * `object_storage_options` - Cloud storage configuration
 async fn get_remote_bed_stream(
     file_path: String,
     bed_fields: BEDFields,
@@ -126,10 +160,7 @@ async fn get_remote_bed_stream(
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.feature_start()?.get() as u32);
             pose.push(record.feature_end().unwrap()?.get() as u32);
-            name.push(match record.name(){
-                Some(n) => Some(n.to_string()),
-                _ => None,
-            });
+            name.push(record.name().map(|n| n.to_string()));
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
@@ -172,6 +203,16 @@ async fn get_remote_bed_stream(
     Ok(stream)
 }
 
+/// Reads BED records from local storage and produces record batches
+///
+/// # Arguments
+///
+/// * `file_path` - Local file path
+/// * `bed_fields` - BED format variant
+/// * `schema` - Output schema
+/// * `batch_size` - Number of records per batch
+/// * `thread_num` - Number of threads for parallel BGZF decompression
+/// * `projection` - Optional column projection
 async fn get_local_bed(
     file_path: String,
     bed_fields: BEDFields,
@@ -205,10 +246,7 @@ async fn get_local_bed(
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.feature_start()?.get() as u32);
             pose.push(record.feature_end().unwrap()?.get() as u32);
-            name.push(match record.name(){
-                Some(n) => Some(n.to_string()),
-                _ => None,
-            });
+            name.push(record.name().map(|n| n.to_string()));
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
@@ -250,12 +288,22 @@ async fn get_local_bed(
     Ok(stream)
 }
 
+/// Constructs a DataFusion record batch from BED record data
+///
+/// # Arguments
+///
+/// * `schema` - Output schema
+/// * `chroms` - Chromosome names
+/// * `poss` - Feature start positions
+/// * `pose` - Feature end positions
+/// * `name` - Feature names (optional)
+/// * `projection` - Optional column indices to include
 fn build_record_batch(
     schema: SchemaRef,
     chroms: &[String],
     poss: &[u32],
     pose: &[u32],
-    name: &Vec<Option<String>>,
+    name: &[Option<String>],
     projection: Option<Vec<usize>>,
 ) -> datafusion::error::Result<RecordBatch> {
     let chrom_array = Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>;
@@ -292,6 +340,17 @@ fn build_record_batch(
         .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
 }
 
+/// Routes to appropriate reader based on storage backend and creates a record batch stream
+///
+/// # Arguments
+///
+/// * `file_path` - Path to BED file (local or remote)
+/// * `bed_fields` - BED format variant
+/// * `schema_ref` - Output schema
+/// * `batch_size` - Number of records per batch
+/// * `thread_num` - Optional thread count for parallel reading
+/// * `projection` - Optional column projection
+/// * `object_storage_options` - Cloud storage configuration
 async fn get_stream(
     file_path: String,
     bed_fields: BEDFields,

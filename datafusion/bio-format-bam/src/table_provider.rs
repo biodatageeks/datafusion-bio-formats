@@ -33,15 +33,50 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     Ok(Arc::new(schema))
 }
 
+/// A DataFusion table provider for BAM (Binary Alignment Map) files.
+///
+/// This struct implements the DataFusion TableProvider trait, allowing BAM files
+/// to be queried using SQL via DataFusion. It supports both local and remote
+/// (cloud storage) files with configurable threading for decompression.
 #[derive(Clone, Debug)]
 pub struct BamTableProvider {
+    /// Path to the BAM file (local or remote)
     file_path: String,
+    /// Arrow schema for the BAM records
     schema: SchemaRef,
+    /// Number of threads to use for BGZF decompression
     thread_num: Option<usize>,
+    /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
 impl BamTableProvider {
+    /// Creates a new BAM table provider.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the BAM file (local or remote URL)
+    /// * `thread_num` - Optional number of threads for BGZF decompression
+    /// * `object_storage_options` - Optional configuration for cloud storage access
+    ///
+    /// # Returns
+    ///
+    /// A new BamTableProvider or a DataFusion error if schema determination fails
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use datafusion_bio_format_bam::table_provider::BamTableProvider;
+    ///
+    /// # async fn example() -> datafusion::common::Result<()> {
+    /// let provider = BamTableProvider::new(
+    ///     "data/alignments.bam".to_string(),
+    ///     Some(4),  // Use 4 threads
+    ///     None,     // No cloud storage
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(
         file_path: String,
         thread_num: Option<usize>,

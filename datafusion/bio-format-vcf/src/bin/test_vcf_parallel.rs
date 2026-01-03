@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\nTesting basic VCF table provider functionality...");
 
             // Just test table creation without file operations
-            let ctx = SessionContext::new();
+            let _ctx = SessionContext::new();
             match VcfTableProvider::new(
                 "nonexistent.vcf.bgz".to_string(),
                 None,

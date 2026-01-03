@@ -107,10 +107,10 @@ async fn get_remote_fastq_stream(
     .await?;
 
     // Determine which fields we need to parse based on projection
-    let needs_name = projection.as_ref().map_or(true, |proj| proj.contains(&0));
-    let needs_description = projection.as_ref().map_or(true, |proj| proj.contains(&1));
-    let needs_sequence = projection.as_ref().map_or(true, |proj| proj.contains(&2));
-    let needs_quality_scores = projection.as_ref().map_or(true, |proj| proj.contains(&3));
+    let needs_name = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+    let needs_description = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+    let needs_sequence = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+    let needs_quality_scores = projection.as_ref().is_none_or(|proj| proj.contains(&3));
 
     let stream = try_stream! {
         // Create vectors for accumulating record data only for needed fields.
@@ -206,10 +206,10 @@ async fn get_local_fastq(
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     // Determine which fields we need to parse based on projection
-    let needs_name = projection.as_ref().map_or(true, |proj| proj.contains(&0));
-    let needs_description = projection.as_ref().map_or(true, |proj| proj.contains(&1));
-    let needs_sequence = projection.as_ref().map_or(true, |proj| proj.contains(&2));
-    let needs_quality_scores = projection.as_ref().map_or(true, |proj| proj.contains(&3));
+    let needs_name = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+    let needs_description = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+    let needs_sequence = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+    let needs_quality_scores = projection.as_ref().is_none_or(|proj| proj.contains(&3));
 
     let mut name: Vec<String> = if needs_name {
         Vec::with_capacity(batch_size)
@@ -239,7 +239,7 @@ async fn get_local_fastq(
         file_path.clone(),
         thread_num,
         byte_range.clone(),
-        object_storage_options.unwrap_or(ObjectStorageOptions::default()),
+        object_storage_options.unwrap_or_default(),
     )
     .await?;
     let mut record_num = 0;
@@ -318,6 +318,7 @@ async fn get_local_fastq(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_record_batch_optimized(
     schema: SchemaRef,
     name: &[String],

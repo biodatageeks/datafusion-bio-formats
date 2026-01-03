@@ -3,10 +3,10 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use crate::storage::{VcfLocalReader, VcfRemoteReader};
-use crate::table_provider::{info_to_arrow_type, VcfByteRange};
+use crate::table_provider::{VcfByteRange, info_to_arrow_type};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, Float64Array, NullArray, StringArray, UInt32Array};
+use datafusion::arrow::array::{Array, Float64Array, StringArray, UInt32Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
@@ -26,6 +26,33 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
 use std::str;
 
+/// Constructs a DataFusion RecordBatch from VCF variant data.
+///
+/// This function assembles core VCF columns (chrom, pos, ref, alt, etc.) and INFO fields
+/// into a RecordBatch for execution. It supports projection pushdown to optimize queries.
+///
+/// # Arguments
+///
+/// * `schema` - The target Arrow schema
+/// * `chroms` - Chromosome names
+/// * `poss` - Variant start positions (0-based)
+/// * `pose` - Variant end positions (0-based, inclusive)
+/// * `ids` - Variant identifiers (semicolon-separated if multiple)
+/// * `refs` - Reference bases
+/// * `alts` - Alternate bases (pipe-separated if multiple)
+/// * `quals` - Quality scores (optional)
+/// * `filters` - FILTER field values (semicolon-separated)
+/// * `infos` - Optional arrow arrays for INFO fields
+/// * `projection` - Optional list of column indices to project (None = all columns)
+///
+/// # Returns
+///
+/// A DataFusion RecordBatch with the specified data
+///
+/// # Errors
+///
+/// Returns an error if the RecordBatch cannot be created
+#[allow(clippy::too_many_arguments)]
 pub fn build_record_batch(
     schema: SchemaRef,
     chroms: &[String],
@@ -65,8 +92,8 @@ pub fn build_record_batch(
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(ids.len());
             if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(chrom_array.len())) as Arc<dyn Array>);
+                // For empty projections (COUNT(*)), return an empty vector
+                // The schema should already be empty from the table provider
             } else {
                 for i in proj_ids.clone() {
                     match i {
@@ -85,8 +112,18 @@ pub fn build_record_batch(
             arrays
         }
     };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+
+    // For empty projections (COUNT(*)), we need to specify row count
+    if arrays.is_empty() {
+        let row_count = chroms.len();
+        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(Some(row_count));
+        RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    } else {
+        RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    }
 }
 
 fn load_infos(
@@ -176,6 +213,7 @@ fn get_variant_end(record: &dyn Record, header: &Header) -> u32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_local_vcf(
     file_path: String,
     schema_ref: SchemaRef,
@@ -201,21 +239,16 @@ async fn get_local_vcf(
     let schema = Arc::clone(&schema_ref);
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    
+
     // CRITICAL VCF-SPECIFIC: Header reading strategy
     // Always read header separately to avoid affecting the reader state for record reading
     // The header is needed for schema but reading it from the same reader can cause issues
     let storage_opts = object_storage_options.clone().unwrap();
-    
+
     // Read header separately (from byte 0, regardless of byte_range)
     use crate::storage::get_local_vcf_header;
-    let header = get_local_vcf_header(
-        file_path.clone(),
-        1,
-        storage_opts.clone(),
-    )
-    .await?;
-    
+    let header = get_local_vcf_header(file_path.clone(), 1, storage_opts.clone()).await?;
+
     // Create reader for reading records (after header is read separately)
     let mut reader = VcfLocalReader::new_with_range(
         file_path.clone(),
@@ -224,12 +257,12 @@ async fn get_local_vcf(
         storage_opts,
     )
     .await?;
-    
+
     // CRITICAL: noodles-vcf requires header to be read on the same reader instance
     // before calling records(). Even though we already have the header for schema,
     // we need to read it on this reader to position it correctly for record reading.
     let _ = reader.read_header().await?;
-    
+
     let infos = header.infos();
     let mut record_num = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
@@ -250,7 +283,7 @@ async fn get_local_vcf(
                     break;
                 }
             };
-            
+
             // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
             let record = match result {
                 Ok(record) => {
@@ -260,13 +293,13 @@ async fn get_local_vcf(
                 Err(e) => {
                     // Check if this is an EOF-related error that we should handle gracefully
                     let error_msg = e.to_string().to_lowercase();
-                    let is_eof_error = error_msg.contains("eol") || 
-                                       error_msg.contains("eof") || 
+                    let is_eof_error = error_msg.contains("eol") ||
+                                       error_msg.contains("eof") ||
                                        error_msg.contains("unexpected end");
-                    
+
                     // Check if it's an IO error with UnexpectedEof kind
                     let is_io_eof = e.kind() == std::io::ErrorKind::UnexpectedEof;
-                    
+
                     if is_eof_error || is_io_eof {
                         // EOF reached - break gracefully
                         // Only log if we haven't read any records (might indicate a problem)
@@ -360,28 +393,20 @@ async fn get_remote_vcf_stream(
     // Always read header separately to avoid affecting the reader state for record reading
     // The header is needed for schema but reading it from the same reader can cause issues
     let storage_opts = object_storage_options.clone().unwrap();
-    
+
     // Read header separately (from byte 0, regardless of byte_range)
     use crate::storage::get_remote_vcf_header;
-    let header = get_remote_vcf_header(
-        file_path.clone(),
-        storage_opts.clone(),
-    )
-    .await?;
-    
+    let header = get_remote_vcf_header(file_path.clone(), storage_opts.clone()).await?;
+
     // Create reader for reading records (after header is read separately)
-    let mut reader = VcfRemoteReader::new_with_range(
-        file_path.clone(),
-        byte_range.clone(),
-        storage_opts,
-    )
-    .await;
-    
+    let mut reader =
+        VcfRemoteReader::new_with_range(file_path.clone(), byte_range.clone(), storage_opts).await;
+
     // CRITICAL: noodles-vcf requires header to be read on the same reader instance
     // before calling records(). Even though we already have the header for schema,
     // we need to read it on this reader to position it correctly for record reading.
     let _ = reader.read_header().await?;
-    
+
     let infos = header.infos();
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
@@ -418,7 +443,7 @@ async fn get_remote_vcf_stream(
                     break;
                 }
             };
-            
+
             // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
             let record = match result {
                 Ok(record) => {
@@ -428,13 +453,13 @@ async fn get_remote_vcf_stream(
                 Err(e) => {
                     // Check if this is an EOF-related error that we should handle gracefully
                     let error_msg = e.to_string().to_lowercase();
-                    let is_eof_error = error_msg.contains("eol") || 
-                                       error_msg.contains("eof") || 
+                    let is_eof_error = error_msg.contains("eol") ||
+                                       error_msg.contains("eof") ||
                                        error_msg.contains("unexpected end");
-                    
+
                     // Check if it's an IO error with UnexpectedEof kind
                     let is_io_eof = e.kind() == std::io::ErrorKind::UnexpectedEof;
-                    
+
                     if is_eof_error || is_io_eof {
                         // EOF reached - break gracefully
                         // Only log if we haven't read any records (might indicate a problem)
@@ -528,6 +553,7 @@ fn set_info_builders(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,

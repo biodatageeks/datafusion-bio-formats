@@ -29,10 +29,10 @@ chr2	300	rs3	C	T,A	70	PASS	AC=1,1;AF=0.33,0.33;AN=3;DP=30;DB;ExcessHet=1.8;MLEAC
 chr2	400	.	T	G	50	PASS	AC=1;AF=0.25;AN=4;DP=40;SVTYPE=SNV;FS=0.8;MQ=49.5;QD=11.2;SOR=0.9
 "#;
 
-async fn create_test_vcf_file_with_many_info() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_projection_optimization.vcf";
-    fs::write(temp_file, SAMPLE_VCF_CONTENT_WITH_MANY_INFO).await?;
-    Ok(temp_file.to_string())
+async fn create_test_vcf_file_with_many_info(test_name: &str) -> std::io::Result<String> {
+    let temp_file = format!("/tmp/test_projection_optimization_{}.vcf", test_name);
+    fs::write(&temp_file, SAMPLE_VCF_CONTENT_WITH_MANY_INFO).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {
@@ -52,7 +52,7 @@ async fn test_projection_optimization_core_fields_only() -> Result<(), Box<dyn s
     // Test case 1: Query only core VCF fields (no INFO fields)
     // This should be very fast since no INFO parsing is needed
 
-    let vcf_path = create_test_vcf_file_with_many_info().await?;
+    let vcf_path = create_test_vcf_file_with_many_info("core_fields_only").await?;
 
     // Create table provider with ALL info fields initially (simulating polars-bio scenario)
     let all_info_fields = Some(vec![
@@ -115,7 +115,7 @@ async fn test_projection_optimization_with_info_fields() -> Result<(), Box<dyn s
     // Test case 2: Query with specific INFO fields
     // This should only parse the requested INFO fields
 
-    let vcf_path = create_test_vcf_file_with_many_info().await?;
+    let vcf_path = create_test_vcf_file_with_many_info("with_info_fields").await?;
 
     let all_info_fields = Some(vec![
         "AC".to_string(),
@@ -177,7 +177,7 @@ async fn test_count_optimization() -> Result<(), Box<dyn std::error::Error>> {
     // Test case 3: COUNT(*) query
     // This should be the fastest - no field parsing needed
 
-    let vcf_path = create_test_vcf_file_with_many_info().await?;
+    let vcf_path = create_test_vcf_file_with_many_info("count_optimization").await?;
 
     let all_info_fields = Some(vec![
         "AC".to_string(),

@@ -86,7 +86,7 @@ fn parse_gff_attributes_new(attributes_str: &str) -> HashMap<String, String> {
     }
 
     // Return populated HashMap or empty if no valid pairs were found
-    attributes.unwrap_or_else(HashMap::new)
+    attributes.unwrap_or_default()
 }
 
 async fn benchmark_eager_allocation(

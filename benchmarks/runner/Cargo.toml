@@ -1,0 +1,43 @@
+[package]
+name = "datafusion-bio-benchmarks-runner"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86.0"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "benchmark-runner"
+path = "src/main.rs"
+
+[dependencies]
+# Common benchmark infrastructure
+datafusion-bio-benchmarks-common = { path = "../common" }
+
+# DataFusion and format table providers
+datafusion = { workspace = true }
+datafusion-bio-format-core = { path = "../../datafusion/bio-format-core" }
+datafusion-bio-format-gff = { path = "../../datafusion/bio-format-gff" }
+datafusion-bio-format-vcf = { path = "../../datafusion/bio-format-vcf" }
+datafusion-bio-format-fastq = { path = "../../datafusion/bio-format-fastq" }
+datafusion-bio-format-bam = { path = "../../datafusion/bio-format-bam" }
+datafusion-bio-format-bed = { path = "../../datafusion/bio-format-bed" }
+datafusion-bio-format-fasta = { path = "../../datafusion/bio-format-fasta" }
+
+# Configuration and serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+
+# Async runtime and error handling
+tokio = { version = "1.43", features = ["full"] }
+anyhow = "1.0"
+
+# Logging
+env_logger = "0.11"
+log = "0.4"
+
+# System info
+num_cpus = "1.16"

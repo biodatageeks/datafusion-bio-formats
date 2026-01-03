@@ -12,10 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if !std::path::Path::new(file_path).exists() {
         eprintln!("❌ Error: File {} not found", file_path);
-        eprintln!(
-            "❌ Error: Also need {} for BGZF index",
-            format!("{}.gzi", file_path)
-        );
+        eprintln!("❌ Error: Also need {}.gzi for BGZF index", file_path);
         std::process::exit(1);
     }
 
@@ -33,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧪 Test 1: SELECT * (nested attributes)");
     let start = Instant::now();
 
-    let provider = BgzfGffTableProvider::try_new(&file_path, None)?;
+    let provider = BgzfGffTableProvider::try_new(file_path, None)?;
     let ctx = SessionContext::new();
     ctx.register_table("gff", std::sync::Arc::new(provider))?;
 
@@ -65,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧪 Test 2: SELECT chrom, start, end, gene_id (specific attributes)");
     let start = Instant::now();
 
-    let provider = BgzfGffTableProvider::try_new(&file_path, Some(vec!["gene_id".to_string()]))?;
+    let provider = BgzfGffTableProvider::try_new(file_path, Some(vec!["gene_id".to_string()]))?;
     let ctx = SessionContext::new();
     ctx.register_table("gff", std::sync::Arc::new(provider))?;
 
@@ -99,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧪 Test 3: COUNT(*) performance test");
     let start = Instant::now();
 
-    let provider = BgzfGffTableProvider::try_new(&file_path, Some(vec![]))?; // No attributes
+    let provider = BgzfGffTableProvider::try_new(file_path, Some(vec![]))?; // No attributes
     let ctx = SessionContext::new();
     ctx.register_table("gff", std::sync::Arc::new(provider))?;
 

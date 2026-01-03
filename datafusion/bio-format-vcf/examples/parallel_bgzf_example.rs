@@ -1,8 +1,8 @@
-///! Example demonstrating parallel BGZF VCF processing with DataFusion
-///!
-///! This example shows how to use the BgzfVcfTableProvider for partition-based
-///! parallel processing of BGZF-compressed VCF files. The parallelism is controlled
-///! by DataFusion's `target_partitions` configuration.
+//! Example demonstrating parallel BGZF VCF processing with DataFusion
+//!
+//! This example shows how to use the BgzfVcfTableProvider for partition-based
+//! parallel processing of BGZF-compressed VCF files. The parallelism is controlled
+//! by DataFusion's `target_partitions` configuration.
 use datafusion::prelude::*;
 use datafusion_bio_format_vcf::bgzf_parallel_reader::BgzfVcfTableProvider;
 use std::sync::Arc;

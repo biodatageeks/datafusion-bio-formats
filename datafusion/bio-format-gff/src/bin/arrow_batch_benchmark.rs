@@ -40,7 +40,7 @@ fn parse_gff_attributes(attributes_str: &str) -> HashMap<String, String> {
 // Simulate load_attributes_from_map - the ARROW BUILDING part
 fn load_attributes_from_map(
     attributes_map: &HashMap<String, String>,
-    builder: &mut Vec<OptionalField>,
+    builder: &mut [OptionalField],
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut vec_attributes: Vec<Attribute> = Vec::with_capacity(attributes_map.len());
 

@@ -103,12 +103,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("SIMD parser is {:.2}x faster than Standard", speedup);
     }
 
-    if fast_time > simd_time {
-        let speedup = fast_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-        println!("SIMD parser is {:.2}x faster than Fast", speedup);
-    } else if simd_time > fast_time {
-        let speedup = simd_time.as_nanos() as f64 / fast_time.as_nanos() as f64;
-        println!("Fast parser is {:.2}x faster than SIMD", speedup);
+    match fast_time.cmp(&simd_time) {
+        std::cmp::Ordering::Greater => {
+            let speedup = fast_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
+            println!("SIMD parser is {:.2}x faster than Fast", speedup);
+        }
+        std::cmp::Ordering::Less => {
+            let speedup = simd_time.as_nanos() as f64 / fast_time.as_nanos() as f64;
+            println!("Fast parser is {:.2}x faster than SIMD", speedup);
+        }
+        std::cmp::Ordering::Equal => {}
     }
 
     Ok(())

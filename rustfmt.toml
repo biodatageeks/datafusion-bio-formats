@@ -1,2 +1,3 @@
-required_version= "1.85.1"
-unstable_features = false
+# Rustfmt configuration for datafusion-bio-formats
+# Using stable Rust toolchain - no version requirements or unstable features
+edition = "2021"

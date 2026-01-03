@@ -1,3 +1,11 @@
+//! Storage layer for reading FASTQ files from local and remote sources
+//!
+//! This module provides functions for creating FASTQ readers with support for:
+//! - Multiple compression formats (BGZF, GZIP, uncompressed)
+//! - Local and remote file sources (GCS, S3, Azure Blob Storage)
+//! - Multi-threaded reading for BGZF files
+//! - Byte range reading for partitioned/distributed processing
+
 use crate::table_provider::FastqByteRange;
 use async_compression::tokio::bufread::GzipDecoder;
 use bytes::Bytes;
@@ -17,6 +25,16 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Error, Seek, SeekFrom};
 use tokio_util::io::StreamReader;
 
+/// Creates an async BGZF-decompressing FASTQ reader for remote files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the BGZF-compressed FASTQ file (remote URL)
+/// * `object_storage_options` - Configuration for accessing remote storage
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_fastq_bgzf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -29,6 +47,7 @@ pub async fn get_remote_fastq_bgzf_reader(
     Ok(reader)
 }
 
+/// Creates a remote BGZF FASTQ reader that reads only a specific byte range
 pub async fn get_remote_fastq_bgzf_reader_with_range(
     file_path: String,
     byte_range: FastqByteRange,
@@ -45,7 +64,7 @@ pub async fn get_remote_fastq_bgzf_reader_with_range(
         byte_range.end,
     )
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
 
     let stream_reader = StreamReader::new(stream);
     let bgzf_reader = bgzf::r#async::Reader::new(stream_reader);
@@ -53,6 +72,16 @@ pub async fn get_remote_fastq_bgzf_reader_with_range(
     Ok(fastq_reader)
 }
 
+/// Creates an async FASTQ reader for uncompressed remote files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the uncompressed FASTQ file (remote URL)
+/// * `object_storage_options` - Configuration for accessing remote storage
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_fastq_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -62,6 +91,7 @@ pub async fn get_remote_fastq_reader(
     Ok(reader)
 }
 
+/// Creates a remote uncompressed FASTQ reader that reads only a specific byte range
 pub async fn get_remote_fastq_reader_with_range(
     file_path: String,
     byte_range: FastqByteRange,
@@ -74,12 +104,22 @@ pub async fn get_remote_fastq_reader_with_range(
         byte_range.end,
     )
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
 
     let reader = fastq::r#async::io::Reader::new(StreamReader::new(stream));
     Ok(reader)
 }
 
+/// Creates an async GZIP-decompressing FASTQ reader for remote files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the GZIP-compressed FASTQ file (remote URL)
+/// * `object_storage_options` - Configuration for accessing remote storage
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be accessed or the stream cannot be created
 pub async fn get_remote_fastq_gz_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -98,19 +138,34 @@ pub async fn get_remote_fastq_gz_reader(
     Ok(reader)
 }
 
+/// Creates a synchronous BGZF-decompressing FASTQ reader for local files
+///
+/// Utilizes multiple worker threads for improved decompression performance.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the BGZF-compressed FASTQ file (local filesystem)
+/// * `thread_num` - Number of worker threads for BGZF decompression
+///
+/// # Returns
+///
+/// A synchronous BGZF reader wrapping a FASTQ reader
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened
 pub fn get_local_fastq_bgzf_reader(
     file_path: String,
     thread_num: usize,
 ) -> Result<fastq::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
-    let reader = std::fs::File::open(file_path)
+    std::fs::File::open(file_path)
         .map(|f| {
             bgzf::MultithreadedReader::with_worker_count(
                 std::num::NonZero::new(thread_num).unwrap(),
                 f,
             )
         })
-        .map(fastq::io::Reader::new);
-    reader
+        .map(fastq::io::Reader::new)
 }
 
 /// Helper to find line end in buffer
@@ -174,8 +229,8 @@ fn synchronize_bgzf_fastq_reader<R: BufRead>(
 /// - Records can EXTEND past end boundary if they START before it
 pub struct BgzfRangedFastqReader {
     reader: fastq::io::Reader<noodles_bgzf::IndexedReader<BufReader<File>>>,
-    start_offset: u64,  // Compressed offset where partition starts
-    end_offset: u64,    // Compressed offset where partition ends
+    start_offset: u64, // Compressed offset where partition starts
+    end_offset: u64,   // Compressed offset where partition ends
     state: ReaderState,
 }
 
@@ -184,7 +239,10 @@ enum ReaderState {
     /// Initial state - need to synchronize and check ownership
     Uninitialized,
     /// After sync, positioned at first record - need to check if we own it
-    Synchronized { sync_position: u64, moved_during_sync: bool },
+    Synchronized {
+        sync_position: u64,
+        moved_during_sync: bool,
+    },
     /// Normal reading state
     Reading,
     /// Reached end of partition or EOF
@@ -192,6 +250,13 @@ enum ReaderState {
 }
 
 impl BgzfRangedFastqReader {
+    /// Creates a new BGZF ranged FASTQ reader.
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - FASTQ reader wrapping a BGZF indexed reader
+    /// * `start_offset` - Compressed byte offset where reading starts
+    /// * `end_offset` - Compressed byte offset where reading ends
     pub fn new(
         reader: fastq::io::Reader<noodles_bgzf::IndexedReader<BufReader<File>>>,
         start_offset: u64,
@@ -201,17 +266,28 @@ impl BgzfRangedFastqReader {
         static READER_COUNTER: AtomicU64 = AtomicU64::new(0);
         let reader_id = READER_COUNTER.fetch_add(1, Ordering::SeqCst);
 
-        log::debug!("BgzfRangedFastqReader#{} - start={}, end={}", reader_id, start_offset, end_offset);
+        log::debug!(
+            "BgzfRangedFastqReader#{} - start={}, end={}",
+            reader_id,
+            start_offset,
+            end_offset
+        );
         Self {
             reader,
             start_offset,
             end_offset,
             state: if start_offset == 0 {
-                log::debug!("Reader#{} - Partition 0, starting in Reading state", reader_id);
-                ReaderState::Reading  // Partition 0 starts at beginning
+                log::debug!(
+                    "Reader#{} - Partition 0, starting in Reading state",
+                    reader_id
+                );
+                ReaderState::Reading // Partition 0 starts at beginning
             } else {
-                log::debug!("Reader#{} - Non-zero partition, starting in Uninitialized state", reader_id);
-                ReaderState::Uninitialized  // Need to sync
+                log::debug!(
+                    "Reader#{} - Non-zero partition, starting in Uninitialized state",
+                    reader_id
+                );
+                ReaderState::Uninitialized // Need to sync
             },
         }
     }
@@ -223,7 +299,7 @@ impl BgzfRangedFastqReader {
         log::debug!("initialize - pos_before_sync={}", pos_before_sync);
 
         // Synchronize to next complete FASTQ record
-        synchronize_bgzf_fastq_reader(&mut self.reader.get_mut(), self.end_offset)?;
+        synchronize_bgzf_fastq_reader(self.reader.get_mut(), self.end_offset)?;
 
         // Record the position after synchronization
         let sync_pos = self.reader.get_ref().virtual_position().compressed();
@@ -253,7 +329,10 @@ impl BgzfRangedFastqReader {
                     self.initialize()?;
                     continue;
                 }
-                ReaderState::Synchronized { sync_position, moved_during_sync } => {
+                ReaderState::Synchronized {
+                    sync_position,
+                    moved_during_sync,
+                } => {
                     // We're at the first record after sync
                     // Decision: skip or own?
                     // - If we MOVED during sync: record started before our boundary → skip it
@@ -261,14 +340,20 @@ impl BgzfRangedFastqReader {
 
                     let sync_pos = *sync_position;
                     let moved = *moved_during_sync;
-                    log::debug!("Synchronized state - sync_pos={}, start_offset={}, moved={}",
-                             sync_pos, self.start_offset, moved);
+                    log::debug!(
+                        "Synchronized state - sync_pos={}, start_offset={}, moved={}",
+                        sync_pos,
+                        self.start_offset,
+                        moved
+                    );
 
                     if moved {
                         // We had to search forward to find a record boundary
                         // This means the record started before our partition boundary
                         // Previous partition owns it
-                        log::debug!("Skipping first record (moved during sync, started before boundary)");
+                        log::debug!(
+                            "Skipping first record (moved during sync, started before boundary)"
+                        );
                         let mut dummy = noodles_fastq::Record::default();
                         self.reader.read_record(&mut dummy)?;
                         self.state = ReaderState::Reading;
@@ -355,12 +440,10 @@ pub fn get_local_fastq_bgzf_reader_with_range(
         0
     } else {
         // Find the block at or before our start offset
-        let mut target_comp = 0u64;
         let mut target_uncomp = 0u64;
 
         for (comp, uncomp) in index.as_ref().iter() {
             if *comp <= byte_range.start {
-                target_comp = *comp;
                 target_uncomp = *uncomp;
             } else {
                 break; // Found the block after our target
@@ -379,16 +462,28 @@ pub fn get_local_fastq_bgzf_reader_with_range(
     // It will handle synchronization and ownership checking internally
     Ok(BgzfRangedFastqReader::new(
         fastq::io::Reader::new(reader),
-        byte_range.start,  // Compressed offset
-        byte_range.end,    // Compressed offset
+        byte_range.start, // Compressed offset
+        byte_range.end,   // Compressed offset
     ))
 }
 
+/// Creates a synchronous FASTQ reader for uncompressed local files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the uncompressed FASTQ file (local filesystem)
+///
+/// # Returns
+///
+/// A buffered synchronous FASTQ reader
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened
 pub fn get_local_fastq_reader(file_path: String) -> Result<Reader<BufReader<File>>, Error> {
-    let reader = std::fs::File::open(file_path)
+    std::fs::File::open(file_path)
         .map(BufReader::new)
-        .map(fastq::io::Reader::new);
-    reader
+        .map(fastq::io::Reader::new)
 }
 
 fn resolve_fastq_range_start(file_path: &str, byte_range: &FastqByteRange) -> Result<u64, Error> {
@@ -472,8 +567,6 @@ fn resolve_fastq_range_start(file_path: &str, byte_range: &FastqByteRange) -> Re
         }
     }
 }
-
-
 
 fn open_local_fastq_reader_at_range(
     file_path: &str,
@@ -587,6 +680,13 @@ pub struct PositionTrackingFastqReader {
 }
 
 impl PositionTrackingFastqReader {
+    /// Creates a new position-tracking FASTQ reader for byte range reading.
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - FASTQ reader for uncompressed files
+    /// * `start_pos` - Byte position where reading starts
+    /// * `end_offset` - Byte offset where reading should stop
     pub fn new(reader: Reader<BufReader<File>>, start_pos: u64, end_offset: u64) -> Self {
         Self {
             reader,
@@ -622,6 +722,19 @@ impl PositionTrackingFastqReader {
     }
 }
 
+/// Creates an async GZIP-decompressing FASTQ reader for local files
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the GZIP-compressed FASTQ file (local filesystem)
+///
+/// # Returns
+///
+/// An async GZIP reader wrapping a FASTQ reader
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or read
 pub async fn get_local_fastq_gz_reader(
     file_path: String,
 ) -> Result<
@@ -630,19 +743,25 @@ pub async fn get_local_fastq_gz_reader(
     >,
     Error,
 > {
-    let reader = tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
         .map(GzipDecoder::new)
         .map(tokio::io::BufReader::new)
-        .map(fastq::r#async::io::Reader::new);
-    reader
+        .map(fastq::r#async::io::Reader::new)
 }
 
+/// An async FASTQ reader that automatically detects and handles remote file compression
+///
+/// This enum wraps different reader implementations based on the compression format
+/// detected from the remote file. It provides a unified interface for reading FASTQ
+/// data from cloud storage sources (GCS, S3, Azure Blob Storage, etc.).
 pub enum FastqRemoteReader {
+    /// BGZF-compressed remote FASTQ file reader
     BGZF(
         fastq::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
     ),
+    /// GZIP-compressed remote FASTQ file reader
     GZIP(
         fastq::r#async::io::Reader<
             tokio::io::BufReader<
@@ -652,10 +771,26 @@ pub enum FastqRemoteReader {
             >,
         >,
     ),
+    /// Uncompressed remote FASTQ file reader
     PLAIN(fastq::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 }
 
 impl FastqRemoteReader {
+    /// Creates a new remote FASTQ reader, automatically detecting compression format
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the remote FASTQ file (URL)
+    /// * `object_storage_options` - Configuration for accessing remote storage
+    ///
+    /// # Returns
+    ///
+    /// A `FastqRemoteReader` enum variant matching the detected compression format
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the compression type cannot be detected, file cannot be accessed,
+    /// or the reader cannot be created
     pub async fn new(
         file_path: String,
         object_storage_options: ObjectStorageOptions,
@@ -672,7 +807,7 @@ impl FastqRemoteReader {
         let compression_type =
             get_compression_type(file_path.clone(), None, object_storage_options.clone())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
         match compression_type {
             CompressionType::BGZF => {
@@ -718,6 +853,11 @@ impl FastqRemoteReader {
             ),
         }
     }
+    /// Returns a boxed async stream of FASTQ records from the remote file
+    ///
+    /// # Returns
+    ///
+    /// A boxed stream yielding `Result<Record, Error>` for each FASTQ record in the file
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             FastqRemoteReader::BGZF(reader) => reader.records().boxed(),
@@ -727,19 +867,45 @@ impl FastqRemoteReader {
     }
 }
 
+/// A FASTQ reader that automatically detects and handles local file compression
+///
+/// This enum wraps different reader implementations based on the compression format
+/// detected from the local file. For BGZF files, it uses multi-threaded decompression
+/// for improved performance.
 pub enum FastqLocalReader {
+    /// BGZF-compressed local FASTQ file reader with multi-threaded decompression
     BGZF(fastq::io::Reader<bgzf::MultithreadedReader<std::fs::File>>),
+    /// BGZF-compressed local FASTQ file reader with byte range support
     BGZFRanged(BgzfRangedFastqReader),
+    /// GZIP-compressed local FASTQ file reader
     GZIP(
         fastq::r#async::io::Reader<
             tokio::io::BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>,
         >,
     ),
+    /// Uncompressed local FASTQ file reader
     PLAIN(Reader<BufReader<File>>),
+    /// Uncompressed local FASTQ file reader with byte range support
     PlainRanged(PositionTrackingFastqReader),
 }
 
 impl FastqLocalReader {
+    /// Creates a new local FASTQ reader, automatically detecting compression format
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the local FASTQ file (filesystem path)
+    /// * `thread_num` - Number of worker threads for BGZF decompression (used only for BGZF files)
+    /// * `object_storage_options` - Configuration for compression type detection
+    ///
+    /// # Returns
+    ///
+    /// A `FastqLocalReader` enum variant matching the detected compression format
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the compression type cannot be detected, file cannot be opened,
+    /// or the reader cannot be created
     pub async fn new(
         file_path: String,
         thread_num: usize,
@@ -761,7 +927,7 @@ impl FastqLocalReader {
             object_storage_options.clone(),
         )
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
         match compression_type {
             CompressionType::BGZF => {
@@ -806,6 +972,13 @@ impl FastqLocalReader {
         }
     }
 
+    /// Returns a boxed async stream of FASTQ records from the local file
+    ///
+    /// Note: For synchronous readers (BGZF and PLAIN), records are wrapped in an async stream.
+    ///
+    /// # Returns
+    ///
+    /// A boxed stream yielding `Result<Record, Error>` for each FASTQ record in the file
     pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record, Error>> {
         match self {
             FastqLocalReader::BGZF(reader) => stream::iter(reader.records()).boxed(),

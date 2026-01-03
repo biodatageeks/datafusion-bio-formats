@@ -208,11 +208,11 @@ use noodles_bgzf::virtual_position::VirtualPosition;
 use noodles_fastq as fastq;
 use std::io::Seek;
 
-const BLOCK_SIZE: usize = 64 * 1024; // 64 KiB typical BGZF block
+const _BLOCK_SIZE: usize = 64 * 1024; // 64 KiB typical BGZF block
 
 // Index of BGZF block boundaries as virtual positions
 // (compressed_offset, uncompressed_offset_within_block)
-type BlockIndex = Vec<VirtualPosition>;
+type _BlockIndex = Vec<VirtualPosition>;
 
 fn get_bgzf_block_offsets(index: Index, thread_num: usize) -> Vec<(u64, u64)> {
     let mut blocks = index.as_ref().to_vec();
@@ -223,7 +223,7 @@ fn get_bgzf_block_offsets(index: Index, thread_num: usize) -> Vec<(u64, u64)> {
     }
 
     // Determine how many blocks per thread (rounding up)
-    let chunk_size = (total_blocks + thread_num - 1) / thread_num;
+    let chunk_size = total_blocks.div_ceil(thread_num);
     let mut ranges = Vec::with_capacity(thread_num.min(total_blocks));
 
     for chunk_idx in 0..thread_num {
@@ -351,7 +351,7 @@ fn process_blocks(
                 // println!("{}", vp.compressed());
                 processed_records += 1;
             }
-            Err(err) => {
+            Err(_err) => {
                 failed_records += 1;
                 // eprintln!("Error reading record at compressed offset {}: {}", comp_offset, err);
                 // Handle the error as needed, e.g., log it or skip the record

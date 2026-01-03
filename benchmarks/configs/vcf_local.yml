@@ -1,0 +1,57 @@
+# VCF Benchmark Configuration (Local Use Only)
+# 
+# This configuration is for local benchmarking with downloaded VCF files.
+# VCF benchmarks are NOT included in CI/CD due to large file sizes.
+#
+# Prerequisites:
+# 1. Download VCF files: ./benchmarks/scripts/download_vcf_benchmark_files.sh
+# 2. Update file paths below to match your download location
+# 3. Run: ./target/release/benchmark-runner benchmarks/configs/vcf_local.yml
+#
+# See benchmarks/VCF_BENCHMARKS.md for detailed instructions
+
+format: vcf
+table_name: variants
+
+# Local file paths (update these after downloading)
+# Use absolute paths to downloaded VCF files
+test_data:
+  # Recommended: Use medium file (~2-3MB) for reasonable benchmark duration
+  # For quick tests, use: /tmp/small_trio_ychr.vcf.gz (~50KB)
+  # For comprehensive tests, use: /tmp/large_chr22_phase3.vcf.gz (~200-300MB)
+  - filename: /tmp/medium_ceu_genotypes.vcf.gz
+    # Note: drive_url is ignored for absolute paths but required by schema
+    drive_url: https://local-file
+    checksum: null
+
+# Parallelism benchmarks - test BGZF parallel decompression
+parallelism_tests:
+  thread_counts: [1, 2, 4, 8]  # Test with different thread counts
+  repetitions: 3
+  query: "SELECT COUNT(*) FROM {table_name}"
+
+# Predicate pushdown benchmarks - test filter optimization efficiency
+predicate_pushdown_tests:
+  repetitions: 3
+  tests:
+    - name: chromosome_filter
+      query: "SELECT COUNT(*) FROM {table_name} WHERE chrom = '22'"
+
+    - name: position_range_filter
+      query: "SELECT COUNT(*) FROM {table_name} WHERE start > 10000000 AND start < 20000000"
+
+    - name: quality_filter
+      query: "SELECT COUNT(*) FROM {table_name} WHERE qual > 100"
+
+# Projection pushdown benchmarks - test column pruning optimization
+projection_pushdown_tests:
+  repetitions: 3
+  tests:
+    - name: full_schema
+      query: "SELECT * FROM {table_name} LIMIT 100000"
+
+    - name: core_fields
+      query: "SELECT chrom, start, `end`, ref, alt FROM {table_name} LIMIT 100000"
+
+    - name: single_column
+      query: "SELECT chrom FROM {table_name} LIMIT 100000"

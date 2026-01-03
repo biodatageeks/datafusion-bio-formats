@@ -1,0 +1,153 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: 'patch'
+      pre_release:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    # Only run on master branch
+    if: github.ref == 'refs/heads/master'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: '1.86.0'
+          components: 'clippy, rustfmt'
+
+      - name: Install cargo-edit for version bumping
+        run: cargo install cargo-edit --version 0.12.3 --locked
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Get current version
+        id: current_version
+        run: |
+          CURRENT_VERSION=$(grep -m 1 '^version = ' datafusion/bio-format-core/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version: $CURRENT_VERSION"
+
+      - name: Bump version in all crates
+        id: bump_version
+        run: |
+          # Bump version once - cargo set-version updates all workspace members
+          echo "Bumping version for all workspace members"
+          cargo set-version --manifest-path datafusion/bio-format-core/Cargo.toml --bump ${{ inputs.version_type }}
+
+          # Get the new version
+          NEW_VERSION=$(grep -m 1 '^version = ' datafusion/bio-format-core/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+
+      - name: Update Cargo.lock
+        run: cargo check --all
+
+      - name: Run tests
+        run: cargo test --all
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Commit version bump
+        run: |
+          git add -A
+          git commit -m "chore: release v${{ steps.bump_version.outputs.version }}"
+
+      - name: Create and push tag
+        run: |
+          git tag -a "v${{ steps.bump_version.outputs.version }}" -m "Release v${{ steps.bump_version.outputs.version }}"
+          git push origin master
+          git push origin "v${{ steps.bump_version.outputs.version }}"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Get the previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -z "$PREV_TAG" ]; then
+            echo "First release - no previous tag found"
+            CHANGELOG="First release of datafusion-bio-formats"
+          else
+            echo "Generating changelog from $PREV_TAG to v${{ steps.bump_version.outputs.version }}"
+            CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # Save changelog to file
+          echo "$CHANGELOG" > /tmp/changelog.md
+          echo "## What's Changed" >> /tmp/release_notes.md
+          echo "" >> /tmp/release_notes.md
+          echo "$CHANGELOG" >> /tmp/release_notes.md
+          echo "" >> /tmp/release_notes.md
+          echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...v${{ steps.bump_version.outputs.version }}" >> /tmp/release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.bump_version.outputs.version }}
+          name: Release v${{ steps.bump_version.outputs.version }}
+          body_path: /tmp/release_notes.md
+          draft: false
+          prerelease: ${{ inputs.pre_release }}
+          generate_release_notes: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Optional: Publish to crates.io (uncomment when ready)
+      # - name: Publish to crates.io
+      #   run: |
+      #     # Publish crates in dependency order
+      #     cargo publish --manifest-path datafusion/bio-format-core/Cargo.toml --token ${{ secrets.CARGO_TOKEN }}
+      #     sleep 10  # Wait for crates.io to update
+      #
+      #     # Publish dependent crates
+      #     for crate in datafusion/bio-format-{fastq,vcf,bam,bed,gff,fasta,cram}/Cargo.toml; do
+      #       cargo publish --manifest-path "$crate" --token ${{ secrets.CARGO_TOKEN }}
+      #       sleep 10
+      #     done
+      #   env:
+      #     CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Previous Version**: ${{ steps.current_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **New Version**: ${{ steps.bump_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version Bump**: ${{ inputs.version_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pre-release**: ${{ inputs.pre_release }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: v${{ steps.bump_version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Release created successfully!" >> $GITHUB_STEP_SUMMARY

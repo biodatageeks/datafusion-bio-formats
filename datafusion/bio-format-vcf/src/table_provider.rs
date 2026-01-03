@@ -26,10 +26,28 @@ use std::sync::Arc;
 /// Byte range specification for file reading
 #[derive(Clone, Debug, PartialEq)]
 pub struct VcfByteRange {
+    /// Start byte offset (inclusive)
     pub start: u64,
+    /// End byte offset (exclusive)
     pub end: u64,
 }
 
+/// Determines the Arrow schema for a VCF file by reading its header.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the VCF file
+/// * `info_fields` - Optional list of INFO fields to include (if None, all are included)
+/// * `format_fields` - Optional list of FORMAT fields to include (if None, all are included)
+/// * `object_storage_options` - Configuration for cloud storage access
+///
+/// # Returns
+///
+/// An Arrow SchemaRef representing the VCF table structure
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or the header is invalid
 async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
@@ -51,30 +69,22 @@ async fn determine_schema_from_header(
         Field::new("filter", DataType::Utf8, true),
     ];
 
-    match info_fields {
-        Some(infos) => {
-            for tag in infos {
-                let dtype = info_to_arrow_type(&header_infos, &tag);
-                let info = header_infos.get(tag.as_str()).unwrap();
-                let nullable = is_nullable(&info.ty());
-                fields.push(Field::new(tag.to_lowercase(), dtype, nullable));
-            }
+    if let Some(infos) = info_fields {
+        for tag in infos {
+            let dtype = info_to_arrow_type(header_infos, tag);
+            let info = header_infos.get(tag.as_str()).unwrap();
+            let nullable = is_nullable(&info.ty());
+            // Preserve case sensitivity for INFO fields to avoid conflicts
+            fields.push(Field::new(tag.clone(), dtype, nullable));
         }
-        _ => {}
     }
 
-    match format_fields {
-        Some(formats) => {
-            for tag in formats {
-                let dtype = format_to_arrow_type(&header_formats, &tag);
-                fields.push(Field::new(
-                    format!("format_{}", tag.to_lowercase()),
-                    dtype,
-                    true,
-                ));
-            }
+    if let Some(formats) = format_fields {
+        for tag in formats {
+            let dtype = format_to_arrow_type(header_formats, tag);
+            // Preserve case sensitivity for FORMAT fields
+            fields.push(Field::new(format!("format_{}", tag), dtype, true));
         }
-        _ => {}
     }
 
     let schema = Schema::new(fields);
@@ -82,10 +92,32 @@ async fn determine_schema_from_header(
     Ok(Arc::new(schema))
 }
 
+/// Determines if a VCF INFO field type is nullable.
+///
+/// FLAG type fields are not nullable (always present as true/false), while other
+/// types can be absent for specific variants.
+///
+/// # Arguments
+///
+/// * `ty` - The VCF INFO field type
+///
+/// # Returns
+///
+/// `true` if the field can be null/missing, `false` if it's always present
 pub fn is_nullable(ty: &InfoType) -> bool {
     !matches!(ty, InfoType::Flag)
 }
 
+/// Converts a VCF FORMAT field type to an Arrow DataType.
+///
+/// # Arguments
+///
+/// * `formats` - The VCF header FORMAT definitions
+/// * `field` - The FORMAT field name
+///
+/// # Returns
+///
+/// The corresponding Arrow DataType
 fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
     let format = formats.get(field).unwrap();
     match format.ty() {
@@ -96,24 +128,52 @@ fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
     }
 }
 
+/// A DataFusion table provider for reading VCF files.
+///
+/// This provider enables SQL queries on VCF files by implementing the DataFusion
+/// TableProvider interface. It supports local and remote files, multiple compression formats,
+/// and projection pushdown optimization.
 #[derive(Clone, Debug)]
 pub struct VcfTableProvider {
+    /// Path to the VCF file (local path or cloud URI)
     file_path: String,
+    /// Optional list of INFO fields to include (if None, all are included)
     info_fields: Option<Vec<String>>,
+    /// Optional list of FORMAT fields to include (if None, all are included)
     format_fields: Option<Vec<String>>,
+    /// Arrow schema representing the VCF table structure
     schema: SchemaRef,
+    /// Optional number of worker threads for BGZF decompression
     thread_num: Option<usize>,
+    /// Optional byte range for reading only a portion of the file
     byte_range: Option<VcfByteRange>,
+    /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
 impl VcfTableProvider {
-    /// Create a new VcfTableProvider (synchronous version)
-    /// 
+    /// Creates a new VCF table provider.
+    ///
     /// # Warning
     /// This method uses `block_on` internally and should NOT be called from
     /// within an async context (like Tokio runtime) as it can cause deadlocks.
     /// Use `new_async` instead when called from async contexts.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the VCF file
+    /// * `info_fields` - Optional list of INFO fields to include
+    /// * `format_fields` - Optional list of FORMAT fields to include
+    /// * `thread_num` - Optional number of worker threads for BGZF decompression
+    /// * `object_storage_options` - Configuration for cloud storage access
+    ///
+    /// # Returns
+    ///
+    /// A new `VcfTableProvider` instance with schema determined from the VCF header
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or the header is invalid
     pub fn new(
         file_path: String,
         info_fields: Option<Vec<String>>,
@@ -139,7 +199,7 @@ impl VcfTableProvider {
     }
 
     /// Create a new VcfTableProvider (async version)
-    /// 
+    ///
     /// Use this method when called from async contexts to avoid deadlocks.
     pub async fn new_async(
         file_path: String,
@@ -167,12 +227,12 @@ impl VcfTableProvider {
     }
 
     /// Create VcfTableProvider that reads only a specific byte range (synchronous version)
-    /// 
+    ///
     /// # Critical Note
     /// The header is always read from byte 0 for schema inference, regardless of `byte_range.start`.
     /// The `byte_range` only applies to variant record reading, ensuring schema consistency
     /// across all splits of the same VCF file.
-    /// 
+    ///
     /// # Warning
     /// This method uses `block_on` internally and should NOT be called from
     /// within an async context (like Tokio runtime) as it can cause deadlocks.
@@ -205,12 +265,12 @@ impl VcfTableProvider {
     }
 
     /// Create VcfTableProvider that reads only a specific byte range (async version)
-    /// 
+    ///
     /// # Critical Note
     /// The header is always read from byte 0 for schema inference, regardless of `byte_range.start`.
     /// The `byte_range` only applies to variant record reading, ensuring schema consistency
     /// across all splits of the same VCF file.
-    /// 
+    ///
     /// Use this method when called from async contexts to avoid deadlocks.
     pub async fn new_with_range_async(
         file_path: String,
@@ -269,7 +329,8 @@ impl TableProvider for VcfTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
+                    // For empty projections (COUNT(*)), return an empty schema
+                    Arc::new(Schema::empty())
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
@@ -302,6 +363,19 @@ impl TableProvider for VcfTableProvider {
     }
 }
 
+/// Converts a VCF INFO field type to an Arrow DataType.
+///
+/// Handles scalar types (Integer, Float, String, Character, Flag) and array types
+/// based on the Number field of the INFO definition.
+///
+/// # Arguments
+///
+/// * `infos` - The VCF header INFO definitions
+/// * `field` - The INFO field name
+///
+/// # Returns
+///
+/// The corresponding Arrow DataType, defaulting to Utf8 if field is not found
 pub fn info_to_arrow_type(infos: &Infos, field: &str) -> DataType {
     match infos.get(field) {
         Some(t) => {

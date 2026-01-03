@@ -19,6 +19,16 @@ use std::io::Error;
 use std::num::NonZero;
 use tokio_util::io::StreamReader;
 
+/// Creates a remote BGZF-compressed BED reader from cloud storage
+///
+/// # Arguments
+///
+/// * `file_path` - Remote file path (GCS, S3, or Azure URL)
+/// * `object_storage_options` - Cloud storage configuration
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
 pub async fn get_remote_bed_bgzf_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -31,6 +41,16 @@ pub async fn get_remote_bed_bgzf_reader<const N: usize>(
     Ok(reader)
 }
 
+/// Creates a remote GZIP-compressed BED reader from cloud storage
+///
+/// # Arguments
+///
+/// * `file_path` - Remote file path (GCS, S3, or Azure URL)
+/// * `object_storage_options` - Cloud storage configuration
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
 pub async fn get_remote_fastq_gz_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -48,6 +68,16 @@ pub async fn get_remote_fastq_gz_reader<const N: usize>(
     Ok(reader)
 }
 
+/// Creates a remote uncompressed BED reader from cloud storage
+///
+/// # Arguments
+///
+/// * `file_path` - Remote file path (GCS, S3, or Azure URL)
+/// * `object_storage_options` - Cloud storage configuration
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
 pub async fn get_remote_bed_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
@@ -57,6 +87,20 @@ pub async fn get_remote_bed_reader<const N: usize>(
     Ok(reader)
 }
 
+/// Creates a local BGZF-compressed BED reader with parallel decompression
+///
+/// # Arguments
+///
+/// * `file_path` - Local file path
+/// * `thread_num` - Number of threads for parallel BGZF decompression
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
+///
+/// # Errors
+///
+/// Returns error if file cannot be opened
 pub fn get_local_bed_bgzf_reader<const N: usize>(
     file_path: String,
     thread_num: usize,
@@ -65,17 +109,29 @@ pub fn get_local_bed_bgzf_reader<const N: usize>(
         "Reading VCF file from local storage with {} threads",
         thread_num
     );
-    let reader = File::open(file_path)
+    File::open(file_path)
         .map(|f| {
             noodles_bgzf::MultithreadedReader::with_worker_count(
                 NonZero::new(thread_num).unwrap(),
                 f,
             )
         })
-        .map(noodles_bed::io::Reader::new);
-    reader
+        .map(noodles_bed::io::Reader::new)
 }
 
+/// Creates a local GZIP-compressed BED reader
+///
+/// # Arguments
+///
+/// * `file_path` - Local file path
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
+///
+/// # Errors
+///
+/// Returns error if file cannot be opened
 pub async fn get_local_bed_gz_reader<const N: usize>(
     file_path: String,
 ) -> Result<
@@ -85,40 +141,64 @@ pub async fn get_local_bed_gz_reader<const N: usize>(
     >,
     Error,
 > {
-    let reader = tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
         .map(GzipDecoder::new)
         .map(tokio::io::BufReader::new)
-        .map(async_reader::Reader::new);
-    reader
+        .map(async_reader::Reader::new)
 }
 
+/// Creates a local uncompressed BED reader
+///
+/// # Arguments
+///
+/// * `file_path` - Local file path
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
+///
+/// # Errors
+///
+/// Returns error if file cannot be opened
 pub fn get_local_bed_reader<const N: usize>(
     file_path: String,
 ) -> Result<noodles_bed::io::Reader<N, std::io::BufReader<File>>, Error> {
     debug!("Reading BED file from local storage with sync reader");
-    let reader = File::open(file_path)
-        .map(|f| std::io::BufReader::new(f))
-        .map(noodles_bed::io::Reader::new);
-    reader
+    File::open(file_path)
+        .map(std::io::BufReader::new)
+        .map(noodles_bed::io::Reader::new)
 }
 
+/// Remote BED reader supporting multiple compression formats
+///
+/// This enum wraps different reader implementations for BGZF, GZIP, and uncompressed
+/// BED files from cloud storage backends.
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
 pub enum BedRemoteReader<const N: usize> {
+    /// BGZF-compressed BED reader
     BGZF(async_reader::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>, N>),
+    /// GZIP-compressed BED reader
     GZIP(
         async_reader::Reader<
             tokio::io::BufReader<GzipDecoder<StreamReader<FuturesBytesStream, Bytes>>>,
             N,
         >,
     ),
+    /// Uncompressed BED reader
     PLAIN(async_reader::Reader<StreamReader<FuturesBytesStream, Bytes>, N>),
 }
 
+/// Macro to generate BedRemoteReader implementations for different column counts
 macro_rules! impl_bed_remote_reader {
     ($($n:expr),*) => {
         $(
             impl BedRemoteReader<$n> {
+                /// Creates a new remote BED reader, auto-detecting compression format
                 pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
                     info!("Creating remote BED reader: {}", object_storage_options);
                     let compression_type = get_compression_type(
@@ -142,6 +222,7 @@ macro_rules! impl_bed_remote_reader {
                     }
                 }
 
+                /// Returns a stream of BED records from the remote reader
                 pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record<$n>, Error>> {
                     match self {
                         BedRemoteReader::BGZF(reader) => reader.records().boxed(),
@@ -150,6 +231,7 @@ macro_rules! impl_bed_remote_reader {
                     }
                 }
 
+                /// Returns a stream of lines from the remote reader
                 pub async fn lines(&mut self) -> BoxStream<'_, Result<String, Error>> {
                     match self {
                         BedRemoteReader::BGZF(reader) => reader.lines().boxed(),
@@ -165,15 +247,27 @@ macro_rules! impl_bed_remote_reader {
 // // Generate implementations for N = 3, 4, 5, 6
 impl_bed_remote_reader!(3, 4, 5, 6);
 
+/// Local BED reader supporting multiple compression formats
+///
+/// This enum wraps different reader implementations for BGZF and uncompressed
+/// BED files from local storage.
+///
+/// # Type Parameters
+///
+/// * `N` - Number of BED columns (3-6)
 pub enum BedLocalReader<const N: usize> {
+    /// BGZF-compressed BED reader with parallel decompression
     BGZF(noodles_bed::io::Reader<N, MultithreadedReader<File>>),
+    /// Uncompressed BED reader
     PLAIN(noodles_bed::io::Reader<N, std::io::BufReader<File>>),
 }
 
+/// Macro to generate BedLocalReader implementations for different column counts
 macro_rules! impl_bed_local_reader {
     ($($n:expr),*) => {
         $(
             impl BedLocalReader<$n> {
+                /// Creates a new local BED reader, auto-detecting compression format
                 pub async fn new(file_path: String, thread_num: usize) -> Result<Self, Error> {
                     info!("Creating local BED reader: {}", file_path);
                     let compression_type = get_compression_type(
@@ -196,6 +290,7 @@ macro_rules! impl_bed_local_reader {
                     }
                 }
 
+                /// Returns a stream of BED records from the local reader
                 pub fn read_records(&mut self) -> impl Stream<Item = Result<Record<$n>, Error>> + '_ {
                     match self {
                         BedLocalReader::BGZF(reader) => {

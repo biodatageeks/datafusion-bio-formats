@@ -1,7 +1,13 @@
 [package]
 name = "datafusion-bio-format-gff"
-version = "0.1.0"
-edition = "2024"
+version = "0.1.1"
+description = "GFF file format support for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
 
 [dependencies]
 datafusion.workspace = true
@@ -25,6 +31,6 @@ env_logger = "0.11.8"
 tracing = "0.1.40"
 
 [[example]]
-name = "test_reader"
+name = "test_gff_reader"
 # Some issue when publishing and path isn't specified, so adding here
-path = "./examples/test_reader.rs"
+path = "./examples/test_gff_reader.rs"

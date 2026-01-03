@@ -1,8 +1,19 @@
+/// Internal utilities for reading lines from async readers
 mod line {
     use tokio::io::{self, AsyncBufRead, AsyncBufReadExt};
 
     /// Reads a single line (up to and including `\n`) from `reader` into `buf`.
+    ///
     /// Strips a single trailing `\r` or `\n` or `\r\n` if present.
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - Async buffered reader
+    /// * `buf` - Buffer to accumulate line data
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes read (0 indicates EOF), or error
     pub async fn read_line<R>(reader: &mut R, buf: &mut Vec<u8>) -> io::Result<usize>
     where
         R: AsyncBufRead + Unpin,
@@ -35,17 +46,31 @@ use tokio::io::{self, AsyncBufRead};
 
 use noodles_bed::Record;
 
-/// An async BED reader.
+/// An async BED reader for streaming BED records
+///
+/// This generic reader supports any async buffered reader and can parse
+/// BED records of a specific column count (3-6).
+///
+/// # Type Parameters
+///
+/// * `R` - Async buffered reader type
+/// * `N` - Number of BED columns (3-6)
 pub struct Reader<R, const N: usize> {
+    /// The underlying async reader
     inner: R,
 }
 
 impl<R, const N: usize> Reader<R, N> {
+    /// Creates a new async BED reader wrapping the given reader
+    ///
+    /// # Arguments
+    ///
+    /// * `inner` - The underlying async reader
     pub fn new(inner: R) -> Self {
         Self { inner }
     }
-    /// Returns a reference to the underlying reader.
 
+    /// Returns a reference to the underlying reader.
     pub fn get_ref(&self) -> &R {
         &self.inner
     }
@@ -72,12 +97,21 @@ macro_rules! impl_async_reader {
             {
 
 
+                /// Reads a single line into the provided buffer
+                ///
+                /// # Arguments
+                ///
+                /// * `buf` - Buffer to accumulate line data
+                ///
+                /// # Returns
+                ///
+                /// Number of bytes read (0 indicates EOF), or error
                 pub async fn read_line(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-                    // Reuse the same logic as in GFF’s read_line, minus directive handling.
+                    // Reuse the same logic as in GFF's read_line, minus directive handling.
                     line::read_line(&mut self.inner, buf).await
                 }
 
-
+                /// Returns a stream of lines from the reader
                 pub fn lines(&mut self) -> impl Stream<Item = io::Result<String>> + '_ {
                     Box::pin(stream::try_unfold(
                         (self, Vec::new()),
@@ -96,7 +130,8 @@ macro_rules! impl_async_reader {
                     ))
                 }
 
-                 pub fn records(&mut self) -> impl Stream<Item = io::Result<Record<$n>>> + '_ {
+                /// Returns a stream of BED records from the reader
+                pub fn records(&mut self) -> impl Stream<Item = io::Result<Record<$n>>> + '_ {
                         // Initial state is (self, an empty Vec<u8>)
                         Box::pin(
                             stream::try_unfold(

@@ -1,6 +1,6 @@
+use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_vcf::storage::{VcfLocalReader, get_local_vcf_reader_with_range};
 use datafusion_bio_format_vcf::table_provider::VcfByteRange;
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -14,10 +14,10 @@ fn create_test_vcf_file() -> std::io::Result<NamedTempFile> {
         "##fileformat=VCFv4.3\n",
         "##contig=<ID=chr1,length=249250621>\n",
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
-        "chr1\t1000\t.\tA\tT\t100\tPASS\t.\n",      // Variant 1
-        "chr1\t2000\t.\tG\tC\t200\tPASS\t.\n",      // Variant 2
-        "chr1\t3000\t.\tT\tA\t300\tPASS\t.\n",      // Variant 3
-        "chr1\t4000\t.\tC\tG\t400\tPASS\t.\n",      // Variant 4
+        "chr1\t1000\t.\tA\tT\t100\tPASS\t.\n", // Variant 1
+        "chr1\t2000\t.\tG\tC\t200\tPASS\t.\n", // Variant 2
+        "chr1\t3000\t.\tT\tA\t300\tPASS\t.\n", // Variant 3
+        "chr1\t4000\t.\tC\tG\t400\tPASS\t.\n", // Variant 4
     );
 
     temp_file.write_all(vcf_content.as_bytes())?;
@@ -56,7 +56,10 @@ fn test_byte_range_first_half() -> std::io::Result<()> {
     // Header is ~100 bytes, each variant line is ~40 bytes
     // So bytes 100-180 should cover first 2 variants
     // Note: VCF readers read complete lines, so we may get more records
-    let byte_range = VcfByteRange { start: 100, end: 180 };
+    let byte_range = VcfByteRange {
+        start: 100,
+        end: 180,
+    };
     let mut reader = get_local_vcf_reader_with_range(file_path, byte_range)?;
 
     let mut record_count = 0;
@@ -68,7 +71,10 @@ fn test_byte_range_first_half() -> std::io::Result<()> {
         chroms.push(record.reference_sequence_name().to_string());
     }
 
-    assert!(record_count >= 1, "Should read at least 1 VCF variant record");
+    assert!(
+        record_count >= 1,
+        "Should read at least 1 VCF variant record"
+    );
     // VCF readers read complete lines, so we may get more than 2 if lines extend past the range
     assert!(record_count <= 4, "Should not read more than all records");
     Ok(())
@@ -129,7 +135,10 @@ fn test_zero_byte_range() -> std::io::Result<()> {
         record_count += 1;
     }
 
-    assert_eq!(record_count, 0, "Zero-byte range at end of file should read no records");
+    assert_eq!(
+        record_count, 0,
+        "Zero-byte range at end of file should read no records"
+    );
     Ok(())
 }
 
@@ -162,7 +171,10 @@ async fn test_integration_with_vcf_local_reader() -> std::io::Result<()> {
     let temp_file = create_test_vcf_file()?;
     let file_path = temp_file.path().to_string_lossy().to_string();
 
-    let byte_range = Some(VcfByteRange { start: 100, end: 180 });
+    let byte_range = Some(VcfByteRange {
+        start: 100,
+        end: 180,
+    });
     let storage_opts = ObjectStorageOptions::default();
 
     let mut reader = VcfLocalReader::new_with_range(
@@ -182,7 +194,9 @@ async fn test_integration_with_vcf_local_reader() -> std::io::Result<()> {
         record_count += 1;
     }
 
-    assert!(record_count >= 1, "Integration test should read at least 1 record");
+    assert!(
+        record_count >= 1,
+        "Integration test should read at least 1 record"
+    );
     Ok(())
 }
-

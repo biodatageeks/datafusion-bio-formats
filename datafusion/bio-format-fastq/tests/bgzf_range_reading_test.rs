@@ -1,3 +1,4 @@
+use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 /// Unit tests for BGZF range reading with GZI index
 ///
 /// Tests the new `get_local_fastq_bgzf_reader_with_range()` function
@@ -6,7 +7,6 @@ use datafusion_bio_format_fastq::storage::{
     FastqLocalReader, get_local_fastq_bgzf_reader_with_range,
 };
 use datafusion_bio_format_fastq::table_provider::FastqByteRange;
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use noodles_bgzf::gzi;
 use std::path::PathBuf;
 
@@ -29,11 +29,12 @@ fn test_bgzf_range_reader_creation() {
     }
 
     // Create reader with byte range
-    let byte_range = FastqByteRange { start: 0, end: 10000 };
-    let result = get_local_fastq_bgzf_reader_with_range(
-        file_path.to_string_lossy().to_string(),
-        byte_range,
-    );
+    let byte_range = FastqByteRange {
+        start: 0,
+        end: 10000,
+    };
+    let result =
+        get_local_fastq_bgzf_reader_with_range(file_path.to_string_lossy().to_string(), byte_range);
 
     assert!(
         result.is_ok(),
@@ -107,17 +108,19 @@ fn test_bgzf_range_reading_first_partition() {
         end: first_block_end,
     };
 
-    let mut reader = get_local_fastq_bgzf_reader_with_range(
-        file_path.to_string_lossy().to_string(),
-        byte_range,
-    )
-    .expect("Failed to create reader");
+    let mut reader =
+        get_local_fastq_bgzf_reader_with_range(file_path.to_string_lossy().to_string(), byte_range)
+            .expect("Failed to create reader");
 
     // Count records in first partition
     let mut record_count = 0;
     let mut record = noodles_fastq::Record::default();
 
-    while reader.read_record(&mut record).expect("Failed to read record") > 0 {
+    while reader
+        .read_record(&mut record)
+        .expect("Failed to read record")
+        > 0
+    {
         record_count += 1;
 
         // Verify record structure
@@ -166,7 +169,7 @@ fn test_bgzf_range_reading_all_partitions() {
 
     // Create 4 partitions
     let num_partitions = 4.min(entries.len() - 1);
-    let blocks_per_partition = (entries.len() - 1 + num_partitions - 1) / num_partitions;
+    let blocks_per_partition = (entries.len() - 1).div_ceil(num_partitions);
 
     let mut total_records = 0;
     let mut partition_records = Vec::new();
@@ -201,7 +204,11 @@ fn test_bgzf_range_reading_all_partitions() {
         let mut partition_count = 0;
         let mut record = noodles_fastq::Record::default();
 
-        while reader.read_record(&mut record).expect("Failed to read record") > 0 {
+        while reader
+            .read_record(&mut record)
+            .expect("Failed to read record")
+            > 0
+        {
             partition_count += 1;
 
             // Basic validation
@@ -286,11 +293,9 @@ fn test_bgzf_range_vs_full_file_consistency() {
         end: u64::MAX,
     };
 
-    let mut range_reader = get_local_fastq_bgzf_reader_with_range(
-        file_path.to_string_lossy().to_string(),
-        byte_range,
-    )
-    .expect("Failed to create range reader");
+    let mut range_reader =
+        get_local_fastq_bgzf_reader_with_range(file_path.to_string_lossy().to_string(), byte_range)
+            .expect("Failed to create range reader");
 
     let mut range_records = Vec::new();
     let mut record = noodles_fastq::Record::default();
@@ -342,7 +347,10 @@ async fn test_fastq_local_reader_bgzf_ranged_variant() {
     }
 
     // Create FastqLocalReader with byte range (should use BGZFRanged variant)
-    let byte_range = Some(FastqByteRange { start: 0, end: 10000 });
+    let byte_range = Some(FastqByteRange {
+        start: 0,
+        end: 10000,
+    });
 
     let mut reader = FastqLocalReader::new_with_range(
         file_path.to_string_lossy().to_string(),
@@ -459,17 +467,19 @@ fn test_bgzf_range_boundary_alignment() {
         end: first_block_end,
     };
 
-    let mut reader = get_local_fastq_bgzf_reader_with_range(
-        file_path.to_string_lossy().to_string(),
-        byte_range,
-    )
-    .expect("Failed to create reader");
+    let mut reader =
+        get_local_fastq_bgzf_reader_with_range(file_path.to_string_lossy().to_string(), byte_range)
+            .expect("Failed to create reader");
 
     // Count records in first block
     let mut record_count = 0;
     let mut record = noodles_fastq::Record::default();
 
-    while reader.read_record(&mut record).expect("Failed to read record") > 0 {
+    while reader
+        .read_record(&mut record)
+        .expect("Failed to read record")
+        > 0
+    {
         record_count += 1;
     }
 
@@ -496,16 +506,18 @@ fn test_bgzf_range_boundary_alignment() {
         end: second_block_end,
     };
 
-    let mut reader = get_local_fastq_bgzf_reader_with_range(
-        file_path.to_string_lossy().to_string(),
-        byte_range,
-    )
-    .expect("Failed to create reader");
+    let mut reader =
+        get_local_fastq_bgzf_reader_with_range(file_path.to_string_lossy().to_string(), byte_range)
+            .expect("Failed to create reader");
 
     let mut second_block_count = 0;
     let mut record = noodles_fastq::Record::default();
 
-    while reader.read_record(&mut record).expect("Failed to read record") > 0 {
+    while reader
+        .read_record(&mut record)
+        .expect("Failed to read record")
+        > 0
+    {
         second_block_count += 1;
     }
 
@@ -516,7 +528,10 @@ fn test_bgzf_range_boundary_alignment() {
 
     // Both blocks should contain records
     // Note: With synchronization, blocks may overlap slightly at boundaries
-    assert!(second_block_count > 0, "Second block should contain records");
+    assert!(
+        second_block_count > 0,
+        "Second block should contain records"
+    );
     assert!(record_count > 0, "First block should contain records");
 
     // Verify they're reading different portions (not the exact same records)

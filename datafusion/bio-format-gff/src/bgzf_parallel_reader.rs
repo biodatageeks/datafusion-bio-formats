@@ -21,12 +21,18 @@ use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
     stream::RecordBatchStreamAdapter,
 };
-use datafusion_bio_format_core::table_utils::{Attribute, OptionalField, builders_to_arrays};
+use datafusion_bio_format_core::table_utils::{Attribute, OptionalField};
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_gff as gff;
 use std::path::PathBuf;
 use tracing::debug;
 
+/// Table provider for BGZF-compressed GFF files with parallel processing support
+///
+/// Implements Apache DataFusion's TableProvider trait with support for:
+/// - Parallel reading of BGZF-compressed blocks
+/// - Filter pushdown optimization for efficient predicate evaluation
+/// - Dynamic schema construction based on requested attributes
 #[derive(Debug, Clone)]
 pub struct BgzfGffTableProvider {
     path: PathBuf,
@@ -35,9 +41,17 @@ pub struct BgzfGffTableProvider {
 }
 
 impl BgzfGffTableProvider {
+    /// Creates a new BGZF GFF table provider
+    ///
+    /// # Arguments
+    /// * `path` - Path to the BGZF-compressed GFF file
+    /// * `attr_fields` - Optional list of specific attributes to extract as columns
+    ///
+    /// # Returns
+    /// A configured table provider or IO error if schema construction fails
     pub fn try_new(path: impl Into<PathBuf>, attr_fields: Option<Vec<String>>) -> io::Result<Self> {
         let schema = determine_schema_on_demand(attr_fields.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Schema error: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("Schema error: {}", e)))?;
 
         Ok(Self {
             path: path.into(),
@@ -243,6 +257,7 @@ struct BgzfGffExec {
 }
 
 impl BgzfGffExec {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         path: PathBuf,
         partitions: Vec<(u64, u64)>,
@@ -802,47 +817,8 @@ fn process_nested_attributes(attributes_str: &str) -> Vec<Attribute> {
     attributes
 }
 
-/// Create Arrow RecordBatch from builders
-fn create_batch(
-    schema: &SchemaRef,
-    chrom_builder: &mut datafusion::arrow::array::StringBuilder,
-    start_builder: &mut datafusion::arrow::array::UInt32Builder,
-    end_builder: &mut datafusion::arrow::array::UInt32Builder,
-    type_builder: &mut datafusion::arrow::array::StringBuilder,
-    source_builder: &mut datafusion::arrow::array::StringBuilder,
-    score_builder: &mut datafusion::arrow::array::Float32Builder,
-    strand_builder: &mut datafusion::arrow::array::StringBuilder,
-    phase_builder: &mut datafusion::arrow::array::UInt32Builder,
-    attribute_builders: &mut Option<(
-        Vec<String>,
-        Vec<datafusion::arrow::datatypes::DataType>,
-        Vec<OptionalField>,
-    )>,
-    nested_builder: &mut Option<OptionalField>,
-) -> Result<RecordBatch, ArrowError> {
-    let mut columns: Vec<Arc<dyn Array>> = vec![
-        Arc::new(chrom_builder.finish()),
-        Arc::new(start_builder.finish()),
-        Arc::new(end_builder.finish()),
-        Arc::new(type_builder.finish()),
-        Arc::new(source_builder.finish()),
-        Arc::new(score_builder.finish()),
-        Arc::new(strand_builder.finish()),
-        Arc::new(phase_builder.finish()),
-    ];
-
-    // Add attribute columns
-    if let Some(builders) = attribute_builders {
-        let attr_arrays = builders_to_arrays(&mut builders.2);
-        columns.extend(attr_arrays.into_iter().map(|arr| arr as Arc<dyn Array>));
-    } else if let Some(builder) = nested_builder {
-        columns.push(builder.finish()?);
-    }
-
-    RecordBatch::try_new(schema.clone(), columns)
-}
-
 /// Create Arrow RecordBatch from builders with projection support
+#[allow(clippy::too_many_arguments)]
 fn create_batch_projected(
     schema: &SchemaRef,
     projection_indices: &[usize],
@@ -1006,7 +982,7 @@ mod tests {
 
         let batch2 = create_batch_projected(
             &schema2,
-            &vec![0, 1],
+            &[0, 1],
             1,
             &mut chrom_builder,
             &mut start_builder,

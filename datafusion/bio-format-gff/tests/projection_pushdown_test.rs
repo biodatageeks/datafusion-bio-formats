@@ -11,9 +11,14 @@ chr2	ensembl	gene	3000	4000	.	-	0	ID=gene2;Name=GENE2;Type=lncRNA
 "#;
 
 async fn create_test_gff_file() -> std::io::Result<String> {
-    let temp_file = "/tmp/test_projection.gff3";
-    fs::write(temp_file, SAMPLE_GFF_CONTENT).await?;
-    Ok(temp_file.to_string())
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_file = format!("/tmp/test_projection_{}.gff3", nanos);
+    fs::write(&temp_file, SAMPLE_GFF_CONTENT).await?;
+    Ok(temp_file)
 }
 
 fn create_object_storage_options() -> ObjectStorageOptions {
@@ -90,7 +95,9 @@ async fn test_gff_projection_position_columns() -> Result<(), Box<dyn std::error
     ctx.register_table("test_gff", Arc::new(table))?;
 
     // Test selecting position columns
-    let df = ctx.sql("SELECT chrom, start, end FROM test_gff").await?;
+    let df = ctx
+        .sql("SELECT chrom, start, \"end\" FROM test_gff")
+        .await?;
     let results = df.collect().await?;
 
     if results.is_empty() {
@@ -602,7 +609,7 @@ async fn test_gff_select_position_columns_bug() -> Result<(), Box<dyn std::error
 
     // Test SELECT start, end - this should also work correctly
     println!("Testing GFF SELECT start, end...");
-    let df2 = ctx.sql("SELECT start, end FROM gff_table").await?;
+    let df2 = ctx.sql("SELECT start, \"end\" FROM gff_table").await?;
     let results2 = df2.collect().await?;
 
     println!(

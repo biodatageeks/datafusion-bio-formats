@@ -1,0 +1,1173 @@
+#!/usr/bin/env python3
+"""
+Generate interactive HTML benchmark comparison report with historical data selection.
+Based on polars-bio's implementation - simplified dropdowns, dynamic tabs, improved styling.
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from typing import Any, Dict, List
+
+
+def load_index(data_dir: Path) -> Dict[str, Any]:
+    """Load the master index of all benchmark datasets."""
+    index_file = data_dir / "index.json"
+    if not index_file.exists():
+        return {"datasets": [], "tags": [], "latest_tag": None, "last_updated": ""}
+
+    with open(index_file) as f:
+        return json.load(f)
+
+
+def organize_datasets_by_ref(index_data: Dict[str, Any]) -> Dict[str, Dict]:
+    """
+    Organize datasets by ref, grouping runners under each ref.
+    For branches, each commit gets a unique entry using ref@sha as key.
+
+    Returns:
+        refs_by_type: {
+            "tag": {
+                "v0.1.1": {
+                    "label": "v0.1.1",
+                    "ref": "v0.1.1",
+                    "ref_type": "tag",
+                    "commit_sha": "abc123",
+                    "is_latest_tag": True,
+                    "runners": {
+                        "linux": "tag-v0.1.1-linux",
+                        "macos": "tag-v0.1.1-macos"
+                    }
+                }
+            },
+            "branch": {
+                "benchmarking@abc123": {
+                    "label": "benchmarking(abc123)",
+                    "ref": "benchmarking",
+                    "ref_type": "branch",
+                    "commit_sha": "abc123",
+                    "is_latest_tag": False,
+                    "runners": {
+                        "linux": "benchmarking@abc123@linux",
+                        "macos": "benchmarking@abc123@macos"
+                    }
+                }
+            }
+        }
+    """
+    refs_by_type = {"tag": {}, "branch": {}}
+
+    for dataset in index_data.get("datasets", []):
+        ref = dataset["ref"]
+        ref_type = dataset["ref_type"]
+        runner = dataset["runner"]
+        commit_sha = dataset.get("commit_sha", "unknown")
+        timestamp = dataset.get("timestamp", "")
+
+        # For branches, use ref@sha as unique key; for tags, use ref name
+        if ref_type == "branch":
+            unique_key = f"{ref}@{commit_sha}"
+            # Use the dataset ID directly (should be ref@sha@runner format from workflow)
+            dataset_id = dataset["id"]
+        else:
+            unique_key = ref
+            dataset_id = dataset["id"]
+
+        # Create ref entry if it doesn't exist
+        if unique_key not in refs_by_type[ref_type]:
+            refs_by_type[ref_type][unique_key] = {
+                "label": dataset["label"],
+                "ref": ref,
+                "ref_type": ref_type,
+                "commit_sha": commit_sha,
+                "timestamp": timestamp,
+                "is_latest_tag": dataset.get("is_latest_tag", False),
+                "runners": {},
+            }
+
+        # Add this dataset to the runners dict
+        refs_by_type[ref_type][unique_key]["runners"][runner] = dataset_id
+
+    return refs_by_type
+
+
+def load_dataset_results(data_dir: Path, dataset_id: str, dataset_info: Dict) -> Dict:
+    """
+    Load benchmark results for a specific dataset.
+
+    Loads both metadata and actual benchmark result JSON files.
+    """
+    dataset_path = data_dir / dataset_info.get("path", "")
+
+    # Load metadata if path exists
+    metadata = {}
+    if dataset_path.exists():
+        for metadata_file in [dataset_path / "metadata.json", dataset_path.parent / "metadata.json"]:
+            if metadata_file.exists():
+                with open(metadata_file) as f:
+                    metadata = json.load(f)
+                break
+
+    # Load benchmark results from results/ directory
+    results = {}
+    if dataset_path.exists():
+        results_dir = dataset_path / "results"
+        if results_dir.exists():
+            # Scan all subdirectories for JSON files
+            for json_file in results_dir.rglob("*.json"):
+                # Skip metadata files
+                if json_file.name in ["metadata.json", "linux.json", "macos.json"]:
+                    continue
+
+                try:
+                    with open(json_file) as f:
+                        result = json.load(f)
+
+                        # Organize by format, then category
+                        format_type = result.get("format", "unknown")
+                        category = result.get("category", "unknown")
+
+                        if format_type not in results:
+                            results[format_type] = {}
+
+                        if category not in results[format_type]:
+                            results[format_type][category] = []
+
+                        results[format_type][category].append(result)
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"Warning: Could not load {json_file}: {e}", file=sys.stderr)
+
+    # Always return dataset structure (even if path doesn't exist)
+    # The index.json contains all the essential info we need for the UI
+    return {
+        "id": dataset_id,
+        "label": dataset_info["label"],
+        "ref": dataset_info["ref"],
+        "runner": dataset_info.get("runner", "unknown"),
+        "runner_label": dataset_info.get("runner_label", "Unknown"),
+        "metadata": metadata,
+        "results": results,
+    }
+
+
+def generate_html_report(data_dir: Path, output_file: Path):
+    """Generate interactive HTML comparison report."""
+
+    print("Loading benchmark index...")
+    index = load_index(data_dir)
+
+    if not index.get("datasets"):
+        print("Warning: No benchmark datasets found in index", file=sys.stderr)
+
+    # Organize datasets by ref type
+    refs_by_type = organize_datasets_by_ref(index)
+
+    print(f"Found {len(index.get('datasets', []))} total datasets")
+    print(f"  Tags: {len(refs_by_type['tag'])}")
+    print(f"  Branches/Commits: {len(refs_by_type['branch'])}")
+
+    # Load all dataset metadata (lightweight - just metadata for now)
+    all_datasets = {}
+    for dataset in index.get("datasets", []):
+        dataset_data = load_dataset_results(data_dir, dataset["id"], dataset)
+        if dataset_data:
+            all_datasets[dataset["id"]] = dataset_data
+
+    # Generate HTML
+    html = generate_html_template(index, all_datasets, refs_by_type)
+
+    # Write output
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(html)
+
+    print(f"\n✅ Interactive report generated: {output_file}")
+
+
+def generate_html_template(index: Dict, datasets: Dict, refs_by_type: Dict) -> str:
+    """Generate the complete HTML template."""
+
+    # Embed all data as JSON
+    embedded_data = {
+        "index": index,
+        "datasets": datasets,
+        "refs_by_type": refs_by_type,
+    }
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DataFusion Bio-Formats Benchmark Comparison</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }}
+
+        /* Selection Panel Styles */
+        .selection-panel {{
+            background-color: white;
+            padding: 25px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+
+        .selection-panel h2 {{
+            margin: 0 0 15px 0;
+            color: #333;
+            font-size: 18px;
+            font-weight: 600;
+        }}
+
+        .selection-row {{
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            margin-bottom: 15px;
+        }}
+
+        .selection-row label {{
+            font-weight: 600;
+            min-width: 80px;
+            color: #495057;
+        }}
+
+        .selection-row select {{
+            flex: 1;
+            padding: 10px 15px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 14px;
+            background: white;
+            cursor: pointer;
+        }}
+
+        .selection-row select:focus {{
+            outline: none;
+            border-color: #007bff;
+            box-shadow: 0 0 0 3px rgba(0,123,255,0.25);
+        }}
+
+        .vs-label {{
+            font-weight: 700;
+            color: #6c757d;
+            font-size: 18px;
+            padding: 0 10px;
+        }}
+
+        .button-group {{
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }}
+
+        button {{
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            font-weight: 500;
+        }}
+
+        .btn-primary {{
+            background: #007bff;
+            color: white;
+        }}
+
+        .btn-primary:hover {{
+            background: #0056b3;
+        }}
+
+        .btn-secondary {{
+            background: #6c757d;
+            color: white;
+        }}
+
+        .btn-secondary:hover {{
+            background: #545b62;
+        }}
+
+        /* Header Styles */
+        .header {{
+            background-color: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+
+        h1 {{
+            margin: 0 0 10px 0;
+            color: #333;
+        }}
+
+        .subtitle {{
+            color: #666;
+            font-size: 14px;
+        }}
+
+        /* Runner Tabs - More Visible */
+        .runner-tabs-wrapper {{
+            background-color: white;
+            padding: 15px 20px 0 20px;
+            margin-bottom: 0;
+            border-radius: 8px 8px 0 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+
+        .runner-tabs {{
+            display: flex;
+            gap: 10px;
+            border-bottom: 2px solid #e9ecef;
+        }}
+
+        .runner-tab {{
+            padding: 12px 24px;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-bottom: none;
+            border-radius: 6px 6px 0 0;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            color: #495057;
+            transition: all 0.2s;
+            margin-bottom: -2px;
+        }}
+
+        .runner-tab:hover {{
+            background: #e9ecef;
+        }}
+
+        .runner-tab.active {{
+            background: white;
+            color: #007bff;
+            border-color: #007bff;
+            border-bottom-color: white;
+        }}
+
+        /* Format Tabs - Subtabs within platform */
+        .format-tabs-wrapper {{
+            background-color: #f8f9fa;
+            padding: 10px 20px;
+            margin-bottom: 20px;
+        }}
+
+        .format-tabs {{
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }}
+
+        .format-tab {{
+            padding: 8px 16px;
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+            color: #6c757d;
+            text-transform: uppercase;
+            transition: all 0.2s;
+        }}
+
+        .format-tab:hover {{
+            background: #e9ecef;
+            border-color: #adb5bd;
+        }}
+
+        .format-tab.active {{
+            background: #007bff;
+            color: white;
+            border-color: #007bff;
+        }}
+
+        /* Chart Container Styles */
+        .chart-container {{
+            background-color: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }}
+
+        h2 {{
+            margin-top: 0;
+            color: #333;
+        }}
+
+        .loading {{
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }}
+
+        .error {{
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }}
+
+        .info {{
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }}
+
+        optgroup {{
+            font-weight: 600;
+        }}
+
+        /* ========================================
+           MOBILE-FRIENDLY RESPONSIVE STYLES
+           ======================================== */
+
+        /* Phase 1: Critical Mobile Fixes (< 480px) */
+        @media (max-width: 480px) {{
+            /* Improve base typography for readability */
+            body {{
+                font-size: 16px;
+                padding: 10px;
+            }}
+
+            /* Selection Panel Adjustments */
+            .selection-panel {{
+                padding: 15px;
+            }}
+
+            .selection-panel h2 {{
+                font-size: 16px;
+                margin-bottom: 12px;
+            }}
+
+            /* Stack labels vertically on very small screens */
+            .selection-row {{
+                flex-direction: column;
+                align-items: stretch;
+                gap: 8px;
+                margin-bottom: 12px;
+            }}
+
+            .selection-row label {{
+                min-width: auto;
+                font-size: 14px;
+            }}
+
+            /* Fix dropdown overflow - remove min-width, allow full width */
+            .selection-row select {{
+                width: 100%;
+                min-width: auto;
+                max-width: 100%;
+                padding: 12px;
+                font-size: 16px; /* Prevent zoom on iOS */
+            }}
+
+            .vs-label {{
+                text-align: center;
+                padding: 8px 0;
+                font-size: 16px;
+            }}
+
+            /* Stack buttons vertically with better touch targets */
+            .button-group {{
+                flex-direction: column;
+                gap: 10px;
+                margin-top: 12px;
+            }}
+
+            button {{
+                width: 100%;
+                padding: 14px 20px; /* Increase to 44px min touch target */
+                font-size: 16px;
+            }}
+
+            /* Improve tab touch targets and wrapping */
+            .runner-tabs-wrapper {{
+                padding: 10px 10px 0 10px;
+            }}
+
+            .runner-tabs {{
+                flex-wrap: wrap;
+                gap: 6px;
+            }}
+
+            .runner-tab {{
+                padding: 14px 18px; /* Increase touch target */
+                font-size: 13px;
+                flex: 1 1 auto;
+                text-align: center;
+                min-width: 120px;
+            }}
+
+            /* Format tabs - make scrollable horizontally if needed */
+            .format-tabs-wrapper {{
+                padding: 8px 10px;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }}
+
+            .format-tabs {{
+                gap: 6px;
+                flex-wrap: nowrap; /* Keep in single row, allow scroll */
+                min-width: min-content;
+            }}
+
+            .format-tab {{
+                padding: 12px 16px; /* Better touch target */
+                font-size: 11px;
+                white-space: nowrap;
+                flex-shrink: 0;
+            }}
+
+            /* Reduce chart container padding */
+            .chart-container {{
+                padding: 12px;
+                margin-bottom: 15px;
+            }}
+
+            h2 {{
+                font-size: 16px;
+            }}
+
+            /* Optimize error/info boxes */
+            .error, .info {{
+                padding: 12px;
+                font-size: 14px;
+            }}
+
+            .loading {{
+                padding: 30px;
+                font-size: 14px;
+            }}
+        }}
+
+        /* Phase 2: Tablet Optimizations (481px - 768px) */
+        @media (min-width: 481px) and (max-width: 768px) {{
+            body {{
+                padding: 15px;
+            }}
+
+            .selection-panel {{
+                padding: 20px;
+                max-width: 600px;
+                margin-left: auto;
+                margin-right: auto;
+            }}
+
+            /* Keep labels and dropdowns side-by-side but optimize spacing */
+            .selection-row {{
+                gap: 12px;
+            }}
+
+            .selection-row label {{
+                min-width: 90px;
+            }}
+
+            .selection-row select {{
+                font-size: 15px;
+                padding: 11px;
+            }}
+
+            /* Improve button sizing */
+            button {{
+                padding: 12px 22px;
+                font-size: 15px;
+            }}
+
+            /* Tab improvements */
+            .runner-tab {{
+                padding: 13px 22px;
+                font-size: 13px;
+            }}
+
+            .format-tab {{
+                padding: 10px 18px;
+                font-size: 11px;
+            }}
+
+            /* Chart container */
+            .chart-container {{
+                padding: 16px;
+            }}
+        }}
+
+        /* Phase 3: Desktop and Large Tablets (> 768px) */
+        @media (min-width: 769px) {{
+            .selection-panel {{
+                max-width: 800px;
+                margin-left: auto;
+                margin-right: auto;
+            }}
+        }}
+
+        /* Ensure touch-friendly focus states */
+        @media (hover: none) and (pointer: coarse) {{
+            /* Enhanced focus indicators for touch devices */
+            button:active {{
+                transform: scale(0.98);
+                transition: transform 0.1s;
+            }}
+
+            .runner-tab:active, .format-tab:active {{
+                transform: scale(0.97);
+                transition: transform 0.1s;
+            }}
+
+            select:focus {{
+                border-width: 2px;
+            }}
+        }}
+    </style>
+</head>
+<body>
+    <div class="selection-panel">
+        <h2>📊 Select Datasets to Compare</h2>
+
+        <div class="selection-row">
+            <label for="baseline-select">Baseline:</label>
+            <select id="baseline-select">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+
+        <div class="selection-row">
+            <span class="vs-label">vs</span>
+        </div>
+
+        <div class="selection-row">
+            <label for="target-select">Target:</label>
+            <select id="target-select">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+
+        <div class="button-group">
+            <button class="btn-primary" onclick="app.loadComparison()">Compare</button>
+            <button class="btn-secondary" onclick="app.resetToDefault()">Reset to Default</button>
+        </div>
+    </div>
+
+    <div id="runner-tabs-container"></div>
+    <div id="format-tabs-container"></div>
+    <div id="charts-container"></div>
+
+    <script>
+        // Embedded data
+        const DATA = {json.dumps(embedded_data, indent=2)};
+
+        // Application state
+        const app = {{
+            currentBaseline: null,  // unique key (ref or ref@sha)
+            currentTarget: null,    // unique key (ref or ref@sha)
+            currentRunner: null,
+            currentFormat: null,     // current file format (gff, vcf, etc.)
+            availableRunners: [],
+            availableFormats: [],
+
+            init() {{
+                this.populateDropdowns();
+                this.setDefaults();
+            }},
+
+            populateDropdowns() {{
+                const baselineSelect = document.getElementById('baseline-select');
+                const targetSelect = document.getElementById('target-select');
+
+                baselineSelect.innerHTML = '';
+                targetSelect.innerHTML = '';
+
+                // Safety check for refs_by_type
+                if (!DATA.refs_by_type) {{
+                    console.error('DATA.refs_by_type is not defined');
+                    return;
+                }}
+
+                // Tags
+                const tags = DATA.refs_by_type.tag ? Object.entries(DATA.refs_by_type.tag).map(([key, data]) => ({{
+                    key: key,
+                    ...data
+                }})) : [];
+
+                if (tags.length > 0) {{
+                    const tagGroup = document.createElement('optgroup');
+                    tagGroup.label = 'Tags';
+
+                    tags.forEach(ref => {{
+                        const option = document.createElement('option');
+                        option.value = ref.key;
+                        option.textContent = ref.label + (ref.is_latest_tag ? ' ⭐ Latest' : '');
+                        tagGroup.appendChild(option);
+                    }});
+
+                    baselineSelect.appendChild(tagGroup.cloneNode(true));
+                    targetSelect.appendChild(tagGroup.cloneNode(true));
+                }}
+
+                // Branches (each commit gets a separate entry) - sort by timestamp descending
+                const branches = DATA.refs_by_type.branch ? Object.entries(DATA.refs_by_type.branch).map(([key, data]) => ({{
+                    key: key,
+                    ...data
+                }})).sort((a, b) => {{
+                    // Sort by timestamp descending (most recent first)
+                    return new Date(b.timestamp) - new Date(a.timestamp);
+                }}) : [];
+
+                if (branches.length > 0) {{
+                    const branchGroup = document.createElement('optgroup');
+                    branchGroup.label = 'Branches/Commits';
+
+                    branches.forEach(ref => {{
+                        const option = document.createElement('option');
+                        option.value = ref.key;  // Use unique key (ref@sha)
+                        option.textContent = ref.label;  // Display with commit SHA
+                        branchGroup.appendChild(option);
+                    }});
+
+                    baselineSelect.appendChild(branchGroup.cloneNode(true));
+                    targetSelect.appendChild(branchGroup.cloneNode(true));
+                }}
+            }},
+
+            setDefaults() {{
+                // Find latest tag
+                const latestTagEntry = DATA.refs_by_type.tag ?
+                    Object.entries(DATA.refs_by_type.tag).find(([key, ref]) => ref.is_latest_tag) : null;
+
+                // Find first branch (most recent commit)
+                const firstBranchEntry = DATA.refs_by_type.branch ?
+                    Object.entries(DATA.refs_by_type.branch)[0] : null;
+                const targetEntry = firstBranchEntry ||
+                    (DATA.refs_by_type.tag ? Object.entries(DATA.refs_by_type.tag)[0] : null);
+
+                if (latestTagEntry) {{
+                    const [tagKey, tagData] = latestTagEntry;
+                    document.getElementById('baseline-select').value = tagKey;
+                    this.currentBaseline = tagKey;
+                }}
+
+                if (targetEntry) {{
+                    const [targetKey, targetData] = targetEntry;
+                    document.getElementById('target-select').value = targetKey;
+                    this.currentTarget = targetKey;
+                }}
+
+                // Auto-load comparison if both are set
+                if (this.currentBaseline && this.currentTarget) {{
+                    this.loadComparison();
+                }}
+            }},
+
+            resetToDefault() {{
+                this.setDefaults();
+                this.loadComparison();
+            }},
+
+            getRefData(refKey) {{
+                // Find ref in tags or branches using unique key
+                return DATA.refs_by_type.tag[refKey] || DATA.refs_by_type.branch[refKey];
+            }},
+
+            loadComparison() {{
+                const baselineRef = document.getElementById('baseline-select').value;
+                const targetRef = document.getElementById('target-select').value;
+
+                if (!baselineRef || !targetRef) {{
+                    alert('Please select both baseline and target datasets');
+                    return;
+                }}
+
+                if (baselineRef === targetRef) {{
+                    alert('Please select different datasets for comparison');
+                    return;
+                }}
+
+                this.currentBaseline = baselineRef;
+                this.currentTarget = targetRef;
+
+                const baselineRefData = this.getRefData(baselineRef);
+                const targetRefData = this.getRefData(targetRef);
+
+                if (!baselineRefData || !targetRefData) {{
+                    document.getElementById('charts-container').innerHTML =
+                        '<div class="error">Error: Could not load dataset data</div>';
+                    return;
+                }}
+
+                // Find common runners
+                const baselineRunners = Object.keys(baselineRefData.runners);
+                const targetRunners = Object.keys(targetRefData.runners);
+                const commonRunners = baselineRunners.filter(r => targetRunners.includes(r));
+
+                if (commonRunners.length === 0) {{
+                    document.getElementById('charts-container').innerHTML =
+                        '<div class="error">Error: No common runners between selected datasets</div>';
+                    return;
+                }}
+
+                this.availableRunners = commonRunners;
+
+                // Find available formats across both datasets
+                const baselineDatasetId = baselineRefData.runners[commonRunners[0]];
+                const targetDatasetId = targetRefData.runners[commonRunners[0]];
+                const baselineDataset = DATA.datasets[baselineDatasetId];
+                const targetDataset = DATA.datasets[targetDatasetId];
+
+                const baselineFormats = Object.keys(baselineDataset.results || {{}});
+                const targetFormats = Object.keys(targetDataset.results || {{}});
+                const commonFormats = [...new Set([...baselineFormats, ...targetFormats])].sort();
+
+                this.availableFormats = commonFormats;
+
+                // Setup runner tabs
+                this.setupRunnerTabs();
+
+                // Set initial format and generate charts
+                this.currentRunner = commonRunners[0];
+                this.currentFormat = commonFormats.length > 0 ? commonFormats[0] : null;
+                this.setupFormatTabs();
+                this.generateCharts();
+            }},
+
+            setupRunnerTabs() {{
+                const tabsContainer = document.getElementById('runner-tabs-container');
+
+                if (this.availableRunners.length === 1) {{
+                    // Single runner - show simple label
+                    const runner = this.availableRunners[0];
+                    const baselineRefData = this.getRefData(this.currentBaseline);
+                    const datasetId = baselineRefData.runners[runner];
+                    const dataset = DATA.datasets[datasetId];
+
+                    tabsContainer.innerHTML = `
+                        <div class="runner-tabs-wrapper">
+                            <div class="runner-tabs">
+                                <div class="runner-tab active">
+                                    ${{dataset.runner_label}}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }} else {{
+                    // Multiple runners - show clickable tabs
+                    const tabs = this.availableRunners.map((runner, idx) => {{
+                        const baselineRefData = this.getRefData(this.currentBaseline);
+                        const datasetId = baselineRefData.runners[runner];
+                        const dataset = DATA.datasets[datasetId];
+                        const active = idx === 0 ? 'active' : '';
+
+                        return `<button class="runner-tab ${{active}}" onclick="app.switchRunner('${{runner}}')">
+                            ${{dataset.runner_label}}
+                        </button>`;
+                    }}).join('');
+
+                    tabsContainer.innerHTML = `
+                        <div class="runner-tabs-wrapper">
+                            <div class="runner-tabs">
+                                ${{tabs}}
+                            </div>
+                        </div>
+                    `;
+                }}
+            }},
+
+            switchRunner(runner) {{
+                this.currentRunner = runner;
+
+                // Update active tab
+                document.querySelectorAll('.runner-tab').forEach(tab => {{
+                    tab.classList.remove('active');
+                }});
+                event.target.classList.add('active');
+
+                // Update available formats for new runner
+                const baselineRefData = this.getRefData(this.currentBaseline);
+                const targetRefData = this.getRefData(this.currentTarget);
+                const baselineDatasetId = baselineRefData.runners[runner];
+                const targetDatasetId = targetRefData.runners[runner];
+                const baselineDataset = DATA.datasets[baselineDatasetId];
+                const targetDataset = DATA.datasets[targetDatasetId];
+
+                const baselineFormats = Object.keys(baselineDataset.results || {{}});
+                const targetFormats = Object.keys(targetDataset.results || {{}});
+                const commonFormats = [...new Set([...baselineFormats, ...targetFormats])].sort();
+
+                this.availableFormats = commonFormats;
+                this.currentFormat = commonFormats.length > 0 ? commonFormats[0] : null;
+
+                // Regenerate format tabs and charts
+                this.setupFormatTabs();
+                this.generateCharts();
+            }},
+
+            setupFormatTabs() {{
+                const tabsContainer = document.getElementById('format-tabs-container');
+
+                if (this.availableFormats.length === 0) {{
+                    tabsContainer.innerHTML = '';
+                    return;
+                }}
+
+                if (this.availableFormats.length === 1) {{
+                    // Single format - show simple label
+                    tabsContainer.innerHTML = `
+                        <div class="format-tabs-wrapper">
+                            <div class="format-tabs">
+                                <div class="format-tab active">
+                                    ${{this.availableFormats[0].toUpperCase()}}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }} else {{
+                    // Multiple formats - show clickable tabs
+                    const tabs = this.availableFormats.map((format, idx) => {{
+                        const active = idx === 0 ? 'active' : '';
+                        return `<button class="format-tab ${{active}}" onclick="app.switchFormat('${{format}}')">
+                            ${{format.toUpperCase()}}
+                        </button>`;
+                    }}).join('');
+
+                    tabsContainer.innerHTML = `
+                        <div class="format-tabs-wrapper">
+                            <div class="format-tabs">
+                                ${{tabs}}
+                            </div>
+                        </div>
+                    `;
+                }}
+            }},
+
+            switchFormat(format) {{
+                this.currentFormat = format;
+
+                // Update active tab
+                document.querySelectorAll('.format-tab').forEach(tab => {{
+                    tab.classList.remove('active');
+                }});
+                event.target.classList.add('active');
+
+                // Regenerate charts
+                this.generateCharts();
+            }},
+
+            generateCharts() {{
+                const container = document.getElementById('charts-container');
+                const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC';
+
+                // Get datasets for current runner
+                const baselineRefData = this.getRefData(this.currentBaseline);
+                const targetRefData = this.getRefData(this.currentTarget);
+
+                const baselineDatasetId = baselineRefData.runners[this.currentRunner];
+                const targetDatasetId = targetRefData.runners[this.currentRunner];
+
+                const baseline = DATA.datasets[baselineDatasetId];
+                const target = DATA.datasets[targetDatasetId];
+
+                if (!baseline || !target) {{
+                    container.innerHTML = `
+                        <div class="error">
+                            <strong>Error: Dataset not found</strong><br>
+                            Baseline ID: ${{baselineDatasetId}}<br>
+                            Target ID: ${{targetDatasetId}}
+                        </div>
+                    `;
+                    return;
+                }}
+
+                // Generate header
+                let html = `
+                    <div class="header">
+                        <h1>DataFusion Bio-Formats Benchmark Comparison</h1>
+                        <div class="subtitle">
+                            <strong>Baseline:</strong> ${{baseline.label}} &nbsp;|&nbsp;
+                            <strong>Target:</strong> ${{target.label}} &nbsp;|&nbsp;
+                            <strong>Platform:</strong> ${{baseline.runner_label}} &nbsp;|&nbsp;
+                            <strong>Generated:</strong> ${{timestamp}}
+                        </div>
+                    </div>
+                `;
+
+                // Check if we have results to display
+                const baselineResults = baseline.results || {{}};
+                const targetResults = target.results || {{}};
+
+                if (Object.keys(baselineResults).length === 0 && Object.keys(targetResults).length === 0) {{
+                    html += `
+                        <div class="info">
+                            <h3>No benchmark results found</h3>
+                            <p><strong>Baseline:</strong> ${{baseline.label}} (${{baseline.ref}})</p>
+                            <p><strong>Target:</strong> ${{target.label}} (${{target.ref}})</p>
+                            <p><strong>Platform:</strong> ${{baseline.runner_label}}</p>
+                            <br>
+                            <p><em>Benchmark results will appear here once the workflow completes.</em></p>
+                        </div>
+                    `;
+                    container.innerHTML = html;
+                    return;
+                }}
+
+                // Filter results by current format
+                const baselineFormatResults = (this.currentFormat && baselineResults[this.currentFormat]) || {{}};
+                const targetFormatResults = (this.currentFormat && targetResults[this.currentFormat]) || {{}};
+
+                if (Object.keys(baselineFormatResults).length === 0 && Object.keys(targetFormatResults).length === 0) {{
+                    html += `
+                        <div class="info">
+                            <h3>No results for format: ${{this.currentFormat}}</h3>
+                            <p><em>Select a different format or wait for benchmark results.</em></p>
+                        </div>
+                    `;
+                    container.innerHTML = html;
+                    return;
+                }}
+
+                // Generate charts for each category within the current format
+                const categories = new Set([...Object.keys(baselineFormatResults), ...Object.keys(targetFormatResults)]);
+
+                categories.forEach(category => {{
+                    const categoryId = 'chart-' + this.currentFormat + '-' + category.replace(/\\s+/g, '-');
+                    html += `<div id="${{categoryId}}" class="chart"></div>`;
+                }});
+
+                container.innerHTML = html;
+
+                // Generate Plotly charts for each category
+                categories.forEach(category => {{
+                    const categoryId = 'chart-' + this.currentFormat + '-' + category.replace(/\\s+/g, '-');
+                    const baselineCategoryResults = baselineFormatResults[category] || [];
+                    const targetCategoryResults = targetFormatResults[category] || [];
+
+                    // Create benchmark name mapping
+                    const benchmarkNames = new Set();
+                    baselineCategoryResults.forEach(r => benchmarkNames.add(r.benchmark_name));
+                    targetCategoryResults.forEach(r => benchmarkNames.add(r.benchmark_name));
+
+                    // Prepare data for grouped bar chart
+                    const baselineValues = [];
+                    const targetValues = [];
+                    const labels = [];
+
+                    Array.from(benchmarkNames).sort().forEach(name => {{
+                        const baselineBench = baselineCategoryResults.find(r => r.benchmark_name === name);
+                        const targetBench = targetCategoryResults.find(r => r.benchmark_name === name);
+
+                        labels.push(name);
+                        baselineValues.push(baselineBench ? baselineBench.metrics.elapsed_seconds : null);
+                        targetValues.push(targetBench ? targetBench.metrics.elapsed_seconds : null);
+                    }});
+
+                    // Create traces
+                    const trace1 = {{
+                        x: labels,
+                        y: baselineValues,
+                        name: `${{baseline.label}} (baseline)`,
+                        type: 'bar',
+                        marker: {{ color: 'rgb(55, 128, 191)' }}
+                    }};
+
+                    const trace2 = {{
+                        x: labels,
+                        y: targetValues,
+                        name: `${{target.label}} (target)`,
+                        type: 'bar',
+                        marker: {{ color: 'rgb(219, 64, 82)' }}
+                    }};
+
+                    const layout = {{
+                        title: `${{category.charAt(0).toUpperCase() + category.slice(1)}} Benchmarks - Elapsed Time (seconds)`,
+                        barmode: 'group',
+                        xaxis: {{ title: 'Benchmark' }},
+                        yaxis: {{ title: 'Elapsed Time (seconds)' }},
+                        showlegend: true,
+                        height: 500,
+                        // Responsive layout for mobile
+                        autosize: true,
+                        margin: {{
+                            l: window.innerWidth < 480 ? 40 : 60,
+                            r: window.innerWidth < 480 ? 10 : 30,
+                            t: window.innerWidth < 480 ? 60 : 80,
+                            b: window.innerWidth < 480 ? 40 : 60
+                        }}
+                    }};
+
+                    const config = {{
+                        responsive: true,
+                        displayModeBar: window.innerWidth >= 768, // Hide mode bar on mobile
+                        displaylogo: false
+                    }};
+
+                    Plotly.newPlot(categoryId, [trace1, trace2], layout, config);
+                }});
+            }}
+        }};
+
+        // Initialize app
+        document.addEventListener('DOMContentLoaded', () => {{
+            app.init();
+        }});
+    </script>
+</body>
+</html>
+"""
+
+    return html
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate interactive benchmark comparison report"
+    )
+    parser.add_argument(
+        "data_dir",
+        type=Path,
+        help="Directory containing benchmark-data (with index.json)"
+    )
+    parser.add_argument(
+        "output_file",
+        type=Path,
+        help="Output HTML file path"
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output"
+    )
+
+    args = parser.parse_args()
+
+    if not args.data_dir.exists():
+        print(f"Error: Data directory not found: {args.data_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        generate_html_report(args.data_dir, args.output_file)
+    except Exception as e:
+        print(f"❌ Error: {e}", file=sys.stderr)
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
