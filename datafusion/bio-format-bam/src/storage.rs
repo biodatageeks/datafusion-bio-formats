@@ -70,8 +70,10 @@ pub enum BamReader {
     Local(Reader<MultithreadedReader<File>>),
     /// Remote BAM reader for cloud storage access
     Remote(
-        bam::r#async::io::Reader<
-            noodles_bgzf::AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>,
+        Box<
+            bam::r#async::io::Reader<
+                noodles_bgzf::AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>,
+            >,
         >,
     ),
 }
@@ -106,7 +108,7 @@ impl BamReader {
                 let reader = get_remote_bam_reader(file_path, object_storage_options)
                     .await
                     .unwrap();
-                BamReader::Remote(reader)
+                BamReader::Remote(Box::new(reader))
             }
             _ => panic!("Unsupported storage type for BAM file: {:?}", storage_type),
         }
@@ -124,7 +126,7 @@ impl BamReader {
             }
             BamReader::Remote(reader) => {
                 // reader.read_header().await.unwrap();
-                reader.records().boxed()
+                reader.as_mut().records().boxed()
             }
         }
     }
@@ -140,7 +142,7 @@ impl BamReader {
                 header.reference_sequences().clone()
             }
             BamReader::Remote(reader) => {
-                let header = reader.read_header().await.unwrap();
+                let header = reader.as_mut().read_header().await.unwrap();
                 header.reference_sequences().clone()
             }
         }

@@ -3,7 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use crate::storage::{VcfLocalReader, VcfRemoteReader};
-use crate::table_provider::info_to_arrow_type;
+use crate::table_provider::{VcfByteRange, info_to_arrow_type};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, Float64Array, StringArray, UInt32Array};
@@ -213,6 +213,7 @@ fn get_variant_end(record: &dyn Record, header: &Header) -> u32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_local_vcf(
     file_path: String,
     schema_ref: SchemaRef,
@@ -220,6 +221,7 @@ async fn get_local_vcf(
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<VcfByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
@@ -237,13 +239,30 @@ async fn get_local_vcf(
     let schema = Arc::clone(&schema_ref);
     let file_path = file_path.clone();
     let thread_num = thread_num.unwrap_or(1);
-    let mut reader = VcfLocalReader::new(
+
+    // CRITICAL VCF-SPECIFIC: Header reading strategy
+    // Always read header separately to avoid affecting the reader state for record reading
+    // The header is needed for schema but reading it from the same reader can cause issues
+    let storage_opts = object_storage_options.clone().unwrap();
+
+    // Read header separately (from byte 0, regardless of byte_range)
+    use crate::storage::get_local_vcf_header;
+    let header = get_local_vcf_header(file_path.clone(), 1, storage_opts.clone()).await?;
+
+    // Create reader for reading records (after header is read separately)
+    let mut reader = VcfLocalReader::new_with_range(
         file_path.clone(),
         thread_num,
-        object_storage_options.unwrap(),
+        byte_range.clone(),
+        storage_opts,
     )
-    .await;
-    let header = reader.read_header().await?;
+    .await?;
+
+    // CRITICAL: noodles-vcf requires header to be read on the same reader instance
+    // before calling records(). Even though we already have the header for schema,
+    // we need to read it on this reader to position it correctly for record reading.
+    let _ = reader.read_header().await?;
+
     let infos = header.infos();
     let mut record_num = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
@@ -254,8 +273,47 @@ async fn get_local_vcf(
 
         let mut records = reader.read_records();
         // let iter_start_time = Instant::now();
-        while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+        let mut records_read = 0;
+        loop {
+            let result = match records.next().await {
+                Some(r) => r,
+                None => {
+                    // Stream ended normally (None means end of stream)
+                    debug!("VCF stream ended normally after reading {} records", records_read);
+                    break;
+                }
+            };
+
+            // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
+            let record = match result {
+                Ok(record) => {
+                    records_read += 1;
+                    record
+                },
+                Err(e) => {
+                    // Check if this is an EOF-related error that we should handle gracefully
+                    let error_msg = e.to_string().to_lowercase();
+                    let is_eof_error = error_msg.contains("eol") ||
+                                       error_msg.contains("eof") ||
+                                       error_msg.contains("unexpected end");
+
+                    // Check if it's an IO error with UnexpectedEof kind
+                    let is_io_eof = e.kind() == std::io::ErrorKind::UnexpectedEof;
+
+                    if is_eof_error || is_io_eof {
+                        // EOF reached - break gracefully
+                        // Only log if we haven't read any records (might indicate a problem)
+                        if records_read == 0 {
+                            debug!("VCF stream hit EOF before reading any records. Error: {}", e);
+                        } else {
+                            debug!("VCF stream hit EOF after reading {} records", records_read);
+                        }
+                        break;
+                    }
+                    // For other errors, convert and propagate them using ?
+                    Err(DataFusionError::Execution(format!("VCF reading error: {}", e)))?
+                }
+            };
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.variant_start().unwrap()?.get() as u32);
             pose.push(get_variant_end(&record, &header));
@@ -326,12 +384,29 @@ async fn get_remote_vcf_stream(
     batch_size: usize,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<VcfByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
-    let mut reader = VcfRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await;
-    let header = reader.read_header().await?;
+    // CRITICAL VCF-SPECIFIC: Header reading strategy
+    // Always read header separately to avoid affecting the reader state for record reading
+    // The header is needed for schema but reading it from the same reader can cause issues
+    let storage_opts = object_storage_options.clone().unwrap();
+
+    // Read header separately (from byte 0, regardless of byte_range)
+    use crate::storage::get_remote_vcf_header;
+    let header = get_remote_vcf_header(file_path.clone(), storage_opts.clone()).await?;
+
+    // Create reader for reading records (after header is read separately)
+    let mut reader =
+        VcfRemoteReader::new_with_range(file_path.clone(), byte_range.clone(), storage_opts).await;
+
+    // CRITICAL: noodles-vcf requires header to be read on the same reader instance
+    // before calling records(). Even though we already have the header for schema,
+    // we need to read it on this reader to position it correctly for record reading.
+    let _ = reader.read_header().await?;
+
     let infos = header.infos();
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
@@ -358,8 +433,47 @@ async fn get_remote_vcf_stream(
         // Process records one by one.
 
         let mut records = reader.read_records().await;
-        while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+        let mut records_read = 0;
+        loop {
+            let result = match records.next().await {
+                Some(r) => r,
+                None => {
+                    // Stream ended normally (None means end of stream)
+                    debug!("VCF stream ended normally after reading {} records", records_read);
+                    break;
+                }
+            };
+
+            // Handle EOF errors gracefully - noodles-vcf may return errors for unexpected EOF
+            let record = match result {
+                Ok(record) => {
+                    records_read += 1;
+                    record
+                },
+                Err(e) => {
+                    // Check if this is an EOF-related error that we should handle gracefully
+                    let error_msg = e.to_string().to_lowercase();
+                    let is_eof_error = error_msg.contains("eol") ||
+                                       error_msg.contains("eof") ||
+                                       error_msg.contains("unexpected end");
+
+                    // Check if it's an IO error with UnexpectedEof kind
+                    let is_io_eof = e.kind() == std::io::ErrorKind::UnexpectedEof;
+
+                    if is_eof_error || is_io_eof {
+                        // EOF reached - break gracefully
+                        // Only log if we haven't read any records (might indicate a problem)
+                        if records_read == 0 {
+                            debug!("VCF stream hit EOF before reading any records. Error: {}", e);
+                        } else {
+                            debug!("VCF stream hit EOF after reading {} records", records_read);
+                        }
+                        break;
+                    }
+                    // For other errors, convert and propagate them using ?
+                    Err(DataFusionError::Execution(format!("VCF reading error: {}", e)))?
+                }
+            };
             chroms.push(record.reference_sequence_name().to_string());
             poss.push(record.variant_start().unwrap()?.get() as u32);
             pose.push(get_variant_end(&record, &header));
@@ -439,6 +553,7 @@ fn set_info_builders(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,
@@ -446,6 +561,7 @@ async fn get_stream(
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     projection: Option<Vec<usize>>,
+    byte_range: Option<VcfByteRange>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
@@ -463,6 +579,7 @@ async fn get_stream(
                 thread_num,
                 info_fields,
                 projection,
+                byte_range,
                 object_storage_options,
             )
             .await?;
@@ -475,6 +592,7 @@ async fn get_stream(
                 batch_size,
                 info_fields,
                 projection,
+                byte_range,
                 object_storage_options,
             )
             .await?;
@@ -493,6 +611,7 @@ pub struct VcfExec {
     pub(crate) format_fields: Option<Vec<String>>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
+    pub(crate) byte_range: Option<VcfByteRange>,
     pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
 }
@@ -549,6 +668,7 @@ impl ExecutionPlan for VcfExec {
             self.thread_num,
             self.info_fields.clone(),
             self.projection.clone(),
+            self.byte_range.clone(),
             self.object_storage_options.clone(),
         );
         let stream = futures::stream::once(fut).try_flatten();

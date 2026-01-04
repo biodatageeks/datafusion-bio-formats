@@ -190,7 +190,14 @@ jobs:
       # Run TARGET benchmarks
       - name: Checkout Target
         run: |
-          git checkout ${{ needs.prepare.outputs.target_ref }}
+          TARGET_REF="${{ needs.prepare.outputs.target_ref }}"
+          # For PR branches, fetch the PR head first
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin ${{ github.head_ref }}:${{ github.head_ref }} || git fetch origin pull/${{ github.event.pull_request.number }}/head:${{ github.head_ref }}
+            git checkout ${{ github.head_ref }}
+          else
+            git checkout "$TARGET_REF" || git checkout -b "$TARGET_REF" origin/"$TARGET_REF"
+          fi
           git submodule update --init --recursive
 
       - name: Build Target Benchmark Runner
@@ -320,7 +327,14 @@ jobs:
       # Run TARGET benchmarks
       - name: Checkout Target
         run: |
-          git checkout ${{ needs.prepare.outputs.target_ref }}
+          TARGET_REF="${{ needs.prepare.outputs.target_ref }}"
+          # For PR branches, fetch the PR head first
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin ${{ github.head_ref }}:${{ github.head_ref }} || git fetch origin pull/${{ github.event.pull_request.number }}/head:${{ github.head_ref }}
+            git checkout ${{ github.head_ref }}
+          else
+            git checkout "$TARGET_REF" || git checkout -b "$TARGET_REF" origin/"$TARGET_REF"
+          fi
           git submodule update --init --recursive
 
       - name: Build Target Benchmark Runner
@@ -623,6 +637,8 @@ jobs:
           git add benchmark-data/ benchmark-comparison/
           git commit -m "Add benchmark results for ${{ needs.prepare.outputs.target_ref }}" || echo "No changes to commit"
           git push origin gh-pages
+        # Note: This push will automatically trigger the pages.yml workflow
+        # which handles GitHub Pages deployment using official actions
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'

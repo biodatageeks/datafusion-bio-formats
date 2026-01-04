@@ -438,6 +438,139 @@ fn is_azure_blob_url(url_str: &str) -> bool {
     }
     false
 }
+/// Get remote stream with arbitrary byte range support (start..end)
+pub async fn get_remote_stream_with_range(
+    file_path: String,
+    object_storage_options: ObjectStorageOptions,
+    start: u64,
+    end: u64,
+) -> Result<FuturesBytesStream, opendal::Error> {
+    let storage_type = get_storage_type(file_path.clone());
+    let bucket_name = get_bucket_name(file_path.clone());
+    let relative_file_path = get_file_path(file_path.clone());
+    let chunk_size = object_storage_options.clone().chunk_size.unwrap_or(64);
+    let concurrent_fetches = object_storage_options
+        .clone()
+        .concurrent_fetches
+        .unwrap_or(8);
+    let allow_anonymous = object_storage_options.allow_anonymous;
+    let enable_request_payer = object_storage_options.enable_request_payer;
+    let max_retries = object_storage_options.max_retries.unwrap_or(5);
+    let timeout = object_storage_options.timeout.unwrap_or(300);
+
+    match storage_type {
+        StorageType::S3 => {
+            log::info!(
+                "Using S3 storage type with range {}..{} for file: {}",
+                start,
+                end,
+                relative_file_path
+            );
+            let mut builder = S3::default()
+                .region(
+                    &env::var("AWS_REGION").unwrap_or(
+                        env::var("AWS_DEFAULT_REGION").unwrap_or(
+                            S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
+                                .await
+                                .unwrap_or("us-east-1".to_string()),
+                        ),
+                    ),
+                )
+                .bucket(bucket_name.as_str())
+                .endpoint(&env::var("AWS_ENDPOINT_URL").unwrap_or_default());
+            if allow_anonymous {
+                builder = builder.disable_ec2_metadata().allow_anonymous();
+            };
+            if enable_request_payer {
+                builder = builder.enable_request_payer();
+            }
+            let operator = Operator::new(builder)?
+                .layer(
+                    TimeoutLayer::new()
+                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                )
+                .layer(RetryLayer::new().with_max_times(max_retries))
+                .layer(LoggingLayer::default())
+                .finish();
+
+            operator
+                .reader_with(relative_file_path.as_str())
+                .concurrent(1)
+                .await?
+                .into_bytes_stream(start..end)
+                .await
+        }
+        StorageType::AZBLOB => {
+            let blob_info = extract_account_and_container(&file_path.clone());
+            log::info!(
+                "Using Azure Blob Storage with range {}..{} for file: {}",
+                start,
+                end,
+                blob_info.relative_path
+            );
+
+            let builder = Azblob::default()
+                .root("/")
+                .container(&blob_info.container)
+                .endpoint(&blob_info.endpoint)
+                .account_name(&env::var("AZURE_STORAGE_ACCOUNT").unwrap_or_default())
+                .account_key(&env::var("AZURE_STORAGE_KEY").unwrap_or_default());
+            let operator = Operator::new(builder)?
+                .layer(
+                    TimeoutLayer::new()
+                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                )
+                .layer(RetryLayer::new().with_max_times(max_retries))
+                .layer(LoggingLayer::default())
+                .finish();
+
+            operator
+                .reader_with(blob_info.relative_path.as_str())
+                .chunk(chunk_size * 1024 * 1024)
+                .concurrent(1)
+                .await?
+                .into_bytes_stream(start..end)
+                .await
+        }
+        StorageType::GCS => {
+            log::info!(
+                "Using GCS storage with range {}..{} for file: {}",
+                start,
+                end,
+                relative_file_path
+            );
+            let mut builder = Gcs::default().bucket(bucket_name.as_str());
+            if allow_anonymous {
+                builder = builder.disable_vm_metadata().allow_anonymous();
+            } else if let Ok(service_account_key) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+                builder = builder.credential_path(service_account_key.as_str());
+            } else {
+                log::warn!(
+                    "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set. Using default credentials."
+                );
+            }
+            let operator = Operator::new(builder)?
+                .layer(
+                    TimeoutLayer::new()
+                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                )
+                .layer(RetryLayer::new().with_max_times(max_retries))
+                .layer(LoggingLayer::default())
+                .finish();
+
+            operator
+                .reader_with(relative_file_path.as_str())
+                .chunk(chunk_size * 1024 * 1024)
+                .concurrent(concurrent_fetches)
+                .await?
+                .into_bytes_stream(start..end)
+                .await
+        }
+        StorageType::HTTP => unimplemented!("HTTP storage type is not implemented yet"),
+        StorageType::LOCAL => unreachable!("LOCAL storage should not use remote stream"),
+    }
+}
+
 /// Creates a byte stream for reading from a file (local or remote)
 ///
 /// # Arguments

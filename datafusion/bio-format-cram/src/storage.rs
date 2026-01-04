@@ -185,7 +185,7 @@ pub async fn get_local_cram_reader(
             cram::io::reader::Builder::default()
                 .set_reference_sequence_repository(repo.clone())
                 .build_from_path(&file_path)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .map_err(io::Error::other)?
         }
         ReferenceSequenceRepository::Embedded | ReferenceSequenceRepository::None => {
             // Use Builder with default (empty) repository
@@ -193,7 +193,7 @@ pub async fn get_local_cram_reader(
             cram::io::reader::Builder::default()
                 .set_reference_sequence_repository(default_repo)
                 .build_from_path(&file_path)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .map_err(io::Error::other)?
         }
     };
 
@@ -209,7 +209,7 @@ pub enum CramReader {
     Local(Reader<File>, ReferenceSequenceRepository, Header),
     /// Remote CRAM file reader (async) with embedded or remote reference
     Remote(
-        cram::r#async::io::Reader<StreamReader<FuturesBytesStream, bytes::Bytes>>,
+        Box<cram::r#async::io::Reader<StreamReader<FuturesBytesStream, bytes::Bytes>>>,
         ReferenceSequenceRepository,
         Header,
     ),
@@ -250,7 +250,7 @@ impl CramReader {
                         .await
                         .unwrap();
                 let header = reader.read_header().await.unwrap();
-                CramReader::Remote(reader, reference_repo, header)
+                CramReader::Remote(Box::new(reader), reference_repo, header)
             }
             _ => panic!("Unsupported storage type for CRAM file: {:?}", storage_type),
         }
@@ -273,7 +273,7 @@ impl CramReader {
             CramReader::Remote(reader, _reference_repo, header) => {
                 // Repository is already set on the reader via Builder pattern during construction
                 // The reader will use it automatically when decoding CRAM data
-                reader.records(header).boxed()
+                reader.as_mut().records(header).boxed()
             }
         }
     }

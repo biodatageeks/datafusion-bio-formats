@@ -51,7 +51,7 @@ impl BgzfGffTableProvider {
     /// A configured table provider or IO error if schema construction fails
     pub fn try_new(path: impl Into<PathBuf>, attr_fields: Option<Vec<String>>) -> io::Result<Self> {
         let schema = determine_schema_on_demand(attr_fields.clone())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Schema error: {}", e)))?;
+            .map_err(|e| io::Error::other(format!("Schema error: {}", e)))?;
 
         Ok(Self {
             path: path.into(),

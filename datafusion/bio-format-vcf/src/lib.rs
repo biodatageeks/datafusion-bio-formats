@@ -76,3 +76,5 @@ pub mod storage;
 /// This module provides the primary API for registering VCF files as queryable
 /// DataFusion tables and handling schema determination from VCF headers.
 pub mod table_provider;
+
+pub use table_provider::VcfByteRange;

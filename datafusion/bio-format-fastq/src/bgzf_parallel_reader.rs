@@ -61,7 +61,17 @@ impl BgzfFastqTableProvider {
     }
 }
 
-fn get_bgzf_partition_bounds(index: &gzi::Index, thread_num: usize) -> Vec<(u64, u64)> {
+/// Calculates partition boundaries for BGZF files based on GZI index.
+///
+/// # Arguments
+///
+/// * `index` - GZI index containing compressed/uncompressed offset pairs
+/// * `thread_num` - Number of partitions to create
+///
+/// # Returns
+///
+/// Vector of (start, end) compressed offset pairs for each partition
+pub fn get_bgzf_partition_bounds(index: &gzi::Index, thread_num: usize) -> Vec<(u64, u64)> {
     let mut block_offsets: Vec<(u64, u64)> = index.as_ref().iter().map(|(c, u)| (*c, *u)).collect();
     block_offsets.insert(0, (0, 0));
 
@@ -195,7 +205,23 @@ fn find_line_end(buf: &[u8], start: usize) -> Option<usize> {
         .map(|pos| start + pos)
 }
 
-fn synchronize_reader<R: BufRead>(reader: &mut IndexedReader<R>, end_comp: u64) -> io::Result<()> {
+/// Synchronizes a BGZF reader to the next valid FASTQ record boundary.
+///
+/// This function ensures the reader is positioned at the start of a complete
+/// FASTQ record (4-line pattern: @header, sequence, +separator, quality).
+///
+/// # Arguments
+///
+/// * `reader` - Mutable reference to the BGZF indexed reader
+/// * `end_comp` - Compressed offset where reading should stop
+///
+/// # Returns
+///
+/// `Ok(())` if synchronization succeeds, `Err` if I/O error occurs
+pub fn synchronize_reader<R: BufRead>(
+    reader: &mut IndexedReader<R>,
+    end_comp: u64,
+) -> io::Result<()> {
     // DO NOT perform an initial read_until, as it can discard a valid header
     // if the initial seek lands exactly on the start of a line.
     // The loop below is capable of handling any starting position.

@@ -384,7 +384,7 @@ impl GffRemoteReader {
         let compression_type =
             get_compression_type(file_path.clone(), None, object_storage_options.clone())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
         match (compression_type.clone(), parser_type) {
             // GZIP variants
@@ -673,7 +673,7 @@ impl GffLocalReader {
             object_storage_options.clone(),
         )
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
         match (compression_type.clone(), parser_type) {
             // GZIP variants - using sync readers

@@ -111,14 +111,26 @@ async fn main() -> Result<()> {
     // Validate configuration
     validate_config(&config)?;
 
-    // Download test data
-    println!("📥 Downloading test data...");
+    // Download or use local test data
+    println!("📥 Processing test data...");
     let downloader = DataDownloader::new()?;
     let mut data_paths = Vec::new();
 
     for data_config in &config.test_data {
-        let test_file = data_config.to_test_data_file()?;
-        let path = downloader.download(&test_file, false)?;
+        // Check if filename is an absolute path (local file)
+        let path = if std::path::Path::new(&data_config.filename).is_absolute() {
+            // Use local file directly
+            let local_path = std::path::PathBuf::from(&data_config.filename);
+            if !local_path.exists() {
+                anyhow::bail!("Local file not found: {}", local_path.display());
+            }
+            println!("✓ Using local file: {}", local_path.display());
+            local_path
+        } else {
+            // Download from Google Drive
+            let test_file = data_config.to_test_data_file()?;
+            downloader.download(&test_file, false)?
+        };
         data_paths.push(path);
     }
     println!();
@@ -129,7 +141,7 @@ async fn main() -> Result<()> {
         config.format, config.table_name
     );
     let ctx = SessionContext::new();
-    register_table(&ctx, &config.format, &config.table_name, &data_paths).await?;
+    register_table(&ctx, &config.format, &config.table_name, &data_paths, None).await?;
     println!("✓ Table registered successfully\n");
 
     // Run benchmark categories
@@ -142,6 +154,7 @@ async fn main() -> Result<()> {
         &config.table_name,
         &config.parallelism_tests,
         &results_dir,
+        &data_paths,
     )
     .await?;
 
@@ -198,6 +211,7 @@ async fn register_table(
     format: &str,
     table_name: &str,
     data_paths: &[PathBuf],
+    thread_num: Option<usize>,
 ) -> Result<()> {
     if data_paths.is_empty() {
         anyhow::bail!("No data files provided");
@@ -218,8 +232,15 @@ async fn register_table(
         }
         "vcf" => {
             use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
-            let provider = VcfTableProvider::new(file_path.to_string(), None, None, None, None)
-                .context("Failed to create VCF table provider")?;
+            let storage_options = ObjectStorageOptions::default();
+            let provider = VcfTableProvider::new(
+                file_path.to_string(),
+                None,
+                None,
+                thread_num,
+                Some(storage_options),
+            )
+            .context("Failed to create VCF table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register VCF table")?;
         }
@@ -271,6 +292,7 @@ async fn run_parallelism_benchmarks(
     table_name: &str,
     config: &ParallelismConfig,
     output_dir: &Path,
+    data_paths: &[PathBuf],
 ) -> Result<()> {
     println!("🔀 Running Parallelism Benchmarks");
     println!("==================================");
@@ -285,6 +307,14 @@ async fn run_parallelism_benchmarks(
         };
 
         println!("  Testing with {} threads...", thread_count);
+
+        // For VCF, re-register table with specific thread count for BGZF decompression
+        if format == "vcf" {
+            // Unregister existing table
+            ctx.deregister_table(table_name)?;
+            // Re-register with thread count
+            register_table(ctx, format, table_name, data_paths, Some(thread_count)).await?;
+        }
 
         let mut total_records = 0u64;
         let mut total_time = 0.0;

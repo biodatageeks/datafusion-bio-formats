@@ -54,4 +54,6 @@ pub mod storage;
 /// DataFusion table provider implementation for FASTQ files
 pub mod table_provider;
 
-pub use bgzf_parallel_reader::BgzfFastqTableProvider;
+pub use bgzf_parallel_reader::{
+    BgzfFastqTableProvider, get_bgzf_partition_bounds, synchronize_reader,
+};

@@ -195,7 +195,7 @@ impl FastaRemoteReader {
         let compression_type =
             get_compression_type(file_path.clone(), None, object_storage_options.clone())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
         match compression_type {
             CompressionType::BGZF => {
                 let reader =
@@ -277,7 +277,7 @@ impl FastaLocalReader {
             object_storage_options.clone(),
         )
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
         match compression_type {
             CompressionType::BGZF => {
                 let reader = get_local_fasta_bgzf_reader(file_path, thread_num)?;

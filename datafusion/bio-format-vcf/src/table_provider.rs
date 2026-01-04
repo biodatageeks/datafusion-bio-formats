@@ -23,6 +23,15 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+/// Byte range specification for file reading
+#[derive(Clone, Debug, PartialEq)]
+pub struct VcfByteRange {
+    /// Start byte offset (inclusive)
+    pub start: u64,
+    /// End byte offset (exclusive)
+    pub end: u64,
+}
+
 /// Determines the Arrow schema for a VCF file by reading its header.
 ///
 /// # Arguments
@@ -136,12 +145,19 @@ pub struct VcfTableProvider {
     schema: SchemaRef,
     /// Optional number of worker threads for BGZF decompression
     thread_num: Option<usize>,
+    /// Optional byte range for reading only a portion of the file
+    byte_range: Option<VcfByteRange>,
     /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
 impl VcfTableProvider {
     /// Creates a new VCF table provider.
+    ///
+    /// # Warning
+    /// This method uses `block_on` internally and should NOT be called from
+    /// within an async context (like Tokio runtime) as it can cause deadlocks.
+    /// Use `new_async` instead when called from async contexts.
     ///
     /// # Arguments
     ///
@@ -177,6 +193,109 @@ impl VcfTableProvider {
             format_fields,
             schema,
             thread_num,
+            byte_range: None,
+            object_storage_options,
+        })
+    }
+
+    /// Create a new VcfTableProvider (async version)
+    ///
+    /// Use this method when called from async contexts to avoid deadlocks.
+    pub async fn new_async(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        thread_num: Option<usize>,
+        object_storage_options: Option<ObjectStorageOptions>,
+    ) -> datafusion::common::Result<Self> {
+        let schema = determine_schema_from_header(
+            &file_path,
+            &info_fields,
+            &format_fields,
+            &object_storage_options,
+        )
+        .await?;
+        Ok(Self {
+            file_path,
+            info_fields,
+            format_fields,
+            schema,
+            thread_num,
+            byte_range: None,
+            object_storage_options,
+        })
+    }
+
+    /// Create VcfTableProvider that reads only a specific byte range (synchronous version)
+    ///
+    /// # Critical Note
+    /// The header is always read from byte 0 for schema inference, regardless of `byte_range.start`.
+    /// The `byte_range` only applies to variant record reading, ensuring schema consistency
+    /// across all splits of the same VCF file.
+    ///
+    /// # Warning
+    /// This method uses `block_on` internally and should NOT be called from
+    /// within an async context (like Tokio runtime) as it can cause deadlocks.
+    /// Use `new_with_range_async` instead when called from async contexts.
+    pub fn new_with_range(
+        file_path: String,
+        byte_range: Option<VcfByteRange>, // None = read entire file
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        thread_num: Option<usize>, // For distributed use, should be None (single-threaded)
+        object_storage_options: Option<ObjectStorageOptions>,
+    ) -> datafusion::common::Result<Self> {
+        // CRITICAL: Always read header from byte 0, regardless of byte_range.start
+        // This ensures schema consistency across all splits
+        let schema = block_on(determine_schema_from_header(
+            &file_path,
+            &info_fields,
+            &format_fields,
+            &object_storage_options,
+        ))?;
+        Ok(Self {
+            file_path,
+            info_fields,
+            format_fields,
+            schema,
+            thread_num,
+            byte_range,
+            object_storage_options,
+        })
+    }
+
+    /// Create VcfTableProvider that reads only a specific byte range (async version)
+    ///
+    /// # Critical Note
+    /// The header is always read from byte 0 for schema inference, regardless of `byte_range.start`.
+    /// The `byte_range` only applies to variant record reading, ensuring schema consistency
+    /// across all splits of the same VCF file.
+    ///
+    /// Use this method when called from async contexts to avoid deadlocks.
+    pub async fn new_with_range_async(
+        file_path: String,
+        byte_range: Option<VcfByteRange>, // None = read entire file
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        thread_num: Option<usize>, // For distributed use, should be None (single-threaded)
+        object_storage_options: Option<ObjectStorageOptions>,
+    ) -> datafusion::common::Result<Self> {
+        // CRITICAL: Always read header from byte 0, regardless of byte_range.start
+        // This ensures schema consistency across all splits
+        let schema = determine_schema_from_header(
+            &file_path,
+            &info_fields,
+            &format_fields,
+            &object_storage_options,
+        )
+        .await?;
+        Ok(Self {
+            file_path,
+            info_fields,
+            format_fields,
+            schema,
+            thread_num,
+            byte_range,
             object_storage_options,
         })
     }
@@ -237,6 +356,7 @@ impl TableProvider for VcfTableProvider {
             format_fields: self.format_fields.clone(),
             projection: projection.cloned(),
             limit,
+            byte_range: self.byte_range.clone(),
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
         }))
