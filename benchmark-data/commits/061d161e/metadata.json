@@ -1,0 +1,7 @@
+{
+  "ref": "feature/vcf-format-columns",
+  "ref_type": "branch",
+  "commit_sha": "061d161e8d12c98332ad853955fd045f5ae69de8",
+  "timestamp": "2026-01-25T16:28:57Z",
+  "benchmark_mode": "fast"
+}

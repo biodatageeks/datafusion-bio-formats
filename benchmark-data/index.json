@@ -477,6 +477,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feature/vcf-format-columns@061d161e8d12c98332ad853955fd045f5ae69de8@linux",
+      "label": "feature/vcf-format-columns(061d161e)",
+      "ref": "feature/vcf-format-columns",
+      "ref_type": "branch",
+      "timestamp": "2026-01-25T16:29:05Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/061d161e/linux",
+      "commit_sha": "061d161e8d12c98332ad853955fd045f5ae69de8",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feature/vcf-format-columns@061d161e8d12c98332ad853955fd045f5ae69de8@macos",
+      "label": "feature/vcf-format-columns(061d161e)",
+      "ref": "feature/vcf-format-columns",
+      "ref_type": "branch",
+      "timestamp": "2026-01-25T16:29:05Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/061d161e/macos",
+      "commit_sha": "061d161e8d12c98332ad853955fd045f5ae69de8",
+      "is_latest_tag": false
+    },
+    {
       "id": "feature/vcf-format-columns@1f16fcb88fcb94c218abda862aebc1dce321e2d7@linux",
       "label": "feature/vcf-format-columns(1f16fcb8)",
       "ref": "feature/vcf-format-columns",
@@ -523,6 +547,30 @@
       "path": "commits/b2167618/macos",
       "commit_sha": "b2167618634f59ecf71fc1a7d47f1941c5123f5b",
       "is_latest_tag": false
+    },
+    {
+      "id": "v0.1.1@061d161e8d12c98332ad853955fd045f5ae69de8@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-25T16:29:05Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "061d161e8d12c98332ad853955fd045f5ae69de8",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@061d161e8d12c98332ad853955fd045f5ae69de8@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-25T16:29:05Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "061d161e8d12c98332ad853955fd045f5ae69de8",
+      "is_latest_tag": true
     },
     {
       "id": "v0.1.1@099537d7c02b3defed13675896e65a817590d3cc@linux",
@@ -1272,6 +1320,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-01-25T16:22:20Z",
+  "last_updated": "2026-01-25T16:29:05Z",
   "latest_tag": "v0.1.1"
 }
