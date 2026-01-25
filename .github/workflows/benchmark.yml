@@ -58,7 +58,7 @@ jobs:
       benchmark_mode: ${{ steps.config.outputs.benchmark_mode }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: recursive
@@ -263,7 +263,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: recursive
@@ -401,7 +401,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: gh-pages
           fetch-depth: 0
@@ -608,7 +608,7 @@ jobs:
           cat "$INDEX_FILE" | jq '.'
 
       - name: Checkout Python Scripts from Main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           sparse-checkout: |
