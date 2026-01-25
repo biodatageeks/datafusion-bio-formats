@@ -355,6 +355,7 @@ async fn test_format_with_info_fields() -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// Test single sample VCF - FORMAT columns should NOT have sample name prefix
 #[tokio::test]
 async fn test_format_single_sample_vcf() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_vcf_file("single_sample", SAMPLE_VCF_SINGLE_SAMPLE).await?;
@@ -373,14 +374,16 @@ async fn test_format_single_sample_vcf() -> Result<(), Box<dyn std::error::Error
 
     // Should have 8 core fields + 2 FORMAT fields (1 sample * 2 format fields)
     assert_eq!(schema.fields().len(), 10);
-    assert_eq!(schema.field(8).name(), "OnlySample_GT");
-    assert_eq!(schema.field(9).name(), "OnlySample_DP");
+    // Single sample: no sample prefix, just the format field name
+    assert_eq!(schema.field(8).name(), "GT");
+    assert_eq!(schema.field(9).name(), "DP");
 
     let ctx = SessionContext::new();
     ctx.register_table("test_vcf", Arc::new(table))?;
 
+    // Query using simple field names (no sample prefix needed)
     let df = ctx
-        .sql("SELECT chrom, \"OnlySample_GT\", \"OnlySample_DP\" FROM test_vcf ORDER BY start")
+        .sql("SELECT chrom, \"GT\", \"DP\" FROM test_vcf ORDER BY start")
         .await?;
     let results = df.collect().await?;
 

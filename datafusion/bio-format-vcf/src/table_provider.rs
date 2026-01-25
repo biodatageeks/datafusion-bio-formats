@@ -80,18 +80,24 @@ async fn determine_schema_from_header(
         }
     }
 
-    // Generate per-sample FORMAT columns with naming convention: {sample_name}_{format_field}
+    // Generate per-sample FORMAT columns
+    // Naming convention: {format_field} for single sample, {sample_name}_{format_field} for multiple
     // If format_fields is None, include all FORMAT fields from header
     let format_tags: Vec<String> = match format_fields {
         Some(tags) => tags.clone(),
         None => header_formats.keys().map(|k| k.to_string()).collect(),
     };
     if !format_tags.is_empty() && !sample_names.is_empty() {
+        let single_sample = sample_names.len() == 1;
         for sample_name in &sample_names {
             for tag in &format_tags {
                 let dtype = format_to_arrow_type(header_formats, tag);
-                // Format field naming: {sample_name}_{format_field}
-                let field_name = format!("{}_{}", sample_name, tag);
+                // Skip sample prefix for single-sample VCFs
+                let field_name = if single_sample {
+                    tag.clone()
+                } else {
+                    format!("{}_{}", sample_name, tag)
+                };
                 fields.push(Field::new(field_name, dtype, true));
             }
         }
