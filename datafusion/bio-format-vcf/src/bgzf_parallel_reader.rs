@@ -680,6 +680,7 @@ impl ExecutionPlan for BgzfVcfExec {
                     }
 
                     // Build record batch using the existing logic
+                    let num_info_fields = info_builders.0.len();
                     let batch = crate::physical_exec::build_record_batch(
                         schema.clone(),
                         &chroms,
@@ -691,6 +692,8 @@ impl ExecutionPlan for BgzfVcfExec {
                         &quals,
                         &filters,
                         Some(&builders_to_arrays(&mut info_builders.2)),
+                        None, // FORMAT fields not supported in parallel reader yet
+                        num_info_fields,
                         projection.clone(),
                     )
                     .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;

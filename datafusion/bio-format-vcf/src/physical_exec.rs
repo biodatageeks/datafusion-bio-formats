@@ -3,7 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use crate::storage::{VcfLocalReader, VcfRemoteReader};
-use crate::table_provider::info_to_arrow_type;
+use crate::table_provider::{format_to_arrow_type, info_to_arrow_type};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, Float64Array, StringArray, UInt32Array};
@@ -20,16 +20,18 @@ use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::{StreamExt, TryStreamExt};
 use log::debug;
 use noodles_vcf::Header;
-use noodles_vcf::header::Infos;
+use noodles_vcf::header::{Formats, Infos};
 use noodles_vcf::variant::Record;
 use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArray};
-use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
+use noodles_vcf::variant::record::samples::series::value::genotype::Phasing;
+use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases, Samples};
 use std::str;
 
 /// Constructs a DataFusion RecordBatch from VCF variant data.
 ///
-/// This function assembles core VCF columns (chrom, pos, ref, alt, etc.) and INFO fields
-/// into a RecordBatch for execution. It supports projection pushdown to optimize queries.
+/// This function assembles core VCF columns (chrom, pos, ref, alt, etc.), INFO fields,
+/// and FORMAT fields into a RecordBatch for execution. It supports projection pushdown
+/// to optimize queries.
 ///
 /// # Arguments
 ///
@@ -43,6 +45,8 @@ use std::str;
 /// * `quals` - Quality scores (optional)
 /// * `filters` - FILTER field values (semicolon-separated)
 /// * `infos` - Optional arrow arrays for INFO fields
+/// * `formats` - Optional arrow arrays for FORMAT fields (per-sample)
+/// * `num_info_fields` - Number of INFO fields (used for projection index calculation)
 /// * `projection` - Optional list of column indices to project (None = all columns)
 ///
 /// # Returns
@@ -64,6 +68,8 @@ pub fn build_record_batch(
     quals: &[Option<f64>],
     filters: &[String],
     infos: Option<&Vec<Arc<dyn Array>>>,
+    formats: Option<&Vec<Arc<dyn Array>>>,
+    num_info_fields: usize,
     projection: Option<Vec<usize>>,
 ) -> datafusion::error::Result<RecordBatch> {
     let chrom_array = Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>;
@@ -74,6 +80,13 @@ pub fn build_record_batch(
     let alt_array = Arc::new(StringArray::from(alts.to_vec())) as Arc<dyn Array>;
     let qual_array = Arc::new(Float64Array::from(quals.to_vec())) as Arc<dyn Array>;
     let filter_array = Arc::new(StringArray::from(filters.to_vec())) as Arc<dyn Array>;
+
+    // Column index layout:
+    // 0-7: core fields (chrom, start, end, id, ref, alt, qual, filter)
+    // 8 to (8 + num_info_fields - 1): INFO fields
+    // (8 + num_info_fields) onwards: FORMAT fields (per-sample)
+    let format_start_idx = 8 + num_info_fields;
+
     let arrays = match projection {
         None => {
             let mut arrays: Vec<Arc<dyn Array>> = vec![
@@ -86,11 +99,16 @@ pub fn build_record_batch(
                 qual_array,
                 filter_array,
             ];
-            arrays.append(&mut infos.unwrap().clone());
+            if let Some(info_arrays) = infos {
+                arrays.append(&mut info_arrays.clone());
+            }
+            if let Some(format_arrays) = formats {
+                arrays.append(&mut format_arrays.clone());
+            }
             arrays
         }
         Some(proj_ids) => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(ids.len());
+            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
             if proj_ids.is_empty() {
                 // For empty projections (COUNT(*)), return an empty vector
                 // The schema should already be empty from the table provider
@@ -105,7 +123,18 @@ pub fn build_record_batch(
                         5 => arrays.push(alt_array.clone()),
                         6 => arrays.push(qual_array.clone()),
                         7 => arrays.push(filter_array.clone()),
-                        _ => arrays.push(infos.unwrap()[i - 8].clone()),
+                        idx if idx < format_start_idx => {
+                            // INFO field
+                            if let Some(info_arrays) = infos {
+                                arrays.push(info_arrays[idx - 8].clone());
+                            }
+                        }
+                        idx => {
+                            // FORMAT field
+                            if let Some(format_arrays) = formats {
+                                arrays.push(format_arrays[idx - format_start_idx].clone());
+                            }
+                        }
                     }
                 }
             }
@@ -220,6 +249,8 @@ async fn get_local_vcf(
     batch_size: usize,
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
+    format_fields: Option<Vec<String>>,
+    sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -247,10 +278,23 @@ async fn get_local_vcf(
     .await;
     let header = reader.read_header().await?;
     let infos = header.infos();
+    let formats = header.formats();
     let mut record_num = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
     set_info_builders(batch_size, info_fields, infos, &mut info_builders);
+    let num_info_fields = info_builders.0.len();
+
+    // Initialize FORMAT builders
+    let mut format_builders: FormatBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    set_format_builders(
+        batch_size,
+        format_fields,
+        &sample_names,
+        formats,
+        &mut format_builders,
+    );
+    let has_format_fields = !format_builders.0.is_empty();
 
     let stream = try_stream! {
 
@@ -268,11 +312,19 @@ async fn get_local_vcf(
             alts.push(record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join("|"));
             quals.push(record.quality_score().transpose()?.map(|v| v as f64));
             filters.push(record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join(";"));
-            load_infos(Box::new(record), &header, &mut info_builders)?;
+            load_infos(Box::new(record.clone()), &header, &mut info_builders)?;
+            if has_format_fields {
+                load_formats(&record, &header, &sample_names, &mut format_builders)?;
+            }
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
+                let format_arrays = if has_format_fields {
+                    Some(builders_to_arrays(&mut format_builders.3))
+                } else {
+                    None
+                };
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
                     &chroms,
@@ -283,9 +335,10 @@ async fn get_local_vcf(
                     &alts,
                     &quals,
                     &filters,
-                    Some(&builders_to_arrays(&mut info_builders.2)), projection.clone(),
-                    // if infos.is_empty() { None } else { Some(&infos) },
-
+                    Some(&builders_to_arrays(&mut info_builders.2)),
+                    format_arrays.as_ref(),
+                    num_info_fields,
+                    projection.clone(),
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
@@ -305,6 +358,11 @@ async fn get_local_vcf(
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
         if !chroms.is_empty() {
+            let format_arrays = if has_format_fields {
+                Some(builders_to_arrays(&mut format_builders.3))
+            } else {
+                None
+            };
             let batch = build_record_batch(
                 Arc::clone(&schema.clone()),
                 &chroms,
@@ -315,8 +373,10 @@ async fn get_local_vcf(
                 &alts,
                 &quals,
                 &filters,
-                Some(&builders_to_arrays(&mut info_builders.2)), projection.clone(),
-                // if infos.is_empty() { None } else { Some(&infos) },
+                Some(&builders_to_arrays(&mut info_builders.2)),
+                format_arrays.as_ref(),
+                num_info_fields,
+                projection.clone(),
             )?;
             yield batch;
         }
@@ -324,11 +384,14 @@ async fn get_local_vcf(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_remote_vcf_stream(
     file_path: String,
     schema: SchemaRef,
     batch_size: usize,
     info_fields: Option<Vec<String>>,
+    format_fields: Option<Vec<String>>,
+    sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -338,9 +401,22 @@ async fn get_remote_vcf_stream(
     let mut reader = VcfRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await;
     let header = reader.read_header().await?;
     let infos = header.infos();
+    let formats = header.formats();
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
     set_info_builders(batch_size, info_fields, infos, &mut info_builders);
+    let num_info_fields = info_builders.0.len();
+
+    // Initialize FORMAT builders
+    let mut format_builders: FormatBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    set_format_builders(
+        batch_size,
+        format_fields,
+        &sample_names,
+        formats,
+        &mut format_builders,
+    );
+    let has_format_fields = !format_builders.0.is_empty();
 
     let stream = try_stream! {
         // Create vectors for accumulating record data.
@@ -375,11 +451,19 @@ async fn get_remote_vcf_stream(
             alts.push(record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join("|"));
             quals.push(record.quality_score().transpose()?.map(|v| v as f64));
             filters.push(record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join(";"));
-            load_infos(Box::new(record), &header, &mut info_builders)?;
+            load_infos(Box::new(record.clone()), &header, &mut info_builders)?;
+            if has_format_fields {
+                load_formats(&record, &header, &sample_names, &mut format_builders)?;
+            }
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
+                let format_arrays = if has_format_fields {
+                    Some(builders_to_arrays(&mut format_builders.3))
+                } else {
+                    None
+                };
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
                     &chroms,
@@ -390,9 +474,10 @@ async fn get_remote_vcf_stream(
                     &alts,
                     &quals,
                     &filters,
-                    Some(&builders_to_arrays(&mut info_builders.2)), projection.clone(),
-                    // if infos.is_empty() { None } else { Some(&infos) },
-
+                    Some(&builders_to_arrays(&mut info_builders.2)),
+                    format_arrays.as_ref(),
+                    num_info_fields,
+                    projection.clone(),
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
@@ -412,6 +497,11 @@ async fn get_remote_vcf_stream(
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
         if !chroms.is_empty() {
+            let format_arrays = if has_format_fields {
+                Some(builders_to_arrays(&mut format_builders.3))
+            } else {
+                None
+            };
             let batch = build_record_batch(
                 Arc::clone(&schema.clone()),
                 &chroms,
@@ -422,8 +512,10 @@ async fn get_remote_vcf_stream(
                 &alts,
                 &quals,
                 &filters,
-                Some(&builders_to_arrays(&mut info_builders.2)), projection.clone(),
-                // if infos.is_empty() { None } else { Some(&infos) },
+                Some(&builders_to_arrays(&mut info_builders.2)),
+                format_arrays.as_ref(),
+                num_info_fields,
+                projection.clone(),
             )?;
             yield batch;
         }
@@ -446,6 +538,210 @@ fn set_info_builders(
     }
 }
 
+/// Holds builders for per-sample FORMAT fields.
+/// Format builders are organized as: for each sample, for each format field.
+/// This matches the column ordering: sample1_field1, sample1_field2, sample2_field1, sample2_field2, etc.
+type FormatBuilders = (Vec<String>, Vec<String>, Vec<DataType>, Vec<OptionalField>);
+
+fn set_format_builders(
+    batch_size: usize,
+    format_fields: Option<Vec<String>>,
+    sample_names: &[String],
+    formats: &Formats,
+    format_builders: &mut FormatBuilders,
+) {
+    // If format_fields is None, include all FORMAT fields from header
+    let fields: Vec<String> = match format_fields {
+        Some(tags) => tags,
+        None => formats.keys().map(|k| k.to_string()).collect(),
+    };
+    for sample_name in sample_names {
+        for f in &fields {
+            let data_type = format_to_arrow_type(formats, f);
+            let field = OptionalField::new(&data_type, batch_size).unwrap();
+            format_builders.0.push(sample_name.clone()); // sample name
+            format_builders.1.push(f.clone()); // format field name
+            format_builders.2.push(data_type);
+            format_builders.3.push(field);
+        }
+    }
+}
+
+/// Converts a genotype to its string representation (e.g., "0/1", "1|0", "./.")
+fn genotype_to_string(record: &dyn Record, header: &Header, sample_index: usize) -> Option<String> {
+    let samples = record.samples().ok()?;
+    let gt_series = samples.select(header, "GT")?.ok()?;
+
+    // series.get returns Option<Option<Result<Value>>>
+    if let Some(Some(Ok(gt_value))) = gt_series.get(header, sample_index) {
+        use noodles_vcf::variant::record::samples::series::Value;
+        if let Value::Genotype(gt) = gt_value {
+            let mut result = String::new();
+            let mut first = true;
+            for (allele, phasing) in gt.iter().flatten() {
+                if !first {
+                    match phasing {
+                        Phasing::Phased => result.push('|'),
+                        Phasing::Unphased => result.push('/'),
+                    }
+                }
+                first = false;
+                match allele {
+                    Some(a) => result.push_str(&a.to_string()),
+                    None => result.push('.'),
+                }
+            }
+            return Some(result);
+        }
+    }
+    None
+}
+
+fn load_formats(
+    record: &dyn Record,
+    header: &Header,
+    sample_names: &[String],
+    format_builders: &mut FormatBuilders,
+) -> Result<(), datafusion::arrow::error::ArrowError> {
+    let samples = match record.samples() {
+        Ok(s) => s,
+        Err(_) => {
+            // If samples can't be read, append null for all format fields
+            for builder in format_builders.3.iter_mut() {
+                builder.append_null()?;
+            }
+            return Ok(());
+        }
+    };
+    let num_format_fields = if sample_names.is_empty() {
+        0
+    } else {
+        format_builders.0.len() / sample_names.len()
+    };
+
+    for (builder_idx, builder) in format_builders.3.iter_mut().enumerate() {
+        let sample_idx = builder_idx / num_format_fields;
+        let field_name = &format_builders.1[builder_idx];
+        let data_type = &format_builders.2[builder_idx];
+
+        // Handle GT (genotype) specially - always convert to string
+        if field_name == "GT" {
+            match genotype_to_string(record, header, sample_idx) {
+                Some(gt_str) => builder.append_string(&gt_str)?,
+                None => builder.append_null()?,
+            }
+            continue;
+        }
+
+        // Handle other FORMAT fields
+        let series_result = samples.select(header, field_name.as_str());
+        match series_result {
+            Some(Ok(series)) => {
+                // series.get returns Option<Option<Result<Value>>>
+                // Outer Option: sample exists, Inner Option: field value present, Result: parse success
+                match series.get(header, sample_idx) {
+                    Some(Some(Ok(value))) => {
+                        use noodles_vcf::variant::record::samples::series::Value;
+                        match value {
+                            Value::Integer(v) => builder.append_int(v)?,
+                            Value::Float(v) => builder.append_float(v)?,
+                            Value::String(v) => builder.append_string(&v)?,
+                            Value::Character(c) => builder.append_string(&c.to_string())?,
+                            Value::Array(arr) => {
+                                use noodles_vcf::variant::record::samples::series::value::Array as SamplesArray;
+                                match arr {
+                                    SamplesArray::Integer(values) => {
+                                        // Preserve nulls for proper allele alignment (e.g., AD=10,. -> [10, null])
+                                        let ints: Vec<Option<i32>> =
+                                            values.iter().map(|v| v.ok().flatten()).collect();
+                                        let all_null = ints.iter().all(|v| v.is_none());
+                                        if all_null {
+                                            builder.append_null()?;
+                                        } else if matches!(data_type, DataType::Int32) {
+                                            // Scalar type but got array - take first non-null value
+                                            if let Some(first) = ints.iter().find_map(|v| *v) {
+                                                builder.append_int(first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
+                                        } else {
+                                            builder.append_array_int_nullable(ints)?;
+                                        }
+                                    }
+                                    SamplesArray::Float(values) => {
+                                        let floats: Vec<Option<f32>> =
+                                            values.iter().map(|v| v.ok().flatten()).collect();
+                                        let all_null = floats.iter().all(|v| v.is_none());
+                                        if all_null {
+                                            builder.append_null()?;
+                                        } else if matches!(data_type, DataType::Float32) {
+                                            if let Some(first) = floats.iter().find_map(|v| *v) {
+                                                builder.append_float(first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
+                                        } else {
+                                            builder.append_array_float_nullable(floats)?;
+                                        }
+                                    }
+                                    SamplesArray::String(values) => {
+                                        let strings: Vec<Option<String>> = values
+                                            .iter()
+                                            .map(|v| v.ok().flatten().map(|s| s.to_string()))
+                                            .collect();
+                                        let all_null = strings.iter().all(|v| v.is_none());
+                                        if all_null {
+                                            builder.append_null()?;
+                                        } else if matches!(data_type, DataType::Utf8) {
+                                            if let Some(first) =
+                                                strings.iter().find_map(|v| v.clone())
+                                            {
+                                                builder.append_string(&first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
+                                        } else {
+                                            builder.append_array_string_nullable(strings)?;
+                                        }
+                                    }
+                                    SamplesArray::Character(values) => {
+                                        let strings: Vec<Option<String>> = values
+                                            .iter()
+                                            .map(|v| v.ok().flatten().map(|c| c.to_string()))
+                                            .collect();
+                                        let all_null = strings.iter().all(|v| v.is_none());
+                                        if all_null {
+                                            builder.append_null()?;
+                                        } else if matches!(data_type, DataType::Utf8) {
+                                            if let Some(first) =
+                                                strings.iter().find_map(|v| v.clone())
+                                            {
+                                                builder.append_string(&first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
+                                        } else {
+                                            builder.append_array_string_nullable(strings)?;
+                                        }
+                                    }
+                                }
+                            }
+                            Value::Genotype(_) => {
+                                // Genotype should have been handled above
+                                builder.append_null()?;
+                            }
+                        }
+                    }
+                    // Missing value, parse error, or sample doesn't exist
+                    _ => builder.append_null()?,
+                }
+            }
+            _ => builder.append_null()?,
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
@@ -453,6 +749,8 @@ async fn get_stream(
     batch_size: usize,
     thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
+    format_fields: Option<Vec<String>>,
+    sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -471,6 +769,8 @@ async fn get_stream(
                 batch_size,
                 thread_num,
                 info_fields,
+                format_fields,
+                sample_names,
                 projection,
                 object_storage_options,
                 coordinate_system_zero_based,
@@ -484,6 +784,8 @@ async fn get_stream(
                 schema.clone(),
                 batch_size,
                 info_fields,
+                format_fields,
+                sample_names,
                 projection,
                 object_storage_options,
                 coordinate_system_zero_based,
@@ -502,6 +804,7 @@ pub struct VcfExec {
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) info_fields: Option<Vec<String>>,
     pub(crate) format_fields: Option<Vec<String>>,
+    pub(crate) sample_names: Vec<String>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
     pub(crate) thread_num: Option<usize>,
@@ -561,6 +864,8 @@ impl ExecutionPlan for VcfExec {
             batch_size,
             self.thread_num,
             self.info_fields.clone(),
+            self.format_fields.clone(),
+            self.sample_names.clone(),
             self.projection.clone(),
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
