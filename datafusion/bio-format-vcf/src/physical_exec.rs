@@ -384,6 +384,7 @@ async fn get_local_vcf(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_remote_vcf_stream(
     file_path: String,
     schema: SchemaRef,
