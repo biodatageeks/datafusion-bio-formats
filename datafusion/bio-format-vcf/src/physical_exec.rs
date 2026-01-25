@@ -550,7 +550,11 @@ fn set_format_builders(
     formats: &Formats,
     format_builders: &mut FormatBuilders,
 ) {
-    let fields = format_fields.unwrap_or_default();
+    // If format_fields is None, include all FORMAT fields from header
+    let fields: Vec<String> = match format_fields {
+        Some(tags) => tags,
+        None => formats.keys().map(|k| k.to_string()).collect(),
+    };
     for sample_name in sample_names {
         for f in &fields {
             let data_type = format_to_arrow_type(formats, f);
@@ -647,56 +651,77 @@ fn load_formats(
                                 use noodles_vcf::variant::record::samples::series::value::Array as SamplesArray;
                                 match arr {
                                     SamplesArray::Integer(values) => {
-                                        let ints: Vec<i32> = values
-                                            .iter()
-                                            .filter_map(|v| v.ok().flatten())
-                                            .collect();
-                                        if ints.is_empty() {
+                                        // Preserve nulls for proper allele alignment (e.g., AD=10,. -> [10, null])
+                                        let ints: Vec<Option<i32>> =
+                                            values.iter().map(|v| v.ok().flatten()).collect();
+                                        let all_null = ints.iter().all(|v| v.is_none());
+                                        if all_null {
                                             builder.append_null()?;
                                         } else if matches!(data_type, DataType::Int32) {
-                                            // Scalar type but got array - take first value
-                                            builder.append_int(ints[0])?;
+                                            // Scalar type but got array - take first non-null value
+                                            if let Some(first) = ints.iter().find_map(|v| *v) {
+                                                builder.append_int(first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
                                         } else {
-                                            builder.append_array_int(ints)?;
+                                            builder.append_array_int_nullable(ints)?;
                                         }
                                     }
                                     SamplesArray::Float(values) => {
-                                        let floats: Vec<f32> = values
-                                            .iter()
-                                            .filter_map(|v| v.ok().flatten())
-                                            .collect();
-                                        if floats.is_empty() {
+                                        let floats: Vec<Option<f32>> =
+                                            values.iter().map(|v| v.ok().flatten()).collect();
+                                        let all_null = floats.iter().all(|v| v.is_none());
+                                        if all_null {
                                             builder.append_null()?;
                                         } else if matches!(data_type, DataType::Float32) {
-                                            builder.append_float(floats[0])?;
+                                            if let Some(first) = floats.iter().find_map(|v| *v) {
+                                                builder.append_float(first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
                                         } else {
-                                            builder.append_array_float(floats)?;
+                                            builder.append_array_float_nullable(floats)?;
                                         }
                                     }
                                     SamplesArray::String(values) => {
-                                        let strings: Vec<String> = values
+                                        let strings: Vec<Option<String>> = values
                                             .iter()
-                                            .filter_map(|v| v.ok().flatten().map(|s| s.to_string()))
+                                            .map(|v| v.ok().flatten().map(|s| s.to_string()))
                                             .collect();
-                                        if strings.is_empty() {
+                                        let all_null = strings.iter().all(|v| v.is_none());
+                                        if all_null {
                                             builder.append_null()?;
                                         } else if matches!(data_type, DataType::Utf8) {
-                                            builder.append_string(&strings[0])?;
+                                            if let Some(first) =
+                                                strings.iter().find_map(|v| v.clone())
+                                            {
+                                                builder.append_string(&first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
                                         } else {
-                                            builder.append_array_string(strings)?;
+                                            builder.append_array_string_nullable(strings)?;
                                         }
                                     }
                                     SamplesArray::Character(values) => {
-                                        let strings: Vec<String> = values
+                                        let strings: Vec<Option<String>> = values
                                             .iter()
-                                            .filter_map(|v| v.ok().flatten().map(|c| c.to_string()))
+                                            .map(|v| v.ok().flatten().map(|c| c.to_string()))
                                             .collect();
-                                        if strings.is_empty() {
+                                        let all_null = strings.iter().all(|v| v.is_none());
+                                        if all_null {
                                             builder.append_null()?;
                                         } else if matches!(data_type, DataType::Utf8) {
-                                            builder.append_string(&strings[0])?;
+                                            if let Some(first) =
+                                                strings.iter().find_map(|v| v.clone())
+                                            {
+                                                builder.append_string(&first)?;
+                                            } else {
+                                                builder.append_null()?;
+                                            }
                                         } else {
-                                            builder.append_array_string(strings)?;
+                                            builder.append_array_string_nullable(strings)?;
                                         }
                                     }
                                 }

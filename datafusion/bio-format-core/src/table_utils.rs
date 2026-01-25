@@ -230,6 +230,33 @@ impl OptionalField {
         }
     }
 
+    /// Appends a vector of nullable integers as an array element
+    ///
+    /// Preserves null entries in the array (e.g., for VCF AD=10,. -> [10, null])
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Vector of Option<Int32> values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayInt32Builder
+    pub fn append_array_int_nullable(&mut self, value: Vec<Option<i32>>) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayInt32Builder(builder) => {
+                for v in value {
+                    match v {
+                        Some(i) => builder.values().append_value(i),
+                        None => builder.values().append_null(),
+                    }
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayInt32Builder".into())),
+        }
+    }
+
     /// Appends a float value to the builder
     ///
     /// # Arguments
@@ -267,6 +294,38 @@ impl OptionalField {
         match self {
             OptionalField::ArrayFloat32Builder(builder) => {
                 builder.values().append_slice(&value);
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError(
+                "Expected ArrayFloat32Builder".into(),
+            )),
+        }
+    }
+
+    /// Appends a vector of nullable floats as an array element
+    ///
+    /// Preserves null entries in the array (e.g., for VCF AF=0.5,. -> [0.5, null])
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Vector of Option<Float32> values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayFloat32Builder
+    pub fn append_array_float_nullable(
+        &mut self,
+        value: Vec<Option<f32>>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayFloat32Builder(builder) => {
+                for v in value {
+                    match v {
+                        Some(f) => builder.values().append_value(f),
+                        None => builder.values().append_null(),
+                    }
+                }
                 builder.append(true);
                 Ok(())
             }
@@ -314,6 +373,36 @@ impl OptionalField {
             OptionalField::ArrayUtf8Builder(builder) => {
                 for v in value {
                     builder.values().append_value(&v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayUtf8Builder".into())),
+        }
+    }
+
+    /// Appends a vector of nullable strings as an array element
+    ///
+    /// Preserves null entries in the array
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - Vector of Option<String> values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayUtf8Builder
+    pub fn append_array_string_nullable(
+        &mut self,
+        value: Vec<Option<String>>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayUtf8Builder(builder) => {
+                for v in value {
+                    match v {
+                        Some(s) => builder.values().append_value(&s),
+                        None => builder.values().append_null(),
+                    }
                 }
                 builder.append(true);
                 Ok(())

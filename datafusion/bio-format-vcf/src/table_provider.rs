@@ -81,9 +81,14 @@ async fn determine_schema_from_header(
     }
 
     // Generate per-sample FORMAT columns with naming convention: {sample_name}_{format_field}
-    if let Some(formats) = format_fields {
+    // If format_fields is None, include all FORMAT fields from header
+    let format_tags: Vec<String> = match format_fields {
+        Some(tags) => tags.clone(),
+        None => header_formats.keys().map(|k| k.to_string()).collect(),
+    };
+    if !format_tags.is_empty() && !sample_names.is_empty() {
         for sample_name in &sample_names {
-            for tag in formats {
+            for tag in &format_tags {
                 let dtype = format_to_arrow_type(header_formats, tag);
                 // Format field naming: {sample_name}_{format_field}
                 let field_name = format!("{}_{}", sample_name, tag);
