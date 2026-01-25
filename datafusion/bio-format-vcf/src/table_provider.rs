@@ -19,7 +19,7 @@ use futures::executor::block_on;
 use log::debug;
 use noodles_vcf::header::Formats;
 use noodles_vcf::header::Infos;
-use noodles_vcf::header::record::value::map::format::Type as FormatType;
+use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
 use noodles_vcf::header::record::value::map::info::{Number, Type as InfoType};
 use std::any::Any;
 use std::fmt::Debug;
@@ -37,7 +37,8 @@ use std::sync::Arc;
 ///
 /// # Returns
 ///
-/// An Arrow SchemaRef representing the VCF table structure
+/// A tuple of (Arrow SchemaRef, sample names) representing the VCF table structure
+/// and the sample names from the header.
 ///
 /// # Errors
 ///
@@ -48,10 +49,15 @@ async fn determine_schema_from_header(
     format_fields: &Option<Vec<String>>,
     object_storage_options: &Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
-) -> datafusion::common::Result<SchemaRef> {
+) -> datafusion::common::Result<(SchemaRef, Vec<String>)> {
     let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
     let header_infos = header.infos();
     let header_formats = header.formats();
+    let sample_names: Vec<String> = header
+        .sample_names()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -74,11 +80,15 @@ async fn determine_schema_from_header(
         }
     }
 
+    // Generate per-sample FORMAT columns with naming convention: {sample_name}_{format_field}
     if let Some(formats) = format_fields {
-        for tag in formats {
-            let dtype = format_to_arrow_type(header_formats, tag);
-            // Preserve case sensitivity for FORMAT fields
-            fields.push(Field::new(format!("format_{}", tag), dtype, true));
+        for sample_name in &sample_names {
+            for tag in formats {
+                let dtype = format_to_arrow_type(header_formats, tag);
+                // Format field naming: {sample_name}_{format_field}
+                let field_name = format!("{}_{}", sample_name, tag);
+                fields.push(Field::new(field_name, dtype, true));
+            }
         }
     }
 
@@ -90,7 +100,7 @@ async fn determine_schema_from_header(
     );
     let schema = Schema::new_with_metadata(fields, metadata);
     // println!("Schema: {:?}", schema);
-    Ok(Arc::new(schema))
+    Ok((Arc::new(schema), sample_names))
 }
 
 /// Determines if a VCF INFO field type is nullable.
@@ -111,6 +121,10 @@ pub fn is_nullable(ty: &InfoType) -> bool {
 
 /// Converts a VCF FORMAT field type to an Arrow DataType.
 ///
+/// Handles scalar types (Integer, Float, String, Character) and array types
+/// based on the Number field of the FORMAT definition. GT (genotype) fields
+/// are always treated as Utf8 strings.
+///
 /// # Arguments
 ///
 /// * `formats` - The VCF header FORMAT definitions
@@ -118,14 +132,35 @@ pub fn is_nullable(ty: &InfoType) -> bool {
 ///
 /// # Returns
 ///
-/// The corresponding Arrow DataType
-fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
-    let format = formats.get(field).unwrap();
-    match format.ty() {
-        FormatType::Integer => DataType::Int32,
-        FormatType::Float => DataType::Float32,
-        FormatType::Character => DataType::Utf8,
-        FormatType::String => DataType::Utf8,
+/// The corresponding Arrow DataType, defaulting to Utf8 if field is not found
+pub fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
+    // GT (genotype) is always represented as a string (e.g., "0/1", "1|0", "./.")
+    if field == "GT" {
+        return DataType::Utf8;
+    }
+
+    match formats.get(field) {
+        Some(format) => {
+            let inner = match format.ty() {
+                FormatType::Integer => DataType::Int32,
+                FormatType::Float => DataType::Float32,
+                FormatType::Character => DataType::Utf8,
+                FormatType::String => DataType::Utf8,
+            };
+
+            match format.number() {
+                FormatNumber::Count(0) | FormatNumber::Count(1) => inner,
+                // All other Number variants indicate variable-length arrays
+                _ => DataType::List(Arc::new(Field::new("item", inner, true))),
+            }
+        }
+        None => {
+            log::warn!(
+                "VCF FORMAT tag '{}' not found in header; defaulting to Utf8",
+                field
+            );
+            DataType::Utf8
+        }
     }
 }
 
@@ -150,6 +185,8 @@ pub struct VcfTableProvider {
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
+    /// Sample names from the VCF header (used for FORMAT column naming)
+    sample_names: Vec<String>,
 }
 
 impl VcfTableProvider {
@@ -180,7 +217,7 @@ impl VcfTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
-        let schema = block_on(determine_schema_from_header(
+        let (schema, sample_names) = block_on(determine_schema_from_header(
             &file_path,
             &info_fields,
             &format_fields,
@@ -195,6 +232,7 @@ impl VcfTableProvider {
             thread_num,
             object_storage_options,
             coordinate_system_zero_based,
+            sample_names,
         })
     }
 }
@@ -259,6 +297,7 @@ impl TableProvider for VcfTableProvider {
             schema: schema.clone(),
             info_fields: self.info_fields.clone(),
             format_fields: self.format_fields.clone(),
+            sample_names: self.sample_names.clone(),
             projection: projection.cloned(),
             limit,
             thread_num: self.thread_num,
