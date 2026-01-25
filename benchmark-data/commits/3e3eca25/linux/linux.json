@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-01-25T17:02:45Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feature/vcf-format-columns",
+  "commit_sha": "3e3eca25f6eeab383d0486fab1263773b95f08bf",
+  "benchmark_mode": "fast"
+}
