@@ -43,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
                 Some(4),
                 Some(ObjectStorageOptions::default()),
+                true, // Use 0-based coordinates (default)
             ) {
                 Ok(_) => println!("✓ VcfTableProvider created successfully with 4 threads"),
                 Err(e) => println!("✗ Error creating VcfTableProvider: {}", e),
@@ -65,6 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None, // No specific format fields
         None, // Auto-detect threads
         Some(ObjectStorageOptions::default()),
+        true, // Use 0-based coordinates (default)
     )?;
 
     ctx.register_table("vcf_table", Arc::new(table_provider))?;
@@ -100,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             None,
             Some(thread_count),
             Some(ObjectStorageOptions::default()),
+            true, // Use 0-based coordinates (default)
         )?;
 
         ctx.register_table("vcf_table", Arc::new(table_provider))?;

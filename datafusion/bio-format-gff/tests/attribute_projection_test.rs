@@ -45,6 +45,7 @@ async fn test_attribute_projection_single_attribute() -> Result<(), Box<dyn std:
         Some(vec!["ID".to_string(), "Name".to_string()]),
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -91,6 +92,7 @@ async fn test_attribute_projection_multiple_attributes() -> Result<(), Box<dyn s
         ]),
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -135,6 +137,7 @@ async fn test_attribute_projection_mixed_core_and_attributes()
         ]),
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -169,7 +172,8 @@ async fn test_attribute_projection_mixed_core_and_attributes()
 
     assert!(note_array.is_null(1));
     assert_eq!(note_array.value(2), "frameshift");
-    assert_eq!(start_array.value(2), 170);
+    // With 0-based coordinates (default), start position is 169 (was 170 in 1-based)
+    assert_eq!(start_array.value(2), 169);
 
     Ok(())
 }
@@ -185,6 +189,7 @@ async fn test_attribute_projection_no_attributes_queried() -> Result<(), Box<dyn
         Some(vec!["ID".to_string(), "Name".to_string()]),
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();
@@ -221,6 +226,7 @@ async fn test_attribute_projection_all_attributes() -> Result<(), Box<dyn std::e
         ]),
         Some(1),
         Some(object_storage_options),
+        true,
     )?;
 
     let ctx = SessionContext::new();

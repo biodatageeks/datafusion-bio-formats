@@ -28,6 +28,8 @@ pub struct CramExec {
     pub(crate) limit: Option<usize>,
     pub(crate) reference_path: Option<String>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
+    /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
+    pub(crate) coordinate_system_zero_based: bool,
 }
 
 impl Debug for CramExec {
@@ -82,6 +84,7 @@ impl ExecutionPlan for CramExec {
             self.reference_path.clone(),
             self.projection.clone(),
             self.object_storage_options.clone(),
+            self.coordinate_system_zero_based,
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
@@ -95,6 +98,7 @@ async fn get_remote_cram_stream(
     reference_path: Option<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
@@ -139,9 +143,11 @@ async fn get_remote_cram_stream(
                 &names,
             );
             chrom.push(chrom_name);
+            // noodles returns 1-based positions; convert to 0-based if needed
             match record.alignment_start() {
                 Some(start_pos) => {
-                    start.push(Some(usize::from(start_pos) as u32));
+                    let pos = usize::from(start_pos) as u32;
+                    start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
                 },
                 None => {
                     start.push(None);
@@ -149,7 +155,11 @@ async fn get_remote_cram_stream(
             }
             match record.alignment_end() {
                 Some(end_pos) => {
-                    end.push(Some(usize::from(end_pos) as u32));
+                    let pos = usize::from(end_pos) as u32;
+                    // End position: noodles returns 1-based inclusive end
+                    // For 0-based half-open: keep as-is (1-based inclusive = 0-based exclusive)
+                    // For 1-based closed: use as-is
+                    end.push(Some(pos));
                 },
                 None => {
                     end.push(None);
@@ -180,8 +190,12 @@ async fn get_remote_cram_stream(
                 &names,
             );
             mate_chrom.push(chrom_name);
+            // mate_alignment_start: same conversion as alignment_start
             match record.mate_alignment_start()  {
-                Some(start) => mate_start.push(Some(usize::from(start) as u32)),
+                Some(start_val) => {
+                    let pos = usize::from(start_val) as u32;
+                    mate_start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
+                },
                 _ => mate_start.push(None),
             };
 
@@ -251,6 +265,7 @@ async fn get_local_cram(
     batch_size: usize,
     reference_path: Option<String>,
     projection: Option<Vec<usize>>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
@@ -294,9 +309,11 @@ async fn get_local_cram(
                     name.push(None);
                 }
             };
+            // noodles returns 1-based positions; convert to 0-based if needed
             match record.alignment_start() {
                 Some(start_pos) => {
-                    start.push(Some(usize::from(start_pos) as u32));
+                    let pos = usize::from(start_pos) as u32;
+                    start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
                 },
                 None => {
                     start.push(None);
@@ -304,7 +321,11 @@ async fn get_local_cram(
             }
             match record.alignment_end() {
                 Some(end_pos) => {
-                    end.push(Some(usize::from(end_pos) as u32));
+                    let pos = usize::from(end_pos) as u32;
+                    // End position: noodles returns 1-based inclusive end
+                    // For 0-based half-open: keep as-is (1-based inclusive = 0-based exclusive)
+                    // For 1-based closed: use as-is
+                    end.push(Some(pos));
                 },
                 None => {
                     end.push(None);
@@ -332,8 +353,12 @@ async fn get_local_cram(
                 &names,
             );
             mate_chrom.push(chrom_name);
+            // mate_alignment_start: same conversion as alignment_start
             match record.mate_alignment_start()  {
-                Some(start) => mate_start.push(Some(usize::from(start) as u32)),
+                Some(start_val) => {
+                    let pos = usize::from(start_val) as u32;
+                    mate_start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
+                },
                 None => mate_start.push(None),
             };
 
@@ -482,6 +507,7 @@ async fn get_stream(
     reference_path: Option<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let file_path = file_path.clone();
     let store_type = get_storage_type(file_path.clone());
@@ -495,6 +521,7 @@ async fn get_stream(
                 batch_size,
                 reference_path,
                 projection,
+                coordinate_system_zero_based,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -507,6 +534,7 @@ async fn get_stream(
                 reference_path,
                 projection,
                 object_storage_options,
+                coordinate_system_zero_based,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))

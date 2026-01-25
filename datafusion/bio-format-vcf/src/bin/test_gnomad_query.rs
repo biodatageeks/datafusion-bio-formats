@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,                                 // format_fields
         None,                                 // thread_num
         Some(object_storage_options.clone()),
+        true, // Use 0-based coordinates (default)
     )?) as Arc<dyn TableProvider>;
 
     ctx.register_table("gnomad", table_provider)?;

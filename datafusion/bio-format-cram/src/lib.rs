@@ -23,7 +23,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a CRAM file as a table
-//! let table = CramTableProvider::new("data/alignments.cram".to_string(), None, None)?;
+//! let table = CramTableProvider::new("data/alignments.cram".to_string(), None, None, true)?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!
 //! // Query with SQL

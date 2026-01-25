@@ -1,6 +1,8 @@
 use crate::filter_utils::{can_push_down_filter, evaluate_filters_against_record};
 use crate::storage::GffRecordTrait;
+use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use std::any::Any;
+use std::collections::HashMap;
 use std::io::{self, BufRead, Read, Seek};
 use std::sync::Arc;
 
@@ -38,6 +40,8 @@ pub struct BgzfGffTableProvider {
     path: PathBuf,
     schema: SchemaRef,
     attr_fields: Option<Vec<String>>,
+    /// If true (default), output 0-based half-open coordinates; if false, 1-based closed
+    coordinate_system_zero_based: bool,
 }
 
 impl BgzfGffTableProvider {
@@ -46,23 +50,32 @@ impl BgzfGffTableProvider {
     /// # Arguments
     /// * `path` - Path to the BGZF-compressed GFF file
     /// * `attr_fields` - Optional list of specific attributes to extract as columns
+    /// * `coordinate_system_zero_based` - If true (default), output 0-based coordinates
     ///
     /// # Returns
     /// A configured table provider or IO error if schema construction fails
-    pub fn try_new(path: impl Into<PathBuf>, attr_fields: Option<Vec<String>>) -> io::Result<Self> {
-        let schema = determine_schema_on_demand(attr_fields.clone())
+    pub fn try_new(
+        path: impl Into<PathBuf>,
+        attr_fields: Option<Vec<String>>,
+        coordinate_system_zero_based: bool,
+    ) -> io::Result<Self> {
+        let schema = determine_schema_on_demand(attr_fields.clone(), coordinate_system_zero_based)
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Schema error: {}", e)))?;
 
         Ok(Self {
             path: path.into(),
             schema,
             attr_fields,
+            coordinate_system_zero_based,
         })
     }
 }
 
 /// Determine schema based on attribute fields (same logic as main table provider)
-fn determine_schema_on_demand(attr_fields: Option<Vec<String>>) -> Result<SchemaRef> {
+fn determine_schema_on_demand(
+    attr_fields: Option<Vec<String>>,
+    coordinate_system_zero_based: bool,
+) -> Result<SchemaRef> {
     // Always include 8 static GFF fields
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -111,7 +124,14 @@ fn determine_schema_on_demand(attr_fields: Option<Vec<String>>) -> Result<Schema
         }
     }
 
-    Ok(Arc::new(Schema::new(fields)))
+    // Add coordinate system metadata to schema
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        COORDINATE_SYSTEM_METADATA_KEY.to_string(),
+        coordinate_system_zero_based.to_string(),
+    );
+
+    Ok(Arc::new(Schema::new_with_metadata(fields, metadata)))
 }
 
 /// Get partition bounds for parallel BGZF processing
@@ -238,6 +258,7 @@ impl datafusion::catalog::TableProvider for BgzfGffTableProvider {
             index,
             self.attr_fields.clone(),
             limit,
+            self.coordinate_system_zero_based,
         );
         Ok(Arc::new(exec))
     }
@@ -253,6 +274,7 @@ struct BgzfGffExec {
     index: gzi::Index,
     attr_fields: Option<Vec<String>>,
     limit: Option<usize>,
+    coordinate_system_zero_based: bool,
     properties: PlanProperties,
 }
 
@@ -267,6 +289,7 @@ impl BgzfGffExec {
         index: gzi::Index,
         attr_fields: Option<Vec<String>>,
         limit: Option<usize>,
+        coordinate_system_zero_based: bool,
     ) -> Self {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -284,6 +307,7 @@ impl BgzfGffExec {
             index,
             attr_fields,
             limit,
+            coordinate_system_zero_based,
             properties,
         }
     }
@@ -345,6 +369,7 @@ impl ExecutionPlan for BgzfGffExec {
         let index = self.index.clone();
         let attr_fields = self.attr_fields.clone();
         let limit = self.limit;
+        let coordinate_system_zero_based = self.coordinate_system_zero_based;
 
         debug!(
             "Executing BGZF GFF partition {} with range: {}-{}",
@@ -614,7 +639,16 @@ impl ExecutionPlan for BgzfGffExec {
 
                     // Append projected standard fields
                     if let Some(b) = &mut chrom_builder { b.append_value(&rec.chrom); }
-                    if let Some(b) = &mut start_builder { b.append_value(rec.start); }
+                    if let Some(b) = &mut start_builder {
+                        // Apply coordinate conversion: GFF is 1-based closed interval
+                        // When zero_based=true, convert start to 0-based (subtract 1)
+                        let start_val = if coordinate_system_zero_based {
+                            rec.start.saturating_sub(1)
+                        } else {
+                            rec.start
+                        };
+                        b.append_value(start_val);
+                    }
                     if let Some(b) = &mut end_builder { b.append_value(rec.end); }
                     if let Some(b) = &mut type_builder { b.append_value(&rec.ty); }
                     if let Some(b) = &mut source_builder { b.append_value(&rec.source); }

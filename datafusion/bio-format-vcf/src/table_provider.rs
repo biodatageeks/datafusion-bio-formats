@@ -1,6 +1,8 @@
 use crate::physical_exec::VcfExec;
 use crate::storage::get_header;
 use async_trait::async_trait;
+use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use std::collections::HashMap;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
@@ -31,6 +33,7 @@ use std::sync::Arc;
 /// * `info_fields` - Optional list of INFO fields to include (if None, all are included)
 /// * `format_fields` - Optional list of FORMAT fields to include (if None, all are included)
 /// * `object_storage_options` - Configuration for cloud storage access
+/// * `coordinate_system_zero_based` - If true, coordinates are 0-based half-open; if false, 1-based closed
 ///
 /// # Returns
 ///
@@ -44,6 +47,7 @@ async fn determine_schema_from_header(
     info_fields: &Option<Vec<String>>,
     format_fields: &Option<Vec<String>>,
     object_storage_options: &Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::common::Result<SchemaRef> {
     let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
     let header_infos = header.infos();
@@ -78,7 +82,13 @@ async fn determine_schema_from_header(
         }
     }
 
-    let schema = Schema::new(fields);
+    // Add coordinate system metadata to schema
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        COORDINATE_SYSTEM_METADATA_KEY.to_string(),
+        coordinate_system_zero_based.to_string(),
+    );
+    let schema = Schema::new_with_metadata(fields, metadata);
     // println!("Schema: {:?}", schema);
     Ok(Arc::new(schema))
 }
@@ -138,6 +148,8 @@ pub struct VcfTableProvider {
     thread_num: Option<usize>,
     /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
+    /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
+    coordinate_system_zero_based: bool,
 }
 
 impl VcfTableProvider {
@@ -150,6 +162,8 @@ impl VcfTableProvider {
     /// * `format_fields` - Optional list of FORMAT fields to include
     /// * `thread_num` - Optional number of worker threads for BGZF decompression
     /// * `object_storage_options` - Configuration for cloud storage access
+    /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
+    ///   if false, output 1-based closed coordinates
     ///
     /// # Returns
     ///
@@ -164,12 +178,14 @@ impl VcfTableProvider {
         format_fields: Option<Vec<String>>,
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
         let schema = block_on(determine_schema_from_header(
             &file_path,
             &info_fields,
             &format_fields,
             &object_storage_options,
+            coordinate_system_zero_based,
         ))?;
         Ok(Self {
             file_path,
@@ -178,6 +194,7 @@ impl VcfTableProvider {
             schema,
             thread_num,
             object_storage_options,
+            coordinate_system_zero_based,
         })
     }
 }
@@ -210,13 +227,20 @@ impl TableProvider for VcfTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    // For empty projections (COUNT(*)), return an empty schema
-                    Arc::new(Schema::empty())
+                    // For empty projections (COUNT(*)), return an empty schema with preserved metadata
+                    let empty_fields: Vec<Field> = vec![];
+                    Arc::new(Schema::new_with_metadata(
+                        empty_fields,
+                        schema.metadata().clone(),
+                    ))
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
                         indices.iter().map(|&i| schema.field(i).clone()).collect();
-                    Arc::new(Schema::new(projected_fields))
+                    Arc::new(Schema::new_with_metadata(
+                        projected_fields,
+                        schema.metadata().clone(),
+                    ))
                 }
                 None => schema.clone(),
             }
@@ -239,6 +263,7 @@ impl TableProvider for VcfTableProvider {
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
+            coordinate_system_zero_based: self.coordinate_system_zero_based,
         }))
     }
 }

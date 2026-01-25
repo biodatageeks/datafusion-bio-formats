@@ -22,7 +22,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a GFF file as a table
-//! let table = GffTableProvider::new("data/annotations.gff3".to_string(), None, None, None)?;
+//! let table = GffTableProvider::new("data/annotations.gff3".to_string(), None, None, None, true)?;
 //! ctx.register_table("annotations", Arc::new(table))?;
 //!
 //! // Query with SQL

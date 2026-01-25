@@ -32,6 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         BEDFields::BED4,
         Some(1),
         Some(object_storage_options),
+        true, // Use 0-based coordinates (default)
     )
     .unwrap();
     let ctx = datafusion::execution::context::SessionContext::new();

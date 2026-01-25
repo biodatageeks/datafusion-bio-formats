@@ -35,6 +35,8 @@ pub struct GffExec {
     pub(crate) limit: Option<usize>,
     pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
+    /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
+    pub(crate) coordinate_system_zero_based: bool,
 }
 
 impl Debug for GffExec {
@@ -91,6 +93,7 @@ impl ExecutionPlan for GffExec {
             self.projection.clone(),
             self.filters.clone(),
             self.object_storage_options.clone(),
+            self.coordinate_system_zero_based,
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
@@ -417,6 +420,7 @@ impl GffRecordTrait for RemoteGffRecordWrapper {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_remote_gff_stream(
     file_path: String,
     attr_fields: Option<Vec<String>>,
@@ -425,6 +429,7 @@ async fn get_remote_gff_stream(
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
@@ -519,7 +524,9 @@ async fn get_remote_gff_stream(
                 chroms.push(record.reference_sequence_name().to_string());
             }
             if needs_start {
-                poss.push(record.start().get() as u32);
+                // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
+                let start_pos = record.start().get() as u32;
+                poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
             }
             if needs_end {
                 pose.push(record.end().get() as u32);
@@ -644,6 +651,7 @@ async fn get_local_gff(
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     // Determine which core GFF fields we need to parse based on projection
@@ -756,7 +764,9 @@ async fn get_local_gff(
                 chroms.push(record.reference_sequence_name());
             }
             if needs_start {
-                poss.push(record.start());
+                // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
+                let start_pos = record.start();
+                poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
             }
             if needs_end {
                 pose.push(record.end());
@@ -1082,6 +1092,7 @@ async fn get_stream(
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
 
@@ -1100,6 +1111,7 @@ async fn get_stream(
                 projection,
                 filters,
                 object_storage_options,
+                coordinate_system_zero_based,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -1113,6 +1125,7 @@ async fn get_stream(
                 projection,
                 filters,
                 object_storage_options,
+                coordinate_system_zero_based,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))

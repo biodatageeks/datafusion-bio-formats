@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧪 Test 1: SELECT * (nested attributes)");
     let start = Instant::now();
 
-    let provider = BgzfGffTableProvider::try_new(file_path, None)?;
+    let provider = BgzfGffTableProvider::try_new(file_path, None, true)?;
     let ctx = SessionContext::new();
     ctx.register_table("gff", std::sync::Arc::new(provider))?;
 
@@ -62,7 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧪 Test 2: SELECT chrom, start, end, gene_id (specific attributes)");
     let start = Instant::now();
 
-    let provider = BgzfGffTableProvider::try_new(file_path, Some(vec!["gene_id".to_string()]))?;
+    let provider =
+        BgzfGffTableProvider::try_new(file_path, Some(vec!["gene_id".to_string()]), true)?;
     let ctx = SessionContext::new();
     ctx.register_table("gff", std::sync::Arc::new(provider))?;
 
@@ -96,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🧪 Test 3: COUNT(*) performance test");
     let start = Instant::now();
 
-    let provider = BgzfGffTableProvider::try_new(file_path, Some(vec![]))?; // No attributes
+    let provider = BgzfGffTableProvider::try_new(file_path, Some(vec![]), true)?; // No attributes
     let ctx = SessionContext::new();
     ctx.register_table("gff", std::sync::Arc::new(provider))?;
 
