@@ -736,3 +736,92 @@ async fn test_format_array_preserves_nulls() -> Result<(), Box<dyn std::error::E
 
     Ok(())
 }
+
+/// Test that single-sample and multi-sample VCFs have different naming conventions
+#[tokio::test]
+async fn test_format_column_naming_single_vs_multi_sample() -> Result<(), Box<dyn std::error::Error>>
+{
+    let object_storage_options = create_object_storage_options();
+
+    // Test single-sample VCF: columns should NOT have sample prefix
+    let single_file = create_test_vcf_file("naming_single", SAMPLE_VCF_SINGLE_SAMPLE).await?;
+    let single_table = VcfTableProvider::new(
+        single_file.clone(),
+        None,
+        Some(vec!["GT".to_string(), "DP".to_string()]),
+        Some(1),
+        Some(object_storage_options.clone()),
+        true,
+    )?;
+
+    let single_schema = single_table.schema();
+    let single_field_names: Vec<&str> = single_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    // Single sample: FORMAT columns should be just "GT", "DP" (no prefix)
+    assert!(
+        single_field_names.contains(&"GT"),
+        "Single-sample VCF should have 'GT' column without sample prefix"
+    );
+    assert!(
+        single_field_names.contains(&"DP"),
+        "Single-sample VCF should have 'DP' column without sample prefix"
+    );
+    assert!(
+        !single_field_names
+            .iter()
+            .any(|n| n.contains('_') && n.ends_with("_GT")),
+        "Single-sample VCF should NOT have sample-prefixed GT column"
+    );
+
+    // Test multi-sample VCF: columns should have sample prefix
+    let multi_file = create_test_vcf_file("naming_multi", SAMPLE_VCF_WITH_FORMAT).await?;
+    let multi_table = VcfTableProvider::new(
+        multi_file.clone(),
+        None,
+        Some(vec!["GT".to_string(), "DP".to_string()]),
+        Some(1),
+        Some(object_storage_options),
+        true,
+    )?;
+
+    let multi_schema = multi_table.schema();
+    let multi_field_names: Vec<&str> = multi_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    // Multi sample: FORMAT columns should be "Sample1_GT", "Sample2_GT", etc.
+    assert!(
+        multi_field_names.contains(&"Sample1_GT"),
+        "Multi-sample VCF should have 'Sample1_GT' column with sample prefix"
+    );
+    assert!(
+        multi_field_names.contains(&"Sample2_GT"),
+        "Multi-sample VCF should have 'Sample2_GT' column with sample prefix"
+    );
+    assert!(
+        multi_field_names.contains(&"Sample1_DP"),
+        "Multi-sample VCF should have 'Sample1_DP' column with sample prefix"
+    );
+    assert!(
+        multi_field_names.contains(&"Sample2_DP"),
+        "Multi-sample VCF should have 'Sample2_DP' column with sample prefix"
+    );
+    // Multi-sample should NOT have unprefixed FORMAT columns
+    assert!(
+        !multi_field_names.contains(&"GT"),
+        "Multi-sample VCF should NOT have unprefixed 'GT' column"
+    );
+    assert!(
+        !multi_field_names.contains(&"DP")
+            || multi_field_names.iter().filter(|n| **n == "DP").count() == 0,
+        "Multi-sample VCF should NOT have unprefixed FORMAT 'DP' column (INFO DP is separate)"
+    );
+
+    Ok(())
+}
