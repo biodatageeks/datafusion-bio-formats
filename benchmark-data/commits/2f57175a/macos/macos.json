@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-01-25T16:36:53Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feature/vcf-format-columns",
+  "commit_sha": "2f57175a8038b7875b86d57010fa6e2ce8eb449d",
+  "benchmark_mode": "fast"
+}
