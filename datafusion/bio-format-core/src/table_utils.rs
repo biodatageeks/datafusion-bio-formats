@@ -236,7 +236,7 @@ impl OptionalField {
     ///
     /// # Arguments
     ///
-    /// * `value` - Vector of Option<Int32> values to append as a single array element
+    /// * `value` - Vector of `Option<i32>` values to append as a single array element
     ///
     /// # Errors
     ///
@@ -309,7 +309,7 @@ impl OptionalField {
     ///
     /// # Arguments
     ///
-    /// * `value` - Vector of Option<Float32> values to append as a single array element
+    /// * `value` - Vector of `Option<f32>` values to append as a single array element
     ///
     /// # Errors
     ///
@@ -387,7 +387,7 @@ impl OptionalField {
     ///
     /// # Arguments
     ///
-    /// * `value` - Vector of Option<String> values to append as a single array element
+    /// * `value` - Vector of `Option<String>` values to append as a single array element
     ///
     /// # Errors
     ///
