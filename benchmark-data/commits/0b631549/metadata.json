@@ -1,0 +1,7 @@
+{
+  "ref": "feat/write-support-vcf-fastq",
+  "ref_type": "branch",
+  "commit_sha": "0b631549450f31c7f79b09d8b940b7cffe194fbe",
+  "timestamp": "2026-01-26T09:57:23Z",
+  "benchmark_mode": "fast"
+}
