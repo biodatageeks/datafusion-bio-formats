@@ -405,6 +405,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/write-support-vcf-fastq@40e5bf36a338d684d0944d65d2ccf293d5f85d70@linux",
+      "label": "feat/write-support-vcf-fastq(40e5bf36)",
+      "ref": "feat/write-support-vcf-fastq",
+      "ref_type": "branch",
+      "timestamp": "2026-01-26T09:10:26Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/40e5bf36/linux",
+      "commit_sha": "40e5bf36a338d684d0944d65d2ccf293d5f85d70",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/write-support-vcf-fastq@40e5bf36a338d684d0944d65d2ccf293d5f85d70@macos",
+      "label": "feat/write-support-vcf-fastq(40e5bf36)",
+      "ref": "feat/write-support-vcf-fastq",
+      "ref_type": "branch",
+      "timestamp": "2026-01-26T09:10:27Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/40e5bf36/macos",
+      "commit_sha": "40e5bf36a338d684d0944d65d2ccf293d5f85d70",
+      "is_latest_tag": false
+    },
+    {
       "id": "feature/coordinate-system-parameter@2055388b5752bdc147c95105d9428ea54e691360@linux",
       "label": "feature/coordinate-system-parameter(2055388b)",
       "ref": "feature/coordinate-system-parameter",
@@ -834,6 +858,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "3e3eca25f6eeab383d0486fab1263773b95f08bf",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@40e5bf36a338d684d0944d65d2ccf293d5f85d70@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-26T09:10:26Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "40e5bf36a338d684d0944d65d2ccf293d5f85d70",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@40e5bf36a338d684d0944d65d2ccf293d5f85d70@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-26T09:10:26Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "40e5bf36a338d684d0944d65d2ccf293d5f85d70",
       "is_latest_tag": true
     },
     {
@@ -1464,6 +1512,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-01-25T17:04:49Z",
+  "last_updated": "2026-01-26T09:10:27Z",
   "latest_tag": "v0.1.1"
 }
