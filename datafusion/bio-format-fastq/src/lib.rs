@@ -49,9 +49,16 @@
 /// BGZF parallel reader implementation for multi-threaded FASTQ parsing
 pub mod bgzf_parallel_reader;
 mod physical_exec;
+/// Serializer for converting Arrow RecordBatches to FASTQ records
+pub mod serializer;
 /// Storage layer for reading FASTQ files from local and remote sources
 pub mod storage;
 /// DataFusion table provider implementation for FASTQ files
 pub mod table_provider;
+mod write_exec;
+/// Writer for FASTQ files with compression support
+pub mod writer;
 
 pub use bgzf_parallel_reader::BgzfFastqTableProvider;
+pub use write_exec::FastqWriteExec;
+pub use writer::{FastqCompressionType, FastqLocalWriter};

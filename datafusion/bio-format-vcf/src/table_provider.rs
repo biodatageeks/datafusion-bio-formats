@@ -1,5 +1,7 @@
 use crate::physical_exec::VcfExec;
 use crate::storage::get_header;
+use crate::write_exec::VcfWriteExec;
+use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use std::collections::HashMap;
@@ -7,8 +9,9 @@ use std::collections::HashMap;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::Constraints;
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -75,8 +78,21 @@ async fn determine_schema_from_header(
             let dtype = info_to_arrow_type(header_infos, tag);
             let info = header_infos.get(tag.as_str()).unwrap();
             let nullable = is_nullable(&info.ty());
+            // Store VCF header metadata in field metadata for round-trip preservation
+            let mut field_metadata = HashMap::new();
+            field_metadata.insert(
+                "vcf_description".to_string(),
+                info.description().to_string(),
+            );
+            field_metadata.insert(
+                "vcf_number".to_string(),
+                info_number_to_string(info.number()),
+            );
+            field_metadata.insert("vcf_type".to_string(), info_type_to_string(&info.ty()));
+            field_metadata.insert("vcf_field_type".to_string(), "INFO".to_string());
             // Preserve case sensitivity for INFO fields to avoid conflicts
-            fields.push(Field::new(tag.clone(), dtype, nullable));
+            let field = Field::new(tag.clone(), dtype, nullable).with_metadata(field_metadata);
+            fields.push(field);
         }
     }
 
@@ -98,7 +114,26 @@ async fn determine_schema_from_header(
                 } else {
                     format!("{}_{}", sample_name, tag)
                 };
-                fields.push(Field::new(field_name, dtype, true));
+                // Store VCF header metadata in field metadata for round-trip preservation
+                let mut field_metadata = HashMap::new();
+                if let Some(format_info) = header_formats.get(tag.as_str()) {
+                    field_metadata.insert(
+                        "vcf_description".to_string(),
+                        format_info.description().to_string(),
+                    );
+                    field_metadata.insert(
+                        "vcf_number".to_string(),
+                        format_number_to_string(format_info.number()),
+                    );
+                    field_metadata.insert(
+                        "vcf_type".to_string(),
+                        format_type_to_string(&format_info.ty()),
+                    );
+                }
+                field_metadata.insert("vcf_field_type".to_string(), "FORMAT".to_string());
+                field_metadata.insert("vcf_format_id".to_string(), tag.clone());
+                let field = Field::new(field_name, dtype, true).with_metadata(field_metadata);
+                fields.push(field);
             }
         }
     }
@@ -316,6 +351,54 @@ impl TableProvider for VcfTableProvider {
             coordinate_system_zero_based: self.coordinate_system_zero_based,
         }))
     }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        debug!("VcfTableProvider::insert_into");
+
+        // Only OVERWRITE mode is supported (file will be created/replaced)
+        if insert_op != InsertOp::Overwrite {
+            return Err(datafusion::common::DataFusionError::NotImplemented(
+                "VCF write only supports OVERWRITE mode (INSERT OVERWRITE). \
+                 APPEND mode is not supported."
+                    .to_string(),
+            ));
+        }
+
+        // Validate input schema has the required core columns
+        let input_schema = input.schema();
+        if input_schema.fields().len() < 8 {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "Input schema must have at least 8 columns: chrom, start, end, id, ref, alt, qual, filter"
+                    .to_string(),
+            ));
+        }
+
+        // Determine compression from file path
+        let compression = VcfCompressionType::from_path(&self.file_path);
+
+        // Get info and format field names
+        let info_fields = self.info_fields.clone().unwrap_or_default();
+        let format_fields = self.format_fields.clone().unwrap_or_default();
+
+        Ok(Arc::new(VcfWriteExec::new(
+            input,
+            self.file_path.clone(),
+            Some(compression),
+            info_fields,
+            format_fields,
+            self.sample_names.clone(),
+            self.coordinate_system_zero_based,
+        )))
+    }
+
+    fn constraints(&self) -> Option<&Constraints> {
+        None
+    }
 }
 
 /// Converts a VCF INFO field type to an Arrow DataType.
@@ -357,5 +440,53 @@ pub fn info_to_arrow_type(infos: &Infos, field: &str) -> DataType {
             );
             DataType::Utf8
         }
+    }
+}
+
+/// Converts INFO Number enum to VCF string representation
+fn info_number_to_string(number: Number) -> String {
+    match number {
+        Number::Count(n) => n.to_string(),
+        Number::AlternateBases => "A".to_string(),
+        Number::ReferenceAlternateBases => "R".to_string(),
+        Number::Samples => "G".to_string(),
+        Number::Unknown => ".".to_string(),
+    }
+}
+
+/// Converts INFO Type enum to VCF string representation
+fn info_type_to_string(ty: &InfoType) -> String {
+    match ty {
+        InfoType::Integer => "Integer".to_string(),
+        InfoType::Float => "Float".to_string(),
+        InfoType::Flag => "Flag".to_string(),
+        InfoType::Character => "Character".to_string(),
+        InfoType::String => "String".to_string(),
+    }
+}
+
+/// Converts FORMAT Number enum to VCF string representation
+fn format_number_to_string(number: FormatNumber) -> String {
+    match number {
+        FormatNumber::Count(n) => n.to_string(),
+        FormatNumber::AlternateBases => "A".to_string(),
+        FormatNumber::ReferenceAlternateBases => "R".to_string(),
+        FormatNumber::Samples => "G".to_string(),
+        FormatNumber::Unknown => ".".to_string(),
+        FormatNumber::LocalAlternateBases => "LA".to_string(),
+        FormatNumber::LocalReferenceAlternateBases => "LR".to_string(),
+        FormatNumber::LocalSamples => "LG".to_string(),
+        FormatNumber::Ploidy => "P".to_string(),
+        FormatNumber::BaseModifications => "M".to_string(),
+    }
+}
+
+/// Converts FORMAT Type enum to VCF string representation
+fn format_type_to_string(ty: &FormatType) -> String {
+    match ty {
+        FormatType::Integer => "Integer".to_string(),
+        FormatType::Float => "Float".to_string(),
+        FormatType::Character => "Character".to_string(),
+        FormatType::String => "String".to_string(),
     }
 }

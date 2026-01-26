@@ -25,9 +25,13 @@ async-compression.workspace = true
 async-stream = "0.3.6"
 log = { version = "0.4.27", features = ["release_max_level_debug"] }
 async-trait = "0.1.88"
+flate2 = "1.0"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
+
+[dev-dependencies]
+tempfile = "3.0"
 
 [[example]]
 name = "test_fastq_reader"

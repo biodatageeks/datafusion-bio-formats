@@ -1,9 +1,12 @@
 use crate::physical_exec::FastqExec;
+use crate::write_exec::FastqWriteExec;
+use crate::writer::FastqCompressionType;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::Constraints;
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -120,5 +123,45 @@ impl TableProvider for FastqTableProvider {
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
         }))
+    }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        debug!("FastqTableProvider::insert_into");
+
+        // Only OVERWRITE mode is supported (file will be created/replaced)
+        if insert_op != InsertOp::Overwrite {
+            return Err(datafusion::common::DataFusionError::NotImplemented(
+                "FASTQ write only supports OVERWRITE mode (INSERT OVERWRITE). \
+                 APPEND mode is not supported."
+                    .to_string(),
+            ));
+        }
+
+        // Validate input schema matches FASTQ schema
+        let input_schema = input.schema();
+        if input_schema.fields().len() < 4 {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "Input schema must have at least 4 columns: name, description, sequence, quality_scores"
+                    .to_string(),
+            ));
+        }
+
+        // Determine compression from file path
+        let compression = FastqCompressionType::from_path(&self.file_path);
+
+        Ok(Arc::new(FastqWriteExec::new(
+            input,
+            self.file_path.clone(),
+            Some(compression),
+        )))
+    }
+
+    fn constraints(&self) -> Option<&Constraints> {
+        None
     }
 }
