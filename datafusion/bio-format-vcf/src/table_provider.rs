@@ -281,6 +281,52 @@ impl VcfTableProvider {
             sample_names,
         })
     }
+
+    /// Creates a new VCF table provider for write operations.
+    ///
+    /// This constructor is used when the output file does not exist yet. It accepts
+    /// the schema directly instead of reading it from the file.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the output VCF file
+    /// * `schema` - Arrow schema for the output
+    /// * `info_fields` - List of INFO fields to write
+    /// * `format_fields` - List of FORMAT fields to write
+    /// * `sample_names` - Sample names for the VCF header
+    /// * `coordinate_system_zero_based` - If true, input coordinates are 0-based half-open;
+    ///   if false, input coordinates are 1-based closed
+    ///
+    /// # Returns
+    ///
+    /// A new `VcfTableProvider` instance configured for writing
+    pub fn new_for_write(
+        file_path: String,
+        schema: SchemaRef,
+        info_fields: Vec<String>,
+        format_fields: Vec<String>,
+        sample_names: Vec<String>,
+        coordinate_system_zero_based: bool,
+    ) -> Self {
+        Self {
+            file_path,
+            info_fields: if info_fields.is_empty() {
+                None
+            } else {
+                Some(info_fields)
+            },
+            format_fields: if format_fields.is_empty() {
+                None
+            } else {
+                Some(format_fields)
+            },
+            schema,
+            thread_num: None,
+            object_storage_options: None,
+            coordinate_system_zero_based,
+            sample_names,
+        }
+    }
 }
 
 #[async_trait]

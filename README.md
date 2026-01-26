@@ -226,6 +226,30 @@ The same setting controls both reading and writing, ensuring round-trip consiste
 | `.vcf.bgz`, `.fastq.bgz` | BGZF | Block-gzipped (recommended) |
 | `.vcf.bgzf`, `.fastq.bgzf` | BGZF | Block-gzipped (recommended) |
 
+### VCF Header Metadata Preservation
+
+When reading VCF files, header metadata (field descriptions, types, and numbers) is stored in Arrow field metadata. This enables round-trip read/write operations to preserve the original VCF header information:
+
+```rust
+// Reading preserves metadata in schema
+let provider = VcfTableProvider::new("input.vcf", ...)?;
+let schema = provider.schema();
+
+// Field metadata contains original VCF definitions
+let dp_field = schema.field_with_name("DP")?;
+let metadata = dp_field.metadata();
+// metadata["vcf_description"] = "Total read depth"
+// metadata["vcf_type"] = "Integer"
+// metadata["vcf_number"] = "1"
+```
+
+The writer uses this metadata to reconstruct proper VCF header lines:
+```
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total read depth">
+```
+
+For write-only operations (new output files), use `VcfTableProvider::new_for_write()` which accepts the schema directly without reading from file.
+
 ## Performance Benchmarks
 
 This project includes a comprehensive benchmark framework to track performance across releases and validate optimizations.

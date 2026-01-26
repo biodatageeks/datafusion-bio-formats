@@ -1,0 +1,361 @@
+//! Integration tests for VCF write functionality
+
+use datafusion::catalog::TableProvider;
+use datafusion::prelude::*;
+use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
+use datafusion_bio_format_vcf::writer::VcfCompressionType;
+use std::sync::Arc;
+use tokio::fs;
+
+/// Sample VCF with INFO and FORMAT fields for round-trip testing
+const SAMPLE_VCF_ROUNDTRIP: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total read depth">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency">
+##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sample read depth">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
+chr1	100	rs1	A	T	60	PASS	DP=50;AF=0.25;DB	GT:DP:GQ	0/1:20:99	1/1:30:95
+chr1	200	rs2	G	C	80	PASS	DP=60;AF=0.10	GT:DP:GQ	0/0:25:99	0/1:35:90
+"#;
+
+/// Simple VCF for basic write tests
+const SIMPLE_VCF: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	rs1	A	T	30	PASS	DP=50
+chr1	200	rs2	G	C	40	PASS	DP=60
+"#;
+
+async fn create_test_vcf(name: &str, content: &str) -> std::io::Result<String> {
+    let path = format!("/tmp/test_write_{}.vcf", name);
+    fs::write(&path, content).await?;
+    Ok(path)
+}
+
+async fn cleanup_files(paths: &[&str]) {
+    for path in paths {
+        let _ = fs::remove_file(path).await;
+    }
+}
+
+fn create_read_provider(
+    path: &str,
+    info_fields: Option<Vec<String>>,
+    format_fields: Option<Vec<String>>,
+) -> VcfTableProvider {
+    VcfTableProvider::new(
+        path.to_string(),
+        info_fields,
+        format_fields,
+        None, // thread_num
+        None, // object_storage_options
+        true, // coordinate_system_zero_based
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn test_write_vcf_basic() {
+    let input_path = create_test_vcf("basic_input", SIMPLE_VCF).await.unwrap();
+    let output_path = "/tmp/test_write_basic_output.vcf";
+
+    let ctx = SessionContext::new();
+
+    // Register source table (reads from existing file)
+    let source = create_read_provider(&input_path, Some(vec!["DP".to_string()]), None);
+    let source_schema = source.schema();
+    let sample_names: Vec<String> = vec![];
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Register destination table using write-only constructor
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string()],
+        vec![],
+        sample_names,
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    // Write data
+    let result = ctx
+        .sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    // Verify count
+    assert_eq!(result.len(), 1);
+    let count = result[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(count, 2);
+
+    // Read back and verify
+    let content = fs::read_to_string(output_path).await.unwrap();
+    assert!(content.contains("##fileformat=VCF"));
+    assert!(content.contains("#CHROM\tPOS"));
+    assert!(content.contains("chr1\t100"));
+    assert!(content.contains("chr1\t200"));
+
+    cleanup_files(&[&input_path, output_path]).await;
+}
+
+#[tokio::test]
+async fn test_write_vcf_preserves_info_description() {
+    let input_path = create_test_vcf("desc_input", SIMPLE_VCF).await.unwrap();
+    let output_path = "/tmp/test_write_desc_output.vcf";
+
+    let ctx = SessionContext::new();
+
+    // Register source table
+    let source = create_read_provider(&input_path, Some(vec!["DP".to_string()]), None);
+    let source_schema = source.schema();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Register dest with write-only constructor
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string()],
+        vec![],
+        vec![],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    // Write data
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    // Read output and verify header contains original description
+    let content = fs::read_to_string(output_path).await.unwrap();
+    assert!(
+        content.contains("Description=\"Read Depth\""),
+        "Output should preserve original INFO description. Got: {}",
+        content
+    );
+
+    cleanup_files(&[&input_path, output_path]).await;
+}
+
+#[tokio::test]
+async fn test_write_vcf_multi_sample() {
+    let input_path = create_test_vcf("multi_input", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+    let output_path = "/tmp/test_write_multi_output.vcf";
+
+    let ctx = SessionContext::new();
+
+    // Register source table with INFO and FORMAT fields
+    let source = create_read_provider(
+        &input_path,
+        Some(vec!["DP".to_string(), "AF".to_string(), "DB".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()]),
+    );
+    let source_schema = source.schema();
+    let sample_names = vec!["Sample1".to_string(), "Sample2".to_string()];
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Register destination table with write-only constructor
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string(), "AF".to_string(), "DB".to_string()],
+        vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()],
+        sample_names,
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    // Write data
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    // Read output and verify
+    let content = fs::read_to_string(output_path).await.unwrap();
+
+    // Check header metadata is preserved
+    assert!(content.contains("##INFO=<ID=DP"));
+    assert!(content.contains("##INFO=<ID=AF"));
+    assert!(content.contains("##FORMAT=<ID=GT"));
+    assert!(content.contains("##FORMAT=<ID=DP"));
+
+    // Check sample names in header
+    assert!(content.contains("Sample1"));
+    assert!(content.contains("Sample2"));
+
+    // Check data rows
+    assert!(content.contains("chr1\t100"));
+    assert!(content.contains("0/1")); // Sample1 GT
+    assert!(content.contains("1/1")); // Sample2 GT
+
+    cleanup_files(&[&input_path, output_path]).await;
+}
+
+#[tokio::test]
+async fn test_write_vcf_coordinate_conversion() {
+    let input_path = create_test_vcf("coord_input", SIMPLE_VCF).await.unwrap();
+    let output_path = "/tmp/test_write_coord_output.vcf";
+
+    let ctx = SessionContext::new();
+
+    // Read with 0-based coordinates
+    let source = create_read_provider(&input_path, Some(vec!["DP".to_string()]), None);
+    let source_schema = source.schema();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Write with 0-based coordinates (should convert back to 1-based in VCF)
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string()],
+        vec![],
+        vec![],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    // Verify positions are 1-based in output (100, 200)
+    let content = fs::read_to_string(output_path).await.unwrap();
+    assert!(
+        content.contains("chr1\t100\t"),
+        "Position should be 1-based (100)"
+    );
+    assert!(
+        content.contains("chr1\t200\t"),
+        "Position should be 1-based (200)"
+    );
+
+    cleanup_files(&[&input_path, output_path]).await;
+}
+
+#[tokio::test]
+async fn test_write_vcf_with_filter() {
+    let input_path = create_test_vcf("filter_input", SIMPLE_VCF).await.unwrap();
+    let output_path = "/tmp/test_write_filter_output.vcf";
+
+    let ctx = SessionContext::new();
+
+    let source = create_read_provider(&input_path, Some(vec!["DP".to_string()]), None);
+    let source_schema = source.schema();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string()],
+        vec![],
+        vec![],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    // Filter to only include first record (0-based start = 99)
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source WHERE start = 99")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(output_path).await.unwrap();
+    assert!(content.contains("chr1\t100\t"));
+    assert!(!content.contains("chr1\t200\t"));
+
+    cleanup_files(&[&input_path, output_path]).await;
+}
+
+#[tokio::test]
+async fn test_compression_type_detection() {
+    assert_eq!(
+        VcfCompressionType::from_path("test.vcf"),
+        VcfCompressionType::Plain
+    );
+    assert_eq!(
+        VcfCompressionType::from_path("test.vcf.gz"),
+        VcfCompressionType::Gzip
+    );
+    assert_eq!(
+        VcfCompressionType::from_path("test.vcf.bgz"),
+        VcfCompressionType::Bgzf
+    );
+    assert_eq!(
+        VcfCompressionType::from_path("test.vcf.bgzf"),
+        VcfCompressionType::Bgzf
+    );
+}
+
+#[tokio::test]
+async fn test_schema_field_metadata_preserved() {
+    let input_path = create_test_vcf("meta_input", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+
+    // Create table provider and check schema metadata
+    let provider = VcfTableProvider::new(
+        input_path.clone(),
+        Some(vec!["DP".to_string(), "AF".to_string()]),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+
+    let schema = provider.schema();
+
+    // Check INFO field metadata
+    let dp_field = schema.field_with_name("DP").unwrap();
+    let dp_metadata = dp_field.metadata();
+    assert_eq!(
+        dp_metadata.get("vcf_description"),
+        Some(&"Total read depth".to_string())
+    );
+    assert_eq!(dp_metadata.get("vcf_type"), Some(&"Integer".to_string()));
+    assert_eq!(dp_metadata.get("vcf_number"), Some(&"1".to_string()));
+
+    let af_field = schema.field_with_name("AF").unwrap();
+    let af_metadata = af_field.metadata();
+    assert_eq!(
+        af_metadata.get("vcf_description"),
+        Some(&"Allele frequency".to_string())
+    );
+    assert_eq!(af_metadata.get("vcf_type"), Some(&"Float".to_string()));
+    assert_eq!(af_metadata.get("vcf_number"), Some(&"A".to_string()));
+
+    // Check FORMAT field metadata (multi-sample uses Sample1_GT naming)
+    let gt_field = schema.field_with_name("Sample1_GT").unwrap();
+    let gt_metadata = gt_field.metadata();
+    assert_eq!(
+        gt_metadata.get("vcf_description"),
+        Some(&"Genotype".to_string())
+    );
+    assert_eq!(gt_metadata.get("vcf_format_id"), Some(&"GT".to_string()));
+
+    cleanup_files(&[&input_path]).await;
+}

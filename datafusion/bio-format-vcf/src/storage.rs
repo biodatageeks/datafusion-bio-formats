@@ -296,11 +296,10 @@ pub async fn get_header(
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> Result<vcf::Header, Error> {
     let storage_type = get_storage_type(file_path.clone());
+    let opts = object_storage_options.unwrap_or_default();
     let header = match storage_type {
-        StorageType::LOCAL => {
-            get_local_vcf_header(file_path, 1, object_storage_options.unwrap().clone()).await?
-        }
-        _ => get_remote_vcf_header(file_path, object_storage_options.unwrap().clone()).await?,
+        StorageType::LOCAL => get_local_vcf_header(file_path, 1, opts.clone()).await?,
+        _ => get_remote_vcf_header(file_path, opts.clone()).await?,
     };
     Ok(header)
 }
@@ -599,18 +598,12 @@ impl VcfReader {
             "Storage type for VCF file {}: {:?}",
             file_path, storage_type
         );
+        let opts = object_storage_options.unwrap_or_default();
         match storage_type {
             StorageType::LOCAL => VcfReader::Local(
-                VcfLocalReader::new(
-                    file_path,
-                    thread_num.unwrap_or(1),
-                    object_storage_options.unwrap(),
-                )
-                .await,
+                VcfLocalReader::new(file_path, thread_num.unwrap_or(1), opts).await,
             ),
-            _ => VcfReader::Remote(
-                VcfRemoteReader::new(file_path, object_storage_options.unwrap()).await,
-            ),
+            _ => VcfReader::Remote(VcfRemoteReader::new(file_path, opts).await),
         }
     }
 

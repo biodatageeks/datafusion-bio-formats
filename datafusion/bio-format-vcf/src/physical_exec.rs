@@ -273,7 +273,7 @@ async fn get_local_vcf(
     let mut reader = VcfLocalReader::new(
         file_path.clone(),
         thread_num,
-        object_storage_options.unwrap(),
+        object_storage_options.unwrap_or_default(),
     )
     .await;
     let header = reader.read_header().await?;
@@ -398,7 +398,11 @@ async fn get_remote_vcf_stream(
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
-    let mut reader = VcfRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await;
+    let mut reader = VcfRemoteReader::new(
+        file_path.clone(),
+        object_storage_options.unwrap_or_default(),
+    )
+    .await;
     let header = reader.read_header().await?;
     let infos = header.infos();
     let formats = header.formats();
