@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-01-26T16:21:44Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/write-support-vcf-fastq",
+  "commit_sha": "35fdb2a9060e0faf875f32ff8e5f3439b0bbd808",
+  "benchmark_mode": "fast"
+}
