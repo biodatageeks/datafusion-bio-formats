@@ -3,10 +3,55 @@
 //! This module provides functionality for converting DataFusion Arrow data back
 //! to FASTQ format for writing to files.
 
-use datafusion::arrow::array::{Array, RecordBatch, StringArray};
+use datafusion::arrow::array::{Array, LargeStringArray, RecordBatch, StringArray};
 use datafusion::common::{DataFusionError, Result};
 use noodles_fastq as fastq;
 use noodles_fastq::record::Definition;
+
+/// Enum to hold either StringArray or LargeStringArray reference
+/// This allows handling both standard Arrow Utf8 and Polars LargeUtf8 types
+enum StringColumnRef<'a> {
+    Small(&'a StringArray),
+    Large(&'a LargeStringArray),
+}
+
+impl StringColumnRef<'_> {
+    fn value(&self, i: usize) -> &str {
+        match self {
+            StringColumnRef::Small(arr) => arr.value(i),
+            StringColumnRef::Large(arr) => arr.value(i),
+        }
+    }
+
+    fn is_null(&self, i: usize) -> bool {
+        match self {
+            StringColumnRef::Small(arr) => Array::is_null(*arr, i),
+            StringColumnRef::Large(arr) => Array::is_null(*arr, i),
+        }
+    }
+}
+
+/// Gets a string column from the batch (supports both Utf8 and LargeUtf8)
+fn get_string_column<'a>(
+    batch: &'a RecordBatch,
+    index: usize,
+    name: &str,
+) -> Result<StringColumnRef<'a>> {
+    let column = batch.column(index);
+
+    // Try StringArray first, then LargeStringArray
+    if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+        return Ok(StringColumnRef::Small(arr));
+    }
+    if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(StringColumnRef::Large(arr));
+    }
+
+    Err(DataFusionError::Execution(format!(
+        "Column {} ({}) must be Utf8 or LargeUtf8 type",
+        index, name
+    )))
+}
 
 /// Converts an Arrow RecordBatch to a vector of FASTQ records.
 ///
@@ -42,37 +87,11 @@ pub fn batch_to_fastq_records(batch: &RecordBatch) -> Result<Vec<fastq::Record>>
     }
 
     // Get columns by position (matching the schema defined in table_provider.rs)
-    let names = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution("Column 0 (name) must be Utf8 type".to_string())
-        })?;
-
-    let descriptions = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution("Column 1 (description) must be Utf8 type".to_string())
-        })?;
-
-    let sequences = batch
-        .column(2)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution("Column 2 (sequence) must be Utf8 type".to_string())
-        })?;
-
-    let quality_scores = batch
-        .column(3)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution("Column 3 (quality_scores) must be Utf8 type".to_string())
-        })?;
+    // Supports both Utf8 (StringArray) and LargeUtf8 (LargeStringArray) for Polars compatibility
+    let names = get_string_column(batch, 0, "name")?;
+    let descriptions = get_string_column(batch, 1, "description")?;
+    let sequences = get_string_column(batch, 2, "sequence")?;
+    let quality_scores = get_string_column(batch, 3, "quality_scores")?;
 
     let mut records = Vec::with_capacity(batch.num_rows());
 
@@ -238,5 +257,40 @@ mod tests {
         let result = batch_to_fastq_records(&batch);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("length"));
+    }
+
+    #[test]
+    fn test_batch_to_fastq_records_large_string_array() {
+        // Test with LargeUtf8 (LargeStringArray) - Polars default string type
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::LargeUtf8, false),
+            Field::new("description", DataType::LargeUtf8, true),
+            Field::new("sequence", DataType::LargeUtf8, false),
+            Field::new("quality_scores", DataType::LargeUtf8, false),
+        ]));
+
+        let names = LargeStringArray::from(vec!["seq_polars"]);
+        let descriptions = LargeStringArray::from(vec![Some("from polars")]);
+        let sequences = LargeStringArray::from(vec!["ACGTACGT"]);
+        let quality_scores = LargeStringArray::from(vec!["IIIIIIII"]);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(names),
+                Arc::new(descriptions),
+                Arc::new(sequences),
+                Arc::new(quality_scores),
+            ],
+        )
+        .unwrap();
+
+        let records = batch_to_fastq_records(&batch).unwrap();
+        assert_eq!(records.len(), 1);
+
+        assert_eq!(records[0].name(), "seq_polars");
+        assert_eq!(records[0].description(), "from polars");
+        assert_eq!(records[0].sequence(), b"ACGTACGT");
+        assert_eq!(records[0].quality_scores(), b"IIIIIIII");
     }
 }
