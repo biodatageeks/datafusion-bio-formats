@@ -4,10 +4,33 @@
 //! to VCF format for writing to files.
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int32Array, ListArray, RecordBatch,
-    StringArray, UInt32Array,
+    Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
+    ListArray, RecordBatch, StringArray, UInt32Array,
 };
 use datafusion::common::{DataFusionError, Result};
+
+/// Enum to hold either StringArray or LargeStringArray reference
+/// This allows handling both standard Arrow Utf8 and Polars LargeUtf8 types
+enum StringColumnRef<'a> {
+    Small(&'a StringArray),
+    Large(&'a LargeStringArray),
+}
+
+impl StringColumnRef<'_> {
+    fn value(&self, i: usize) -> &str {
+        match self {
+            StringColumnRef::Small(arr) => arr.value(i),
+            StringColumnRef::Large(arr) => arr.value(i),
+        }
+    }
+
+    fn is_null(&self, i: usize) -> bool {
+        match self {
+            StringColumnRef::Small(arr) => Array::is_null(*arr, i),
+            StringColumnRef::Large(arr) => Array::is_null(*arr, i),
+        }
+    }
+}
 
 /// A serialized VCF record as a string line
 pub struct VcfRecordLine {
@@ -133,16 +156,28 @@ pub fn batch_to_vcf_lines(
     Ok(records)
 }
 
-/// Gets a string column from the batch by name
-fn get_string_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
+/// Gets a string column from the batch by name (supports both Utf8 and LargeUtf8)
+fn get_string_column_by_name<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+) -> Result<StringColumnRef<'a>> {
     let idx = batch.schema().index_of(name).map_err(|_| {
         DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
     })?;
-    batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' must be Utf8 type", name)))
+    let column = batch.column(idx);
+
+    // Try StringArray first, then LargeStringArray
+    if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
+        return Ok(StringColumnRef::Small(arr));
+    }
+    if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(StringColumnRef::Large(arr));
+    }
+
+    Err(DataFusionError::Execution(format!(
+        "Column '{}' must be Utf8 or LargeUtf8 type",
+        name
+    )))
 }
 
 /// Gets a u32 column from the batch by name
@@ -252,6 +287,7 @@ fn build_info_string(
 }
 
 /// Extracts an INFO value as a string from an Arrow array at a specific row
+/// Supports both standard Arrow types and Polars "Large" variants (LargeUtf8, LargeList)
 fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<String>> {
     if array.is_null(row) {
         return Ok(None);
@@ -273,11 +309,24 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
         return Ok(Some(arr.value(row).to_string()));
     }
 
+    // Handle both Utf8 (StringArray) and LargeUtf8 (LargeStringArray)
     if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
         return Ok(Some(arr.value(row).to_string()));
     }
+    if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(Some(arr.value(row).to_string()));
+    }
 
+    // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
+        let values = arr.value(row);
+        let value_strings = extract_list_values(&values)?;
+        if value_strings.is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(value_strings.join(",")));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
         let value_strings = extract_list_values(&values)?;
         if value_strings.is_empty() {
@@ -290,28 +339,39 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
 }
 
 /// Extracts values from a list array as strings
+/// Supports both standard Arrow types and Polars "Large" variants
 fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
     let mut values = Vec::new();
+    let len = array.len();
 
     if let Some(int_arr) = array.as_any().downcast_ref::<Int32Array>() {
-        for i in 0..int_arr.len() {
-            if int_arr.is_null(i) {
+        for i in 0..len {
+            if array.is_null(i) {
                 values.push(".".to_string());
             } else {
                 values.push(int_arr.value(i).to_string());
             }
         }
     } else if let Some(float_arr) = array.as_any().downcast_ref::<Float32Array>() {
-        for i in 0..float_arr.len() {
-            if float_arr.is_null(i) {
+        for i in 0..len {
+            if array.is_null(i) {
                 values.push(".".to_string());
             } else {
                 values.push(format!("{:.6}", float_arr.value(i)));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<StringArray>() {
-        for i in 0..str_arr.len() {
-            if str_arr.is_null(i) {
+        for i in 0..len {
+            if array.is_null(i) {
+                values.push(".".to_string());
+            } else {
+                values.push(str_arr.value(i).to_string());
+            }
+        }
+    } else if let Some(str_arr) = array.as_any().downcast_ref::<LargeStringArray>() {
+        // Handle LargeUtf8 (Polars default string type)
+        for i in 0..len {
+            if array.is_null(i) {
                 values.push(".".to_string());
             } else {
                 values.push(str_arr.value(i).to_string());
@@ -362,6 +422,7 @@ fn build_format_and_samples(
 }
 
 /// Extracts a sample/FORMAT value as a string from an Arrow array
+/// Supports both standard Arrow types and Polars "Large" variants (LargeUtf8, LargeList)
 fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> {
     if array.is_null(row) {
         return Ok(".".to_string());
@@ -379,6 +440,7 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
         return Ok(format!("{:.6}", arr.value(row)));
     }
 
+    // Handle both Utf8 (StringArray) and LargeUtf8 (LargeStringArray)
     if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
         let s = arr.value(row);
         if s.is_empty() {
@@ -386,8 +448,24 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
         }
         return Ok(s.to_string());
     }
+    if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
+        let s = arr.value(row);
+        if s.is_empty() {
+            return Ok(".".to_string());
+        }
+        return Ok(s.to_string());
+    }
 
+    // Handle both List and LargeList
     if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
+        let values = arr.value(row);
+        let value_strings = extract_list_values(&values)?;
+        if value_strings.is_empty() {
+            return Ok(".".to_string());
+        }
+        return Ok(value_strings.join(","));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<LargeListArray>() {
         let values = arr.value(row);
         let value_strings = extract_list_values(&values)?;
         if value_strings.is_empty() {
@@ -582,5 +660,54 @@ mod tests {
         // Should have FORMAT column and one sample column
         assert!(line.contains("GT:DP"));
         assert!(line.contains("0/1:25"));
+    }
+
+    #[test]
+    fn test_batch_to_vcf_lines_large_string_array() {
+        // Test with LargeUtf8 (LargeStringArray) - Polars default string type
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::LargeUtf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::LargeUtf8, true),
+            Field::new("ref", DataType::LargeUtf8, false),
+            Field::new("alt", DataType::LargeUtf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::LargeUtf8, true),
+        ]));
+
+        let chroms = LargeStringArray::from(vec!["chr1"]);
+        let starts = UInt32Array::from(vec![99u32]); // 0-based
+        let ends = UInt32Array::from(vec![100u32]);
+        let ids = LargeStringArray::from(vec![Some("rs456")]);
+        let refs = LargeStringArray::from(vec!["C"]);
+        let alts = LargeStringArray::from(vec!["T"]);
+        let quals = Float64Array::from(vec![Some(45.0)]);
+        let filters = LargeStringArray::from(vec![Some("PASS")]);
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(chroms),
+                Arc::new(starts),
+                Arc::new(ends),
+                Arc::new(ids),
+                Arc::new(refs),
+                Arc::new(alts),
+                Arc::new(quals),
+                Arc::new(filters),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &[], &[], &[], true).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        // Position should be 100 (1-based), ID should be rs456
+        assert!(
+            lines[0]
+                .line
+                .starts_with("chr1\t100\trs456\tC\tT\t45.00\tPASS")
+        );
     }
 }
