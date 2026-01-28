@@ -47,6 +47,8 @@
 /// downstream consumers to correctly interpret coordinate values.
 pub const COORDINATE_SYSTEM_METADATA_KEY: &str = "bio.coordinate_system_zero_based";
 
+/// Bioinformatics metadata key constants and utilities
+pub mod metadata;
 /// Object storage integration for cloud and local file access
 pub mod object_storage;
 /// Table utilities for building DataFusion table providers

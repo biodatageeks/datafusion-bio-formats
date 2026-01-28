@@ -4,6 +4,12 @@ use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use datafusion_bio_format_core::metadata::{
+    AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
+    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
+    VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
+    VCF_SAMPLE_NAMES_KEY, to_json_string,
+};
 use std::collections::HashMap;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -29,6 +35,12 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 /// Determines the Arrow schema for a VCF file by reading its header.
+///
+/// This function extracts VCF header information and stores it in Arrow schema metadata
+/// for round-trip preservation:
+/// - Schema-level metadata: file format, filters, contigs, ALT alleles, sample names (as JSON)
+/// - Field-level metadata: INFO/FORMAT field descriptions, types, and numbers using `bio.vcf.field.*` keys
+/// - Coordinate system metadata: `bio.coordinate_system_zero_based`
 ///
 /// # Arguments
 ///
@@ -62,6 +74,42 @@ async fn determine_schema_from_header(
         .map(|s| s.to_string())
         .collect();
 
+    // Extract header metadata for schema storage
+    let file_format_obj = header.file_format();
+    let file_format = format!(
+        "VCFv{}.{}",
+        file_format_obj.major(),
+        file_format_obj.minor()
+    );
+
+    let filters: Vec<FilterMetadata> = header
+        .filters()
+        .iter()
+        .map(|(id, filter)| FilterMetadata {
+            id: id.to_string(),
+            description: filter.description().to_string(),
+        })
+        .collect();
+
+    let contigs: Vec<ContigMetadata> = header
+        .contigs()
+        .iter()
+        .map(|(id, contig)| ContigMetadata {
+            id: id.to_string(),
+            length: contig.length().map(|l| l as u64),
+            metadata: HashMap::new(), // Extract additional metadata if available
+        })
+        .collect();
+
+    let alt_alleles: Vec<AltAlleleMetadata> = header
+        .alternative_alleles()
+        .iter()
+        .map(|(id, alt)| AltAlleleMetadata {
+            id: id.to_string(),
+            description: alt.description().to_string(),
+        })
+        .collect();
+
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt32, false),
@@ -81,15 +129,18 @@ async fn determine_schema_from_header(
             // Store VCF header metadata in field metadata for round-trip preservation
             let mut field_metadata = HashMap::new();
             field_metadata.insert(
-                "vcf_description".to_string(),
+                VCF_FIELD_DESCRIPTION_KEY.to_string(),
                 info.description().to_string(),
             );
             field_metadata.insert(
-                "vcf_number".to_string(),
+                VCF_FIELD_TYPE_KEY.to_string(),
+                info_type_to_string(&info.ty()),
+            );
+            field_metadata.insert(
+                VCF_FIELD_NUMBER_KEY.to_string(),
                 info_number_to_string(info.number()),
             );
-            field_metadata.insert("vcf_type".to_string(), info_type_to_string(&info.ty()));
-            field_metadata.insert("vcf_field_type".to_string(), "INFO".to_string());
+            field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
             // Preserve case sensitivity for INFO fields to avoid conflicts
             let field = Field::new(tag.clone(), dtype, nullable).with_metadata(field_metadata);
             fields.push(field);
@@ -118,20 +169,20 @@ async fn determine_schema_from_header(
                 let mut field_metadata = HashMap::new();
                 if let Some(format_info) = header_formats.get(tag.as_str()) {
                     field_metadata.insert(
-                        "vcf_description".to_string(),
+                        VCF_FIELD_DESCRIPTION_KEY.to_string(),
                         format_info.description().to_string(),
                     );
                     field_metadata.insert(
-                        "vcf_number".to_string(),
-                        format_number_to_string(format_info.number()),
-                    );
-                    field_metadata.insert(
-                        "vcf_type".to_string(),
+                        VCF_FIELD_TYPE_KEY.to_string(),
                         format_type_to_string(&format_info.ty()),
                     );
+                    field_metadata.insert(
+                        VCF_FIELD_NUMBER_KEY.to_string(),
+                        format_number_to_string(format_info.number()),
+                    );
                 }
-                field_metadata.insert("vcf_field_type".to_string(), "FORMAT".to_string());
-                field_metadata.insert("vcf_format_id".to_string(), tag.clone());
+                field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
+                field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
                 let field = Field::new(field_name, dtype, true).with_metadata(field_metadata);
                 fields.push(field);
             }
@@ -144,6 +195,20 @@ async fn determine_schema_from_header(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
     );
+    metadata.insert(VCF_FILE_FORMAT_KEY.to_string(), file_format);
+
+    // Serialize complex structures as JSON using shared utilities
+    metadata.insert(VCF_FILTERS_KEY.to_string(), to_json_string(&filters));
+    metadata.insert(VCF_CONTIGS_KEY.to_string(), to_json_string(&contigs));
+    metadata.insert(
+        VCF_ALTERNATIVE_ALLELES_KEY.to_string(),
+        to_json_string(&alt_alleles),
+    );
+    metadata.insert(
+        VCF_SAMPLE_NAMES_KEY.to_string(),
+        to_json_string(&sample_names),
+    );
+
     let schema = Schema::new_with_metadata(fields, metadata);
     // println!("Schema: {:?}", schema);
     Ok((Arc::new(schema), sample_names))

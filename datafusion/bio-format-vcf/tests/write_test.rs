@@ -2,6 +2,12 @@
 
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
+use datafusion_bio_format_core::metadata::{
+    AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
+    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
+    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_SAMPLE_NAMES_KEY,
+    from_json_string,
+};
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use datafusion_bio_format_vcf::writer::VcfCompressionType;
 use std::sync::Arc;
@@ -329,33 +335,105 @@ async fn test_schema_field_metadata_preserved() {
 
     let schema = provider.schema();
 
-    // Check INFO field metadata
+    // Check INFO field metadata using new bio.vcf.field.* keys
     let dp_field = schema.field_with_name("DP").unwrap();
     let dp_metadata = dp_field.metadata();
     assert_eq!(
-        dp_metadata.get("vcf_description"),
+        dp_metadata.get(VCF_FIELD_DESCRIPTION_KEY),
         Some(&"Total read depth".to_string())
     );
-    assert_eq!(dp_metadata.get("vcf_type"), Some(&"Integer".to_string()));
-    assert_eq!(dp_metadata.get("vcf_number"), Some(&"1".to_string()));
+    assert_eq!(
+        dp_metadata.get(VCF_FIELD_TYPE_KEY),
+        Some(&"Integer".to_string())
+    );
+    assert_eq!(
+        dp_metadata.get(VCF_FIELD_NUMBER_KEY),
+        Some(&"1".to_string())
+    );
 
     let af_field = schema.field_with_name("AF").unwrap();
     let af_metadata = af_field.metadata();
     assert_eq!(
-        af_metadata.get("vcf_description"),
+        af_metadata.get(VCF_FIELD_DESCRIPTION_KEY),
         Some(&"Allele frequency".to_string())
     );
-    assert_eq!(af_metadata.get("vcf_type"), Some(&"Float".to_string()));
-    assert_eq!(af_metadata.get("vcf_number"), Some(&"A".to_string()));
+    assert_eq!(
+        af_metadata.get(VCF_FIELD_TYPE_KEY),
+        Some(&"Float".to_string())
+    );
+    assert_eq!(
+        af_metadata.get(VCF_FIELD_NUMBER_KEY),
+        Some(&"A".to_string())
+    );
 
     // Check FORMAT field metadata (multi-sample uses Sample1_GT naming)
     let gt_field = schema.field_with_name("Sample1_GT").unwrap();
     let gt_metadata = gt_field.metadata();
     assert_eq!(
-        gt_metadata.get("vcf_description"),
+        gt_metadata.get(VCF_FIELD_DESCRIPTION_KEY),
         Some(&"Genotype".to_string())
     );
-    assert_eq!(gt_metadata.get("vcf_format_id"), Some(&"GT".to_string()));
+    assert_eq!(
+        gt_metadata.get(VCF_FIELD_FORMAT_ID_KEY),
+        Some(&"GT".to_string())
+    );
+
+    cleanup_files(&[&input_path]).await;
+}
+
+#[tokio::test]
+async fn test_header_metadata_roundtrip() {
+    const FULL_HEADER_VCF: &str = r#"##fileformat=VCFv4.3
+##FILTER=<ID=LowQual,Description="Low quality">
+##contig=<ID=chr1,length=249250621>
+##ALT=<ID=DEL,Description="Deletion">
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	.	A	T	30	PASS	DP=50
+"#;
+
+    let input_path = create_test_vcf("header_meta", FULL_HEADER_VCF)
+        .await
+        .unwrap();
+
+    let provider = create_read_provider(&input_path, Some(vec!["DP".to_string()]), None);
+
+    let schema = provider.schema();
+    let metadata = schema.metadata();
+
+    // Verify file format
+    assert_eq!(metadata.get(VCF_FILE_FORMAT_KEY).unwrap(), "VCFv4.3");
+
+    // Verify filters using shared utilities
+    let filters_json = metadata.get(VCF_FILTERS_KEY).unwrap();
+    let filters = from_json_string::<Vec<FilterMetadata>>(filters_json).unwrap();
+    assert!(
+        filters
+            .iter()
+            .any(|f| f.id == "LowQual" && f.description == "Low quality")
+    );
+
+    // Verify contigs using shared utilities
+    let contigs_json = metadata.get(VCF_CONTIGS_KEY).unwrap();
+    let contigs = from_json_string::<Vec<ContigMetadata>>(contigs_json).unwrap();
+    assert!(
+        contigs
+            .iter()
+            .any(|c| c.id == "chr1" && c.length == Some(249250621))
+    );
+
+    // Verify ALT using shared utilities
+    let alts_json = metadata.get(VCF_ALTERNATIVE_ALLELES_KEY).unwrap();
+    let alts = from_json_string::<Vec<AltAlleleMetadata>>(alts_json).unwrap();
+    assert!(
+        alts.iter()
+            .any(|a| a.id == "DEL" && a.description == "Deletion")
+    );
+
+    // Verify samples
+    let samples_json = metadata.get(VCF_SAMPLE_NAMES_KEY).unwrap();
+    let samples = from_json_string::<Vec<String>>(samples_json).unwrap();
+    assert_eq!(samples.len(), 0); // No samples in this VCF
 
     cleanup_files(&[&input_path]).await;
 }

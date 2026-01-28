@@ -1,11 +1,19 @@
 //! VCF header builder for constructing VCF headers from Arrow schemas
 //!
 //! This module provides functionality for building VCF header lines from Arrow schemas,
-//! enabling round-trip VCF read/write operations. When field metadata is available
-//! (from reading a VCF file), it preserves original descriptions, types, and numbers.
+//! enabling round-trip VCF read/write operations. Header information is reconstructed from:
+//! - Schema-level metadata: file format version, FILTER, CONTIG, and ALT definitions (stored as JSON)
+//! - Field-level metadata: INFO/FORMAT field descriptions, types, and numbers (using `bio.vcf.field.*` keys)
+//!
+//! When metadata is not available, sensible defaults are generated from Arrow types.
 
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::common::Result;
+use datafusion_bio_format_core::metadata::{
+    AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
+    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
+    VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, from_json_string,
+};
 use std::collections::HashSet;
 
 /// Index of the CHROM column in VCF schema
@@ -29,12 +37,18 @@ pub const CORE_FIELD_COUNT: usize = 8;
 
 /// Builds VCF header lines from an Arrow schema with INFO and FORMAT field definitions
 ///
-/// If the schema fields contain VCF metadata (vcf_description, vcf_type, vcf_number),
-/// those values are used. Otherwise, defaults are generated from the Arrow types.
+/// Reconstructs VCF header lines from schema metadata:
+/// - File format version from `bio.vcf.file_format` (defaults to VCFv4.3)
+/// - FILTER definitions from `bio.vcf.filters` (JSON array)
+/// - CONTIG definitions from `bio.vcf.contigs` (JSON array)
+/// - ALT allele definitions from `bio.vcf.alternative_alleles` (JSON array)
+/// - INFO/FORMAT field metadata from `bio.vcf.field.*` keys
+///
+/// When metadata is absent, defaults are inferred from Arrow types.
 ///
 /// # Arguments
 ///
-/// * `schema` - The Arrow schema containing field definitions
+/// * `schema` - The Arrow schema containing field definitions and metadata
 /// * `info_fields` - List of INFO field names to include
 /// * `format_fields` - List of FORMAT field names per sample
 /// * `sample_names` - List of sample names from the original VCF
@@ -50,8 +64,54 @@ pub fn build_vcf_header_lines(
 ) -> Result<Vec<String>> {
     let mut lines = Vec::new();
 
-    // File format line
-    lines.push("##fileformat=VCFv4.3".to_string());
+    // Get file format from schema metadata (default to VCFv4.3)
+    let schema_metadata = schema.metadata();
+    let file_format = schema_metadata
+        .get(VCF_FILE_FORMAT_KEY)
+        .map(|s| s.as_str())
+        .unwrap_or("VCFv4.3");
+    lines.push(format!("##fileformat={}", file_format));
+
+    // Add FILTER definitions from metadata using shared utilities
+    if let Some(filters_json) = schema_metadata.get(VCF_FILTERS_KEY) {
+        if let Some(filters) = from_json_string::<Vec<FilterMetadata>>(filters_json) {
+            for filter in filters {
+                if filter.id != "PASS" {
+                    // PASS is implicit
+                    lines.push(format!(
+                        "##FILTER=<ID={},Description=\"{}\">",
+                        filter.id, filter.description
+                    ));
+                }
+            }
+        }
+    }
+
+    // Add CONTIG definitions from metadata using shared utilities
+    if let Some(contigs_json) = schema_metadata.get(VCF_CONTIGS_KEY) {
+        if let Some(contigs) = from_json_string::<Vec<ContigMetadata>>(contigs_json) {
+            for contig in contigs {
+                let mut line = format!("##contig=<ID={}", contig.id);
+                if let Some(length) = contig.length {
+                    line.push_str(&format!(",length={}", length));
+                }
+                line.push('>');
+                lines.push(line);
+            }
+        }
+    }
+
+    // Add ALT definitions from metadata using shared utilities
+    if let Some(alts_json) = schema_metadata.get(VCF_ALTERNATIVE_ALLELES_KEY) {
+        if let Some(alts) = from_json_string::<Vec<AltAlleleMetadata>>(alts_json) {
+            for alt in alts {
+                lines.push(format!(
+                    "##ALT=<ID={},Description=\"{}\">",
+                    alt.id, alt.description
+                ));
+            }
+        }
+    }
 
     // Add INFO field definitions
     for info_name in info_fields {
@@ -86,22 +146,25 @@ pub fn build_vcf_header_lines(
 }
 
 /// Extracts VCF metadata from an INFO field, using stored metadata if available
+///
+/// Reads metadata from `bio.vcf.field.*` keys. If not present, generates defaults
+/// from the Arrow data type.
 fn get_info_field_metadata(field: &Field, field_name: &str) -> (String, String, String) {
     let metadata = field.metadata();
 
-    // Try to get stored VCF metadata
+    // Get stored VCF metadata using bio.vcf.field.* keys
     let vcf_type = metadata
-        .get("vcf_type")
+        .get(VCF_FIELD_TYPE_KEY)
         .cloned()
         .unwrap_or_else(|| arrow_type_to_vcf_type(field.data_type()).to_string());
 
     let number = metadata
-        .get("vcf_number")
+        .get(VCF_FIELD_NUMBER_KEY)
         .cloned()
         .unwrap_or_else(|| arrow_type_to_vcf_number(field.data_type()).to_string());
 
     let description = metadata
-        .get("vcf_description")
+        .get(VCF_FIELD_DESCRIPTION_KEY)
         .cloned()
         .unwrap_or_else(|| format!("{} field", field_name));
 
@@ -109,26 +172,32 @@ fn get_info_field_metadata(field: &Field, field_name: &str) -> (String, String, 
 }
 
 /// Extracts VCF metadata from a FORMAT field, using stored metadata if available
+///
+/// Reads metadata from `bio.vcf.field.*` keys. If not present, generates defaults
+/// from the Arrow data type (with special handling for GT fields).
 fn get_format_field_metadata(field: &Field, format_name: &str) -> (String, String, String) {
     let metadata = field.metadata();
 
-    // Try to get stored VCF metadata
-    let vcf_type = metadata.get("vcf_type").cloned().unwrap_or_else(|| {
-        // GT is always a string
-        if format_name == "GT" {
-            "String".to_string()
-        } else {
-            arrow_type_to_vcf_type(field.data_type()).to_string()
-        }
-    });
+    // Get stored VCF metadata using bio.vcf.field.* keys
+    let vcf_type = metadata
+        .get(VCF_FIELD_TYPE_KEY)
+        .cloned()
+        .unwrap_or_else(|| {
+            // GT is always a string
+            if format_name == "GT" {
+                "String".to_string()
+            } else {
+                arrow_type_to_vcf_type(field.data_type()).to_string()
+            }
+        });
 
     let number = metadata
-        .get("vcf_number")
+        .get(VCF_FIELD_NUMBER_KEY)
         .cloned()
         .unwrap_or_else(|| arrow_type_to_vcf_number(field.data_type()).to_string());
 
     let description = metadata
-        .get("vcf_description")
+        .get(VCF_FIELD_DESCRIPTION_KEY)
         .cloned()
         .unwrap_or_else(|| format!("{} format field", format_name));
 
@@ -239,11 +308,14 @@ mod tests {
 
     #[test]
     fn test_build_vcf_header_lines_with_metadata() {
-        // Create field with VCF metadata
+        // Create field with VCF metadata using new bio.vcf.field.* keys
         let mut dp_metadata = HashMap::new();
-        dp_metadata.insert("vcf_description".to_string(), "Read Depth".to_string());
-        dp_metadata.insert("vcf_number".to_string(), "1".to_string());
-        dp_metadata.insert("vcf_type".to_string(), "Integer".to_string());
+        dp_metadata.insert(
+            VCF_FIELD_DESCRIPTION_KEY.to_string(),
+            "Read Depth".to_string(),
+        );
+        dp_metadata.insert(VCF_FIELD_NUMBER_KEY.to_string(), "1".to_string());
+        dp_metadata.insert(VCF_FIELD_TYPE_KEY.to_string(), "Integer".to_string());
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, false),
