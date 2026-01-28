@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-01-28T06:35:54Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/write-support-vcf-fastq",
+  "commit_sha": "9b36c6ceed3eda982193e8106b070cadbaa1fd2f",
+  "benchmark_mode": "fast"
+}
