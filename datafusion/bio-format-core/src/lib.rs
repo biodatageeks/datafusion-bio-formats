@@ -49,6 +49,9 @@ pub const COORDINATE_SYSTEM_METADATA_KEY: &str = "bio.coordinate_system_zero_bas
 
 /// Bioinformatics metadata key constants and utilities
 pub mod metadata;
+
+// Re-export commonly used metadata keys
+pub use metadata::{BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY};
 /// Object storage integration for cloud and local file access
 pub mod object_storage;
 /// Table utilities for building DataFusion table providers

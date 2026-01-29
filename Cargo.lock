@@ -986,6 +986,7 @@ dependencies = [
  "datafusion-bio-format-core",
  "futures",
  "futures-util",
+ "hex",
  "log",
  "noodles-bam 0.81.0",
  "noodles-bgzf 0.36.0",

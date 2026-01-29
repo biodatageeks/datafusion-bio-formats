@@ -40,3 +40,5 @@ mod physical_exec;
 pub mod storage;
 /// DataFusion table provider implementation for BAM files.
 pub mod table_provider;
+/// Registry of common BAM alignment tags with type information.
+mod tag_registry;

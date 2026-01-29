@@ -24,7 +24,12 @@ noodles-sam = "0.77.0"
 async-stream = "0.3.6"
 log = "0.4.27"
 async-trait = "0.1.88"
+hex = "0.4"
 
 [[example]]
 name = "test_bam_reader"
 path = "./examples/test_bam_reader.rs"
+
+[[example]]
+name = "test_bam_with_tags"
+path = "./examples/test_bam_with_tags.rs"
