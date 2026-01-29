@@ -1,0 +1,7 @@
+{
+  "ref": "dependabot/cargo/tempfile-3.24.0",
+  "ref_type": "branch",
+  "commit_sha": "2c3dd7bd377329c15880b728df9e0017d55a0f47",
+  "timestamp": "2026-01-29T07:44:02Z",
+  "benchmark_mode": "fast"
+}

@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-01-29T07:43:18Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "dependabot/cargo/tempfile-3.24.0",
+  "commit_sha": "2c3dd7bd377329c15880b728df9e0017d55a0f47",
+  "benchmark_mode": "fast"
+}
