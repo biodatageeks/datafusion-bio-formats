@@ -1,0 +1,7 @@
+{
+  "ref": "dependabot/cargo/tracing-0.1.44",
+  "ref_type": "branch",
+  "commit_sha": "f90dafd290f7a573c8417d033083d49300b014d2",
+  "timestamp": "2026-01-29T07:50:31Z",
+  "benchmark_mode": "fast"
+}
