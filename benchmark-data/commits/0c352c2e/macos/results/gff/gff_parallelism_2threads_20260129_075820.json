@@ -1,0 +1,23 @@
+{
+  "benchmark_name": "gff_parallelism_2threads",
+  "format": "gff",
+  "category": "parallelism",
+  "timestamp": "2026-01-29T07:58:20.804030Z",
+  "system_info": {
+    "os": "Darwin 15.7.3",
+    "cpu_model": "Apple M1 (Virtual)",
+    "cpu_cores": 3,
+    "total_memory_gb": 7.0
+  },
+  "configuration": {
+    "repetitions": 3,
+    "threads": 2
+  },
+  "metrics": {
+    "throughput_records_per_sec": 1222.5566593883793,
+    "elapsed_seconds": 0.000817958,
+    "total_records": 1,
+    "speedup_vs_baseline": 111.52089368855384,
+    "peak_memory_mb": null
+  }
+}

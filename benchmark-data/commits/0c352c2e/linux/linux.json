@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-01-29T07:41:22Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "dependabot/cargo/log-0.4.29",
+  "commit_sha": "0c352c2ebf043420dafcfc107df03ab048dacd79",
+  "benchmark_mode": "fast"
+}

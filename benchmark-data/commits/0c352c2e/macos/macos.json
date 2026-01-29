@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-01-29T07:58:21Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "dependabot/cargo/log-0.4.29",
+  "commit_sha": "0c352c2ebf043420dafcfc107df03ab048dacd79",
+  "benchmark_mode": "fast"
+}
