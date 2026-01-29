@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-01-29T11:13:14Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/bam-optional-tags",
+  "commit_sha": "b3255315c67926359b687ab146c2715a2fc10c5c",
+  "benchmark_mode": "fast"
+}
