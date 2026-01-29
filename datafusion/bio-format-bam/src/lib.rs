@@ -22,7 +22,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a BAM file as a table
-//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true)?;
+//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true, None)?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!
 //! // Query with SQL
