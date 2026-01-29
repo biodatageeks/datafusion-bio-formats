@@ -100,8 +100,8 @@ impl ExecutionPlan for BamExec {
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
-/// Type alias for tag builders: (tag_names, tag_types, builders)
-type TagBuilders = (Vec<String>, Vec<DataType>, Vec<OptionalField>);
+/// Type alias for tag builders: (tag_names, tag_types, builders, parsed_tags)
+type TagBuilders = (Vec<String>, Vec<DataType>, Vec<OptionalField>, Vec<Tag>);
 
 /// Initialize tag builders based on requested tag fields
 fn set_tag_builders(
@@ -114,9 +114,15 @@ fn set_tag_builders(
         for tag in tags {
             if let Some(tag_def) = known_tags.get(&tag) {
                 if let Ok(builder) = OptionalField::new(&tag_def.arrow_type, batch_size) {
-                    tag_builders.0.push(tag.clone());
-                    tag_builders.1.push(tag_def.arrow_type.clone());
-                    tag_builders.2.push(builder);
+                    // Pre-parse tag to avoid parsing on every record
+                    let tag_bytes = tag.as_bytes();
+                    if tag_bytes.len() == 2 {
+                        let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
+                        tag_builders.0.push(tag.clone());
+                        tag_builders.1.push(tag_def.arrow_type.clone());
+                        tag_builders.2.push(builder);
+                        tag_builders.3.push(parsed_tag);
+                    }
                 }
             }
         }
@@ -126,21 +132,12 @@ fn set_tag_builders(
 /// Extract tag values from a BAM record and populate builders
 fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
     for i in 0..tag_builders.0.len() {
-        let tag_name = &tag_builders.0[i];
         let builder = &mut tag_builders.2[i];
-
-        // Parse tag from string (e.g., "NM" -> Tag)
-        // Tags must be exactly 2 bytes
-        let tag_bytes = tag_name.as_bytes();
-        if tag_bytes.len() != 2 {
-            builder.append_null()?;
-            continue;
-        }
-        let tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
+        let tag = &tag_builders.3[i]; // Use pre-parsed tag
 
         // Access tag using noodles API: record.data().get(tag)
         let data = record.data();
-        let tag_result = data.get(&tag);
+        let tag_result = data.get(tag);
 
         match tag_result {
             Some(Ok(value)) => {
@@ -238,49 +235,52 @@ fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, A
     builders.iter_mut().map(|b| b.finish()).collect()
 }
 
-async fn get_remote_bam_stream(
-    file_path: String,
-    schema: SchemaRef,
-    batch_size: usize,
-    projection: Option<Vec<usize>>,
-    object_storage_options: Option<ObjectStorageOptions>,
-    coordinate_system_zero_based: bool,
-    tag_fields: Option<Vec<String>>,
-) -> datafusion::error::Result<
-    AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
-> {
-    let mut reader = BamReader::new(file_path.clone(), None, object_storage_options).await;
-
-    let stream = try_stream! {
-        // Create vectors for accumulating record data.
-        let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
-        let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-        let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-        let mut end : Vec<Option<u32>> = Vec::with_capacity(batch_size);
-
-        let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-        let mut flag : Vec<u32> = Vec::with_capacity(batch_size);
-        let mut cigar : Vec<String> = Vec::with_capacity(batch_size);
-        let mut mate_chrom : Vec<Option<String>> = Vec::with_capacity(batch_size);
-        let mut mate_start : Vec<Option<u32>> = Vec::with_capacity(batch_size);
-        let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
-        let mut sequence : Vec<String> = Vec::with_capacity(batch_size);
+/// Macro to generate the record processing logic for BAM readers
+///
+/// This macro contains the shared logic for processing BAM records from any reader source.
+/// It accumulates records into batches and yields them as Arrow RecordBatches.
+///
+/// # Arguments
+/// * `$reader` - The BamReader instance (must be mutable)
+/// * `$schema` - Arc<Schema> for the output
+/// * `$batch_size` - Number of records per batch
+/// * `$projection` - Optional projection vector
+/// * `$coord_zero_based` - Whether to use 0-based coordinates
+/// * `$tag_fields` - Optional list of tag field names
+macro_rules! process_bam_records_impl {
+    ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
+        try_stream! {
+        // Create vectors for accumulating record data
+        let mut name: Vec<Option<String>> = Vec::with_capacity($batch_size);
+        let mut chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
+        let mut start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut end: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut flag: Vec<u32> = Vec::with_capacity($batch_size);
+        let mut cigar: Vec<String> = Vec::with_capacity($batch_size);
+        let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
+        let mut mate_start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut quality_scores: Vec<String> = Vec::with_capacity($batch_size);
+        let mut sequence: Vec<String> = Vec::with_capacity($batch_size);
 
         // Initialize tag builders
-        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new());
-        set_tag_builders(batch_size, tag_fields, &mut tag_builders);
+        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        set_tag_builders($batch_size, $tag_fields, &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
         let mut record_num = 0;
         let mut batch_num = 0;
 
-        // Process records one by one.
-
-        let ref_sequences = reader.read_sequences().await;
-        let mut records = reader.read_records().await;
+        // Get reference sequences and record iterator
+        let ref_sequences = $reader.read_sequences().await;
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+        let mut records = $reader.read_records().await;
+
+        // Process records one by one
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
+
+            // Extract record name
             match record.name() {
                 Some(read_name) => {
                     name.push(Some(read_name.to_string()));
@@ -289,21 +289,27 @@ async fn get_remote_bam_stream(
                     name.push(None);
                 }
             };
+
+            // Extract chromosome name
             let chrom_name = get_chrom_by_seq_id(
                 record.reference_sequence_id(),
                 &names,
             );
             chrom.push(chrom_name);
+
+            // Extract alignment start position
             match record.alignment_start() {
                 Some(start_pos) => {
                     // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
                     let pos = start_pos?.get() as u32;
-                    start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
+                    start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
                 },
                 None => {
                     start.push(None);
                 }
             }
+
+            // Extract alignment end position
             match record.alignment_end() {
                 Some(end_pos) => {
                     end.push(Some(end_pos?.get() as u32));
@@ -312,6 +318,8 @@ async fn get_remote_bam_stream(
                     end.push(None);
                 }
             };
+
+            // Extract mapping quality
             match record.mapping_quality() {
                 Some(mapping_quality_value) => {
                     mapping_quality.push(Some(mapping_quality_value.get() as u32));
@@ -320,28 +328,36 @@ async fn get_remote_bam_stream(
                     mapping_quality.push(None);
                 }
             };
-           let seq_string = record.sequence().iter()
-               .map(char::from)
-               .collect();
+
+            // Extract sequence
+            let seq_string = record.sequence().iter()
+                .map(char::from)
+                .collect();
             sequence.push(seq_string);
+
+            // Extract quality scores
             quality_scores.push(record.quality_scores().iter()
                 .map(|p| char::from(p+33))
                 .collect::<String>());
 
+            // Extract flags and CIGAR
             flag.push(record.flags().bits() as u32);
             cigar.push(record.cigar().iter().map(|p| p.unwrap())
                 .map(cigar_op_to_string)
                 .collect::<Vec<String>>().join(""));
-            let chrom_name = get_chrom_by_seq_id(
+
+            // Extract mate information
+            let mate_chrom_name = get_chrom_by_seq_id(
                 record.mate_reference_sequence_id(),
                 &names,
             );
-            mate_chrom.push(chrom_name);
-            match record.mate_alignment_start()  {
+            mate_chrom.push(mate_chrom_name);
+
+            match record.mate_alignment_start() {
                 Some(mate_start_pos) => {
                     // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
                     let pos = mate_start_pos?.get() as u32;
-                    mate_start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
+                    mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
                 },
                 _ => mate_start.push(None),
             };
@@ -350,8 +366,9 @@ async fn get_remote_bam_stream(
             load_tags(&record, &mut tag_builders)?;
 
             record_num += 1;
-            // Once the batch size is reached, build and yield a record batch.
-            if record_num % batch_size == 0 {
+
+            // Once the batch size is reached, build and yield a record batch
+            if record_num % $batch_size == 0 {
                 debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
                     Some(builders_to_arrays(&mut tag_builders.2)?)
@@ -359,7 +376,7 @@ async fn get_remote_bam_stream(
                     None
                 };
                 let batch = build_record_batch(
-                    Arc::clone(&schema.clone()),
+                    Arc::clone(&$schema.clone()),
                     RecordFields {
                         name: &name,
                         chrom: &chrom,
@@ -374,12 +391,13 @@ async fn get_remote_bam_stream(
                         quality_scores: &quality_scores,
                     },
                     tag_arrays.as_ref(),
-                    projection.clone(),
+                    $projection.clone(),
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
                 yield batch;
-                // Clear vectors for the next batch.
+
+                // Clear vectors for the next batch
                 name.clear();
                 chrom.clear();
                 start.clear();
@@ -393,8 +411,8 @@ async fn get_remote_bam_stream(
                 quality_scores.clear();
             }
         }
-        // If there are remaining records that don't fill a complete batch,
-        // yield them as well.
+
+        // If there are remaining records that don't fill a complete batch, yield them as well
         if !name.is_empty() {
             let tag_arrays = if num_tag_fields > 0 {
                 Some(builders_to_arrays(&mut tag_builders.2)?)
@@ -402,7 +420,7 @@ async fn get_remote_bam_stream(
                 None
             };
             let batch = build_record_batch(
-                Arc::clone(&schema.clone()),
+                Arc::clone(&$schema.clone()),
                 RecordFields {
                     name: &name,
                     chrom: &chrom,
@@ -417,11 +435,34 @@ async fn get_remote_bam_stream(
                     quality_scores: &quality_scores,
                 },
                 tag_arrays.as_ref(),
-                projection.clone(),
+                $projection.clone(),
             )?;
             yield batch;
         }
+        }
     };
+}
+
+async fn get_remote_bam_stream(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
+    tag_fields: Option<Vec<String>>,
+) -> datafusion::error::Result<
+    AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
+> {
+    let mut reader = BamReader::new(file_path.clone(), None, object_storage_options).await;
+    let stream = process_bam_records_impl!(
+        reader,
+        schema,
+        batch_size,
+        projection,
+        coordinate_system_zero_based,
+        tag_fields
+    );
     Ok(stream)
 }
 
@@ -435,178 +476,15 @@ async fn get_local_bam(
     tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
-    let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-    let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-    let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-
-    let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-    let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
-    let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
-    let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-    let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-    let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
-    let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
-
-    // let mut count: usize = 0;
-    let mut batch_num = 0;
-    let file_path = file_path.clone();
     let mut reader = BamReader::new(file_path.clone(), thread_num, None).await;
-    let mut record_num = 0;
-
-    let stream = try_stream! {
-        // Initialize tag builders
-        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new());
-        set_tag_builders(batch_size, tag_fields, &mut tag_builders);
-        let num_tag_fields = tag_builders.0.len();
-
-        let ref_sequences = reader.read_sequences().await;
-        let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
-        let mut records = reader.read_records().await;
-        // let iter_start_time = Instant::now();
-        while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
-            let seq_string = record.sequence().iter()
-                   .map(char::from)
-                   .collect();
-            let chrom_name = get_chrom_by_seq_id(
-                record.reference_sequence_id(),
-                &names,
-            );
-            chrom.push(chrom_name);
-            match record.name() {
-                Some(read_name) => {
-                    name.push(Some(read_name.to_string()));
-                },
-                _ => {
-                    name.push(None);
-                }
-            };
-            match record.alignment_start() {
-                Some(start_pos) => {
-                    // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                    let pos = start_pos?.get() as u32;
-                    start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
-                },
-                None => {
-                    start.push(None);
-                }
-            }
-            match record.alignment_end() {
-                Some(end_pos) => {
-                    end.push(Some(end_pos?.get() as u32));
-                },
-                None => {
-                    end.push(None);
-                }
-            };
-            sequence.push(seq_string);
-            quality_scores.push(record.quality_scores().iter()
-                .map(|p| char::from(p+33))
-                .collect::<String>());
-
-            match record.mapping_quality() {
-                Some(mapping_quality_value) => {
-                    mapping_quality.push(Some(mapping_quality_value.get() as u32));
-                },
-                None => {
-                    mapping_quality.push(None);
-                }
-            };
-            flag.push(record.flags().bits() as u32);
-            cigar.push(record.cigar().iter().map(|p| p.unwrap())
-                .map(cigar_op_to_string)
-                .collect::<Vec<String>>().join(""));
-             let chrom_name = get_chrom_by_seq_id(
-                record.mate_reference_sequence_id(),
-                &names,
-            );
-            mate_chrom.push(chrom_name);
-            match record.mate_alignment_start()  {
-                Some(mate_start_pos) => {
-                    // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                    let pos = mate_start_pos?.get() as u32;
-                    mate_start.push(Some(if coordinate_system_zero_based { pos - 1 } else { pos }));
-                },
-                None => mate_start.push(None),
-            };
-
-            // Load tag fields
-            load_tags(&record, &mut tag_builders)?;
-
-            record_num += 1;
-            // Once the batch size is reached, build and yield a record batch.
-            if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
-                let tag_arrays = if num_tag_fields > 0 {
-                    Some(builders_to_arrays(&mut tag_builders.2)?)
-                } else {
-                    None
-                };
-                let batch = build_record_batch(
-                    Arc::clone(&schema.clone()),
-                    RecordFields {
-                        name: &name,
-                        chrom: &chrom,
-                        start: &start,
-                        end: &end,
-                        flag: &flag,
-                        cigar: &cigar,
-                        mapping_quality: &mapping_quality,
-                        mate_chrom: &mate_chrom,
-                        mate_start: &mate_start,
-                        sequence: &sequence,
-                        quality_scores: &quality_scores,
-                    },
-                    tag_arrays.as_ref(),
-                    projection.clone(),
-                )?;
-                batch_num += 1;
-                debug!("Batch number: {}", batch_num);
-                yield batch;
-                // Clear vectors for the next batch.
-                name.clear();
-                chrom.clear();
-                start.clear();
-                end.clear();
-                flag.clear();
-                cigar.clear();
-                mapping_quality.clear();
-                mate_chrom.clear();
-                mate_start.clear();
-                sequence.clear();
-                quality_scores.clear();
-            }
-        }
-        // If there are remaining records that don't fill a complete batch,
-        // yield them as well.
-        if !name.is_empty() {
-            let tag_arrays = if num_tag_fields > 0 {
-                Some(builders_to_arrays(&mut tag_builders.2)?)
-            } else {
-                None
-            };
-            let batch = build_record_batch(
-                Arc::clone(&schema.clone()),
-                RecordFields {
-                    name: &name,
-                    chrom: &chrom,
-                    start: &start,
-                    end: &end,
-                    flag: &flag,
-                    cigar: &cigar,
-                    mapping_quality: &mapping_quality,
-                    mate_chrom: &mate_chrom,
-                    mate_start: &mate_start,
-                    sequence: &sequence,
-                    quality_scores: &quality_scores,
-                },
-                tag_arrays.as_ref(),
-                projection.clone(),
-            )?;
-            yield batch;
-        }
-    };
+    let stream = process_bam_records_impl!(
+        reader,
+        schema,
+        batch_size,
+        projection,
+        coordinate_system_zero_based,
+        tag_fields
+    );
     Ok(stream)
 }
 

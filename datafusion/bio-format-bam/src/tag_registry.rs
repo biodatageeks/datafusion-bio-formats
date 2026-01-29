@@ -6,8 +6,6 @@ use std::sync::Arc;
 
 /// Definition of a BAM alignment tag with type information
 pub struct TagDefinition {
-    #[allow(dead_code)]
-    pub tag: String,
     pub sam_type: char,
     pub arrow_type: DataType,
     pub description: String,
@@ -31,7 +29,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "NM".to_string(),
         TagDefinition {
-            tag: "NM".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Edit distance to the reference".to_string(),
@@ -40,7 +37,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "MD".to_string(),
         TagDefinition {
-            tag: "MD".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "String for mismatching positions".to_string(),
@@ -49,7 +45,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "AS".to_string(),
         TagDefinition {
-            tag: "AS".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Alignment score".to_string(),
@@ -58,7 +53,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "XS".to_string(),
         TagDefinition {
-            tag: "XS".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Suboptimal alignment score".to_string(),
@@ -67,7 +61,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "MQ".to_string(),
         TagDefinition {
-            tag: "MQ".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Mapping quality of the mate/next segment".to_string(),
@@ -78,7 +71,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "RG".to_string(),
         TagDefinition {
-            tag: "RG".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Read group".to_string(),
@@ -87,7 +79,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "LB".to_string(),
         TagDefinition {
-            tag: "LB".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Library".to_string(),
@@ -96,7 +87,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "PU".to_string(),
         TagDefinition {
-            tag: "PU".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Platform unit".to_string(),
@@ -105,7 +95,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "PG".to_string(),
         TagDefinition {
-            tag: "PG".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Program".to_string(),
@@ -116,7 +105,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "CB".to_string(),
         TagDefinition {
-            tag: "CB".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Cell barcode sequence (corrected)".to_string(),
@@ -125,7 +113,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "UB".to_string(),
         TagDefinition {
-            tag: "UB".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Unique molecular identifier (UMI) barcode sequence (corrected)"
@@ -135,7 +122,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "UR".to_string(),
         TagDefinition {
-            tag: "UR".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "UMI barcode sequence (uncorrected)".to_string(),
@@ -144,7 +130,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "CR".to_string(),
         TagDefinition {
-            tag: "CR".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Cell barcode sequence (uncorrected)".to_string(),
@@ -153,7 +138,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "CY".to_string(),
         TagDefinition {
-            tag: "CY".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Cell barcode quality scores".to_string(),
@@ -162,7 +146,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "UY".to_string(),
         TagDefinition {
-            tag: "UY".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "UMI barcode quality scores".to_string(),
@@ -173,7 +156,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "BQ".to_string(),
         TagDefinition {
-            tag: "BQ".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Base quality (offset by 33)".to_string(),
@@ -182,7 +164,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "OQ".to_string(),
         TagDefinition {
-            tag: "OQ".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Original quality scores".to_string(),
@@ -193,7 +174,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "MC".to_string(),
         TagDefinition {
-            tag: "MC".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "CIGAR string for mate/next segment".to_string(),
@@ -202,7 +182,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "R2".to_string(),
         TagDefinition {
-            tag: "R2".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Sequence of mate/next segment in template".to_string(),
@@ -211,7 +190,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "SA".to_string(),
         TagDefinition {
-            tag: "SA".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Chimeric/split alignment information".to_string(),
@@ -220,7 +198,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "CC".to_string(),
         TagDefinition {
-            tag: "CC".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Reference name of the next hit".to_string(),
@@ -229,7 +206,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "CP".to_string(),
         TagDefinition {
-            tag: "CP".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Leftmost coordinate of the next hit".to_string(),
@@ -240,7 +216,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "OC".to_string(),
         TagDefinition {
-            tag: "OC".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Original CIGAR".to_string(),
@@ -249,7 +224,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "OP".to_string(),
         TagDefinition {
-            tag: "OP".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Original mapping position".to_string(),
@@ -258,7 +232,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "OA".to_string(),
         TagDefinition {
-            tag: "OA".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Original alignment".to_string(),
@@ -269,7 +242,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "FI".to_string(),
         TagDefinition {
-            tag: "FI".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Flow ion/cell identification".to_string(),
@@ -278,7 +250,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "TC".to_string(),
         TagDefinition {
-            tag: "TC".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Complete read count".to_string(),
@@ -289,7 +260,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "NH".to_string(),
         TagDefinition {
-            tag: "NH".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of reported alignments".to_string(),
@@ -298,7 +268,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "HI".to_string(),
         TagDefinition {
-            tag: "HI".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Hit index".to_string(),
@@ -307,7 +276,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "IH".to_string(),
         TagDefinition {
-            tag: "IH".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of hits".to_string(),
@@ -316,7 +284,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "SM".to_string(),
         TagDefinition {
-            tag: "SM".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Template-independent mapping quality".to_string(),
@@ -325,7 +292,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "AM".to_string(),
         TagDefinition {
-            tag: "AM".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Smallest template-independent mapping quality in the template"
@@ -335,7 +301,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "X0".to_string(),
         TagDefinition {
-            tag: "X0".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of best hits".to_string(),
@@ -344,7 +309,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "X1".to_string(),
         TagDefinition {
-            tag: "X1".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of suboptimal hits".to_string(),
@@ -353,7 +317,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "XA".to_string(),
         TagDefinition {
-            tag: "XA".to_string(),
             sam_type: 'Z',
             arrow_type: DataType::Utf8,
             description: "Alternative hits".to_string(),
@@ -362,7 +325,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "XN".to_string(),
         TagDefinition {
-            tag: "XN".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of ambiguous bases in the reference".to_string(),
@@ -371,7 +333,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "XM".to_string(),
         TagDefinition {
-            tag: "XM".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of mismatches in the alignment".to_string(),
@@ -380,7 +341,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "XO".to_string(),
         TagDefinition {
-            tag: "XO".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of gap opens".to_string(),
@@ -389,7 +349,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "XG".to_string(),
         TagDefinition {
-            tag: "XG".to_string(),
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Number of gap extensions".to_string(),
@@ -398,7 +357,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags.insert(
         "XT".to_string(),
         TagDefinition {
-            tag: "XT".to_string(),
             sam_type: 'A',
             arrow_type: DataType::Utf8,
             description: "Type: Unique/Repeat/N/Mate-sw".to_string(),
