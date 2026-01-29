@@ -11,16 +11,16 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 
 ## Crates
 
-| Crate | Description | Predicate Pushdown | Projection Pushdown | Multi-threaded | Status |
-|-------|-------------|-------------------|---------------------|----------------|--------|
-| **[datafusion-bio-format-core](datafusion/bio-format-core)** | Core utilities and object storage support | N/A | N/A | N/A | ✅ |
-| **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ❌ |✅   (BGZF) | ✅ |
-| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ❌ | ❌ | ❌ | ✅ |
-| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ❌ | ❌ | ❌ | ✅ |
-| **[datafusion-bio-format-bed](datafusion/bio-format-bed)** | BED genomic intervals | ❌ | ❌  | ❌ | ✅ |
-| **[datafusion-bio-format-gff](datafusion/bio-format-gff)** | GFF genome annotations | ✅ | ✅ | ✅ (BGZF) | ✅ |
-| **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ❌  | ❌ | ✅ |
-| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ❌ | ❌  | ❌ | ✅ |
+| Crate | Description | Predicate Pushdown | Projection Pushdown | Multi-threaded | Write Support | Status |
+|-------|-------------|-------------------|---------------------|----------------|---------------|--------|
+| **[datafusion-bio-format-core](datafusion/bio-format-core)** | Core utilities and object storage support | N/A | N/A | N/A | N/A | ✅ |
+| **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ❌ |✅ (BGZF) | ✅ | ✅ |
+| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ❌ | ❌ | ❌ | ✅ | ✅ |
+| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **[datafusion-bio-format-bed](datafusion/bio-format-bed)** | BED genomic intervals | ❌ | ❌  | ❌ | ❌ | ✅ |
+| **[datafusion-bio-format-gff](datafusion/bio-format-gff)** | GFF genome annotations | ✅ | ✅ | ✅ (BGZF) | ❌ | ✅ |
+| **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ❌  | ❌ | ❌ | ✅ |
+| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ❌ | ❌  | ❌ | ❌ | ✅ |
 
 ## Features
 
@@ -29,6 +29,7 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 - 📊 **SQL Interface**: Query genomic data using familiar SQL syntax
 - 💾 **Memory Efficient**: Streaming architecture for large files
 - 🔧 **DataFusion Integration**: Seamless integration with Apache DataFusion ecosystem
+- ✍️ **Write Support**: Export query results to FASTQ and VCF files with compression
 
 ## Installation
 
@@ -111,6 +112,143 @@ let table = BgzfFastqTableProvider::try_new(
     None
 ).await?;
 ```
+
+## Write Support
+
+FASTQ and VCF formats support writing DataFusion query results back to files using the `INSERT INTO` SQL syntax or the `insert_into()` API.
+
+### Design
+
+The write implementation follows DataFusion's standard patterns:
+
+```
+TableProvider.insert_into()
+    └── WriteExec (ExecutionPlan consuming RecordBatches)
+        ├── Serializer (Arrow → format conversion)
+        └── LocalWriter (compression handling)
+```
+
+**Key features:**
+- **Compression**: Auto-detected from file extension (`.bgz`/`.bgzf` → BGZF, `.gz` → GZIP, else plain)
+- **BGZF default**: Block-gzipped format recommended for bioinformatics (allows random access)
+- **Coordinate conversion**: Automatic 0-based ↔ 1-based conversion for VCF files
+- **Mode**: OVERWRITE only (creates/replaces file)
+
+### Write a FASTQ file
+
+```rust
+use datafusion::prelude::*;
+use datafusion_bio_format_fastq::BgzfFastqTableProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+
+    // Register source FASTQ
+    let source = BgzfFastqTableProvider::try_new("input.fastq.gz", None).await?;
+    ctx.register_table("source", Arc::new(source))?;
+
+    // Register destination FASTQ (compression auto-detected from extension)
+    let dest = BgzfFastqTableProvider::try_new("output.fastq.bgz", None).await?;
+    ctx.register_table("dest", Arc::new(dest))?;
+
+    // Filter and write to new file
+    ctx.sql("
+        INSERT INTO dest
+        SELECT name, description, sequence, quality_scores
+        FROM source
+        WHERE LENGTH(sequence) >= 100
+    ").await?.collect().await?;
+
+    Ok(())
+}
+```
+
+### Write a VCF file
+
+```rust
+use datafusion::prelude::*;
+use datafusion_bio_format_vcf::VcfTableProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+
+    // Register source VCF with INFO fields
+    let source = VcfTableProvider::try_new(
+        "input.vcf.gz",
+        Some(vec!["AF".to_string(), "DP".to_string()]),  // INFO fields
+        None,  // FORMAT fields
+        true,  // coordinate_system_zero_based
+    ).await?;
+    ctx.register_table("variants", Arc::new(source))?;
+
+    // Register destination VCF
+    let dest = VcfTableProvider::try_new(
+        "filtered.vcf.bgz",
+        Some(vec!["AF".to_string(), "DP".to_string()]),
+        None,
+        true,
+    ).await?;
+    ctx.register_table("output", Arc::new(dest))?;
+
+    // Filter variants and write
+    ctx.sql("
+        INSERT INTO output
+        SELECT chrom, start, end, id, ref, alt, qual, filter, AF, DP
+        FROM variants
+        WHERE AF > 0.01 AND DP >= 10
+    ").await?.collect().await?;
+
+    Ok(())
+}
+```
+
+### Coordinate System Handling
+
+VCF files use 1-based coordinates, but the table provider can expose them as 0-based half-open intervals (common in bioinformatics tools like BED):
+
+| Setting | Read Behavior | Write Behavior |
+|---------|---------------|----------------|
+| `coordinate_system_zero_based=true` | VCF POS 100 → DataFrame start=99 | DataFrame start=99 → VCF POS 100 |
+| `coordinate_system_zero_based=false` | VCF POS 100 → DataFrame start=100 | DataFrame start=100 → VCF POS 100 |
+
+The same setting controls both reading and writing, ensuring round-trip consistency.
+
+### Compression Options
+
+| Extension | Compression | Notes |
+|-----------|-------------|-------|
+| `.vcf`, `.fastq` | Plain | Uncompressed |
+| `.vcf.gz`, `.fastq.gz` | GZIP | Standard compression |
+| `.vcf.bgz`, `.fastq.bgz` | BGZF | Block-gzipped (recommended) |
+| `.vcf.bgzf`, `.fastq.bgzf` | BGZF | Block-gzipped (recommended) |
+
+### VCF Header Metadata Preservation
+
+When reading VCF files, header metadata (field descriptions, types, and numbers) is stored in Arrow field metadata. This enables round-trip read/write operations to preserve the original VCF header information:
+
+```rust
+// Reading preserves metadata in schema
+let provider = VcfTableProvider::new("input.vcf", ...)?;
+let schema = provider.schema();
+
+// Field metadata contains original VCF definitions
+let dp_field = schema.field_with_name("DP")?;
+let metadata = dp_field.metadata();
+// metadata["vcf_description"] = "Total read depth"
+// metadata["vcf_type"] = "Integer"
+// metadata["vcf_number"] = "1"
+```
+
+The writer uses this metadata to reconstruct proper VCF header lines:
+```
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total read depth">
+```
+
+For write-only operations (new output files), use `VcfTableProvider::new_for_write()` which accepts the schema directly without reading from file.
 
 ## Performance Benchmarks
 

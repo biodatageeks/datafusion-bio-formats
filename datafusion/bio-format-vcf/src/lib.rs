@@ -64,8 +64,12 @@ extern crate core;
 /// with parallel execution using BGZF block partition boundaries. It's designed for high-performance
 /// querying of large genomic variant datasets.
 pub mod bgzf_parallel_reader;
+/// VCF header builder for constructing VCF headers from Arrow schemas.
+pub mod header_builder;
 /// Physical execution plan implementation for VCF queries.
 mod physical_exec;
+/// Serializer for converting Arrow RecordBatches to VCF records.
+pub mod serializer;
 /// Storage layer and file I/O utilities for VCF format.
 ///
 /// This module handles reading VCF files from various sources (local, S3, GCS, Azure)
@@ -76,3 +80,9 @@ pub mod storage;
 /// This module provides the primary API for registering VCF files as queryable
 /// DataFusion tables and handling schema determination from VCF headers.
 pub mod table_provider;
+mod write_exec;
+/// Writer for VCF files with compression support.
+pub mod writer;
+
+pub use write_exec::VcfWriteExec;
+pub use writer::{VcfCompressionType, VcfLocalWriter};
