@@ -360,19 +360,20 @@ async fn get_remote_bam_stream(
                 };
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
-                    &name,
-                    &chrom,
-                    &start,
-                    &end,
-                    &flag,
-                    &cigar,
-                    &mapping_quality,
-                    &mate_chrom,
-                    &mate_start,
-                    &sequence,
-                    &quality_scores,
+                    RecordFields {
+                        name: &name,
+                        chrom: &chrom,
+                        start: &start,
+                        end: &end,
+                        flag: &flag,
+                        cigar: &cigar,
+                        mapping_quality: &mapping_quality,
+                        mate_chrom: &mate_chrom,
+                        mate_start: &mate_start,
+                        sequence: &sequence,
+                        quality_scores: &quality_scores,
+                    },
                     tag_arrays.as_ref(),
-                    num_tag_fields,
                     projection.clone(),
                 )?;
                 batch_num += 1;
@@ -402,19 +403,20 @@ async fn get_remote_bam_stream(
             };
             let batch = build_record_batch(
                 Arc::clone(&schema.clone()),
-                &name,
-                &chrom,
-                &start,
-                &end,
-                &flag,
-                &cigar,
-                &mapping_quality,
-                &mate_chrom,
-                &mate_start,
-                &sequence,
-                &quality_scores,
+                RecordFields {
+                    name: &name,
+                    chrom: &chrom,
+                    start: &start,
+                    end: &end,
+                    flag: &flag,
+                    cigar: &cigar,
+                    mapping_quality: &mapping_quality,
+                    mate_chrom: &mate_chrom,
+                    mate_start: &mate_start,
+                    sequence: &sequence,
+                    quality_scores: &quality_scores,
+                },
                 tag_arrays.as_ref(),
-                num_tag_fields,
                 projection.clone(),
             )?;
             yield batch;
@@ -543,19 +545,20 @@ async fn get_local_bam(
                 };
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
-                   &name,
-                    &chrom,
-                    &start,
-                    &end,
-                    &flag,
-                    &cigar,
-                    &mapping_quality,
-                    &mate_chrom,
-                    &mate_start,
-                    &sequence,
-                    &quality_scores,
+                    RecordFields {
+                        name: &name,
+                        chrom: &chrom,
+                        start: &start,
+                        end: &end,
+                        flag: &flag,
+                        cigar: &cigar,
+                        mapping_quality: &mapping_quality,
+                        mate_chrom: &mate_chrom,
+                        mate_start: &mate_start,
+                        sequence: &sequence,
+                        quality_scores: &quality_scores,
+                    },
                     tag_arrays.as_ref(),
-                    num_tag_fields,
                     projection.clone(),
                 )?;
                 batch_num += 1;
@@ -585,19 +588,20 @@ async fn get_local_bam(
             };
             let batch = build_record_batch(
                 Arc::clone(&schema.clone()),
-               &name,
-                &chrom,
-                &start,
-                &end,
-                &flag,
-                &cigar,
-                &mapping_quality,
-                &mate_chrom,
-                &mate_start,
-                &sequence,
-                &quality_scores,
+                RecordFields {
+                    name: &name,
+                    chrom: &chrom,
+                    start: &start,
+                    end: &end,
+                    flag: &flag,
+                    cigar: &cigar,
+                    mapping_quality: &mapping_quality,
+                    mate_chrom: &mate_chrom,
+                    mate_start: &mate_start,
+                    sequence: &sequence,
+                    quality_scores: &quality_scores,
+                },
                 tag_arrays.as_ref(),
-                num_tag_fields,
                 projection.clone(),
             )?;
             yield batch;
@@ -606,24 +610,38 @@ async fn get_local_bam(
     Ok(stream)
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Container for BAM record field data
+struct RecordFields<'a> {
+    name: &'a [Option<String>],
+    chrom: &'a [Option<String>],
+    start: &'a [Option<u32>],
+    end: &'a [Option<u32>],
+    flag: &'a [u32],
+    cigar: &'a [String],
+    mapping_quality: &'a [Option<u32>],
+    mate_chrom: &'a [Option<String>],
+    mate_start: &'a [Option<u32>],
+    sequence: &'a [String],
+    quality_scores: &'a [String],
+}
+
 fn build_record_batch(
     schema: SchemaRef,
-    name: &[Option<String>],
-    chrom: &[Option<String>],
-    start: &[Option<u32>],
-    end: &[Option<u32>],
-    flag: &[u32],
-    cigar: &[String],
-    mapping_quality: &[Option<u32>],
-    mate_chrom: &[Option<String>],
-    mate_start: &[Option<u32>],
-    sequence: &[String],
-    quality_scores: &[String],
+    fields: RecordFields,
     tag_arrays: Option<&Vec<ArrayRef>>,
-    _num_tag_fields: usize,
     projection: Option<Vec<usize>>,
 ) -> datafusion::error::Result<RecordBatch> {
+    let name = fields.name;
+    let chrom = fields.chrom;
+    let start = fields.start;
+    let end = fields.end;
+    let flag = fields.flag;
+    let cigar = fields.cigar;
+    let mapping_quality = fields.mapping_quality;
+    let mate_chrom = fields.mate_chrom;
+    let mate_start = fields.mate_start;
+    let sequence = fields.sequence;
+    let quality_scores = fields.quality_scores;
     let name_array = Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>;
     let chrom_array = Arc::new(StringArray::from(chrom.to_vec())) as Arc<dyn Array>;
     let start_array = Arc::new(UInt32Array::from(start.to_vec())) as Arc<dyn Array>;
@@ -704,6 +722,7 @@ fn build_record_batch(
         .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,

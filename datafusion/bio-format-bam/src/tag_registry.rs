@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 /// Definition of a BAM alignment tag with type information
 pub struct TagDefinition {
+    #[allow(dead_code)]
     pub tag: String,
     pub sam_type: char,
     pub arrow_type: DataType,
