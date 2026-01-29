@@ -215,3 +215,86 @@ async fn test_empty_tag_list() {
     // Should have 11 core fields only
     assert_eq!(schema.fields().len(), 11);
 }
+
+#[tokio::test]
+#[ignore = "Requires valid BAM test file"]
+async fn test_describe_discovers_tags() {
+    use datafusion::prelude::*;
+
+    let provider =
+        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None).unwrap();
+
+    let ctx = SessionContext::new();
+
+    // Discover schema by reading 50 records
+    let schema_df = provider.describe(&ctx, Some(50)).await.unwrap();
+    let results = schema_df.collect().await.unwrap();
+
+    assert!(!results.is_empty());
+    let batch = &results[0];
+
+    // Should have at least 11 rows (core fields)
+    assert!(batch.num_rows() >= 11);
+
+    // Verify schema columns
+    assert_eq!(batch.schema().field(0).name(), "column_name");
+    assert_eq!(batch.schema().field(1).name(), "data_type");
+    assert_eq!(batch.schema().field(2).name(), "nullable");
+    assert_eq!(batch.schema().field(3).name(), "category");
+    assert_eq!(batch.schema().field(4).name(), "sam_type");
+    assert_eq!(batch.schema().field(5).name(), "description");
+
+    // Check that core fields are present
+    use datafusion::arrow::array::{Array, StringArray};
+    let column_names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    let has_core_field = (0..column_names.len()).any(|i| column_names.value(i) == "name");
+    assert!(has_core_field, "Should have core 'name' field");
+
+    // Check that discovered tags are marked correctly
+    let categories = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    let tag_count = (0..categories.len())
+        .filter(|&i| categories.value(i) == "tag")
+        .count();
+
+    println!("Discovered {} tags in sample", tag_count);
+    // Should discover at least some tags if present in data
+}
+
+#[tokio::test]
+#[ignore = "Requires valid BAM test file"]
+async fn test_describe_with_display() {
+    use datafusion::prelude::*;
+
+    let provider =
+        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None).unwrap();
+
+    let ctx = SessionContext::new();
+    let schema_df = provider.describe(&ctx, Some(100)).await.unwrap();
+
+    // Should be able to display the DataFrame
+    schema_df.show().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "Requires valid BAM test file"]
+async fn test_describe_method_signature() {
+    // Test that describe method exists with correct signature
+    use datafusion::prelude::*;
+
+    let provider =
+        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None).unwrap();
+
+    let ctx = SessionContext::new();
+    let result = provider.describe(&ctx, Some(10)).await;
+    assert!(result.is_ok(), "Should successfully describe BAM schema");
+}

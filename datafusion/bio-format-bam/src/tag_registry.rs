@@ -380,8 +380,7 @@ pub fn sam_tag_type_to_arrow_type(sam_type: char) -> DataType {
 }
 
 /// Infer SAM type and Arrow type from a noodles Value
-/// Used for runtime type validation
-#[allow(dead_code)]
+/// Used for runtime type validation and schema discovery
 pub fn infer_type_from_noodles_value(value: &Value) -> (char, DataType) {
     match value {
         Value::Character(_) => ('A', DataType::Utf8),
