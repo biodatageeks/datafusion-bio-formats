@@ -309,6 +309,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "dependabot/cargo/log-0.4.29@7401c44dfae5afa969b805e136b8fe73ccc31913@linux",
+      "label": "dependabot/cargo/log-0.4.29(7401c44d)",
+      "ref": "dependabot/cargo/log-0.4.29",
+      "ref_type": "branch",
+      "timestamp": "2026-01-30T10:13:27Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/7401c44d/linux",
+      "commit_sha": "7401c44dfae5afa969b805e136b8fe73ccc31913",
+      "is_latest_tag": false
+    },
+    {
+      "id": "dependabot/cargo/log-0.4.29@7401c44dfae5afa969b805e136b8fe73ccc31913@macos",
+      "label": "dependabot/cargo/log-0.4.29(7401c44d)",
+      "ref": "dependabot/cargo/log-0.4.29",
+      "ref_type": "branch",
+      "timestamp": "2026-01-30T10:13:27Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/7401c44d/macos",
+      "commit_sha": "7401c44dfae5afa969b805e136b8fe73ccc31913",
+      "is_latest_tag": false
+    },
+    {
       "id": "dependabot/cargo/log-0.4.29@80b75c37555c657c3bb197f3cfec749b819b9dcf@linux",
       "label": "dependabot/cargo/log-0.4.29(80b75c37)",
       "ref": "dependabot/cargo/log-0.4.29",
@@ -1557,6 +1581,30 @@
       "is_latest_tag": true
     },
     {
+      "id": "v0.1.1@7401c44dfae5afa969b805e136b8fe73ccc31913@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-30T10:13:27Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "7401c44dfae5afa969b805e136b8fe73ccc31913",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@7401c44dfae5afa969b805e136b8fe73ccc31913@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-01-30T10:13:27Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "7401c44dfae5afa969b805e136b8fe73ccc31913",
+      "is_latest_tag": true
+    },
+    {
       "id": "v0.1.1@75d34edab9a4f8d7b00e5d49e4f5f55cc2fd34d0@linux",
       "label": "v0.1.1",
       "ref": "v0.1.1",
@@ -2424,6 +2472,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-01-30T09:33:59Z",
+  "last_updated": "2026-01-30T10:13:27Z",
   "latest_tag": "v0.1.1"
 }
