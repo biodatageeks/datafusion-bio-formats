@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_projection_full_schema",
+  "format": "gff",
+  "category": "projection_pushdown",
+  "timestamp": "2026-01-30T07:14:55.827254Z",
+  "system_info": {
+    "os": "Darwin 15.7.3",
+    "cpu_model": "Apple M1 (Virtual)",
+    "cpu_cores": 3,
+    "total_memory_gb": 7.0
+  },
+  "configuration": {
+    "query": "SELECT * FROM gencode_annotations LIMIT 100000",
+    "repetitions": 3,
+    "test_name": "full_schema"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 0.0,
+    "elapsed_seconds": 0.000548236,
+    "total_records": 0,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
