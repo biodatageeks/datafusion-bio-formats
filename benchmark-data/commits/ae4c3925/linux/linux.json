@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-01-30T07:52:51Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/bam-optional-tags",
+  "commit_sha": "ae4c39250880b6f9cd330e22b2884a28361dcdac",
+  "benchmark_mode": "fast"
+}
