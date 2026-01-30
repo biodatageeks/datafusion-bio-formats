@@ -1,20 +1,27 @@
 use crate::storage::CramReader;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, UInt32Array};
-use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::common::DataFusionError;
+use datafusion::arrow::array::{ArrayRef, RecordBatch};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::error::ArrowError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_bio_format_core::alignment_utils::{
+    RecordFields, build_record_batch, cigar_op_to_string,
+    get_chrom_by_seq_id_cram as get_chrom_by_seq_id,
+};
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
+use datafusion_bio_format_core::table_utils::OptionalField;
+use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
-use noodles_sam::alignment::record::cigar::Op;
-use noodles_sam::alignment::record::cigar::op::Kind as OpKind;
+use noodles_sam::alignment::Record;
+use noodles_sam::alignment::record::data::field::value::Array as SamArray;
+use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -30,6 +37,8 @@ pub struct CramExec {
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     pub(crate) coordinate_system_zero_based: bool,
+    /// Optional list of CRAM alignment tags to include as columns
+    pub(crate) tag_fields: Option<Vec<String>>,
 }
 
 impl Debug for CramExec {
@@ -85,12 +94,153 @@ impl ExecutionPlan for CramExec {
             self.projection.clone(),
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
+            self.tag_fields.clone(),
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
 
+type TagBuilders = (Vec<String>, Vec<DataType>, Vec<OptionalField>, Vec<Tag>);
+
+fn set_tag_builders(
+    batch_size: usize,
+    tag_fields: Option<Vec<String>>,
+    tag_builders: &mut TagBuilders,
+) {
+    if let Some(tags) = tag_fields {
+        let known_tags = get_known_tags();
+        for tag in tags {
+            // Get tag definition from known tags, or use default for unknown tags
+            let (arrow_type, _sam_type) = if let Some(tag_def) = known_tags.get(&tag) {
+                (tag_def.arrow_type.clone(), tag_def.sam_type)
+            } else {
+                // Default for unknown tags: Utf8
+                (DataType::Utf8, 'Z')
+            };
+
+            if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
+                let tag_bytes = tag.as_bytes();
+                if tag_bytes.len() == 2 {
+                    let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
+                    tag_builders.0.push(tag.clone());
+                    tag_builders.1.push(arrow_type);
+                    tag_builders.2.push(builder);
+                    tag_builders.3.push(parsed_tag);
+                }
+            }
+        }
+    }
+}
+
+fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
+    for i in 0..tag_builders.0.len() {
+        let tag = &tag_builders.3[i];
+        let builder = &mut tag_builders.2[i];
+        let data = record.data();
+        let tag_result = data.get(tag);
+
+        match tag_result {
+            Some(Ok(value)) => match value {
+                Value::Int8(v) => builder.append_int(v as i32)?,
+                Value::UInt8(v) => builder.append_int(v as i32)?,
+                Value::Int16(v) => builder.append_int(v as i32)?,
+                Value::UInt16(v) => builder.append_int(v as i32)?,
+                Value::Int32(v) => builder.append_int(v)?,
+                Value::UInt32(v) => builder.append_int(v as i32)?,
+                Value::Float(f) => builder.append_float(f)?,
+                Value::String(s) => match std::str::from_utf8(s.as_ref()) {
+                    Ok(string) => builder.append_string(string)?,
+                    Err(_) => builder.append_null()?,
+                },
+                Value::Character(c) => builder.append_string(&c.to_string())?,
+                Value::Hex(h) => {
+                    let hex_str = hex::encode::<&[u8]>(h.as_ref());
+                    builder.append_string(&hex_str)?
+                }
+                Value::Array(arr) => match arr {
+                    SamArray::Int8(vals) => {
+                        let vec: Result<Vec<i32>, _> = vals
+                            .as_ref()
+                            .iter()
+                            .map(|v| v.map(|val| val as i32))
+                            .collect();
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
+                    }
+                    SamArray::UInt8(vals) => {
+                        let vec: Result<Vec<i32>, _> = vals
+                            .as_ref()
+                            .iter()
+                            .map(|v| v.map(|val| val as i32))
+                            .collect();
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
+                    }
+                    SamArray::Int16(vals) => {
+                        let vec: Result<Vec<i32>, _> = vals
+                            .as_ref()
+                            .iter()
+                            .map(|v| v.map(|val| val as i32))
+                            .collect();
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
+                    }
+                    SamArray::UInt16(vals) => {
+                        let vec: Result<Vec<i32>, _> = vals
+                            .as_ref()
+                            .iter()
+                            .map(|v| v.map(|val| val as i32))
+                            .collect();
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
+                    }
+                    SamArray::Int32(vals) => {
+                        let vec: Result<Vec<i32>, _> = vals.as_ref().iter().collect();
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
+                    }
+                    SamArray::UInt32(vals) => {
+                        let vec: Result<Vec<i32>, _> = vals
+                            .as_ref()
+                            .iter()
+                            .map(|v| v.map(|val| val as i32))
+                            .collect();
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
+                    }
+                    SamArray::Float(vals) => {
+                        let vec: Result<Vec<f32>, _> = vals.as_ref().iter().collect();
+                        match vec {
+                            Ok(v) => builder.append_array_float(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
+                    }
+                },
+            },
+            _ => builder.append_null()?,
+        }
+    }
+    Ok(())
+}
+
+fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, ArrowError> {
+    builders.iter_mut().map(|b| b.finish()).collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn get_remote_cram_stream(
     file_path: String,
     schema: SchemaRef,
@@ -99,6 +249,7 @@ async fn get_remote_cram_stream(
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
+    tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
@@ -119,6 +270,11 @@ async fn get_remote_cram_stream(
         let mut mate_start : Vec<Option<u32>> = Vec::with_capacity(batch_size);
         let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
         let mut sequence : Vec<String> = Vec::with_capacity(batch_size);
+
+        // Initialize tag builders
+        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        set_tag_builders(batch_size, tag_fields, &mut tag_builders);
+        let num_tag_fields = tag_builders.0.len();
 
         let mut record_num = 0;
         let mut batch_num = 0;
@@ -199,23 +355,34 @@ async fn get_remote_cram_stream(
                 _ => mate_start.push(None),
             };
 
+            // Load tag values if present
+            load_tags(&record, &mut tag_builders)?;
+
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
+                let tag_arrays = if num_tag_fields > 0 {
+                    Some(builders_to_arrays(&mut tag_builders.2)?)
+                } else {
+                    None
+                };
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
-                    &name,
-                    &chrom,
-                    &start,
-                    &end,
-                    &flag,
-                    &cigar,
-                    &mapping_quality,
-                    &mate_chrom,
-                    &mate_start,
-                    &sequence,
-                    &quality_scores,
+                    RecordFields {
+                        name: &name,
+                        chrom: &chrom,
+                        start: &start,
+                        end: &end,
+                        flag: &flag,
+                        cigar: &cigar,
+                        mapping_quality: &mapping_quality,
+                        mate_chrom: &mate_chrom,
+                        mate_start: &mate_start,
+                        sequence: &sequence,
+                        quality_scores: &quality_scores,
+                    },
+                    tag_arrays.as_ref(),
                     projection.clone(),
                 )?;
                 batch_num += 1;
@@ -238,19 +405,27 @@ async fn get_remote_cram_stream(
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
         if !name.is_empty() {
+            let tag_arrays = if num_tag_fields > 0 {
+                Some(builders_to_arrays(&mut tag_builders.2)?)
+            } else {
+                None
+            };
             let batch = build_record_batch(
                 Arc::clone(&schema.clone()),
-                &name,
-                &chrom,
-                &start,
-                &end,
-                &flag,
-                &cigar,
-                &mapping_quality,
-                &mate_chrom,
-                &mate_start,
-                &sequence,
-                &quality_scores,
+                RecordFields {
+                    name: &name,
+                    chrom: &chrom,
+                    start: &start,
+                    end: &end,
+                    flag: &flag,
+                    cigar: &cigar,
+                    mapping_quality: &mapping_quality,
+                    mate_chrom: &mate_chrom,
+                    mate_start: &mate_start,
+                    sequence: &sequence,
+                    quality_scores: &quality_scores,
+                },
+                tag_arrays.as_ref(),
                 projection.clone(),
             )?;
             yield batch;
@@ -259,6 +434,7 @@ async fn get_remote_cram_stream(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_local_cram(
     file_path: String,
     schema: SchemaRef,
@@ -266,6 +442,7 @@ async fn get_local_cram(
     reference_path: Option<String>,
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
+    tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
@@ -280,6 +457,11 @@ async fn get_local_cram(
     let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
     let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
     let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
+
+    // Initialize tag builders
+    let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    set_tag_builders(batch_size, tag_fields, &mut tag_builders);
+    let num_tag_fields = tag_builders.0.len();
 
     let mut batch_num = 0;
     let file_path = file_path.clone();
@@ -362,23 +544,34 @@ async fn get_local_cram(
                 None => mate_start.push(None),
             };
 
+            // Load tag values if present
+            load_tags(&record, &mut tag_builders)?;
+
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
+                let tag_arrays = if num_tag_fields > 0 {
+                    Some(builders_to_arrays(&mut tag_builders.2)?)
+                } else {
+                    None
+                };
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
-                   &name,
-                    &chrom,
-                    &start,
-                    &end,
-                    &flag,
-                    &cigar,
-                    &mapping_quality,
-                    &mate_chrom,
-                    &mate_start,
-                    &sequence,
-                    &quality_scores,
+                    RecordFields {
+                        name: &name,
+                        chrom: &chrom,
+                        start: &start,
+                        end: &end,
+                        flag: &flag,
+                        cigar: &cigar,
+                        mapping_quality: &mapping_quality,
+                        mate_chrom: &mate_chrom,
+                        mate_start: &mate_start,
+                        sequence: &sequence,
+                        quality_scores: &quality_scores,
+                    },
+                    tag_arrays.as_ref(),
                     projection.clone(),
                 )?;
                 batch_num += 1;
@@ -401,19 +594,27 @@ async fn get_local_cram(
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
         if !name.is_empty() {
+            let tag_arrays = if num_tag_fields > 0 {
+                Some(builders_to_arrays(&mut tag_builders.2)?)
+            } else {
+                None
+            };
             let batch = build_record_batch(
                 Arc::clone(&schema.clone()),
-               &name,
-                &chrom,
-                &start,
-                &end,
-                &flag,
-                &cigar,
-                &mapping_quality,
-                &mate_chrom,
-                &mate_start,
-                &sequence,
-                &quality_scores,
+                RecordFields {
+                    name: &name,
+                    chrom: &chrom,
+                    start: &start,
+                    end: &end,
+                    flag: &flag,
+                    cigar: &cigar,
+                    mapping_quality: &mapping_quality,
+                    mate_chrom: &mate_chrom,
+                    mate_start: &mate_start,
+                    sequence: &sequence,
+                    quality_scores: &quality_scores,
+                },
+                tag_arrays.as_ref(),
                 projection.clone(),
             )?;
             yield batch;
@@ -423,83 +624,6 @@ async fn get_local_cram(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_record_batch(
-    schema: SchemaRef,
-    name: &[Option<String>],
-    chrom: &[Option<String>],
-    start: &[Option<u32>],
-    end: &[Option<u32>],
-    flag: &[u32],
-    cigar: &[String],
-    mapping_quality: &[Option<u32>],
-    mate_chrom: &[Option<String>],
-    mate_start: &[Option<u32>],
-    sequence: &[String],
-    quality_scores: &[String],
-    projection: Option<Vec<usize>>,
-) -> datafusion::error::Result<RecordBatch> {
-    let name_array = Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>;
-    let chrom_array = Arc::new(StringArray::from(chrom.to_vec())) as Arc<dyn Array>;
-    let start_array = Arc::new(UInt32Array::from(start.to_vec())) as Arc<dyn Array>;
-    let end_array = Arc::new(UInt32Array::from(end.to_vec())) as Arc<dyn Array>;
-    let flag_array = Arc::new(UInt32Array::from(flag.to_vec())) as Arc<dyn Array>;
-    let cigar_array = Arc::new(StringArray::from(cigar.to_vec())) as Arc<dyn Array>;
-    let mapping_quality_array =
-        Arc::new(UInt32Array::from(mapping_quality.to_vec())) as Arc<dyn Array>;
-    let mate_chrom_array = Arc::new(StringArray::from(mate_chrom.to_vec())) as Arc<dyn Array>;
-    let mate_start_array = Arc::new(UInt32Array::from(mate_start.to_vec())) as Arc<dyn Array>;
-    let sequence_array = Arc::new(StringArray::from(sequence.to_vec())) as Arc<dyn Array>;
-    let quality_scores_array =
-        Arc::new(StringArray::from(quality_scores.to_vec())) as Arc<dyn Array>;
-
-    let arrays = match projection {
-        None => {
-            let arrays: Vec<Arc<dyn Array>> = vec![
-                name_array,
-                chrom_array,
-                start_array,
-                end_array,
-                flag_array,
-                cigar_array,
-                mapping_quality_array,
-                mate_chrom_array,
-                mate_start_array,
-                sequence_array,
-                quality_scores_array,
-            ];
-            arrays
-        }
-        Some(proj_ids) => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(name.len());
-            if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(name_array.len())) as Arc<dyn Array>);
-            } else {
-                for i in proj_ids.clone() {
-                    match i {
-                        0 => arrays.push(name_array.clone()),
-                        1 => arrays.push(chrom_array.clone()),
-                        2 => arrays.push(start_array.clone()),
-                        3 => arrays.push(end_array.clone()),
-                        4 => arrays.push(flag_array.clone()),
-                        5 => arrays.push(cigar_array.clone()),
-                        6 => arrays.push(mapping_quality_array.clone()),
-                        7 => arrays.push(mate_chrom_array.clone()),
-                        8 => arrays.push(mate_start_array.clone()),
-                        9 => arrays.push(sequence_array.clone()),
-                        10 => arrays.push(quality_scores_array.clone()),
-                        _ => arrays
-                            .push(Arc::new(NullArray::new(name_array.len())) as Arc<dyn Array>),
-                    }
-                }
-            }
-            arrays
-        }
-    };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
-}
-
 async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,
@@ -508,6 +632,7 @@ async fn get_stream(
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
+    tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let file_path = file_path.clone();
     let store_type = get_storage_type(file_path.clone());
@@ -522,6 +647,7 @@ async fn get_stream(
                 reference_path,
                 projection,
                 coordinate_system_zero_based,
+                tag_fields,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -535,41 +661,11 @@ async fn get_stream(
                 projection,
                 object_storage_options,
                 coordinate_system_zero_based,
+                tag_fields,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
         }
         _ => unimplemented!("Unsupported storage type: {:?}", store_type),
-    }
-}
-
-fn cigar_op_to_string(op: Op) -> String {
-    let kind = match op.kind() {
-        OpKind::Match => 'M',
-        OpKind::Insertion => 'I',
-        OpKind::Deletion => 'D',
-        OpKind::Skip => 'N',
-        OpKind::SoftClip => 'S',
-        OpKind::HardClip => 'H',
-        OpKind::Pad => 'P',
-        OpKind::SequenceMatch => '=',
-        OpKind::SequenceMismatch => 'X',
-    };
-    format!("{}{}", op.len(), kind)
-}
-
-fn get_chrom_by_seq_id(rid: Option<usize>, names: &[String]) -> Option<String> {
-    match rid {
-        Some(rid) => {
-            let chrom_name = names
-                .get(rid)
-                .expect("reference_sequence_id() should be in bounds");
-            let mut chrom_name = chrom_name.to_string().to_lowercase();
-            if !chrom_name.starts_with("chr") {
-                chrom_name = format!("chr{}", chrom_name);
-            }
-            Some(chrom_name)
-        }
-        _ => None,
     }
 }

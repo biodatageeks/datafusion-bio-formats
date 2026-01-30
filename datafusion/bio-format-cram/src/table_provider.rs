@@ -9,15 +9,21 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
-use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::tag_registry::get_known_tags;
+use datafusion_bio_format_core::{
+    BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
+};
 use log::debug;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::Result<SchemaRef> {
-    let fields = vec![
+fn determine_schema(
+    tag_fields: &Option<Vec<String>>,
+    coordinate_system_zero_based: bool,
+) -> datafusion::common::Result<SchemaRef> {
+    let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
         Field::new("chrom", DataType::Utf8, true),
         Field::new("start", DataType::UInt32, true),
@@ -30,6 +36,33 @@ fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::R
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
     ];
+
+    // Add tag fields if specified
+    if let Some(tags) = tag_fields {
+        let known_tags = get_known_tags();
+        for tag in tags {
+            let mut field_metadata = HashMap::new();
+            field_metadata.insert(BAM_TAG_TAG_KEY.to_string(), tag.clone());
+
+            // Use known tag definition if available, otherwise use default (String/Utf8)
+            let (sam_type, arrow_type, description) = if let Some(tag_def) = known_tags.get(tag) {
+                (
+                    tag_def.sam_type,
+                    tag_def.arrow_type.clone(),
+                    tag_def.description.clone(),
+                )
+            } else {
+                // Default for unknown tags: treat as string (most flexible)
+                ('Z', DataType::Utf8, "Unknown tag".to_string())
+            };
+
+            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), sam_type.to_string());
+            field_metadata.insert(BAM_TAG_DESCRIPTION_KEY.to_string(), description);
+
+            fields.push(Field::new(tag.clone(), arrow_type, true).with_metadata(field_metadata));
+        }
+    }
+
     // Add coordinate system metadata to schema
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -54,6 +87,8 @@ pub struct CramTableProvider {
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
+    /// Optional list of CRAM alignment tags to include as columns
+    tag_fields: Option<Vec<String>>,
 }
 
 impl CramTableProvider {
@@ -65,6 +100,7 @@ impl CramTableProvider {
     /// * `object_storage_options` - Optional cloud storage configuration
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
+    /// * `tag_fields` - Optional list of BAM/SAM tags to extract as columns (e.g., "NM", "MD")
     ///
     /// # Returns
     /// * `Ok(provider)` - Successfully created provider
@@ -74,15 +110,168 @@ impl CramTableProvider {
         reference_path: Option<String>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
+        tag_fields: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema(coordinate_system_zero_based)?;
+        let schema = determine_schema(&tag_fields, coordinate_system_zero_based)?;
         Ok(Self {
             file_path,
             schema,
             reference_path,
             object_storage_options,
             coordinate_system_zero_based,
+            tag_fields,
         })
+    }
+
+    /// Discover available columns by sampling records from the CRAM file.
+    ///
+    /// Returns a DataFrame describing all columns including:
+    /// - Core alignment fields (name, chrom, start, end, etc.)
+    /// - Discovered tag fields with their types and descriptions
+    ///
+    /// # Arguments
+    /// * `ctx` - DataFusion session context
+    /// * `sample_size` - Number of records to sample (default: 100)
+    pub async fn describe(
+        &self,
+        ctx: &datafusion::prelude::SessionContext,
+        sample_size: Option<usize>,
+    ) -> Result<datafusion::prelude::DataFrame, datafusion::common::DataFusionError> {
+        use crate::storage::CramReader;
+        use datafusion::arrow::array::{BooleanBuilder, RecordBatch, StringBuilder};
+        use datafusion::arrow::datatypes::{Field as ArrowField, Schema};
+        use datafusion::datasource::MemTable;
+        use futures_util::StreamExt;
+        use noodles_sam::alignment::record_buf::data::field::Value as CramValue;
+
+        // Helper function to infer type from CRAM value
+        fn infer_type_from_cram_value(value: &CramValue) -> (char, DataType) {
+            match value {
+                CramValue::Character(_) => ('A', DataType::Utf8),
+                CramValue::Int8(_)
+                | CramValue::UInt8(_)
+                | CramValue::Int16(_)
+                | CramValue::UInt16(_)
+                | CramValue::Int32(_)
+                | CramValue::UInt32(_) => ('i', DataType::Int32),
+                CramValue::Float(_) => ('f', DataType::Float32),
+                CramValue::String(_) => ('Z', DataType::Utf8),
+                CramValue::Hex(_) => ('H', DataType::Utf8),
+                CramValue::Array(_) => (
+                    'B',
+                    DataType::List(Arc::new(ArrowField::new("item", DataType::Int32, true))),
+                ),
+            }
+        }
+
+        let sample_size = sample_size.unwrap_or(100);
+
+        // Open CRAM reader
+        let mut reader = CramReader::new(
+            self.file_path.clone(),
+            self.reference_path.clone(),
+            self.object_storage_options.clone(),
+        )
+        .await;
+
+        // Discover tags by sampling records
+        let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+        let mut records = reader.read_records().await;
+        let mut count = 0;
+
+        while let Some(result) = records.next().await {
+            if count >= sample_size {
+                break;
+            }
+
+            match result {
+                Ok(record) => {
+                    let data = record.data();
+                    for (tag, value) in data.iter() {
+                        let tag_str =
+                            format!("{}{}", tag.as_ref()[0] as char, tag.as_ref()[1] as char);
+                        discovered_tags
+                            .entry(tag_str)
+                            .or_insert_with(|| infer_type_from_cram_value(value));
+                    }
+                    count += 1;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        // Build schema description DataFrame
+        let mut column_names = StringBuilder::new();
+        let mut data_types = StringBuilder::new();
+        let mut nullable = BooleanBuilder::new();
+        let mut category = StringBuilder::new();
+        let mut sam_types = StringBuilder::new();
+        let mut descriptions = StringBuilder::new();
+
+        // Core fields
+        let core_fields = vec![
+            ("name", "Utf8", true, "Read name"),
+            ("chrom", "Utf8", true, "Chromosome/reference sequence name"),
+            ("start", "UInt32", true, "Alignment start position"),
+            ("end", "UInt32", true, "Alignment end position"),
+            ("flags", "UInt32", false, "SAM flags"),
+            ("cigar", "Utf8", false, "CIGAR string"),
+            ("mapping_quality", "UInt32", true, "Mapping quality"),
+            ("mate_chrom", "Utf8", true, "Mate chromosome"),
+            ("mate_start", "UInt32", true, "Mate start position"),
+            ("sequence", "Utf8", false, "Read sequence"),
+            ("quality_scores", "Utf8", false, "Quality scores"),
+        ];
+
+        for (name, dtype, is_null, desc) in core_fields {
+            column_names.append_value(name);
+            data_types.append_value(dtype);
+            nullable.append_value(is_null);
+            category.append_value("core");
+            sam_types.append_value("");
+            descriptions.append_value(desc);
+        }
+
+        // Tag fields
+        let known_tags = get_known_tags();
+        for (tag_name, (sam_type, arrow_type)) in discovered_tags {
+            column_names.append_value(&tag_name);
+            data_types.append_value(format!("{:?}", arrow_type));
+            nullable.append_value(true);
+            category.append_value("tag");
+            sam_types.append_value(sam_type.to_string());
+
+            let desc = known_tags
+                .get(&tag_name)
+                .map(|t| t.description.clone())
+                .unwrap_or_else(|| "Unknown tag".to_string());
+            descriptions.append_value(desc);
+        }
+
+        // Create RecordBatch
+        let schema = Arc::new(Schema::new(vec![
+            datafusion::arrow::datatypes::Field::new("column_name", DataType::Utf8, false),
+            datafusion::arrow::datatypes::Field::new("data_type", DataType::Utf8, false),
+            datafusion::arrow::datatypes::Field::new("nullable", DataType::Boolean, false),
+            datafusion::arrow::datatypes::Field::new("category", DataType::Utf8, false),
+            datafusion::arrow::datatypes::Field::new("sam_type", DataType::Utf8, false),
+            datafusion::arrow::datatypes::Field::new("description", DataType::Utf8, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(column_names.finish()),
+                Arc::new(data_types.finish()),
+                Arc::new(nullable.finish()),
+                Arc::new(category.finish()),
+                Arc::new(sam_types.finish()),
+                Arc::new(descriptions.finish()),
+            ],
+        )?;
+
+        let table = MemTable::try_new(schema, vec![vec![batch]])?;
+        ctx.read_table(Arc::new(table))
     }
 }
 
@@ -146,6 +335,7 @@ impl TableProvider for CramTableProvider {
             reference_path: self.reference_path.clone(),
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
+            tag_fields: self.tag_fields.clone(),
         }))
     }
 }

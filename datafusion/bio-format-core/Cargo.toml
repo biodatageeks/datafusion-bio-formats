@@ -15,6 +15,7 @@ datafusion.workspace = true
 opendal.workspace = true
 noodles.workspace = true
 noodles-bgzf.workspace = true
+noodles-sam.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true

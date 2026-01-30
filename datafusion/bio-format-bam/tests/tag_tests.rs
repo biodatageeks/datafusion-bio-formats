@@ -147,20 +147,42 @@ async fn test_count_query() {
 }
 
 #[tokio::test]
-async fn test_unknown_tag_error() {
-    // Test that unknown tags produce a helpful error message
-    let result = BamTableProvider::new(
+async fn test_unknown_tag_accepted() {
+    // Test that unknown tags are accepted and treated as Utf8 by default
+    let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
         None,
         None,
         true,
-        Some(vec!["INVALID_TAG".to_string()]),
-    );
+        Some(vec!["UNKNOWN_TAG".to_string()]),
+    )
+    .unwrap();
 
-    assert!(result.is_err());
-    let err = result.unwrap_err().to_string();
-    assert!(err.contains("Unknown BAM tag"));
-    assert!(err.contains("Available tags:"));
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+
+    let df = ctx.table("bam").await.unwrap();
+    let schema = df.schema();
+
+    // Should have 11 core + 1 unknown tag = 12 fields
+    assert_eq!(schema.fields().len(), 12);
+
+    // Verify unknown tag field is present with Utf8 type
+    let unknown_field = schema.field_with_name(None, "UNKNOWN_TAG").unwrap();
+    assert_eq!(
+        unknown_field.data_type(),
+        &datafusion::arrow::datatypes::DataType::Utf8
+    );
+    assert!(unknown_field.is_nullable());
+
+    // Verify metadata
+    let metadata = unknown_field.metadata();
+    assert_eq!(metadata.get("bio.bam.tag.tag").unwrap(), "UNKNOWN_TAG");
+    assert_eq!(metadata.get("bio.bam.tag.type").unwrap(), "Z");
+    assert_eq!(
+        metadata.get("bio.bam.tag.description").unwrap(),
+        "Unknown tag"
+    );
 }
 
 #[tokio::test]

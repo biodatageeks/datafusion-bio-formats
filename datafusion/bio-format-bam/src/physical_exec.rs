@@ -1,29 +1,29 @@
 use crate::storage::BamReader;
-use crate::tag_registry::get_known_tags;
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, ArrayRef, NullArray, RecordBatch, StringArray, UInt32Array};
+use datafusion::arrow::array::{ArrayRef, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::error::ArrowError;
-use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_bio_format_core::alignment_utils::{
+    RecordFields, build_record_batch, cigar_op_to_string,
+    get_chrom_by_seq_id_bam as get_chrom_by_seq_id,
+};
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
 use datafusion_bio_format_core::table_utils::OptionalField;
+use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
 use noodles_sam::alignment::Record;
-use noodles_sam::alignment::record::cigar::Op;
-use noodles_sam::alignment::record::cigar::op::Kind as OpKind;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
-use std::io;
 use std::sync::Arc;
 
 #[allow(dead_code)]
@@ -112,17 +112,23 @@ fn set_tag_builders(
     if let Some(tags) = tag_fields {
         let known_tags = get_known_tags();
         for tag in tags {
-            if let Some(tag_def) = known_tags.get(&tag) {
-                if let Ok(builder) = OptionalField::new(&tag_def.arrow_type, batch_size) {
-                    // Pre-parse tag to avoid parsing on every record
-                    let tag_bytes = tag.as_bytes();
-                    if tag_bytes.len() == 2 {
-                        let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
-                        tag_builders.0.push(tag.clone());
-                        tag_builders.1.push(tag_def.arrow_type.clone());
-                        tag_builders.2.push(builder);
-                        tag_builders.3.push(parsed_tag);
-                    }
+            // Get tag definition from known tags, or use default for unknown tags
+            let (arrow_type, _sam_type) = if let Some(tag_def) = known_tags.get(&tag) {
+                (tag_def.arrow_type.clone(), tag_def.sam_type)
+            } else {
+                // Default for unknown tags: Utf8
+                (DataType::Utf8, 'Z')
+            };
+
+            if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
+                // Pre-parse tag to avoid parsing on every record
+                let tag_bytes = tag.as_bytes();
+                if tag_bytes.len() == 2 {
+                    let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
+                    tag_builders.0.push(tag.clone());
+                    tag_builders.1.push(arrow_type);
+                    tag_builders.2.push(builder);
+                    tag_builders.3.push(parsed_tag);
                 }
             }
         }
@@ -369,7 +375,7 @@ macro_rules! process_bam_records_impl {
 
             // Once the batch size is reached, build and yield a record batch
             if record_num % $batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                log::debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
                     Some(builders_to_arrays(&mut tag_builders.2)?)
                 } else {
@@ -394,7 +400,7 @@ macro_rules! process_bam_records_impl {
                     $projection.clone(),
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                log::debug!("Batch number: {}", batch_num);
                 yield batch;
 
                 // Clear vectors for the next batch
@@ -488,118 +494,6 @@ async fn get_local_bam(
     Ok(stream)
 }
 
-/// Container for BAM record field data
-struct RecordFields<'a> {
-    name: &'a [Option<String>],
-    chrom: &'a [Option<String>],
-    start: &'a [Option<u32>],
-    end: &'a [Option<u32>],
-    flag: &'a [u32],
-    cigar: &'a [String],
-    mapping_quality: &'a [Option<u32>],
-    mate_chrom: &'a [Option<String>],
-    mate_start: &'a [Option<u32>],
-    sequence: &'a [String],
-    quality_scores: &'a [String],
-}
-
-fn build_record_batch(
-    schema: SchemaRef,
-    fields: RecordFields,
-    tag_arrays: Option<&Vec<ArrayRef>>,
-    projection: Option<Vec<usize>>,
-) -> datafusion::error::Result<RecordBatch> {
-    let name = fields.name;
-    let chrom = fields.chrom;
-    let start = fields.start;
-    let end = fields.end;
-    let flag = fields.flag;
-    let cigar = fields.cigar;
-    let mapping_quality = fields.mapping_quality;
-    let mate_chrom = fields.mate_chrom;
-    let mate_start = fields.mate_start;
-    let sequence = fields.sequence;
-    let quality_scores = fields.quality_scores;
-    let name_array = Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>;
-    let chrom_array = Arc::new(StringArray::from(chrom.to_vec())) as Arc<dyn Array>;
-    let start_array = Arc::new(UInt32Array::from(start.to_vec())) as Arc<dyn Array>;
-    let end_array = Arc::new(UInt32Array::from(end.to_vec())) as Arc<dyn Array>;
-    let flag_array = Arc::new(UInt32Array::from(flag.to_vec())) as Arc<dyn Array>;
-    let cigar_array = Arc::new(StringArray::from(cigar.to_vec())) as Arc<dyn Array>;
-    let mapping_quality_array =
-        Arc::new(UInt32Array::from(mapping_quality.to_vec())) as Arc<dyn Array>;
-    let mate_chrom_array = Arc::new(StringArray::from(mate_chrom.to_vec())) as Arc<dyn Array>;
-    let mate_start_array = Arc::new(UInt32Array::from(mate_start.to_vec())) as Arc<dyn Array>;
-    let sequence_array = Arc::new(StringArray::from(sequence.to_vec())) as Arc<dyn Array>;
-    let quality_scores_array =
-        Arc::new(StringArray::from(quality_scores.to_vec())) as Arc<dyn Array>;
-
-    let arrays = match projection {
-        None => {
-            let mut arrays: Vec<Arc<dyn Array>> = vec![
-                name_array,
-                chrom_array,
-                start_array,
-                end_array,
-                flag_array,
-                cigar_array,
-                mapping_quality_array,
-                mate_chrom_array,
-                mate_start_array,
-                sequence_array,
-                quality_scores_array,
-            ];
-            // Add tag arrays if present
-            if let Some(tags) = tag_arrays {
-                arrays.extend_from_slice(tags);
-            }
-            arrays
-        }
-        Some(proj_ids) => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(name.len());
-            if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(name_array.len())) as Arc<dyn Array>);
-            } else {
-                for i in proj_ids.clone() {
-                    match i {
-                        0 => arrays.push(name_array.clone()),
-                        1 => arrays.push(chrom_array.clone()),
-                        2 => arrays.push(start_array.clone()),
-                        3 => arrays.push(end_array.clone()),
-                        4 => arrays.push(flag_array.clone()),
-                        5 => arrays.push(cigar_array.clone()),
-                        6 => arrays.push(mapping_quality_array.clone()),
-                        7 => arrays.push(mate_chrom_array.clone()),
-                        8 => arrays.push(mate_start_array.clone()),
-                        9 => arrays.push(sequence_array.clone()),
-                        10 => arrays.push(quality_scores_array.clone()),
-                        _ => {
-                            // Tag fields start at index 11
-                            let tag_idx = i - 11;
-                            if let Some(tags) = tag_arrays {
-                                if tag_idx < tags.len() {
-                                    arrays.push(tags[tag_idx].clone());
-                                } else {
-                                    arrays.push(Arc::new(NullArray::new(name_array.len()))
-                                        as Arc<dyn Array>);
-                                }
-                            } else {
-                                arrays
-                                    .push(Arc::new(NullArray::new(name_array.len()))
-                                        as Arc<dyn Array>);
-                            }
-                        }
-                    }
-                }
-            }
-            arrays
-        }
-    };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
@@ -645,37 +539,5 @@ async fn get_stream(
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
         }
         _ => unimplemented!("Unsupported storage type: {:?}", store_type),
-    }
-}
-
-fn cigar_op_to_string(op: Op) -> String {
-    let kind = match op.kind() {
-        OpKind::Match => 'M',
-        OpKind::Insertion => 'I',
-        OpKind::Deletion => 'D',
-        OpKind::Skip => 'N',
-        OpKind::SoftClip => 'S',
-        OpKind::HardClip => 'H',
-        OpKind::Pad => 'P',
-        OpKind::SequenceMatch => '=',
-        OpKind::SequenceMismatch => 'X',
-    };
-    format!("{}{}", op.len(), kind)
-}
-
-fn get_chrom_by_seq_id(rid: Option<io::Result<usize>>, names: &[String]) -> Option<String> {
-    match rid {
-        Some(rid) => {
-            let idx = rid.unwrap();
-            let chrom_name = names
-                .get(idx)
-                .expect("reference_sequence_id() should be in bounds");
-            let mut chrom_name = chrom_name.to_string().to_lowercase();
-            if !chrom_name.starts_with("chr") {
-                chrom_name = format!("chr{}", chrom_name);
-            }
-            Some(chrom_name)
-        }
-        _ => None,
     }
 }

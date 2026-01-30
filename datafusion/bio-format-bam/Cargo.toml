@@ -19,8 +19,8 @@ bytes.workspace = true
 datafusion-bio-format-core = {path = "../bio-format-core"}
 futures.workspace = true
 futures-util.workspace = true
-noodles-bam = {version = "0.81.0" , features = ["async"]}
-noodles-sam = "0.77.0"
+noodles-bam = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a", features = ["async"] }
+noodles-sam.workspace = true
 async-stream = "0.3.6"
 log = "0.4.27"
 async-trait = "0.1.88"

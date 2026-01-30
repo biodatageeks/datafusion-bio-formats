@@ -1,5 +1,4 @@
 use crate::physical_exec::BamExec;
-use crate::tag_registry::get_known_tags;
 use async_trait::async_trait;
 use datafusion::arrow::array::{BooleanBuilder, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -14,6 +13,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::DataFrame;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
     BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
 };
@@ -44,27 +44,25 @@ fn determine_schema(
     if let Some(tags) = tag_fields {
         let known_tags = get_known_tags();
         for tag in tags {
-            let tag_def = known_tags.get(tag).ok_or_else(|| {
-                let available_tags: Vec<String> = known_tags.keys().cloned().collect();
-                DataFusionError::Configuration(format!(
-                    "Unknown BAM tag '{}'. Available tags: {}",
-                    tag,
-                    available_tags.join(", ")
-                ))
-            })?;
-
             let mut field_metadata = HashMap::new();
             field_metadata.insert(BAM_TAG_TAG_KEY.to_string(), tag.clone());
-            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), tag_def.sam_type.to_string());
-            field_metadata.insert(
-                BAM_TAG_DESCRIPTION_KEY.to_string(),
-                tag_def.description.clone(),
-            );
 
-            fields.push(
-                Field::new(tag.clone(), tag_def.arrow_type.clone(), true)
-                    .with_metadata(field_metadata),
-            );
+            // Use known tag definition if available, otherwise use default (String/Utf8)
+            let (sam_type, arrow_type, description) = if let Some(tag_def) = known_tags.get(tag) {
+                (
+                    tag_def.sam_type,
+                    tag_def.arrow_type.clone(),
+                    tag_def.description.clone(),
+                )
+            } else {
+                // Default for unknown tags: treat as string (most flexible)
+                ('Z', DataType::Utf8, "Unknown tag".to_string())
+            };
+
+            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), sam_type.to_string());
+            field_metadata.insert(BAM_TAG_DESCRIPTION_KEY.to_string(), description);
+
+            fields.push(Field::new(tag.clone(), arrow_type, true).with_metadata(field_metadata));
         }
     }
 
@@ -210,7 +208,7 @@ impl BamTableProvider {
         sample_size: Option<usize>,
     ) -> Result<DataFrame, DataFusionError> {
         use crate::storage::BamReader;
-        use crate::tag_registry::infer_type_from_noodles_value;
+        use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
         use futures_util::StreamExt;
 
         let sample_size = sample_size.unwrap_or(100);
