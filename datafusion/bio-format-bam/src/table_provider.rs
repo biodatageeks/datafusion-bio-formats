@@ -241,17 +241,14 @@ impl BamTableProvider {
                     let data = record.data();
 
                     // Iterate through all tags in this record
-                    for tag_result in data.iter() {
-                        if let Ok((tag, value)) = tag_result {
-                            let tag_str =
-                                format!("{}{}", tag.as_ref()[0] as char, tag.as_ref()[1] as char);
+                    for (tag, value) in data.iter().filter_map(Result::ok) {
+                        let tag_str =
+                            format!("{}{}", tag.as_ref()[0] as char, tag.as_ref()[1] as char);
 
-                            // Only add if not already discovered
-                            if !discovered_tags.contains_key(&tag_str) {
-                                let (sam_type, arrow_type) = infer_type_from_noodles_value(&value);
-                                discovered_tags.insert(tag_str, (sam_type, arrow_type));
-                            }
-                        }
+                        // Only add if not already discovered
+                        discovered_tags
+                            .entry(tag_str)
+                            .or_insert_with(|| infer_type_from_noodles_value(&value));
                     }
                     count += 1;
                 }
@@ -351,7 +348,7 @@ impl BamTableProvider {
             data_types.append_value(datatype_to_string(arrow_type));
             nullables.append_value(true); // All tags are nullable
             categories.append_value("tag");
-            sam_types.append_value(&sam_type.to_string());
+            sam_types.append_value(sam_type.to_string());
 
             // Use registry description if available, otherwise generic
             let desc = if let Some(tag_def) = known_tags.get(&tag_name) {
