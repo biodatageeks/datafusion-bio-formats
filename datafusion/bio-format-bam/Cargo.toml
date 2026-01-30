@@ -22,7 +22,7 @@ futures-util.workspace = true
 noodles-bam = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a", features = ["async"] }
 noodles-sam.workspace = true
 async-stream = "0.3.6"
-log = "0.4.27"
+log = "0.4.29"
 async-trait = "0.1.88"
 hex = "0.4"
 
