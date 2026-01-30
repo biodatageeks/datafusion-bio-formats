@@ -52,10 +52,14 @@ pub mod metadata;
 
 // Re-export commonly used metadata keys
 pub use metadata::{BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY};
+/// Alignment utilities shared between BAM and CRAM formats
+pub mod alignment_utils;
 /// Object storage integration for cloud and local file access
 pub mod object_storage;
 /// Table utilities for building DataFusion table providers
 pub mod table_utils;
+/// Tag registry for BAM/CRAM alignment tags
+pub mod tag_registry;
 
 #[cfg(test)]
 mod tests {

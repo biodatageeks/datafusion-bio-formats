@@ -1,5 +1,4 @@
 use crate::physical_exec::BamExec;
-use crate::tag_registry::get_known_tags;
 use async_trait::async_trait;
 use datafusion::arrow::array::{BooleanBuilder, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -14,6 +13,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::DataFrame;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
     BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
 };
@@ -210,7 +210,7 @@ impl BamTableProvider {
         sample_size: Option<usize>,
     ) -> Result<DataFrame, DataFusionError> {
         use crate::storage::BamReader;
-        use crate::tag_registry::infer_type_from_noodles_value;
+        use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
         use futures_util::StreamExt;
 
         let sample_size = sample_size.unwrap_or(100);
