@@ -4,7 +4,6 @@ use async_stream::try_stream;
 use datafusion::arrow::array::{ArrayRef, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::error::ArrowError;
-use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
@@ -21,7 +20,6 @@ use datafusion_bio_format_core::tag_registry::get_known_tags;
 use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
 use noodles_sam::alignment::Record;
-use noodles_sam::alignment::record::cigar::Op;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
@@ -220,6 +218,7 @@ fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, A
     builders.iter_mut().map(|b| b.finish()).collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_remote_cram_stream(
     file_path: String,
     schema: SchemaRef,
@@ -417,6 +416,7 @@ async fn get_remote_cram_stream(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_local_cram(
     file_path: String,
     schema: SchemaRef,
@@ -609,6 +609,7 @@ async fn get_local_cram(
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,

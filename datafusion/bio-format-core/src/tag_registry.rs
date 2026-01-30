@@ -6,8 +6,11 @@ use std::sync::Arc;
 
 /// Definition of a BAM alignment tag with type information
 pub struct TagDefinition {
+    /// SAM specification type code (e.g., 'i' for integer, 'Z' for string)
     pub sam_type: char,
+    /// Arrow data type for this tag
     pub arrow_type: DataType,
+    /// Human-readable description of the tag's purpose
     pub description: String,
 }
 

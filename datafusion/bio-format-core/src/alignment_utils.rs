@@ -9,16 +9,27 @@ use std::sync::Arc;
 
 /// Container for alignment record field data
 pub struct RecordFields<'a> {
+    /// Read/query template names
     pub name: &'a [Option<String>],
+    /// Reference sequence names (chromosomes)
     pub chrom: &'a [Option<String>],
+    /// Alignment start positions
     pub start: &'a [Option<u32>],
+    /// Alignment end positions
     pub end: &'a [Option<u32>],
+    /// SAM flags
     pub flag: &'a [u32],
+    /// CIGAR strings
     pub cigar: &'a [String],
+    /// Mapping quality scores
     pub mapping_quality: &'a [Option<u32>],
+    /// Mate/next segment reference sequence names
     pub mate_chrom: &'a [Option<String>],
+    /// Mate/next segment alignment start positions
     pub mate_start: &'a [Option<u32>],
+    /// Read sequences
     pub sequence: &'a [String],
+    /// Base quality scores
     pub quality_scores: &'a [String],
 }
 
