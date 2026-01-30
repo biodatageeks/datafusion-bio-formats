@@ -401,7 +401,6 @@ impl BamTableProvider {
 impl TableProvider for BamTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
-        // todo!()
     }
 
     fn schema(&self) -> SchemaRef {
@@ -410,7 +409,6 @@ impl TableProvider for BamTableProvider {
 
     fn table_type(&self) -> TableType {
         TableType::Base
-        // todo!()
     }
 
     async fn scan(
