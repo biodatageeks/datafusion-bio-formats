@@ -154,57 +154,73 @@ fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<()
                 }
                 Value::Array(arr) => match arr {
                     SamArray::Int8(vals) => {
-                        let vec: Vec<i32> = vals
+                        let vec: Result<Vec<i32>, _> = vals
                             .as_ref()
                             .iter()
-                            .filter_map(|v| v.ok())
-                            .map(|v| v as i32)
+                            .map(|v| v.map(|val| val as i32))
                             .collect();
-                        builder.append_array_int(vec)?;
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
                     }
                     SamArray::UInt8(vals) => {
-                        let vec: Vec<i32> = vals
+                        let vec: Result<Vec<i32>, _> = vals
                             .as_ref()
                             .iter()
-                            .filter_map(|v| v.ok())
-                            .map(|v| v as i32)
+                            .map(|v| v.map(|val| val as i32))
                             .collect();
-                        builder.append_array_int(vec)?;
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
                     }
                     SamArray::Int16(vals) => {
-                        let vec: Vec<i32> = vals
+                        let vec: Result<Vec<i32>, _> = vals
                             .as_ref()
                             .iter()
-                            .filter_map(|v| v.ok())
-                            .map(|v| v as i32)
+                            .map(|v| v.map(|val| val as i32))
                             .collect();
-                        builder.append_array_int(vec)?;
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
                     }
                     SamArray::UInt16(vals) => {
-                        let vec: Vec<i32> = vals
+                        let vec: Result<Vec<i32>, _> = vals
                             .as_ref()
                             .iter()
-                            .filter_map(|v| v.ok())
-                            .map(|v| v as i32)
+                            .map(|v| v.map(|val| val as i32))
                             .collect();
-                        builder.append_array_int(vec)?;
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
                     }
                     SamArray::Int32(vals) => {
-                        let vec: Vec<i32> = vals.as_ref().iter().filter_map(|v| v.ok()).collect();
-                        builder.append_array_int(vec)?;
+                        let vec: Result<Vec<i32>, _> = vals.as_ref().iter().collect();
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
                     }
                     SamArray::UInt32(vals) => {
-                        let vec: Vec<i32> = vals
+                        let vec: Result<Vec<i32>, _> = vals
                             .as_ref()
                             .iter()
-                            .filter_map(|v| v.ok())
-                            .map(|v| v as i32)
+                            .map(|v| v.map(|val| val as i32))
                             .collect();
-                        builder.append_array_int(vec)?;
+                        match vec {
+                            Ok(v) => builder.append_array_int(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
                     }
                     SamArray::Float(vals) => {
-                        let vec: Vec<f32> = vals.as_ref().iter().filter_map(|v| v.ok()).collect();
-                        builder.append_array_float(vec)?;
+                        let vec: Result<Vec<f32>, _> = vals.as_ref().iter().collect();
+                        match vec {
+                            Ok(v) => builder.append_array_float(v)?,
+                            Err(_) => builder.append_null()?,
+                        }
                     }
                 },
             },
