@@ -14,17 +14,23 @@ pub struct TagDefinition {
     pub description: String,
 }
 
-/// Returns a registry of commonly used BAM alignment tags
+/// Returns a comprehensive registry of SAM/BAM alignment tags
 ///
-/// Tags are organized into categories:
-/// - Alignment scoring: NM, MD, AS, XS, MQ
+/// Contains 75 tags organized into categories:
+/// - Alignment scoring: NM, MD, AS, XS, MQ, H0, H1, H2
 /// - Read groups: RG, LB, PU, PG
 /// - Single-cell: CB, UB, UR, CR, CY, UY
-/// - Quality: BQ, OQ
+/// - Barcoding & molecular IDs: BC, BZ, MI, OX, QT, QX, RX
+/// - Base modifications: ML, MM, MN
+/// - Quality: BQ, OQ, E2, PQ, Q2, U2, UQ
 /// - Pairing: MC, R2, SA, CC, CP
 /// - Original: OC, OP, OA
-/// - Platform: FI, TC
+/// - Platform: FI, TC, FS, FZ
+/// - Color space: CM, CQ, CS
+/// - Annotations: CO, CT, PT, TS
 /// - Other: NH, HI, IH, SM, AM, X0, X1, XA, XN, XM, XO, XG, XT
+/// - BAM-specific: CG
+/// - Reserved: GC, GQ, GS, MF, RT, S2, SQ
 pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     let mut tags = HashMap::new();
 
@@ -366,6 +372,316 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
         },
     );
 
+    // Barcoding and molecular identifiers
+    tags.insert(
+        "BC".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Barcode sequence identifying the sample".to_string(),
+        },
+    );
+    tags.insert(
+        "BZ".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Phred quality of the unique molecular barcode bases in the OX tag"
+                .to_string(),
+        },
+    );
+    tags.insert(
+        "MI".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Molecular identifier (string uniquely identifying the source molecule)"
+                .to_string(),
+        },
+    );
+    tags.insert(
+        "OX".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Original unique molecular barcode bases".to_string(),
+        },
+    );
+    tags.insert(
+        "QT".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Phred quality of the sample barcode sequence in the BC tag".to_string(),
+        },
+    );
+    tags.insert(
+        "QX".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Quality score of the unique molecular identifier in the RX tag"
+                .to_string(),
+        },
+    );
+    tags.insert(
+        "RX".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Sequence bases of the (possibly corrected) unique molecular identifier"
+                .to_string(),
+        },
+    );
+
+    // Base modifications
+    tags.insert(
+        "ML".to_string(),
+        TagDefinition {
+            sam_type: 'B',
+            arrow_type: DataType::List(Arc::new(Field::new("item", DataType::UInt8, true))),
+            description: "Base modification probabilities".to_string(),
+        },
+    );
+    tags.insert(
+        "MM".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Base modifications / methylation".to_string(),
+        },
+    );
+    tags.insert(
+        "MN".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Length of sequence at the time MM and ML were produced".to_string(),
+        },
+    );
+
+    // Color space sequencing
+    tags.insert(
+        "CM".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Edit distance between the color sequence and the color reference"
+                .to_string(),
+        },
+    );
+    tags.insert(
+        "CQ".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Color read base qualities".to_string(),
+        },
+    );
+    tags.insert(
+        "CS".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Color read sequence".to_string(),
+        },
+    );
+
+    // Quality and probability scores
+    tags.insert(
+        "E2".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "The 2nd most likely base calls".to_string(),
+        },
+    );
+    tags.insert(
+        "PQ".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Phred likelihood of the template".to_string(),
+        },
+    );
+    tags.insert(
+        "Q2".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Phred quality of the mate/next segment sequence in the R2 tag"
+                .to_string(),
+        },
+    );
+    tags.insert(
+        "U2".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description:
+                "Phred probability of the 2nd call being wrong conditional on the best being wrong"
+                    .to_string(),
+        },
+    );
+    tags.insert(
+        "UQ".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Phred likelihood of the segment, conditional on mapping being correct"
+                .to_string(),
+        },
+    );
+
+    // Alignment hits
+    tags.insert(
+        "H0".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Number of perfect hits".to_string(),
+        },
+    );
+    tags.insert(
+        "H1".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Number of 1-difference hits".to_string(),
+        },
+    );
+    tags.insert(
+        "H2".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Number of 2-difference hits".to_string(),
+        },
+    );
+
+    // Flow and platform specific
+    tags.insert(
+        "FS".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Segment suffix".to_string(),
+        },
+    );
+    tags.insert(
+        "FZ".to_string(),
+        TagDefinition {
+            sam_type: 'B',
+            arrow_type: DataType::List(Arc::new(Field::new("item", DataType::UInt16, true))),
+            description: "Flow signal intensities".to_string(),
+        },
+    );
+
+    // Annotations
+    tags.insert(
+        "CO".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Free-text comments".to_string(),
+        },
+    );
+    tags.insert(
+        "CT".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Complete read annotation tag (consensus annotation dummy features)"
+                .to_string(),
+        },
+    );
+    tags.insert(
+        "PT".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Read annotations for parts of the padded read sequence".to_string(),
+        },
+    );
+    tags.insert(
+        "TS".to_string(),
+        TagDefinition {
+            sam_type: 'A',
+            arrow_type: DataType::Utf8,
+            description: "Transcript strand".to_string(),
+        },
+    );
+
+    // BAM-specific
+    tags.insert(
+        "CG".to_string(),
+        TagDefinition {
+            sam_type: 'B',
+            arrow_type: DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            description:
+                "BAM-only: CIGAR in BAM's binary encoding if it consists of >65535 operators"
+                    .to_string(),
+        },
+    );
+
+    // Reserved for backwards compatibility
+    tags.insert(
+        "GC".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Reserved for backwards compatibility reasons".to_string(),
+        },
+    );
+    tags.insert(
+        "GQ".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Reserved for backwards compatibility reasons".to_string(),
+        },
+    );
+    tags.insert(
+        "GS".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Reserved for backwards compatibility reasons".to_string(),
+        },
+    );
+    tags.insert(
+        "MF".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Reserved for backwards compatibility reasons".to_string(),
+        },
+    );
+    tags.insert(
+        "RT".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Reserved for backwards compatibility reasons".to_string(),
+        },
+    );
+    tags.insert(
+        "S2".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Reserved for backwards compatibility reasons".to_string(),
+        },
+    );
+    tags.insert(
+        "SQ".to_string(),
+        TagDefinition {
+            sam_type: 'Z',
+            arrow_type: DataType::Utf8,
+            description: "Reserved for backwards compatibility reasons".to_string(),
+        },
+    );
+
     tags
 }
 
@@ -438,8 +754,8 @@ mod tests {
         assert!(tags.contains_key("CB"));
         assert!(tags.contains_key("UB"));
 
-        // Should have ~40 tags
-        assert!(tags.len() >= 40);
+        // Should have ~70 tags (40 original + 30 from SAM spec)
+        assert!(tags.len() >= 70);
     }
 
     #[test]
