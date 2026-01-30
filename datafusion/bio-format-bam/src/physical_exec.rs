@@ -112,17 +112,23 @@ fn set_tag_builders(
     if let Some(tags) = tag_fields {
         let known_tags = get_known_tags();
         for tag in tags {
-            if let Some(tag_def) = known_tags.get(&tag) {
-                if let Ok(builder) = OptionalField::new(&tag_def.arrow_type, batch_size) {
-                    // Pre-parse tag to avoid parsing on every record
-                    let tag_bytes = tag.as_bytes();
-                    if tag_bytes.len() == 2 {
-                        let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
-                        tag_builders.0.push(tag.clone());
-                        tag_builders.1.push(tag_def.arrow_type.clone());
-                        tag_builders.2.push(builder);
-                        tag_builders.3.push(parsed_tag);
-                    }
+            // Get tag definition from known tags, or use default for unknown tags
+            let (arrow_type, _sam_type) = if let Some(tag_def) = known_tags.get(&tag) {
+                (tag_def.arrow_type.clone(), tag_def.sam_type)
+            } else {
+                // Default for unknown tags: Utf8
+                (DataType::Utf8, 'Z')
+            };
+
+            if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
+                // Pre-parse tag to avoid parsing on every record
+                let tag_bytes = tag.as_bytes();
+                if tag_bytes.len() == 2 {
+                    let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
+                    tag_builders.0.push(tag.clone());
+                    tag_builders.1.push(arrow_type);
+                    tag_builders.2.push(builder);
+                    tag_builders.3.push(parsed_tag);
                 }
             }
         }
