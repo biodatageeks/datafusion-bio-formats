@@ -1,11 +1,94 @@
-use datafusion::arrow::array::{Array, ArrayRef, NullArray, StringArray, UInt32Array};
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::array::{
+    Array, ArrayRef, BooleanBuilder, Float32Builder, Int32Builder, ListBuilder, NullArray,
+    StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array,
+};
+use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use log::debug;
 use noodles_sam::alignment::record::cigar::op::{Kind as OpKind, Op};
 use std::io;
 use std::sync::Arc;
+
+/// Create a properly typed array filled with null values
+///
+/// # Arguments
+/// * `data_type` - The Arrow data type for the array
+/// * `length` - Number of null values to create
+///
+/// # Returns
+/// An ArrayRef of the specified type filled with null values
+fn new_null_array(data_type: &DataType, length: usize) -> ArrayRef {
+    match data_type {
+        DataType::Utf8 => {
+            let mut builder = StringBuilder::new();
+            for _ in 0..length {
+                builder.append_null();
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Int32 => {
+            let mut builder = Int32Builder::new();
+            for _ in 0..length {
+                builder.append_null();
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Float32 => {
+            let mut builder = Float32Builder::new();
+            for _ in 0..length {
+                builder.append_null();
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::Boolean => {
+            let mut builder = BooleanBuilder::new();
+            for _ in 0..length {
+                builder.append_null();
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::List(field) => match field.data_type() {
+            DataType::Int32 => {
+                let mut builder = ListBuilder::new(Int32Builder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
+            DataType::Float32 => {
+                let mut builder = ListBuilder::new(Float32Builder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
+            DataType::Utf8 => {
+                let mut builder = ListBuilder::new(StringBuilder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
+            DataType::UInt8 => {
+                let mut builder = ListBuilder::new(UInt8Builder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
+            DataType::UInt16 => {
+                let mut builder = ListBuilder::new(UInt16Builder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
+            _ => Arc::new(NullArray::new(length)),
+        },
+        _ => Arc::new(NullArray::new(length)),
+    }
+}
 
 /// Container for alignment record field data
 pub struct RecordFields<'a> {
@@ -122,13 +205,15 @@ pub fn build_record_batch(
                                 if tag_idx < tags.len() {
                                     arrays.push(tags[tag_idx].clone());
                                 } else {
-                                    arrays.push(Arc::new(NullArray::new(name_array.len()))
-                                        as Arc<dyn Array>);
+                                    // Tag index out of bounds - create properly typed null array
+                                    let field = &schema.fields()[i];
+                                    arrays
+                                        .push(new_null_array(field.data_type(), name_array.len()));
                                 }
                             } else {
-                                arrays
-                                    .push(Arc::new(NullArray::new(name_array.len()))
-                                        as Arc<dyn Array>);
+                                // No tag arrays provided - create properly typed null array
+                                let field = &schema.fields()[i];
+                                arrays.push(new_null_array(field.data_type(), name_array.len()));
                             }
                         }
                     }
