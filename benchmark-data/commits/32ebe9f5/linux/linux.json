@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-01-30T15:47:40Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/cram-tag-support",
+  "commit_sha": "32ebe9f5fe14b13f97dd2ca52347a1661d8bedfd",
+  "benchmark_mode": "fast"
+}
