@@ -394,10 +394,6 @@ async fn get_remote_cram_stream(
                 mate_start.clear();
                 sequence.clear();
                 quality_scores.clear();
-                // Reset tag builders
-                if num_tag_fields > 0 {
-                    set_tag_builders(batch_size, Some(tag_builders.0.clone()), &mut tag_builders);
-                }
             }
         }
         // If there are remaining records that don't fill a complete batch,
@@ -587,10 +583,6 @@ async fn get_local_cram(
                 mate_start.clear();
                 sequence.clear();
                 quality_scores.clear();
-                // Reset tag builders
-                if num_tag_fields > 0 {
-                    set_tag_builders(batch_size, Some(tag_builders.0.clone()), &mut tag_builders);
-                }
             }
         }
         // If there are remaining records that don't fill a complete batch,
