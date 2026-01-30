@@ -162,7 +162,7 @@ pub fn cigar_op_to_string(op: Op) -> String {
 
 /// Get chromosome name from BAM reference sequence ID
 ///
-/// BAM uses io::Result<usize> for reference sequence IDs
+/// BAM uses `io::Result<usize>` for reference sequence IDs
 pub fn get_chrom_by_seq_id_bam(rid: Option<io::Result<usize>>, names: &[String]) -> Option<String> {
     match rid {
         Some(rid) => {
@@ -182,7 +182,7 @@ pub fn get_chrom_by_seq_id_bam(rid: Option<io::Result<usize>>, names: &[String])
 
 /// Get chromosome name from CRAM reference sequence ID
 ///
-/// CRAM uses Option<usize> directly for reference sequence IDs
+/// CRAM uses `Option<usize>` directly for reference sequence IDs
 pub fn get_chrom_by_seq_id_cram(rid: Option<usize>, names: &[String]) -> Option<String> {
     match rid {
         Some(rid) => {
