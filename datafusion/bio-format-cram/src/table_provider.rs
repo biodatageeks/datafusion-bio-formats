@@ -41,22 +41,25 @@ fn determine_schema(
     if let Some(tags) = tag_fields {
         let known_tags = get_known_tags();
         for tag in tags {
-            let tag_def = known_tags.get(tag).ok_or_else(|| {
-                datafusion::common::DataFusionError::Execution(format!("Unknown tag: {}", tag))
-            })?;
-
             let mut field_metadata = HashMap::new();
             field_metadata.insert(BAM_TAG_TAG_KEY.to_string(), tag.clone());
-            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), tag_def.sam_type.to_string());
-            field_metadata.insert(
-                BAM_TAG_DESCRIPTION_KEY.to_string(),
-                tag_def.description.clone(),
-            );
 
-            fields.push(
-                Field::new(tag.clone(), tag_def.arrow_type.clone(), true)
-                    .with_metadata(field_metadata),
-            );
+            // Use known tag definition if available, otherwise use default (String/Utf8)
+            let (sam_type, arrow_type, description) = if let Some(tag_def) = known_tags.get(tag) {
+                (
+                    tag_def.sam_type,
+                    tag_def.arrow_type.clone(),
+                    tag_def.description.clone(),
+                )
+            } else {
+                // Default for unknown tags: treat as string (most flexible)
+                ('Z', DataType::Utf8, "Unknown tag".to_string())
+            };
+
+            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), sam_type.to_string());
+            field_metadata.insert(BAM_TAG_DESCRIPTION_KEY.to_string(), description);
+
+            fields.push(Field::new(tag.clone(), arrow_type, true).with_metadata(field_metadata));
         }
     }
 
