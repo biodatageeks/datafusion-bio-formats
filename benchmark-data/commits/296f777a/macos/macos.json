@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-01-30T11:34:59Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/cram-tag-support",
+  "commit_sha": "296f777a69058fba17a682c6fb425c9b68654c83",
+  "benchmark_mode": "fast"
+}
