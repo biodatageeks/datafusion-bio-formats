@@ -352,9 +352,9 @@ impl BamTableProvider {
 
             // Use registry description if available, otherwise generic
             let desc = if let Some(tag_def) = known_tags.get(&tag_name) {
-                format!("Discovered in data. {}", tag_def.description)
+                tag_def.description.clone()
             } else {
-                format!("Discovered in data. Custom/unknown tag ({})", sam_type)
+                format!("Custom/unknown tag ({})", sam_type)
             };
             descriptions.append_value(desc);
         }
