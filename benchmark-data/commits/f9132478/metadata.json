@@ -1,0 +1,7 @@
+{
+  "ref": "dependabot/cargo/log-0.4.29",
+  "ref_type": "branch",
+  "commit_sha": "f9132478bf01eebb8e6775fa36f560bb55e9e225",
+  "timestamp": "2026-01-30T16:11:54Z",
+  "benchmark_mode": "fast"
+}
