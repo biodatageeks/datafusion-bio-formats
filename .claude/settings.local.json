@@ -164,7 +164,21 @@
       "Bash(git reset:*)",
       "Bash(git commit:*)",
       "Bash(git log:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(cat:*)",
+      "Bash(grep:*)",
+      "Bash(0\", \"./.\"\\)\n- Implement load_formats\\(\\) for extracting sample-level FORMAT values\n- Update build_record_batch\\(\\) to handle FORMAT arrays and projection\n- Update stream functions to pass FORMAT parameters\n\nFeatures:\n- Column naming: {sample_name}_{format_field} \\(e.g., Sample1_GT, NA12878_DP\\)\n- GT genotype always converted to string with / \\(unphased\\) or | \\(phased\\)\n- Type mapping follows INFO field rules \\(Number=1 → scalar, else → List\\)\n- Special characters in sample names work when SQL column names are quoted\n- Projection pushdown fully supported for FORMAT columns\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(0\", \"./.\"\\)\n- [x] DP field extraction \\(integer values\\)\n- [x] Missing FORMAT values become NULL\n- [x] Projection with FORMAT columns\n- [x] Mixed INFO and FORMAT fields\n- [x] Single sample VCF files\n- [x] SELECT * with FORMAT columns\n- [x] COUNT\\(*\\) aggregation\n- [x] Sample names with special characters \\(dash, dot, space\\)\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\nEOF\n\\)\")",
+      "Bash(gh pr checks:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run watch:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh api:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(RUSTDOCFLAGS=\"-D warnings\" cargo doc:*)",
+      "WebFetch(domain:datafusion.apache.org)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh pr list:*)"
     ],
     "deny": [],
     "ask": []

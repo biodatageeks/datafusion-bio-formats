@@ -22,8 +22,12 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a BAM file as a table
-//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true)?;
-//! ctx.register_table("alignments", Arc::new(table))?;
+//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true, None)?;
+//! ctx.register_table("alignments", Arc::new(table.clone()))?;
+//!
+//! // Discover and describe available columns by sampling records
+//! let schema_info = table.describe(&ctx, Some(100)).await?;
+//! schema_info.show().await?;
 //!
 //! // Query with SQL
 //! let df = ctx.sql("SELECT name, chrom, start FROM alignments LIMIT 10").await?;
@@ -40,3 +44,5 @@ mod physical_exec;
 pub mod storage;
 /// DataFusion table provider implementation for BAM files.
 pub mod table_provider;
+/// Registry of common BAM alignment tags with type information.
+mod tag_registry;

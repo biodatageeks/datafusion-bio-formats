@@ -13,6 +13,7 @@ This crate provides a DataFusion `TableProvider` implementation for reading BAM 
 - Cloud storage support (GCS, S3, Azure Blob Storage)
 - Memory-efficient streaming for large alignment files
 - Support for indexed BAM files (BAI)
+- **Optional alignment tag support** with lazy parsing - include tags like NM, MD, AS as queryable columns
 
 ## Installation
 
@@ -24,41 +25,73 @@ datafusion = "50.3.0"
 
 ## Schema
 
-BAM files are read into tables with alignment information:
+BAM files are read into tables with the following core alignment columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `qname` | String | Query template name |
-| `flag` | Int32 | Bitwise flags |
-| `rname` | String | Reference sequence name |
-| `pos` | Int64 | 1-based leftmost mapping position |
-| `mapq` | Int32 | Mapping quality |
+| `name` | String | Query template name |
+| `chrom` | String | Reference sequence name (chromosome) |
+| `start` | UInt32 | Leftmost mapping position (0-based or 1-based) |
+| `end` | UInt32 | Rightmost mapping position |
+| `flags` | UInt32 | Bitwise alignment flags |
 | `cigar` | String | CIGAR string |
-| `rnext` | String | Reference name of mate/next read |
-| `pnext` | Int64 | Position of mate/next read |
-| `tlen` | Int64 | Observed template length |
-| `seq` | String | Segment sequence |
-| `qual` | String | ASCII Phred-scaled base qualities |
+| `mapping_quality` | UInt32 | Mapping quality |
+| `mate_chrom` | String | Reference name of mate/next read |
+| `mate_start` | UInt32 | Position of mate/next read |
+| `sequence` | String | Read sequence |
+| `quality_scores` | String | ASCII Phred-scaled base qualities |
 
-## Usage Example
+### Optional Alignment Tags
+
+You can include additional BAM alignment tags as columns by specifying them when creating the table provider:
+
+```rust
+let table = BamTableProvider::new(
+    "data/alignments.bam".to_string(),
+    Some(4),  // threads
+    None,     // storage options
+    true,     // 0-based coordinates
+    Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),  // tags
+)?;
+```
+
+Common supported tags include:
+- **Alignment scoring**: NM (edit distance), MD (mismatch string), AS (alignment score), XS (suboptimal score)
+- **Read groups**: RG (read group), LB (library), PU (platform unit)
+- **Single-cell**: CB (cell barcode), UB (UMI barcode)
+- **Quality**: BQ (base quality), OQ (original quality)
+- And ~40 more standard tags
+
+Tags are only parsed when explicitly requested in queries (lazy evaluation), ensuring minimal performance overhead.
+
+## Usage Examples
+
+### Basic Usage (Core Fields Only)
 
 ```rust
 use datafusion::prelude::*;
-use datafusion_bio_format_bam::BamTableProvider;
+use datafusion_bio_format_bam::table_provider::BamTableProvider;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> datafusion::error::Result<()> {
     let ctx = SessionContext::new();
 
-    // Register a BAM file as a table
-    let table = BamTableProvider::try_new("data/alignments.bam").await?;
+    // Register a BAM file as a table (no tags)
+    let table = BamTableProvider::new(
+        "data/alignments.bam".to_string(),
+        Some(4),  // 4 threads for decompression
+        None,     // No cloud storage options
+        true,     // Use 0-based coordinates
+        None,     // No optional tags
+    )?;
     ctx.register_table("alignments", Arc::new(table))?;
 
     // Query the data with SQL
     let df = ctx.sql("
-        SELECT qname, rname, pos, mapq
+        SELECT name, chrom, start, mapping_quality
         FROM alignments
-        WHERE mapq >= 30 AND rname = 'chr1'
+        WHERE mapping_quality >= 30 AND chrom = 'chr1'
         LIMIT 10
     ").await?;
 
@@ -66,6 +99,52 @@ async fn main() -> datafusion::error::Result<()> {
     Ok(())
 }
 ```
+
+### With Optional Alignment Tags
+
+```rust
+use datafusion::prelude::*;
+use datafusion_bio_format_bam::table_provider::BamTableProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+
+    // Register a BAM file with alignment tags
+    let table = BamTableProvider::new(
+        "data/alignments.bam".to_string(),
+        Some(4),
+        None,
+        true,
+        Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
+    )?;
+    ctx.register_table("alignments", Arc::new(table))?;
+
+    // Query using tag fields
+    let df = ctx.sql("
+        SELECT name, chrom, start, NM, AS
+        FROM alignments
+        WHERE NM <= 2 AND AS >= 100
+        LIMIT 10
+    ").await?;
+
+    df.show().await?;
+
+    // Aggregate by tag values
+    let df = ctx.sql("
+        SELECT chrom, AVG(NM) as avg_edit_distance
+        FROM alignments
+        WHERE NM IS NOT NULL
+        GROUP BY chrom
+    ").await?;
+
+    df.show().await?;
+    Ok(())
+}
+```
+
+See `examples/test_bam_with_tags.rs` for more comprehensive examples.
 
 ## Supported File Types
 

@@ -19,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(1),
         Some(object_storage_options),
         true,
+        None, // No tag fields
     )
     .unwrap();
 

@@ -73,6 +73,15 @@ pub const BAM_READ_GROUPS_KEY: &str = "bio.bam.read_groups";
 /// BAM program info (@PG) stored as JSON array
 pub const BAM_PROGRAM_INFO_KEY: &str = "bio.bam.program_info";
 
+/// BAM optional tag name (e.g., "NM", "MD") stored in field metadata
+pub const BAM_TAG_TAG_KEY: &str = "bio.bam.tag.tag";
+
+/// BAM optional tag SAM type (e.g., "i", "Z", "f") stored in field metadata
+pub const BAM_TAG_TYPE_KEY: &str = "bio.bam.tag.type";
+
+/// BAM optional tag description stored in field metadata
+pub const BAM_TAG_DESCRIPTION_KEY: &str = "bio.bam.tag.description";
+
 // ============================================================================
 // GFF-Specific Metadata Keys (For Future Use)
 // ============================================================================
