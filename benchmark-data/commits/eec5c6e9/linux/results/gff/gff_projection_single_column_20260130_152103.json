@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_projection_single_column",
+  "format": "gff",
+  "category": "projection_pushdown",
+  "timestamp": "2026-01-30T15:21:03.695698959Z",
+  "system_info": {
+    "os": "Ubuntu 22.04",
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "cpu_cores": 4,
+    "total_memory_gb": 15.620365142822266
+  },
+  "configuration": {
+    "query": "SELECT type FROM gencode_annotations LIMIT 100000",
+    "repetitions": 3,
+    "test_name": "single_column"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 0.0,
+    "elapsed_seconds": 0.000368663,
+    "total_records": 0,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
