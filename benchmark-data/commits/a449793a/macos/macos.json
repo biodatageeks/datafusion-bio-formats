@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-02-01T21:42:37Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "dependabot/cargo/tokio-79976b6853",
+  "commit_sha": "a449793ab96612d01c0ab2b7b7c86230e2195b5a",
+  "benchmark_mode": "fast"
+}

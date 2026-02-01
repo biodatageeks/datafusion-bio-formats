@@ -429,6 +429,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "dependabot/cargo/tokio-79976b6853@a449793ab96612d01c0ab2b7b7c86230e2195b5a@linux",
+      "label": "dependabot/cargo/tokio-79976b6853(a449793a)",
+      "ref": "dependabot/cargo/tokio-79976b6853",
+      "ref_type": "branch",
+      "timestamp": "2026-02-01T21:43:41Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/a449793a/linux",
+      "commit_sha": "a449793ab96612d01c0ab2b7b7c86230e2195b5a",
+      "is_latest_tag": false
+    },
+    {
+      "id": "dependabot/cargo/tokio-79976b6853@a449793ab96612d01c0ab2b7b7c86230e2195b5a@macos",
+      "label": "dependabot/cargo/tokio-79976b6853(a449793a)",
+      "ref": "dependabot/cargo/tokio-79976b6853",
+      "ref_type": "branch",
+      "timestamp": "2026-02-01T21:43:41Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/a449793a/macos",
+      "commit_sha": "a449793ab96612d01c0ab2b7b7c86230e2195b5a",
+      "is_latest_tag": false
+    },
+    {
       "id": "dependabot/cargo/tracing-0.1.43@c077247b86efec9e0bb820506294b6ef27961535@linux",
       "label": "dependabot/cargo/tracing-0.1.43(c077247b)",
       "ref": "dependabot/cargo/tracing-0.1.43",
@@ -2421,6 +2445,30 @@
       "is_latest_tag": true
     },
     {
+      "id": "v0.1.1@a449793ab96612d01c0ab2b7b7c86230e2195b5a@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-01T21:43:41Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "a449793ab96612d01c0ab2b7b7c86230e2195b5a",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@a449793ab96612d01c0ab2b7b7c86230e2195b5a@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-01T21:43:41Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "a449793ab96612d01c0ab2b7b7c86230e2195b5a",
+      "is_latest_tag": true
+    },
+    {
       "id": "v0.1.1@a6130e7b08efed34da5b9c7291b39354ff503269@linux",
       "label": "v0.1.1",
       "ref": "v0.1.1",
@@ -3144,6 +3192,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-01T21:36:33Z",
+  "last_updated": "2026-02-01T21:43:41Z",
   "latest_tag": "v0.1.1"
 }

@@ -1,0 +1,7 @@
+{
+  "ref": "dependabot/cargo/tokio-79976b6853",
+  "ref_type": "branch",
+  "commit_sha": "a449793ab96612d01c0ab2b7b7c86230e2195b5a",
+  "timestamp": "2026-02-01T21:43:33Z",
+  "benchmark_mode": "fast"
+}
