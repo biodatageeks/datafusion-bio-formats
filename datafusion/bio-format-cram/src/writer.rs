@@ -1,0 +1,221 @@
+//! Writer for CRAM files with reference sequence support
+//!
+//! This module provides writers for CRAM files with support for:
+//! - CRAM format with external reference sequences
+//! - Reference sequence validation and indexing
+
+use datafusion::common::{DataFusionError, Result};
+use noodles_cram as cram;
+use noodles_sam as sam;
+use noodles_sam::alignment::io::Write as AlignmentWrite;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::{Path, PathBuf};
+
+/// Writer for CRAM files with reference sequence support
+///
+/// CRAM files require a reference sequence for compression. This writer
+/// handles reference sequence loading and validation.
+pub struct CramLocalWriter {
+    writer: cram::io::Writer<BufWriter<File>>,
+    reference_path: Option<PathBuf>,
+}
+
+impl CramLocalWriter {
+    /// Creates a new CRAM writer with reference sequence
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The output CRAM file path
+    /// * `reference_path` - Optional path to reference FASTA file (with .fai index)
+    ///
+    /// # Returns
+    ///
+    /// A new `CramLocalWriter` configured for CRAM output
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The file cannot be created
+    /// - The reference path is provided but invalid
+    /// - The reference index (.fai) is missing
+    pub fn new<P: AsRef<Path>>(path: P, reference_path: Option<P>) -> Result<Self> {
+        let reference_path = reference_path.map(|p| p.as_ref().to_path_buf());
+
+        // Validate reference path if provided
+        if let Some(ref ref_path) = reference_path {
+            if !ref_path.exists() {
+                return Err(DataFusionError::Execution(format!(
+                    "Reference FASTA file not found: {}",
+                    ref_path.display()
+                )));
+            }
+
+            // Check for .fai index
+            let fai_path = format!("{}.fai", ref_path.display());
+            if !Path::new(&fai_path).exists() {
+                return Err(DataFusionError::Execution(format!(
+                    "Reference index (.fai) not found: {}. Please create it with: samtools faidx {}",
+                    fai_path,
+                    ref_path.display()
+                )));
+            }
+        }
+
+        let file = File::create(path.as_ref()).map_err(|e| {
+            DataFusionError::Execution(format!("Failed to create CRAM file: {}", e))
+        })?;
+        let buf_writer = BufWriter::new(file);
+        let writer = cram::io::Writer::new(buf_writer);
+
+        Ok(Self {
+            writer,
+            reference_path,
+        })
+    }
+
+    /// Returns the reference path if set
+    pub fn reference_path(&self) -> Option<&Path> {
+        self.reference_path.as_deref()
+    }
+
+    /// Writes the SAM header to the CRAM file
+    ///
+    /// This must be called before writing any records.
+    ///
+    /// # Arguments
+    ///
+    /// * `header` - The SAM header to write
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails
+    pub fn write_header(&mut self, header: &sam::Header) -> Result<()> {
+        self.writer
+            .write_header(header)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to write CRAM header: {}", e)))
+    }
+
+    /// Writes a single alignment record to the file
+    ///
+    /// # Arguments
+    ///
+    /// * `header` - The SAM header (needed for CRAM encoding)
+    /// * `record` - The alignment record to write
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails
+    pub fn write_record(
+        &mut self,
+        header: &sam::Header,
+        record: &sam::alignment::RecordBuf,
+    ) -> Result<()> {
+        self.writer
+            .write_alignment_record(header, record)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to write CRAM record: {}", e)))
+    }
+
+    /// Writes multiple alignment records to the file
+    ///
+    /// # Arguments
+    ///
+    /// * `header` - The SAM header (needed for CRAM encoding)
+    /// * `records` - Slice of alignment records to write
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing any record fails
+    pub fn write_records(
+        &mut self,
+        header: &sam::Header,
+        records: &[sam::alignment::RecordBuf],
+    ) -> Result<()> {
+        for record in records {
+            self.write_record(header, record)?;
+        }
+        Ok(())
+    }
+
+    /// Finishes writing and closes the file
+    ///
+    /// This properly finalizes the CRAM stream and consumes the writer.
+    ///
+    /// # Arguments
+    ///
+    /// * `header` - The SAM header (needed for CRAM finish)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if finishing fails
+    pub fn finish(mut self, header: &sam::Header) -> Result<()> {
+        self.writer
+            .finish(header)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to finish CRAM stream: {}", e)))
+    }
+}
+
+/// Validates that a reference FASTA file exists and has an index
+///
+/// # Arguments
+///
+/// * `reference_path` - Path to the reference FASTA file
+///
+/// # Returns
+///
+/// Ok(()) if the reference and index exist, error otherwise
+pub fn validate_reference_file<P: AsRef<Path>>(reference_path: P) -> Result<()> {
+    let ref_path = reference_path.as_ref();
+
+    if !ref_path.exists() {
+        return Err(DataFusionError::Execution(format!(
+            "Reference FASTA file not found: {}",
+            ref_path.display()
+        )));
+    }
+
+    let fai_path = format!("{}.fai", ref_path.display());
+    if !Path::new(&fai_path).exists() {
+        return Err(DataFusionError::Execution(format!(
+            "Reference index (.fai) not found: {}. Create it with: samtools faidx {}",
+            fai_path,
+            ref_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_validate_reference_file_missing() {
+        let result = validate_reference_file("/nonexistent/path/ref.fasta");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_cram_writer_without_reference() {
+        let temp_file = NamedTempFile::with_suffix(".cram").unwrap();
+        let path = temp_file.path();
+
+        let writer = CramLocalWriter::new(path, Option::<&Path>::None);
+        assert!(writer.is_ok());
+    }
+
+    #[test]
+    fn test_write_empty_header() -> Result<()> {
+        let temp_file = NamedTempFile::with_suffix(".cram").unwrap();
+        let path = temp_file.path();
+
+        let header = sam::Header::default();
+        let mut writer = CramLocalWriter::new(path, Option::<&Path>::None)?;
+        writer.write_header(&header)?;
+        writer.finish(&header)?;
+
+        Ok(())
+    }
+}

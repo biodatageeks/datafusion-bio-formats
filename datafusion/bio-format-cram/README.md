@@ -8,11 +8,14 @@ This crate provides a DataFusion `TableProvider` implementation for reading CRAM
 
 ## Features
 
-- Read CRAM files directly into DataFusion tables
+- **Read** CRAM files directly into DataFusion tables
+- **Write** CRAM files from DataFusion query results
 - High compression ratios with reference-based encoding
-- Cloud storage support (GCS, S3, Azure Blob Storage)
+- Reference FASTA file support (required for optimal compression)
+- Cloud storage support (GCS, S3, Azure Blob Storage) for reads
 - Memory-efficient streaming for large alignment files
 - Support for CRAM indexes (CRAI)
+- Round-trip metadata preservation (headers, reference sequences, read groups)
 
 ## Installation
 
@@ -66,6 +69,82 @@ async fn main() -> datafusion::error::Result<()> {
     Ok(())
 }
 ```
+
+### Writing CRAM Files
+
+Write DataFusion query results to CRAM files with reference sequence support:
+
+```rust
+use datafusion::prelude::*;
+use datafusion_bio_format_cram::table_provider::CramTableProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+
+    // Path to reference genome (REQUIRED for optimal CRAM compression)
+    let reference_path = Some("reference/genome.fasta".to_string());
+
+    // Register input CRAM file
+    let input_table = CramTableProvider::new(
+        "input.cram".to_string(),
+        reference_path.clone(),
+        None,  // cloud storage options
+        true,  // 0-based coordinates
+        None,  // no tags
+    )?;
+    ctx.register_table("input", Arc::new(input_table))?;
+
+    // Create output table for write
+    let output_table = CramTableProvider::new_for_write(
+        "output.cram".to_string(),
+        ctx.table("input").await?.schema().into(),
+        reference_path,  // Use same reference
+        None,  // tag fields extracted from schema
+        true,  // 0-based coordinates
+    );
+    ctx.register_table("output", Arc::new(output_table))?;
+
+    // Write filtered results
+    ctx.sql("
+        INSERT OVERWRITE output
+        SELECT * FROM input
+        WHERE mapping_quality >= 30
+    ").await?.show().await?;
+
+    Ok(())
+}
+```
+
+**Important Notes:**
+- **Reference Required**: CRAM files need a reference FASTA for optimal compression
+- Create reference index with: `samtools faidx reference/genome.fasta`
+- Writing without a reference is possible but results in larger files
+- Reference path is preserved in metadata for round-trip compatibility
+
+**Example: BAM to CRAM Conversion**
+```sql
+-- Convert BAM to CRAM (requires reference)
+INSERT OVERWRITE cram_output SELECT * FROM bam_input;
+
+-- Filter and convert
+INSERT OVERWRITE output SELECT * FROM input WHERE chrom = 'chr1' AND mapping_quality >= 30;
+```
+
+**Example: Writing Without Reference (Not Recommended)**
+```rust
+// Creates larger CRAM files without reference-based compression
+let output_table = CramTableProvider::new_for_write(
+    "output.cram".to_string(),
+    schema,
+    None,  // No reference - stores full sequences
+    None,
+    true,
+);
+```
+
+See `examples/write_cram.rs` for complete write examples.
 
 ## Supported File Types
 

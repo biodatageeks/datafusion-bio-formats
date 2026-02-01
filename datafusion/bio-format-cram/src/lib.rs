@@ -57,3 +57,23 @@ pub mod storage;
 /// Implements the TableProvider trait to allow registering CRAM files as
 /// queryable tables within DataFusion contexts.
 pub mod table_provider;
+
+/// Writer for CRAM files with reference sequence support.
+///
+/// Provides functionality to write CRAM files with optional reference compression.
+pub mod writer;
+
+/// Physical execution plan for writing CRAM files.
+///
+/// Implements the ExecutionPlan trait for writing DataFusion query results to CRAM files.
+pub mod write_exec;
+
+/// Serializer for converting Arrow RecordBatches to CRAM records.
+///
+/// Handles conversion of DataFusion Arrow data to noodles CRAM record format.
+pub mod serializer;
+
+/// Header builder for constructing CRAM headers from Arrow schemas.
+///
+/// Reconstructs SAM/CRAM headers from Arrow schema metadata for round-trip operations.
+pub mod header_builder;

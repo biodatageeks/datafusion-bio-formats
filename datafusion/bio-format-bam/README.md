@@ -8,12 +8,16 @@ This crate provides a DataFusion `TableProvider` implementation for reading BAM 
 
 ## Features
 
-- Read BAM files directly into DataFusion tables
+- **Read** BAM/SAM files directly into DataFusion tables
+- **Write** BAM/SAM files from DataFusion query results
 - BGZF compression support (native to BAM format)
-- Cloud storage support (GCS, S3, Azure Blob Storage)
+- SAM format support (uncompressed text)
+- Automatic compression detection from file extension (.bam vs .sam)
+- Cloud storage support (GCS, S3, Azure Blob Storage) for reads
 - Memory-efficient streaming for large alignment files
 - Support for indexed BAM files (BAI)
 - **Optional alignment tag support** with lazy parsing - include tags like NM, MD, AS as queryable columns
+- Round-trip metadata preservation (headers, reference sequences, read groups)
 
 ## Installation
 
@@ -145,6 +149,70 @@ async fn main() -> datafusion::error::Result<()> {
 ```
 
 See `examples/test_bam_with_tags.rs` for more comprehensive examples.
+
+### Writing BAM/SAM Files
+
+Write DataFusion query results to BAM or SAM files:
+
+```rust
+use datafusion::prelude::*;
+use datafusion_bio_format_bam::table_provider::BamTableProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+
+    // Register input BAM file
+    let input_table = BamTableProvider::new(
+        "input.bam".to_string(),
+        None,
+        None,
+        true,  // 0-based coordinates
+        None,  // no tags
+    )?;
+    ctx.register_table("input", Arc::new(input_table))?;
+
+    // Create output table for write
+    let output_table = BamTableProvider::new_for_write(
+        "output.bam".to_string(),  // Use .sam for SAM format
+        ctx.table("input").await?.schema().into(),
+        None,  // tag fields extracted from schema
+        true,  // 0-based coordinates
+    );
+    ctx.register_table("output", Arc::new(output_table))?;
+
+    // Write filtered results
+    ctx.sql("
+        INSERT OVERWRITE output
+        SELECT * FROM input
+        WHERE mapping_quality >= 30
+    ").await?.show().await?;
+
+    Ok(())
+}
+```
+
+**Key Features:**
+- Automatic format detection: `.bam` → BGZF compressed, `.sam` → uncompressed text
+- Preserves headers, reference sequences, read groups, and program info
+- Supports coordinate system conversion (0-based ↔ 1-based)
+- Handles alignment tags (NM, MD, AS, etc.)
+- Round-trip compatible: read → transform → write → read
+
+**Example: Format Conversion**
+```sql
+-- Convert SAM to BAM
+INSERT OVERWRITE bam_output SELECT * FROM sam_input;
+
+-- Convert BAM to SAM
+INSERT OVERWRITE sam_output SELECT * FROM bam_input;
+
+-- Filter and convert
+INSERT OVERWRITE output SELECT * FROM input WHERE chrom = 'chr1' AND mapping_quality >= 30;
+```
+
+See `examples/write_bam.rs` for complete write examples.
 
 ## Supported File Types
 

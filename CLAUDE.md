@@ -39,6 +39,8 @@ Each format has example files in `datafusion/bio-format-{format}/examples/`:
 - `cargo run --example test_reader --package datafusion-bio-format-fastq`
 - `cargo run --example test_reader --package datafusion-bio-format-vcf`
 - `cargo run --example performance_test --package datafusion-bio-format-fastq`
+- `cargo run --example write_bam --package datafusion-bio-format-bam` - BAM/SAM write examples
+- `cargo run --example write_cram --package datafusion-bio-format-cram` - CRAM write examples
 
 ### Testing Individual Crates
 - `cargo test --package datafusion-bio-format-fastq`
@@ -69,10 +71,26 @@ Each format has example files in `datafusion/bio-format-{format}/examples/`:
 
 ### Key Components
 Each format crate follows a consistent pattern:
-- `table_provider.rs`: Implements DataFusion's TableProvider trait
-- `physical_exec.rs`: Implements the physical execution plan
+- `table_provider.rs`: Implements DataFusion's TableProvider trait (with `insert_into()` for write support)
+- `physical_exec.rs`: Implements the physical execution plan for reads
 - `storage.rs`: File reading and parsing logic
 - `lib.rs`: Public API and module exports
+
+#### Write Support (BAM, CRAM, VCF, FASTQ)
+Some formats include write support with additional modules:
+- `writer.rs`: File writer with compression support
+- `write_exec.rs`: Physical execution plan for writes
+- `serializer.rs`: Converts Arrow RecordBatch to format-specific records
+- `header_builder.rs`: Reconstructs format headers from Arrow schema metadata
+
+Write operations use SQL `INSERT OVERWRITE` syntax:
+```sql
+-- BAM/SAM write
+INSERT OVERWRITE output_table SELECT * FROM input_table WHERE mapping_quality >= 30
+
+-- CRAM write (requires reference sequence)
+INSERT OVERWRITE cram_output SELECT * FROM bam_input WHERE chrom = 'chr1'
+```
 
 ### Object Storage Support
 The `bio-format-core` crate provides cloud storage integration via OpenDAL with support for:
@@ -102,3 +120,31 @@ The `bio-format-core` crate provides cloud storage integration via OpenDAL with 
 - `quality_scores`: String (required) - Quality scores
 
 Each format crate defines its schema in the `determine_schema()` function within the table provider.
+
+## Metadata Schema Conventions
+
+For round-trip read/write operations, format-specific metadata is preserved in Arrow schema metadata:
+
+### BAM/SAM Metadata Keys
+**Schema-level** (in `schema.metadata()`):
+- `bio.bam.file_format_version` - SAM format version (default: "1.6")
+- `bio.bam.sort_order` - Sort order: "coordinate", "queryname", or "unsorted"
+- `bio.bam.reference_sequences` - JSON array of reference sequences: `[{"name": "chr1", "length": 249250621}, ...]`
+- `bio.bam.read_groups` - JSON array of read group metadata: `[{"id": "RG1", "sample": "sample1", ...}, ...]`
+- `bio.bam.program_info` - JSON array of program records: `[{"id": "bwa", "name": "bwa", "version": "0.7.17"}, ...]`
+- `bio.bam.comments` - JSON array of comment lines
+- `bio.coordinate_system_zero_based` - "true" for 0-based (default), "false" for 1-based
+
+**Field-level** (tag column metadata):
+- `bio.bam.tag.tag` - SAM tag name (e.g., "NM", "MD", "AS")
+- `bio.bam.tag.type` - SAM type: 'i' (int), 'Z' (string), 'f' (float), 'B' (array)
+- `bio.bam.tag.description` - Human-readable tag description
+
+### CRAM Metadata Keys
+All BAM metadata keys plus:
+- `bio.cram.file_format_version` - CRAM version (3.0 or 3.1)
+- `bio.cram.reference_path` - Path to reference FASTA file
+- `bio.cram.reference_md5` - Reference checksum (optional)
+
+### VCF/FASTQ Metadata Keys
+Similar patterns are followed for other formats with write support. See respective `header_builder.rs` files for details.
