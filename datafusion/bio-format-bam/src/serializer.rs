@@ -68,16 +68,16 @@ pub fn batch_to_bam_records(
     for row in 0..num_rows {
         let record = build_single_record(
             row,
-            &names,
-            &chroms,
-            &starts,
-            &flags,
-            &cigars,
-            &mapping_qualities,
-            &mate_chroms,
-            &mate_starts,
-            &sequences,
-            &quality_scores,
+            names,
+            chroms,
+            starts,
+            flags,
+            cigars,
+            mapping_qualities,
+            mate_chroms,
+            mate_starts,
+            sequences,
+            quality_scores,
             &ref_map,
             batch,
             tag_fields,
@@ -369,7 +369,7 @@ fn arrow_to_sam_tag_value(
                 let list = arr.value(row);
 
                 // Check element type
-                if list.len() > 0 {
+                if !list.is_empty() {
                     if let Some(int_arr) = list.as_any().downcast_ref::<Int32Array>() {
                         // Integer array
                         let values: Vec<i32> =
