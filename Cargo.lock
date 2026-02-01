@@ -1053,6 +1053,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "datafusion",
+ "datafusion-bio-format-bam",
  "datafusion-bio-format-core",
  "futures",
  "futures-util",

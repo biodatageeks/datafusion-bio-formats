@@ -32,3 +32,4 @@ noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f
 
 [dev-dependencies]
 tempfile = "3.10"
+datafusion-bio-format-bam = { path = "../bio-format-bam" }

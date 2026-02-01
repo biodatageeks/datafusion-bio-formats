@@ -18,6 +18,7 @@ async fn main() -> datafusion::error::Result<()> {
     let input_path = "test_data/sample.bam";
     let input_table = BamTableProvider::new(
         input_path.to_string(),
+        None, // thread_num
         None, // object storage options
         true, // 0-based coordinates
         None, // tag fields
@@ -35,7 +36,7 @@ async fn main() -> datafusion::error::Result<()> {
 
     let output_table_1 = BamTableProvider::new_for_write(
         output_path_1.to_string(),
-        df.schema().into(),
+        df.schema().inner().clone(),
         None, // tag fields (extracted from schema)
         true, // 0-based coordinates
     );
@@ -50,8 +51,12 @@ async fn main() -> datafusion::error::Result<()> {
     println!("\nExample 2: Writing SAM file (uncompressed)");
     let output_path_2 = "output/filtered.sam";
 
-    let output_table_2 =
-        BamTableProvider::new_for_write(output_path_2.to_string(), df.schema().into(), None, true);
+    let output_table_2 = BamTableProvider::new_for_write(
+        output_path_2.to_string(),
+        df.schema().inner().clone(),
+        None,
+        true,
+    );
     ctx.register_table("output_2", Arc::new(output_table_2))?;
 
     ctx.sql("INSERT OVERWRITE output_2 SELECT * FROM input_bam WHERE chrom = 'chr1' LIMIT 100")
@@ -63,13 +68,19 @@ async fn main() -> datafusion::error::Result<()> {
     println!("\nExample 3: Converting SAM to BAM");
 
     // Register SAM input
-    let sam_input = BamTableProvider::new("input.sam".to_string(), None, true, None)?;
+    let sam_input = BamTableProvider::new(
+        "input.sam".to_string(),
+        None, // thread_num
+        None, // object storage options
+        true, // 0-based coordinates
+        None, // tag fields
+    )?;
     ctx.register_table("input_sam", Arc::new(sam_input))?;
 
     // Write as BAM
     let bam_output = BamTableProvider::new_for_write(
         "output/converted.bam".to_string(),
-        ctx.table("input_sam").await?.schema().into(),
+        ctx.table("input_sam").await?.schema().inner().clone(),
         None,
         true,
     );

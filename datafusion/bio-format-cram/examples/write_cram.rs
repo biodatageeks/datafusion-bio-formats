@@ -39,7 +39,7 @@ async fn main() -> datafusion::error::Result<()> {
 
     let output_table_1 = CramTableProvider::new_for_write(
         output_path_1.to_string(),
-        df.schema().into(),
+        df.schema().inner().clone(),
         reference_path.clone(),
         None, // tag fields (extracted from schema)
         true, // 0-based coordinates
@@ -57,7 +57,7 @@ async fn main() -> datafusion::error::Result<()> {
 
     let output_table_2 = CramTableProvider::new_for_write(
         output_path_2.to_string(),
-        df.schema().into(),
+        df.schema().inner().clone(),
         reference_path.clone(),
         None,
         true,
@@ -75,7 +75,7 @@ async fn main() -> datafusion::error::Result<()> {
 
     let output_table_3 = CramTableProvider::new_for_write(
         output_path_3.to_string(),
-        df.schema().into(),
+        df.schema().inner().clone(),
         None, // No reference - will store full sequences
         None,
         true,
@@ -91,12 +91,18 @@ async fn main() -> datafusion::error::Result<()> {
     println!("\nExample 4: Converting BAM to CRAM");
     use datafusion_bio_format_bam::table_provider::BamTableProvider;
 
-    let bam_input = BamTableProvider::new("input.bam".to_string(), None, true, None)?;
+    let bam_input = BamTableProvider::new(
+        "input.bam".to_string(),
+        None, // thread_num
+        None, // object storage options
+        true, // 0-based coordinates
+        None, // tag fields
+    )?;
     ctx.register_table("input_bam", Arc::new(bam_input))?;
 
     let cram_output = CramTableProvider::new_for_write(
         "output/converted.cram".to_string(),
-        ctx.table("input_bam").await?.schema().into(),
+        ctx.table("input_bam").await?.schema().inner().clone(),
         reference_path,
         None,
         true,
