@@ -9,6 +9,10 @@
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result};
+use datafusion_bio_format_core::{
+    BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY,
+    BAM_REFERENCE_SEQUENCES_KEY,
+};
 use noodles_sam as sam;
 use noodles_sam::header::record::value::Map;
 use noodles_sam::header::record::value::map::{
@@ -17,19 +21,11 @@ use noodles_sam::header::record::value::map::{
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
-/// Metadata key for CRAM file format version
+/// Metadata key for CRAM file format version (CRAM-specific override)
 pub const CRAM_FILE_FORMAT_VERSION_KEY: &str = "bio.cram.file_format_version";
-/// Metadata key for reference sequences (JSON array)
-pub const CRAM_REFERENCE_SEQUENCES_KEY: &str = "bio.cram.reference_sequences";
-/// Metadata key for read groups (JSON array)
-pub const CRAM_READ_GROUPS_KEY: &str = "bio.cram.read_groups";
-/// Metadata key for program info (JSON array)
-pub const CRAM_PROGRAM_INFO_KEY: &str = "bio.cram.program_info";
-/// Metadata key for comments (JSON array)
-pub const CRAM_COMMENTS_KEY: &str = "bio.cram.comments";
-/// Metadata key for reference FASTA path
+/// Metadata key for reference FASTA path (CRAM-specific)
 pub const CRAM_REFERENCE_PATH_KEY: &str = "bio.cram.reference_path";
-/// Metadata key for reference MD5 checksum
+/// Metadata key for reference MD5 checksum (CRAM-specific)
 pub const CRAM_REFERENCE_MD5_KEY: &str = "bio.cram.reference_md5";
 
 /// Reference sequence metadata
@@ -79,12 +75,12 @@ pub struct ProgramMetadata {
 /// Builds a SAM header from an Arrow schema for CRAM files
 ///
 /// Reconstructs SAM header from schema metadata:
-/// - File format version from `bio.cram.file_format_version` (defaults to "1.6")
-/// - Reference sequences from `bio.cram.reference_sequences` (JSON array)
-/// - Read groups from `bio.cram.read_groups` (JSON array)
-/// - Program info from `bio.cram.program_info` (JSON array)
-/// - Comments from `bio.cram.comments` (JSON array)
-/// - Reference path from `bio.cram.reference_path` (optional)
+/// - File format version from `bio.cram.file_format_version` or `bio.bam.file_format_version` (defaults to "1.6")
+/// - Reference sequences from `bio.bam.reference_sequences` (JSON array)
+/// - Read groups from `bio.bam.read_groups` (JSON array)
+/// - Program info from `bio.bam.program_info` (JSON array)
+/// - Comments from `bio.bam.comments` (JSON array)
+/// - Reference path from `bio.cram.reference_path` (CRAM-specific, optional)
 ///
 /// # Arguments
 ///
@@ -100,8 +96,10 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
     let schema_metadata = schema.metadata();
 
     // Build header (@HD) line
+    // Try CRAM-specific version first, then fall back to BAM version
     let file_format_version = schema_metadata
         .get(CRAM_FILE_FORMAT_VERSION_KEY)
+        .or_else(|| schema_metadata.get(BAM_FILE_FORMAT_VERSION_KEY))
         .map(|s| s.as_str())
         .unwrap_or("1.6");
 
@@ -112,8 +110,8 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
     let header_map = Map::<sam::header::record::value::map::Header>::new(version);
     builder = builder.set_header(header_map);
 
-    // Add reference sequences (@SQ)
-    if let Some(ref_seqs_json) = schema_metadata.get(CRAM_REFERENCE_SEQUENCES_KEY) {
+    // Add reference sequences (@SQ) - uses BAM metadata key
+    if let Some(ref_seqs_json) = schema_metadata.get(BAM_REFERENCE_SEQUENCES_KEY) {
         if let Some(ref_seqs) = from_json_string::<Vec<ReferenceSequenceMetadata>>(ref_seqs_json) {
             for ref_seq in ref_seqs {
                 let length = NonZeroUsize::new(ref_seq.length).ok_or_else(|| {
@@ -127,8 +125,8 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
         }
     }
 
-    // Add read groups (@RG)
-    if let Some(read_groups_json) = schema_metadata.get(CRAM_READ_GROUPS_KEY) {
+    // Add read groups (@RG) - uses BAM metadata key
+    if let Some(read_groups_json) = schema_metadata.get(BAM_READ_GROUPS_KEY) {
         if let Some(read_groups) = from_json_string::<Vec<ReadGroupMetadata>>(read_groups_json) {
             for rg in read_groups {
                 let rg_map = Map::<ReadGroup>::default();
@@ -137,8 +135,8 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
         }
     }
 
-    // Add program info (@PG)
-    if let Some(programs_json) = schema_metadata.get(CRAM_PROGRAM_INFO_KEY) {
+    // Add program info (@PG) - uses BAM metadata key
+    if let Some(programs_json) = schema_metadata.get(BAM_PROGRAM_INFO_KEY) {
         if let Some(programs) = from_json_string::<Vec<ProgramMetadata>>(programs_json) {
             for pg in programs {
                 let pg_map = Map::<Program>::default();
@@ -147,8 +145,8 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
         }
     }
 
-    // Add comments (@CO)
-    if let Some(comments_json) = schema_metadata.get(CRAM_COMMENTS_KEY) {
+    // Add comments (@CO) - uses BAM metadata key
+    if let Some(comments_json) = schema_metadata.get(BAM_COMMENTS_KEY) {
         if let Some(comments) = from_json_string::<Vec<String>>(comments_json) {
             for comment in comments {
                 builder = builder.add_comment(comment);
@@ -203,7 +201,7 @@ mod tests {
             },
         ];
         metadata.insert(
-            CRAM_REFERENCE_SEQUENCES_KEY.to_string(),
+            BAM_REFERENCE_SEQUENCES_KEY.to_string(),
             serde_json::to_string(&ref_seqs).unwrap(),
         );
 
@@ -252,7 +250,7 @@ mod tests {
 
         let comments = vec!["This is a test".to_string(), "Another comment".to_string()];
         metadata.insert(
-            CRAM_COMMENTS_KEY.to_string(),
+            BAM_COMMENTS_KEY.to_string(),
             serde_json::to_string(&comments).unwrap(),
         );
 

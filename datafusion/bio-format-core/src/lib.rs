@@ -51,7 +51,10 @@ pub const COORDINATE_SYSTEM_METADATA_KEY: &str = "bio.coordinate_system_zero_bas
 pub mod metadata;
 
 // Re-export commonly used metadata keys
-pub use metadata::{BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY};
+pub use metadata::{
+    BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY,
+    BAM_REFERENCE_SEQUENCES_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
+};
 /// Alignment utilities shared between BAM and CRAM formats
 pub mod alignment_utils;
 /// Object storage integration for cloud and local file access

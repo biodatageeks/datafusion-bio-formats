@@ -141,10 +141,17 @@ For round-trip read/write operations, format-specific metadata is preserved in A
 - `bio.bam.tag.description` - Human-readable tag description
 
 ### CRAM Metadata Keys
-All BAM metadata keys plus:
-- `bio.cram.file_format_version` - CRAM version (3.0 or 3.1)
-- `bio.cram.reference_path` - Path to reference FASTA file
-- `bio.cram.reference_md5` - Reference checksum (optional)
+CRAM uses BAM metadata keys for common fields (reference sequences, read groups, programs, comments) to maintain consistency across alignment formats. Only CRAM-specific fields use the `bio.cram.*` prefix:
+- `bio.cram.file_format_version` - CRAM version (3.0 or 3.1, overrides BAM version)
+- `bio.cram.reference_path` - Path to reference FASTA file (CRAM-specific)
+- `bio.cram.reference_md5` - Reference checksum (CRAM-specific, optional)
+
+**Note:** CRAM reuses these BAM keys:
+- `bio.bam.file_format_version` - Fallback if CRAM version not specified
+- `bio.bam.reference_sequences` - Reference sequence definitions
+- `bio.bam.read_groups` - Read group metadata
+- `bio.bam.program_info` - Program records
+- `bio.bam.comments` - Comment lines
 
 ### VCF/FASTQ Metadata Keys
 Similar patterns are followed for other formats with write support. See respective `header_builder.rs` files for details.

@@ -9,6 +9,10 @@
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result};
+use datafusion_bio_format_core::{
+    BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY,
+    BAM_REFERENCE_SEQUENCES_KEY,
+};
 use noodles_sam as sam;
 use noodles_sam::header::record::value::Map;
 use noodles_sam::header::record::value::map::{
@@ -17,18 +21,8 @@ use noodles_sam::header::record::value::map::{
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
-/// Metadata key for BAM file format version
-pub const BAM_FILE_FORMAT_VERSION_KEY: &str = "bio.bam.file_format_version";
 /// Metadata key for BAM sort order
 pub const BAM_SORT_ORDER_KEY: &str = "bio.bam.sort_order";
-/// Metadata key for reference sequences (JSON array)
-pub const BAM_REFERENCE_SEQUENCES_KEY: &str = "bio.bam.reference_sequences";
-/// Metadata key for read groups (JSON array)
-pub const BAM_READ_GROUPS_KEY: &str = "bio.bam.read_groups";
-/// Metadata key for program info (JSON array)
-pub const BAM_PROGRAM_INFO_KEY: &str = "bio.bam.program_info";
-/// Metadata key for comments (JSON array)
-pub const BAM_COMMENTS_KEY: &str = "bio.bam.comments";
 
 /// Reference sequence metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]

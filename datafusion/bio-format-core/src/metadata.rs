@@ -61,8 +61,11 @@ pub const VCF_FIELD_FIELD_TYPE_KEY: &str = "bio.vcf.field.field_type";
 pub const VCF_FIELD_FORMAT_ID_KEY: &str = "bio.vcf.field.format_id";
 
 // ============================================================================
-// BAM-Specific Metadata Keys (For Future Use)
+// BAM-Specific Metadata Keys
 // ============================================================================
+
+/// BAM file format version (e.g., "1.6") stored in schema metadata
+pub const BAM_FILE_FORMAT_VERSION_KEY: &str = "bio.bam.file_format_version";
 
 /// BAM reference sequences (contigs) stored as JSON array
 pub const BAM_REFERENCE_SEQUENCES_KEY: &str = "bio.bam.reference_sequences";
@@ -72,6 +75,9 @@ pub const BAM_READ_GROUPS_KEY: &str = "bio.bam.read_groups";
 
 /// BAM program info (@PG) stored as JSON array
 pub const BAM_PROGRAM_INFO_KEY: &str = "bio.bam.program_info";
+
+/// BAM comments (@CO) stored as JSON array
+pub const BAM_COMMENTS_KEY: &str = "bio.bam.comments";
 
 /// BAM optional tag name (e.g., "NM", "MD") stored in field metadata
 pub const BAM_TAG_TAG_KEY: &str = "bio.bam.tag.tag";
