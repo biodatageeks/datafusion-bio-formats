@@ -525,6 +525,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/bam-cram-write-support@0b11208f98485ea871f004b7a436e52f19947eef@linux",
+      "label": "feat/bam-cram-write-support(0b11208f)",
+      "ref": "feat/bam-cram-write-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-01T09:27:54Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/0b11208f/linux",
+      "commit_sha": "0b11208f98485ea871f004b7a436e52f19947eef",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/bam-cram-write-support@0b11208f98485ea871f004b7a436e52f19947eef@macos",
+      "label": "feat/bam-cram-write-support(0b11208f)",
+      "ref": "feat/bam-cram-write-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-01T09:27:54Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/0b11208f/macos",
+      "commit_sha": "0b11208f98485ea871f004b7a436e52f19947eef",
+      "is_latest_tag": false
+    },
+    {
       "id": "feat/bam-cram-write-support@5f4c36ca4334e41d7488c2a0a688d2b77c32591d@linux",
       "label": "feat/bam-cram-write-support(5f4c36ca)",
       "ref": "feat/bam-cram-write-support",
@@ -1386,6 +1410,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "099537d7c02b3defed13675896e65a817590d3cc",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@0b11208f98485ea871f004b7a436e52f19947eef@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-01T09:27:54Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "0b11208f98485ea871f004b7a436e52f19947eef",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@0b11208f98485ea871f004b7a436e52f19947eef@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-01T09:27:54Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "0b11208f98485ea871f004b7a436e52f19947eef",
       "is_latest_tag": true
     },
     {
@@ -2976,6 +3024,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-01T09:26:51Z",
+  "last_updated": "2026-02-01T09:27:54Z",
   "latest_tag": "v0.1.1"
 }

@@ -1,0 +1,7 @@
+{
+  "ref": "feat/bam-cram-write-support",
+  "ref_type": "branch",
+  "commit_sha": "0b11208f98485ea871f004b7a436e52f19947eef",
+  "timestamp": "2026-02-01T09:27:46Z",
+  "benchmark_mode": "fast"
+}
