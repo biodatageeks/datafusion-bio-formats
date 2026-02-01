@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-02-01T09:17:24Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/bam-cram-write-support",
+  "commit_sha": "5f4c36ca4334e41d7488c2a0a688d2b77c32591d",
+  "benchmark_mode": "fast"
+}
