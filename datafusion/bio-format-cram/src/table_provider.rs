@@ -1,9 +1,10 @@
 use crate::physical_exec::CramExec;
+use crate::write_exec::CramWriteExec;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -121,6 +122,31 @@ impl CramTableProvider {
             coordinate_system_zero_based,
             tag_fields,
         })
+    }
+
+    /// Creates a new CRAM table provider for write operations.
+    ///
+    /// # Arguments
+    /// * `output_path` - Path to output CRAM file
+    /// * `schema` - Schema defining the structure of data to write
+    /// * `reference_path` - Optional path to FASTA reference file
+    /// * `tag_fields` - Optional list of BAM/SAM tags to write
+    /// * `coordinate_system_zero_based` - If true, input is 0-based; if false, 1-based
+    pub fn new_for_write(
+        output_path: String,
+        schema: SchemaRef,
+        reference_path: Option<String>,
+        tag_fields: Option<Vec<String>>,
+        coordinate_system_zero_based: bool,
+    ) -> Self {
+        Self {
+            file_path: output_path,
+            schema,
+            reference_path,
+            object_storage_options: None,
+            coordinate_system_zero_based,
+            tag_fields,
+        }
     }
 
     /// Discover available columns by sampling records from the CRAM file.
@@ -337,5 +363,41 @@ impl TableProvider for CramTableProvider {
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             tag_fields: self.tag_fields.clone(),
         }))
+    }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::common::DataFusionError;
+
+        if insert_op != InsertOp::Overwrite {
+            return Err(DataFusionError::NotImplemented(
+                "CRAM insert_into only supports OVERWRITE mode (INSERT OVERWRITE)".to_string(),
+            ));
+        }
+
+        // Extract tag fields from schema metadata
+        let tag_fields: Vec<String> = self
+            .schema
+            .fields()
+            .iter()
+            .filter_map(|field| {
+                field
+                    .metadata()
+                    .get(BAM_TAG_TAG_KEY)
+                    .map(|tag| tag.to_string())
+            })
+            .collect();
+
+        Ok(Arc::new(CramWriteExec::new(
+            input,
+            self.file_path.clone(),
+            self.reference_path.clone(),
+            tag_fields,
+            self.coordinate_system_zero_based,
+        )))
     }
 }

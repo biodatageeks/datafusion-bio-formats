@@ -26,3 +26,9 @@ async-stream = "0.3.6"
 log = "0.4.27"
 async-trait = "0.1.88"
 hex = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a" }
+
+[dev-dependencies]
+tempfile = "3.10"

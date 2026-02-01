@@ -1,11 +1,12 @@
 use crate::physical_exec::BamExec;
+use crate::write_exec::BamWriteExec;
 use async_trait::async_trait;
 use datafusion::arrow::array::{BooleanBuilder, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::DataFusionError;
 use datafusion::datasource::{MemTable, TableType};
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -158,6 +159,37 @@ impl BamTableProvider {
             coordinate_system_zero_based,
             tag_fields,
         })
+    }
+
+    /// Creates a new BAM table provider for write operations.
+    ///
+    /// This constructor is used when creating a table provider for writing
+    /// query results to a BAM/SAM file.
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path to the output BAM/SAM file
+    /// * `schema` - Arrow schema with metadata for header construction
+    /// * `tag_fields` - Optional list of alignment tag names to write
+    /// * `coordinate_system_zero_based` - If true, input uses 0-based coordinates
+    ///
+    /// # Returns
+    ///
+    /// A new BamTableProvider configured for writing
+    pub fn new_for_write(
+        output_path: String,
+        schema: SchemaRef,
+        tag_fields: Option<Vec<String>>,
+        coordinate_system_zero_based: bool,
+    ) -> Self {
+        Self {
+            file_path: output_path,
+            schema,
+            thread_num: None,
+            object_storage_options: None,
+            coordinate_system_zero_based,
+            tag_fields,
+        }
     }
 
     /// Discovers and describes all columns in the BAM file by sampling records.
@@ -457,5 +489,44 @@ impl TableProvider for BamTableProvider {
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             tag_fields: self.tag_fields.clone(),
         }))
+    }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        if insert_op != InsertOp::Overwrite {
+            return Err(DataFusionError::NotImplemented(
+                "BAM insert_into only supports OVERWRITE mode".to_string(),
+            ));
+        }
+
+        debug!("BamTableProvider::insert_into path={}", self.file_path);
+
+        // Extract metadata from schema
+        let schema_metadata = self.schema.metadata();
+        let coordinate_system_zero_based = schema_metadata
+            .get(COORDINATE_SYSTEM_METADATA_KEY)
+            .and_then(|s| s.parse::<bool>().ok())
+            .unwrap_or(true);
+
+        // Extract tag fields from schema (fields with BAM_TAG_TAG_KEY metadata)
+        let mut tag_fields = Vec::new();
+        for field in self.schema.fields() {
+            if field.metadata().contains_key(BAM_TAG_TAG_KEY) {
+                tag_fields.push(field.name().clone());
+            }
+        }
+
+        // Create write execution plan
+        Ok(Arc::new(BamWriteExec::new(
+            input,
+            self.file_path.clone(),
+            None, // Auto-detect compression from file extension
+            tag_fields,
+            coordinate_system_zero_based,
+        )))
     }
 }

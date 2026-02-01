@@ -38,9 +38,17 @@
 
 #![warn(missing_docs)]
 
+/// BAM/SAM header builder for constructing headers from Arrow schemas.
+pub mod header_builder;
 /// Physical execution plan for BAM file scanning.
 mod physical_exec;
+/// Serializer for converting Arrow RecordBatches to BAM records.
+pub mod serializer;
 /// BAM file storage and I/O operations.
 pub mod storage;
 /// DataFusion table provider implementation for BAM files.
 pub mod table_provider;
+/// Write execution plan for BAM/SAM files.
+pub mod write_exec;
+/// Writer for BAM/SAM files with compression support.
+pub mod writer;
