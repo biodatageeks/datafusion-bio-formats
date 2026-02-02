@@ -353,7 +353,8 @@ fn arrow_to_sam_tag_value(
             if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
                 let s = arr.value(row);
                 if let Some(ch) = s.chars().next() {
-                    Ok(Some(TagValue::from(ch as u8)))
+                    // Create a Character value, not an integer
+                    Ok(Some(TagValue::Character(ch as u8)))
                 } else {
                     Ok(None)
                 }

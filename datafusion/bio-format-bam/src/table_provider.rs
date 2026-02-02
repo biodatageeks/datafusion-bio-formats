@@ -78,6 +78,160 @@ fn determine_schema(
     Ok(Arc::new(schema))
 }
 
+/// Determines schema by scanning actual BAM file records to infer tag types
+///
+/// This is more accurate than using only the static registry, as it discovers
+/// the actual types used in the file.
+async fn determine_schema_from_file(
+    file_path: String,
+    thread_num: Option<usize>,
+    object_storage_options: Option<ObjectStorageOptions>,
+    tag_fields: &Option<Vec<String>>,
+    coordinate_system_zero_based: bool,
+    sample_size: usize,
+) -> datafusion::common::Result<SchemaRef> {
+    use crate::storage::BamReader;
+    use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
+    use futures_util::StreamExt;
+
+    let mut fields = vec![
+        Field::new("name", DataType::Utf8, true),
+        Field::new("chrom", DataType::Utf8, true),
+        Field::new("start", DataType::UInt32, true),
+        Field::new("end", DataType::UInt32, true),
+        Field::new("flags", DataType::UInt32, false),
+        Field::new("cigar", DataType::Utf8, false),
+        Field::new("mapping_quality", DataType::UInt32, false),
+        Field::new("mate_chrom", DataType::Utf8, true),
+        Field::new("mate_start", DataType::UInt32, true),
+        Field::new("sequence", DataType::Utf8, false),
+        Field::new("quality_scores", DataType::Utf8, false),
+    ];
+
+    // If tag fields are specified, discover their actual types from the file
+    if let Some(tags) = tag_fields {
+        let known_tags = get_known_tags();
+
+        // Create BAM reader to sample records
+        let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
+
+        // Read header (required before reading records)
+        let _ref_sequences = reader.read_sequences().await;
+
+        // Discover actual tag types by sampling records
+        let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+        let mut records = reader.read_records().await;
+        let mut count = 0;
+
+        debug!(
+            "Starting schema inference by sampling {} records",
+            sample_size
+        );
+        debug!("Looking for tags: {:?}", tags);
+
+        while let Some(result) = records.next().await {
+            if count >= sample_size {
+                break;
+            }
+
+            match result {
+                Ok(record) => {
+                    let data = record.data();
+
+                    // Look for the requested tags in this record
+                    for tag_name in tags {
+                        if discovered_tags.contains_key(tag_name) {
+                            continue; // Already discovered
+                        }
+
+                        // Parse tag to noodles format
+                        let tag_bytes = tag_name.as_bytes();
+                        if tag_bytes.len() == 2 {
+                            let tag = noodles_sam::alignment::record::data::field::Tag::from([
+                                tag_bytes[0],
+                                tag_bytes[1],
+                            ]);
+
+                            if let Some(Ok(value)) = data.get(&tag) {
+                                let (sam_type, arrow_type) = infer_type_from_noodles_value(&value);
+                                debug!(
+                                    "Found tag {} in record {}: sam_type={}, arrow_type={:?}",
+                                    tag_name, count, sam_type, arrow_type
+                                );
+                                discovered_tags.insert(tag_name.clone(), (sam_type, arrow_type));
+                            }
+                        }
+                    }
+                    count += 1;
+                }
+                Err(e) => {
+                    debug!("Error reading record during schema inference: {:?}", e);
+                    continue;
+                }
+            }
+        }
+
+        debug!("Schema inference completed after {} records", count);
+        debug!(
+            "Discovered tags: {:?}",
+            discovered_tags.keys().collect::<Vec<_>>()
+        );
+
+        // Build fields for all requested tags
+        for tag in tags {
+            let mut field_metadata = HashMap::new();
+            field_metadata.insert(BAM_TAG_TAG_KEY.to_string(), tag.clone());
+
+            // Use discovered type if found, otherwise fall back to registry, then default
+            let (sam_type, arrow_type, description) =
+                if let Some((sam_t, arrow_t)) = discovered_tags.get(tag) {
+                    // Use actual discovered type from file
+                    let desc = known_tags
+                        .get(tag)
+                        .map(|t| t.description.clone())
+                        .unwrap_or_else(|| format!("Tag type discovered from file ({})", sam_t));
+                    debug!(
+                        "Using discovered type for {}: {} -> {:?}",
+                        tag, sam_t, arrow_t
+                    );
+                    (*sam_t, arrow_t.clone(), desc)
+                } else if let Some(tag_def) = known_tags.get(tag) {
+                    // Fall back to registry definition
+                    debug!(
+                        "Using registry type for {}: {} -> {:?}",
+                        tag, tag_def.sam_type, tag_def.arrow_type
+                    );
+                    (
+                        tag_def.sam_type,
+                        tag_def.arrow_type.clone(),
+                        tag_def.description.clone(),
+                    )
+                } else {
+                    // Default for unknown tags
+                    debug!("Using default type for {}: Z -> Utf8", tag);
+                    ('Z', DataType::Utf8, "Unknown tag".to_string())
+                };
+
+            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), sam_type.to_string());
+            field_metadata.insert(BAM_TAG_DESCRIPTION_KEY.to_string(), description);
+
+            fields.push(
+                Field::new(tag.clone(), arrow_type.clone(), true).with_metadata(field_metadata),
+            );
+        }
+    }
+
+    // Add coordinate system metadata to schema
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        COORDINATE_SYSTEM_METADATA_KEY.to_string(),
+        coordinate_system_zero_based.to_string(),
+    );
+    let schema = Schema::new_with_metadata(fields, metadata);
+    debug!("Schema (from file): {:?}", schema);
+    Ok(Arc::new(schema))
+}
+
 /// A DataFusion table provider for BAM (Binary Alignment Map) files.
 ///
 /// This struct implements the DataFusion TableProvider trait, allowing BAM files
@@ -117,6 +271,13 @@ impl BamTableProvider {
     ///
     /// A new BamTableProvider or a DataFusion error if schema determination fails
     ///
+    /// # Note
+    ///
+    /// This method uses the static tag registry for schema determination. If your BAM file
+    /// contains tags with non-standard types (e.g., XS as float instead of int), consider
+    /// using `try_new_with_inferred_schema()` instead, which samples the file to discover
+    /// actual tag types.
+    ///
     /// # Example
     ///
     /// ```no_run
@@ -151,6 +312,72 @@ impl BamTableProvider {
         tag_fields: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
         let schema = determine_schema(&tag_fields, coordinate_system_zero_based)?;
+        Ok(Self {
+            file_path,
+            schema,
+            thread_num,
+            object_storage_options,
+            coordinate_system_zero_based,
+            tag_fields,
+        })
+    }
+
+    /// Creates a new BAM table provider with schema inferred from the file.
+    ///
+    /// This method samples records from the BAM file to discover the actual types
+    /// of the requested tags, rather than relying solely on the static registry.
+    /// This is more accurate for files that may use non-standard tag types.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the BAM file (local or remote URL)
+    /// * `thread_num` - Optional number of threads for BGZF decompression
+    /// * `object_storage_options` - Optional configuration for cloud storage access
+    /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
+    ///   if false, output 1-based closed coordinates
+    /// * `tag_fields` - Optional list of BAM alignment tag names to include as columns
+    /// * `sample_size` - Number of records to sample for type inference (default: 100)
+    ///
+    /// # Returns
+    ///
+    /// A new BamTableProvider or a DataFusion error if schema inference fails
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use datafusion_bio_format_bam::table_provider::BamTableProvider;
+    ///
+    /// # async fn example() -> datafusion::common::Result<()> {
+    /// // Create provider with inferred schema
+    /// let provider = BamTableProvider::try_new_with_inferred_schema(
+    ///     "data/alignments.bam".to_string(),
+    ///     Some(4),
+    ///     None,
+    ///     true,
+    ///     Some(vec!["XS".to_string(), "XT".to_string()]),
+    ///     Some(100),  // Sample 100 records
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn try_new_with_inferred_schema(
+        file_path: String,
+        thread_num: Option<usize>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        tag_fields: Option<Vec<String>>,
+        sample_size: Option<usize>,
+    ) -> datafusion::common::Result<Self> {
+        let sample_size = sample_size.unwrap_or(100);
+        let schema = determine_schema_from_file(
+            file_path.clone(),
+            thread_num,
+            object_storage_options.clone(),
+            &tag_fields,
+            coordinate_system_zero_based,
+            sample_size,
+        )
+        .await?;
         Ok(Self {
             file_path,
             schema,
