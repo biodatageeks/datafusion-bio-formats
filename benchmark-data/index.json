@@ -597,6 +597,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/bam-cram-write-support@364d639a0642c2c90e8a51a0560fce8ed523b316@linux",
+      "label": "feat/bam-cram-write-support(364d639a)",
+      "ref": "feat/bam-cram-write-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-02T07:32:22Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/364d639a/linux",
+      "commit_sha": "364d639a0642c2c90e8a51a0560fce8ed523b316",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/bam-cram-write-support@364d639a0642c2c90e8a51a0560fce8ed523b316@macos",
+      "label": "feat/bam-cram-write-support(364d639a)",
+      "ref": "feat/bam-cram-write-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-02T07:32:22Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/364d639a/macos",
+      "commit_sha": "364d639a0642c2c90e8a51a0560fce8ed523b316",
+      "is_latest_tag": false
+    },
+    {
       "id": "feat/bam-cram-write-support@5f4c36ca4334e41d7488c2a0a688d2b77c32591d@linux",
       "label": "feat/bam-cram-write-support(5f4c36ca)",
       "ref": "feat/bam-cram-write-support",
@@ -1941,6 +1965,30 @@
       "is_latest_tag": true
     },
     {
+      "id": "v0.1.1@364d639a0642c2c90e8a51a0560fce8ed523b316@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-02T07:32:22Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "364d639a0642c2c90e8a51a0560fce8ed523b316",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@364d639a0642c2c90e8a51a0560fce8ed523b316@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-02T07:32:22Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "364d639a0642c2c90e8a51a0560fce8ed523b316",
+      "is_latest_tag": true
+    },
+    {
       "id": "v0.1.1@3e3eca25f6eeab383d0486fab1263773b95f08bf@linux",
       "label": "v0.1.1",
       "ref": "v0.1.1",
@@ -3192,6 +3240,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-01T21:43:41Z",
+  "last_updated": "2026-02-02T07:32:23Z",
   "latest_tag": "v0.1.1"
 }
