@@ -1,0 +1,335 @@
+//! Integration tests for BAM write functionality
+//!
+//! Tests verify that BAM files can be written correctly and that data
+//! round-trips properly through read -> write -> read cycles.
+
+use datafusion::arrow::array::{Float32Array, Int32Array, RecordBatch, StringArray, UInt32Array};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::prelude::*;
+use datafusion_bio_format_bam::table_provider::BamTableProvider;
+use datafusion_bio_format_core::{BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tempfile::TempDir;
+
+/// Test that alignment tags are properly preserved during write operations
+#[tokio::test]
+async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_tags.bam");
+
+    // Create a schema with tag fields
+    let mut tag_nm_metadata = HashMap::new();
+    tag_nm_metadata.insert(BAM_TAG_TAG_KEY.to_string(), "NM".to_string());
+    tag_nm_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), "i".to_string());
+    tag_nm_metadata.insert(
+        BAM_TAG_DESCRIPTION_KEY.to_string(),
+        "Edit distance".to_string(),
+    );
+
+    let mut tag_md_metadata = HashMap::new();
+    tag_md_metadata.insert(BAM_TAG_TAG_KEY.to_string(), "MD".to_string());
+    tag_md_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), "Z".to_string());
+    tag_md_metadata.insert(
+        BAM_TAG_DESCRIPTION_KEY.to_string(),
+        "Mismatch positions".to_string(),
+    );
+
+    let mut tag_as_metadata = HashMap::new();
+    tag_as_metadata.insert(BAM_TAG_TAG_KEY.to_string(), "AS".to_string());
+    tag_as_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), "i".to_string());
+    tag_as_metadata.insert(
+        BAM_TAG_DESCRIPTION_KEY.to_string(),
+        "Alignment score".to_string(),
+    );
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("flags", DataType::UInt32, false),
+        Field::new("cigar", DataType::Utf8, false),
+        Field::new("mapping_quality", DataType::UInt32, false),
+        Field::new("mate_chrom", DataType::Utf8, true),
+        Field::new("mate_start", DataType::UInt32, true),
+        Field::new("sequence", DataType::Utf8, false),
+        Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("NM", DataType::Int32, true).with_metadata(tag_nm_metadata),
+        Field::new("MD", DataType::Utf8, true).with_metadata(tag_md_metadata),
+        Field::new("AS", DataType::Int32, true).with_metadata(tag_as_metadata),
+    ]));
+
+    // Create test data with tags
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1", "read2", "read3"])),
+            Arc::new(StringArray::from(vec!["chr1", "chr1", "chr2"])),
+            Arc::new(UInt32Array::from(vec![100, 200, 300])),
+            Arc::new(UInt32Array::from(vec![0, 16, 0])), // flags
+            Arc::new(StringArray::from(vec!["10M", "10M", "10M"])),
+            Arc::new(UInt32Array::from(vec![60, 60, 60])), // mapq
+            Arc::new(StringArray::from(vec![None::<&str>, None, None])),
+            Arc::new(UInt32Array::from(vec![None::<u32>, None, None])),
+            Arc::new(StringArray::from(vec![
+                "ACGTACGTAC",
+                "ACGTACGTAC",
+                "TTTTTTTTTT",
+            ])),
+            Arc::new(StringArray::from(vec![
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+            ])),
+            // Tags
+            Arc::new(Int32Array::from(vec![Some(2), Some(1), Some(0)])), // NM
+            Arc::new(StringArray::from(vec![
+                Some("10"),
+                Some("5^A4"),
+                Some("10"),
+            ])), // MD
+            Arc::new(Int32Array::from(vec![Some(50), Some(45), Some(60)])), // AS
+        ],
+    )?;
+
+    // Create DataFusion context and register batch as input table
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    // Create output table provider
+    let tag_fields = vec!["NM".to_string(), "MD".to_string(), "AS".to_string()];
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        Some(tag_fields.clone()),
+        true, // 0-based coordinates
+    );
+    ctx.register_table("output_bam", Arc::new(write_provider))?;
+
+    // Write the data using SQL
+    ctx.sql("INSERT OVERWRITE output_bam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Now read back and verify tags are preserved
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None, // thread_num
+        None, // storage options
+        true, // 0-based coordinates
+        Some(tag_fields.clone()),
+    )?;
+
+    ctx.register_table("test_bam", Arc::new(read_provider))?;
+
+    // Query with tag projection
+    let df = ctx
+        .sql("SELECT name, \"NM\", \"MD\", \"AS\" FROM test_bam ORDER BY name")
+        .await?;
+
+    let results = df.collect().await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    assert_eq!(batch.num_rows(), 3);
+
+    // Verify names
+    let names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(names.value(0), "read1");
+    assert_eq!(names.value(1), "read2");
+    assert_eq!(names.value(2), "read3");
+
+    // Verify NM tag (integer)
+    let nm_values = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(nm_values.value(0), 2);
+    assert_eq!(nm_values.value(1), 1);
+    assert_eq!(nm_values.value(2), 0);
+
+    // Verify MD tag (string)
+    let md_values = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(md_values.value(0), "10");
+    assert_eq!(md_values.value(1), "5^A4");
+    assert_eq!(md_values.value(2), "10");
+
+    // Verify AS tag (integer)
+    let as_values = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(as_values.value(0), 50);
+    assert_eq!(as_values.value(1), 45);
+    assert_eq!(as_values.value(2), 60);
+
+    Ok(())
+}
+
+/// Test that float tags are properly preserved
+#[tokio::test]
+async fn test_float_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_float_tags.bam");
+
+    // Create a schema with a float tag field
+    let mut tag_xs_metadata = HashMap::new();
+    tag_xs_metadata.insert(BAM_TAG_TAG_KEY.to_string(), "XS".to_string());
+    tag_xs_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), "f".to_string());
+    tag_xs_metadata.insert(
+        BAM_TAG_DESCRIPTION_KEY.to_string(),
+        "Suboptimal alignment score".to_string(),
+    );
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("flags", DataType::UInt32, false),
+        Field::new("cigar", DataType::Utf8, false),
+        Field::new("mapping_quality", DataType::UInt32, false),
+        Field::new("mate_chrom", DataType::Utf8, true),
+        Field::new("mate_start", DataType::UInt32, true),
+        Field::new("sequence", DataType::Utf8, false),
+        Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("XS", DataType::Float32, true).with_metadata(tag_xs_metadata),
+    ]));
+
+    // Create test data with float tag
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1", "read2"])),
+            Arc::new(StringArray::from(vec!["chr1", "chr1"])),
+            Arc::new(UInt32Array::from(vec![100, 200])),
+            Arc::new(UInt32Array::from(vec![0, 0])),
+            Arc::new(StringArray::from(vec!["10M", "10M"])),
+            Arc::new(UInt32Array::from(vec![60, 60])),
+            Arc::new(StringArray::from(vec![None::<&str>, None])),
+            Arc::new(UInt32Array::from(vec![None::<u32>, None])),
+            Arc::new(StringArray::from(vec!["ACGTACGTAC", "ACGTACGTAC"])),
+            Arc::new(StringArray::from(vec!["IIIIIIIIII", "IIIIIIIIII"])),
+            Arc::new(Float32Array::from(vec![Some(45.5), Some(38.2)])), // XS float tag
+        ],
+    )?;
+
+    // Create DataFusion context and register batch as input table
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    // Create output table provider
+    let tag_fields = vec!["XS".to_string()];
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        Some(tag_fields.clone()),
+        true,
+    );
+    ctx.register_table("output_bam", Arc::new(write_provider))?;
+
+    // Write the data using SQL
+    ctx.sql("INSERT OVERWRITE output_bam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Read back and verify
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        None,
+        true,
+        Some(tag_fields.clone()),
+    )?;
+
+    ctx.register_table("test_bam", Arc::new(read_provider))?;
+
+    let df = ctx
+        .sql("SELECT name, \"XS\" FROM test_bam ORDER BY name")
+        .await?;
+
+    let results = df.collect().await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    let xs_values = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .unwrap();
+
+    // Verify float values with tolerance
+    assert!((xs_values.value(0) - 45.5).abs() < 0.01);
+    assert!((xs_values.value(1) - 38.2).abs() < 0.01);
+
+    Ok(())
+}
+
+/// Test writing without tags (tags should be optional)
+#[tokio::test]
+async fn test_write_without_tags() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_no_tags.bam");
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("flags", DataType::UInt32, false),
+        Field::new("cigar", DataType::Utf8, false),
+        Field::new("mapping_quality", DataType::UInt32, false),
+        Field::new("mate_chrom", DataType::Utf8, true),
+        Field::new("mate_start", DataType::UInt32, true),
+        Field::new("sequence", DataType::Utf8, false),
+        Field::new("quality_scores", DataType::Utf8, false),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1"])),
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![100])),
+            Arc::new(UInt32Array::from(vec![0])),
+            Arc::new(StringArray::from(vec!["10M"])),
+            Arc::new(UInt32Array::from(vec![60])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(UInt32Array::from(vec![None::<u32>])),
+            Arc::new(StringArray::from(vec!["ACGTACGTAC"])),
+            Arc::new(StringArray::from(vec!["IIIIIIIIII"])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    // Write without tags
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        None, // No tags
+        true,
+    );
+    ctx.register_table("output_bam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_bam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Verify file was written
+    assert!(output_path.exists());
+
+    Ok(())
+}
