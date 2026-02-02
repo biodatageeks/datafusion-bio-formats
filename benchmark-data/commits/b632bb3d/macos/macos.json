@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-02-02T19:05:10Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/bam-cram-write-support",
+  "commit_sha": "b632bb3dbbf11e155999f4189be5c7a265fb7625",
+  "benchmark_mode": "fast"
+}
