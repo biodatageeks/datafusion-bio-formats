@@ -1035,6 +1035,7 @@ dependencies = [
  "log",
  "noodles 0.93.0",
  "noodles-bgzf 0.36.0",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=d6f205e9bb5369762236724fb54d24c5e1d9b79a)",
  "noodles-sam 0.78.0",
  "opendal",
  "serde",

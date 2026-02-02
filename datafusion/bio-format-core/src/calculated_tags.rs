@@ -243,26 +243,30 @@ mod tests {
     use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::Flags;
     use noodles_sam::alignment::record::MappingQuality;
-    use noodles_sam::alignment::record_buf::Data;
+    use noodles_sam::alignment::record::cigar::Op;
+    use noodles_sam::alignment::record::cigar::op::Kind;
 
-    fn create_test_record(cigar_str: &str, sequence: &str) -> RecordBuf {
-        let cigar: Cigar = cigar_str.parse().unwrap();
-        let mut record = RecordBuf::default();
+    fn create_test_record(ops: Vec<Op>, sequence: &str) -> RecordBuf {
+        use noodles_sam::alignment::record_buf::{
+            Cigar as RecordCigar, QualityScores, Sequence as RecordSequence,
+        };
 
-        record.flags = Flags::empty();
-        record.reference_sequence_id = Some(0);
-        record.alignment_start = Some(Position::try_from(1).unwrap());
-        record.mapping_quality = Some(MappingQuality::try_from(60).unwrap());
-        record.cigar = cigar;
-        record.sequence = sequence.as_bytes().into();
-        record.data = Data::default();
+        let cigar = RecordCigar::from(ops);
 
-        record
+        RecordBuf::builder()
+            .set_flags(Flags::empty())
+            .set_reference_sequence_id(0)
+            .set_alignment_start(Position::try_from(1).unwrap())
+            .set_mapping_quality(MappingQuality::try_from(60).unwrap())
+            .set_cigar(cigar)
+            .set_sequence(RecordSequence::from(sequence.as_bytes().to_vec()))
+            .set_quality_scores(QualityScores::from(vec![b'~'; sequence.len()]))
+            .build()
     }
 
     #[test]
     fn test_calculate_nm_perfect_match() {
-        let record = create_test_record("10M", "ACGTACGTAC");
+        let record = create_test_record(vec![Op::new(Kind::Match, 10)], "ACGTACGTAC");
         let reference = b"ACGTACGTAC";
 
         let nm = calculate_nm_tag(&record, Some(reference));
@@ -271,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_calculate_nm_with_mismatch() {
-        let record = create_test_record("10M", "ACGTACGTAC");
+        let record = create_test_record(vec![Op::new(Kind::Match, 10)], "ACGTACGTAC");
         let reference = b"ACGTCCGTAC"; // One mismatch at position 5
 
         let nm = calculate_nm_tag(&record, Some(reference));
@@ -280,7 +284,14 @@ mod tests {
 
     #[test]
     fn test_calculate_nm_with_insertion() {
-        let record = create_test_record("5M2I3M", "ACGTAXXCGT");
+        let record = create_test_record(
+            vec![
+                Op::new(Kind::Match, 5),
+                Op::new(Kind::Insertion, 2),
+                Op::new(Kind::Match, 3),
+            ],
+            "ACGTAXXCGT",
+        );
 
         let nm = calculate_nm_tag(&record, None);
         assert_eq!(nm, Some(2)); // 2 inserted bases
@@ -288,7 +299,14 @@ mod tests {
 
     #[test]
     fn test_calculate_nm_with_deletion() {
-        let record = create_test_record("5M2D3M", "ACGTACGT");
+        let record = create_test_record(
+            vec![
+                Op::new(Kind::Match, 5),
+                Op::new(Kind::Deletion, 2),
+                Op::new(Kind::Match, 3),
+            ],
+            "ACGTACGT",
+        );
 
         let nm = calculate_nm_tag(&record, None);
         assert_eq!(nm, Some(2)); // 2 deleted bases
@@ -296,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_calculate_md_perfect_match() {
-        let record = create_test_record("10M", "ACGTACGTAC");
+        let record = create_test_record(vec![Op::new(Kind::Match, 10)], "ACGTACGTAC");
         let reference = b"ACGTACGTAC";
 
         let md = calculate_md_tag(&record, reference);
@@ -305,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_calculate_md_with_mismatch() {
-        let record = create_test_record("10M", "ACGTACGTAC");
+        let record = create_test_record(vec![Op::new(Kind::Match, 10)], "ACGTACGTAC");
         let reference = b"ACGTCCGTAC"; // C->A mismatch at position 5 (0-based 4)
 
         let md = calculate_md_tag(&record, reference);
@@ -314,7 +332,14 @@ mod tests {
 
     #[test]
     fn test_calculate_md_with_deletion() {
-        let record = create_test_record("5M2D3M", "ACGTACGT");
+        let record = create_test_record(
+            vec![
+                Op::new(Kind::Match, 5),
+                Op::new(Kind::Deletion, 2),
+                Op::new(Kind::Match, 3),
+            ],
+            "ACGTACGT",
+        );
         let reference = b"ACGTAXXCGT"; // XX deleted
 
         let md = calculate_md_tag(&record, reference);
@@ -323,8 +348,19 @@ mod tests {
 
     #[test]
     fn test_calculate_nm_unmapped() {
-        let mut record = create_test_record("10M", "ACGTACGTAC");
-        record.flags = Flags::UNMAPPED;
+        use noodles_sam::alignment::record_buf::{
+            Cigar as RecordCigar, QualityScores, Sequence as RecordSequence,
+        };
+
+        let cigar: RecordCigar = vec![Op::new(Kind::Match, 10)].into();
+        let sequence = "ACGTACGTAC";
+
+        let record = RecordBuf::builder()
+            .set_flags(Flags::UNMAPPED)
+            .set_cigar(cigar)
+            .set_sequence(RecordSequence::from(sequence.as_bytes().to_vec()))
+            .set_quality_scores(QualityScores::from(vec![b'~'; sequence.len()]))
+            .build();
 
         let nm = calculate_nm_tag(&record, None);
         assert_eq!(nm, None); // Unmapped reads return None

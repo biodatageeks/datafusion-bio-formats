@@ -305,4 +305,126 @@ impl CramReader {
             CramReader::Remote(_, _, header) => header.reference_sequences(),
         }
     }
+
+    /// Fetches a region of a reference sequence.
+    ///
+    /// Retrieves the sequence bases for a specific genomic region from the
+    /// reference repository. This is used for calculating MD and NM tags.
+    ///
+    /// # Arguments
+    /// * `seq_id` - Reference sequence ID (index into reference sequences)
+    /// * `start` - Start position (1-based, inclusive)
+    /// * `end` - End position (1-based, inclusive)
+    ///
+    /// # Returns
+    /// * `Some(Vec<u8>)` - Reference sequence bases for the region
+    /// * `None` - If reference not available or region invalid
+    pub fn fetch_reference_region(
+        &self,
+        seq_id: usize,
+        start: usize,
+        end: usize,
+    ) -> Option<Vec<u8>> {
+        match self {
+            CramReader::Local(_, reference_repo, header) => {
+                fetch_reference_region_impl(reference_repo, header, seq_id, start, end)
+            }
+            CramReader::Remote(_, reference_repo, header) => {
+                fetch_reference_region_impl(reference_repo, header, seq_id, start, end)
+            }
+        }
+    }
+
+    /// Loads all reference sequences into memory.
+    ///
+    /// Pre-loads all reference sequences from the repository for efficient
+    /// random access during tag calculation. This is more efficient than
+    /// fetching regions one at a time.
+    ///
+    /// # Returns
+    /// * `Some(Vec<Vec<u8>>)` - Vector of reference sequences indexed by seq_id
+    /// * `None` - If reference repository is not available or is embedded
+    pub fn load_all_references(&self) -> Option<Vec<Vec<u8>>> {
+        match self {
+            CramReader::Local(_, reference_repo, header) => {
+                load_all_references_impl(reference_repo, header)
+            }
+            CramReader::Remote(_, reference_repo, header) => {
+                load_all_references_impl(reference_repo, header)
+            }
+        }
+    }
+}
+
+/// Helper function to fetch reference region from repository
+fn fetch_reference_region_impl(
+    reference_repo: &ReferenceSequenceRepository,
+    header: &Header,
+    seq_id: usize,
+    start: usize,
+    end: usize,
+) -> Option<Vec<u8>> {
+    // Only works with external reference repositories
+    match reference_repo {
+        ReferenceSequenceRepository::External(repo) => {
+            // Get reference sequence name from header
+            let ref_sequences = header.reference_sequences();
+            let (ref_name, _) = ref_sequences.get_index(seq_id)?;
+
+            // Fetch the entire sequence
+            // Note: FASTA repository returns entire sequence, we'll slice it below
+            match repo.get(ref_name.as_ref()) {
+                Some(Ok(seq)) => {
+                    // Extract the requested region (convert to 0-based indexing)
+                    let seq_bytes = seq.as_ref();
+                    let start_idx = (start - 1).min(seq_bytes.len());
+                    let end_idx = end.min(seq_bytes.len());
+                    Some(seq_bytes[start_idx..end_idx].to_vec())
+                }
+                Some(Err(_)) | None => None,
+            }
+        }
+        ReferenceSequenceRepository::Embedded | ReferenceSequenceRepository::None => {
+            // Embedded references and no-reference cases don't support random access
+            // Would need to decode from CRAM container data
+            None
+        }
+    }
+}
+
+/// Helper function to load all reference sequences into memory
+fn load_all_references_impl(
+    reference_repo: &ReferenceSequenceRepository,
+    header: &Header,
+) -> Option<Vec<Vec<u8>>> {
+    // Only works with external reference repositories
+    match reference_repo {
+        ReferenceSequenceRepository::External(repo) => {
+            let ref_sequences = header.reference_sequences();
+            let mut references = Vec::with_capacity(ref_sequences.len());
+
+            // Load each reference sequence
+            for i in 0..ref_sequences.len() {
+                let (ref_name, _ref_map) = ref_sequences.get_index(i)?;
+
+                // Fetch entire reference sequence by name
+                match repo.get(ref_name.as_ref()) {
+                    Some(Ok(seq)) => {
+                        // Convert Sequence to Vec<u8>
+                        references.push(seq.as_ref().to_vec());
+                    }
+                    Some(Err(_)) | None => {
+                        // If we can't load a reference, return None for the whole set
+                        return None;
+                    }
+                }
+            }
+
+            Some(references)
+        }
+        ReferenceSequenceRepository::Embedded | ReferenceSequenceRepository::None => {
+            // Embedded references and no-reference cases don't support preloading
+            None
+        }
+    }
 }

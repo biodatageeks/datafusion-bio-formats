@@ -336,6 +336,15 @@ async fn get_remote_cram_stream(
         // Process records one by one.
         let ref_sequences = reader.get_sequences();
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+
+        // Load all reference sequences for MD/NM tag calculation
+        let reference_seqs = reader.load_all_references();
+        if reference_seqs.is_some() {
+            debug!("Loaded {} reference sequences for tag calculation", reference_seqs.as_ref().unwrap().len());
+        } else {
+            debug!("No external reference available - MD/NM tags will be NULL if not stored");
+        }
+
         let mut records = reader.read_records().await;
 
         while let Some(result) = records.next().await {
@@ -410,8 +419,28 @@ async fn get_remote_cram_stream(
             };
 
             // Load tag values if present
-            // TODO: Pass reference sequence for calculating MD/NM tags
-            load_tags(&record, &mut tag_builders, None)?;
+            // Extract reference sequence for MD/NM tag calculation
+            let reference_region = if let Some(ref refs) = reference_seqs {
+                // Get reference sequence ID and alignment positions
+                if let (Some(seq_id), Some(start_pos), Some(end_pos)) = (
+                    record.reference_sequence_id(),
+                    record.alignment_start(),
+                    record.alignment_end(),
+                ) {
+                    // Fetch the reference sequence for this chromosome
+                    refs.get(seq_id).map(|ref_seq| {
+                        let start = (usize::from(start_pos) - 1).min(ref_seq.len()); // Convert to 0-based
+                        let end = usize::from(end_pos).min(ref_seq.len());
+                        &ref_seq[start..end]
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            load_tags(&record, &mut tag_builders, reference_region)?;
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
@@ -531,6 +560,15 @@ async fn get_local_cram(
     let stream = try_stream! {
         let ref_sequences = reader.get_sequences();
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+
+        // Load all reference sequences for MD/NM tag calculation
+        let reference_seqs = reader.load_all_references();
+        if reference_seqs.is_some() {
+            debug!("Loaded {} reference sequences for tag calculation", reference_seqs.as_ref().unwrap().len());
+        } else {
+            debug!("No external reference available - MD/NM tags will be NULL if not stored");
+        }
+
         let mut records = reader.read_records().await;
 
         while let Some(result) = records.next().await {
@@ -605,8 +643,28 @@ async fn get_local_cram(
             };
 
             // Load tag values if present
-            // TODO: Pass reference sequence for calculating MD/NM tags
-            load_tags(&record, &mut tag_builders, None)?;
+            // Extract reference sequence for MD/NM tag calculation
+            let reference_region = if let Some(ref refs) = reference_seqs {
+                // Get reference sequence ID and alignment positions
+                if let (Some(seq_id), Some(start_pos), Some(end_pos)) = (
+                    record.reference_sequence_id(),
+                    record.alignment_start(),
+                    record.alignment_end(),
+                ) {
+                    // Fetch the reference sequence for this chromosome
+                    refs.get(seq_id).map(|ref_seq| {
+                        let start = (usize::from(start_pos) - 1).min(ref_seq.len()); // Convert to 0-based
+                        let end = usize::from(end_pos).min(ref_seq.len());
+                        &ref_seq[start..end]
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            load_tags(&record, &mut tag_builders, reference_region)?;
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
