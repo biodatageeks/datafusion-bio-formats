@@ -58,6 +58,8 @@ pub use metadata::{
 };
 /// Alignment utilities shared between BAM and CRAM formats
 pub mod alignment_utils;
+/// Calculated tags (MD, NM) for alignment records
+pub mod calculated_tags;
 /// Object storage integration for cloud and local file access
 pub mod object_storage;
 /// Table utilities for building DataFusion table providers

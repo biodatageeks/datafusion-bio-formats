@@ -11,6 +11,7 @@ use datafusion_bio_format_core::alignment_utils::{
     RecordFields, build_record_batch, cigar_op_to_string,
     get_chrom_by_seq_id_cram as get_chrom_by_seq_id,
 };
+use datafusion_bio_format_core::calculated_tags::{calculate_md_tag, calculate_nm_tag};
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
@@ -148,7 +149,11 @@ fn set_tag_builders(
     }
 }
 
-fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
+fn load_tags<R: Record>(
+    record: &R,
+    tag_builders: &mut TagBuilders,
+    reference_seq: Option<&[u8]>,
+) -> Result<(), ArrowError> {
     for i in 0..tag_builders.0.len() {
         let tag = &tag_builders.3[i];
         let tag_name = &tag_builders.0[i];
@@ -156,8 +161,33 @@ fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<()
         let data = record.data();
         let tag_result = data.get(tag);
 
+        // Check if this is a calculated tag (MD or NM) that can be computed
+        let is_md_tag = tag_name == "MD";
+        let is_nm_tag = tag_name == "NM";
+
         if tag_result.is_none() {
-            debug!("Tag {} not found in record", tag_name);
+            debug!("Tag {} not found in record data", tag_name);
+
+            // Try to calculate MD or NM tags if not present in data
+            if is_md_tag && reference_seq.is_some() {
+                debug!("Attempting to calculate MD tag from alignment");
+                if let Some(md_value) = calculate_md_tag(record, reference_seq.unwrap()) {
+                    debug!("Successfully calculated MD tag: {}", md_value);
+                    builder.append_string(&md_value)?;
+                    continue;
+                } else {
+                    debug!("Failed to calculate MD tag");
+                }
+            } else if is_nm_tag {
+                debug!("Attempting to calculate NM tag from alignment");
+                if let Some(nm_value) = calculate_nm_tag(record, reference_seq) {
+                    debug!("Successfully calculated NM tag: {}", nm_value);
+                    builder.append_int(nm_value)?;
+                    continue;
+                } else {
+                    debug!("Failed to calculate NM tag");
+                }
+            }
         }
 
         match tag_result {
@@ -380,7 +410,8 @@ async fn get_remote_cram_stream(
             };
 
             // Load tag values if present
-            load_tags(&record, &mut tag_builders)?;
+            // TODO: Pass reference sequence for calculating MD/NM tags
+            load_tags(&record, &mut tag_builders, None)?;
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
@@ -574,7 +605,8 @@ async fn get_local_cram(
             };
 
             // Load tag values if present
-            load_tags(&record, &mut tag_builders)?;
+            // TODO: Pass reference sequence for calculating MD/NM tags
+            load_tags(&record, &mut tag_builders, None)?;
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
