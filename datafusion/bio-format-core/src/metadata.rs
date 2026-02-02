@@ -67,6 +67,9 @@ pub const VCF_FIELD_FORMAT_ID_KEY: &str = "bio.vcf.field.format_id";
 /// BAM file format version (e.g., "1.6") stored in schema metadata
 pub const BAM_FILE_FORMAT_VERSION_KEY: &str = "bio.bam.file_format_version";
 
+/// BAM sort order (e.g., "coordinate", "queryname", "unsorted") stored in schema metadata
+pub const BAM_SORT_ORDER_KEY: &str = "bio.bam.sort_order";
+
 /// BAM reference sequences (contigs) stored as JSON array
 pub const BAM_REFERENCE_SEQUENCES_KEY: &str = "bio.bam.reference_sequences";
 

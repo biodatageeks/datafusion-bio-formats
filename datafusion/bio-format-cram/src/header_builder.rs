@@ -11,7 +11,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{
     BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY,
-    BAM_REFERENCE_SEQUENCES_KEY,
+    BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY,
 };
 use noodles_sam as sam;
 use noodles_sam::header::record::value::Map;
@@ -107,7 +107,16 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
     let version: Version = file_format_version
         .parse()
         .unwrap_or_else(|_| Version::new(1, 6));
-    let header_map = Map::<sam::header::record::value::map::Header>::new(version);
+    let mut header_map = Map::<sam::header::record::value::map::Header>::new(version);
+
+    // Set sort order if available (using other_fields)
+    if let Some(sort_order_str) = schema_metadata.get(BAM_SORT_ORDER_KEY) {
+        use noodles_sam::header::record::value::map::header::tag;
+        header_map
+            .other_fields_mut()
+            .insert(tag::SORT_ORDER, sort_order_str.to_string().into());
+    }
+
     builder = builder.set_header(header_map);
 
     // Add reference sequences (@SQ) - uses BAM metadata key
@@ -129,7 +138,30 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
     if let Some(read_groups_json) = schema_metadata.get(BAM_READ_GROUPS_KEY) {
         if let Some(read_groups) = from_json_string::<Vec<ReadGroupMetadata>>(read_groups_json) {
             for rg in read_groups {
-                let rg_map = Map::<ReadGroup>::default();
+                // Create read group map with available fields
+                let mut rg_map = Map::<ReadGroup>::default();
+
+                // Set optional fields using other_fields
+                use noodles_sam::header::record::value::map::read_group::tag;
+                if let Some(sample) = rg.sample {
+                    rg_map.other_fields_mut().insert(tag::SAMPLE, sample.into());
+                }
+                if let Some(platform) = rg.platform {
+                    rg_map
+                        .other_fields_mut()
+                        .insert(tag::PLATFORM, platform.into());
+                }
+                if let Some(library) = rg.library {
+                    rg_map
+                        .other_fields_mut()
+                        .insert(tag::LIBRARY, library.into());
+                }
+                if let Some(description) = rg.description {
+                    rg_map
+                        .other_fields_mut()
+                        .insert(tag::DESCRIPTION, description.into());
+                }
+
                 builder = builder.add_read_group(rg.id, rg_map);
             }
         }
@@ -139,7 +171,25 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
     if let Some(programs_json) = schema_metadata.get(BAM_PROGRAM_INFO_KEY) {
         if let Some(programs) = from_json_string::<Vec<ProgramMetadata>>(programs_json) {
             for pg in programs {
-                let pg_map = Map::<Program>::default();
+                // Create program map with available fields
+                let mut pg_map = Map::<Program>::default();
+
+                // Set optional fields using other_fields
+                use noodles_sam::header::record::value::map::program::tag;
+                if let Some(name) = pg.name {
+                    pg_map.other_fields_mut().insert(tag::NAME, name.into());
+                }
+                if let Some(version) = pg.version {
+                    pg_map
+                        .other_fields_mut()
+                        .insert(tag::VERSION, version.into());
+                }
+                if let Some(command_line) = pg.command_line {
+                    pg_map
+                        .other_fields_mut()
+                        .insert(tag::COMMAND_LINE, command_line.into());
+                }
+
                 builder = builder.add_program(pg.id, pg_map);
             }
         }
