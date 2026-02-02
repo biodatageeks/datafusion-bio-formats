@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_predicate_type_filter",
+  "format": "gff",
+  "category": "predicate_pushdown",
+  "timestamp": "2026-02-02T08:57:02.804293Z",
+  "system_info": {
+    "os": "Darwin 15.7.3",
+    "cpu_model": "Apple M1 (Virtual)",
+    "cpu_cores": 3,
+    "total_memory_gb": 7.0
+  },
+  "configuration": {
+    "query": "SELECT * FROM gencode_annotations WHERE type = 'gene'",
+    "repetitions": 3,
+    "test_name": "type_filter"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 0.0,
+    "elapsed_seconds": 0.001524917,
+    "total_records": 0,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
