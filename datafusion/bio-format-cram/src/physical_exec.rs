@@ -134,9 +134,12 @@ fn set_tag_builders(
                 if tag_bytes.len() == 2 {
                     let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
                     tag_builders.0.push(tag.clone());
-                    tag_builders.1.push(arrow_type);
+                    tag_builders.1.push(arrow_type.clone());
                     tag_builders.2.push(builder);
                     tag_builders.3.push(parsed_tag);
+                    debug!("Successfully created builder for tag {}", tag);
+                } else {
+                    debug!("Invalid tag name length for {}", tag);
                 }
             } else {
                 debug!("Failed to create builder for tag {}: {:?}", tag, arrow_type);
@@ -148,9 +151,14 @@ fn set_tag_builders(
 fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
     for i in 0..tag_builders.0.len() {
         let tag = &tag_builders.3[i];
+        let tag_name = &tag_builders.0[i];
         let builder = &mut tag_builders.2[i];
         let data = record.data();
         let tag_result = data.get(tag);
+
+        if tag_result.is_none() {
+            debug!("Tag {} not found in record", tag_name);
+        }
 
         match tag_result {
             Some(Ok(value)) => match value {
