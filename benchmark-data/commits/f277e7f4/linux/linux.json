@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-02-03T19:06:42Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "fix/preserve-original-chrom-names",
+  "commit_sha": "f277e7f4e3ee7bc4628e284280269a562b74ba4a",
+  "benchmark_mode": "fast"
+}

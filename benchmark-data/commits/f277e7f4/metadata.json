@@ -1,0 +1,7 @@
+{
+  "ref": "fix/preserve-original-chrom-names",
+  "ref_type": "branch",
+  "commit_sha": "f277e7f4e3ee7bc4628e284280269a562b74ba4a",
+  "timestamp": "2026-02-03T19:18:55Z",
+  "benchmark_mode": "fast"
+}
