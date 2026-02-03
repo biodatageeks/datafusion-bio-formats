@@ -837,6 +837,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/bam-cram-write-support@fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d@linux",
+      "label": "feat/bam-cram-write-support(fb2669c4)",
+      "ref": "feat/bam-cram-write-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-03T14:41:55Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/fb2669c4/linux",
+      "commit_sha": "fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/bam-cram-write-support@fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d@macos",
+      "label": "feat/bam-cram-write-support(fb2669c4)",
+      "ref": "feat/bam-cram-write-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-03T14:41:55Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/fb2669c4/macos",
+      "commit_sha": "fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d",
+      "is_latest_tag": false
+    },
+    {
       "id": "feat/bam-optional-tags@16557fb783ea39fb548cb6c5bf258792771049bf@linux",
       "label": "feat/bam-optional-tags(16557fb7)",
       "ref": "feat/bam-optional-tags",
@@ -3571,11 +3595,35 @@
       "path": "tags/v0.1.1/macos",
       "commit_sha": "faafb863c81136440722f21100a762c865e1a7eb",
       "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-03T14:41:55Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-03T14:41:55Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "fb2669c4ea5c401ed5fdbdfcd482f5cd33d9e88d",
+      "is_latest_tag": true
     }
   ],
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-03T14:40:08Z",
+  "last_updated": "2026-02-03T14:41:55Z",
   "latest_tag": "v0.1.1"
 }

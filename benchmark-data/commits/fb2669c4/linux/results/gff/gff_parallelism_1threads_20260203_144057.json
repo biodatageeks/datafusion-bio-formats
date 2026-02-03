@@ -1,0 +1,23 @@
+{
+  "benchmark_name": "gff_parallelism_1threads",
+  "format": "gff",
+  "category": "parallelism",
+  "timestamp": "2026-02-03T14:40:57.977884871Z",
+  "system_info": {
+    "os": "Ubuntu 22.04",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz",
+    "cpu_cores": 4,
+    "total_memory_gb": 15.615314483642578
+  },
+  "configuration": {
+    "repetitions": 3,
+    "threads": 1
+  },
+  "metrics": {
+    "throughput_records_per_sec": 790.8726963855537,
+    "elapsed_seconds": 0.001264426,
+    "total_records": 1,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
