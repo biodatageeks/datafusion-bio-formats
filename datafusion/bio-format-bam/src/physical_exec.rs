@@ -1,4 +1,4 @@
-use crate::storage::BamReader;
+use crate::storage::{BamReader, SamReader, is_sam_file};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{ArrayRef, RecordBatch};
@@ -10,6 +10,7 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Pla
 use datafusion_bio_format_core::alignment_utils::{
     RecordFields, build_record_batch, cigar_op_to_string,
     get_chrom_by_seq_id_bam as get_chrom_by_seq_id,
+    get_chrom_by_seq_id_cram as get_chrom_by_seq_id_sam,
 };
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
@@ -509,6 +510,211 @@ async fn get_local_bam(
     Ok(stream)
 }
 
+/// Macro to generate the record processing logic for SAM readers.
+///
+/// SAM records use `RecordBuf` (same as CRAM), which differs from BAM's lazy `Record`
+/// in how positions, sequences, and quality scores are accessed. Positions are returned
+/// directly (no `io::Result` wrapper), sequences and quality scores are accessed via
+/// `.as_ref()`, and CIGAR operations are dereferenced rather than unwrapped.
+macro_rules! process_sam_records_impl {
+    ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
+        try_stream! {
+        let mut name: Vec<Option<String>> = Vec::with_capacity($batch_size);
+        let mut chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
+        let mut start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut end: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut flag: Vec<u32> = Vec::with_capacity($batch_size);
+        let mut cigar: Vec<String> = Vec::with_capacity($batch_size);
+        let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
+        let mut mate_start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
+        let mut quality_scores: Vec<String> = Vec::with_capacity($batch_size);
+        let mut sequence: Vec<String> = Vec::with_capacity($batch_size);
+
+        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
+        let num_tag_fields = tag_builders.0.len();
+
+        let mut record_num = 0;
+        let mut batch_num = 0;
+
+        let ref_sequences = $reader.read_sequences();
+        let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+        let mut records = $reader.read_records();
+
+        while let Some(result) = records.next().await {
+            let record = result?;
+
+            match record.name() {
+                Some(read_name) => {
+                    name.push(Some(read_name.to_string()));
+                },
+                _ => {
+                    name.push(None);
+                }
+            };
+
+            let chrom_name = get_chrom_by_seq_id_sam(
+                record.reference_sequence_id(),
+                &names,
+            );
+            chrom.push(chrom_name);
+
+            match record.alignment_start() {
+                Some(start_pos) => {
+                    let pos = usize::from(start_pos) as u32;
+                    start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                },
+                None => {
+                    start.push(None);
+                }
+            }
+
+            match record.alignment_end() {
+                Some(end_pos) => {
+                    let pos = usize::from(end_pos) as u32;
+                    end.push(Some(pos));
+                },
+                None => {
+                    end.push(None);
+                }
+            };
+
+            match record.mapping_quality() {
+                Some(mapping_quality_value) => {
+                    mapping_quality.push(Some(u8::from(mapping_quality_value) as u32));
+                },
+                _ => {
+                    mapping_quality.push(None);
+                }
+            };
+
+            let seq_string = record.sequence().as_ref().iter()
+                .map(|b| char::from(*b))
+                .collect();
+            sequence.push(seq_string);
+
+            quality_scores.push(record.quality_scores().as_ref().iter()
+                .map(|s| char::from(*s+33))
+                .collect::<String>());
+
+            flag.push(record.flags().bits() as u32);
+            cigar.push(record.cigar().as_ref().iter()
+                .map(|op| cigar_op_to_string(*op))
+                .collect::<Vec<String>>().join(""));
+
+            let mate_chrom_name = get_chrom_by_seq_id_sam(
+                record.mate_reference_sequence_id(),
+                &names,
+            );
+            mate_chrom.push(mate_chrom_name);
+
+            match record.mate_alignment_start() {
+                Some(mate_start_pos) => {
+                    let pos = usize::from(mate_start_pos) as u32;
+                    mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                },
+                _ => mate_start.push(None),
+            };
+
+            load_tags(&record, &mut tag_builders)?;
+
+            record_num += 1;
+
+            if record_num % $batch_size == 0 {
+                log::debug!("Record number: {}", record_num);
+                let tag_arrays = if num_tag_fields > 0 {
+                    Some(builders_to_arrays(&mut tag_builders.2)?)
+                } else {
+                    None
+                };
+                let batch = build_record_batch(
+                    Arc::clone(&$schema.clone()),
+                    RecordFields {
+                        name: &name,
+                        chrom: &chrom,
+                        start: &start,
+                        end: &end,
+                        flag: &flag,
+                        cigar: &cigar,
+                        mapping_quality: &mapping_quality,
+                        mate_chrom: &mate_chrom,
+                        mate_start: &mate_start,
+                        sequence: &sequence,
+                        quality_scores: &quality_scores,
+                    },
+                    tag_arrays.as_ref(),
+                    $projection.clone(),
+                )?;
+                batch_num += 1;
+                log::debug!("Batch number: {}", batch_num);
+                yield batch;
+
+                name.clear();
+                chrom.clear();
+                start.clear();
+                end.clear();
+                flag.clear();
+                cigar.clear();
+                mapping_quality.clear();
+                mate_chrom.clear();
+                mate_start.clear();
+                sequence.clear();
+                quality_scores.clear();
+            }
+        }
+
+        if !name.is_empty() {
+            let tag_arrays = if num_tag_fields > 0 {
+                Some(builders_to_arrays(&mut tag_builders.2)?)
+            } else {
+                None
+            };
+            let batch = build_record_batch(
+                Arc::clone(&$schema.clone()),
+                RecordFields {
+                    name: &name,
+                    chrom: &chrom,
+                    start: &start,
+                    end: &end,
+                    flag: &flag,
+                    cigar: &cigar,
+                    mapping_quality: &mapping_quality,
+                    mate_chrom: &mate_chrom,
+                    mate_start: &mate_start,
+                    sequence: &sequence,
+                    quality_scores: &quality_scores,
+                },
+                tag_arrays.as_ref(),
+                $projection.clone(),
+            )?;
+            yield batch;
+        }
+        }
+    };
+}
+
+async fn get_local_sam(
+    file_path: String,
+    schema: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    coordinate_system_zero_based: bool,
+    tag_fields: Option<Vec<String>>,
+) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
+{
+    let mut reader = SamReader::new(file_path.clone());
+    let stream = process_sam_records_impl!(
+        reader,
+        schema,
+        batch_size,
+        projection,
+        coordinate_system_zero_based,
+        tag_fields
+    );
+    Ok(stream)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
@@ -528,17 +734,30 @@ async fn get_stream(
 
     match store_type {
         StorageType::LOCAL => {
-            let stream = get_local_bam(
-                file_path.clone(),
-                schema.clone(),
-                batch_size,
-                thread_num,
-                projection,
-                coordinate_system_zero_based,
-                tag_fields,
-            )
-            .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            if is_sam_file(&file_path) {
+                let stream = get_local_sam(
+                    file_path.clone(),
+                    schema.clone(),
+                    batch_size,
+                    projection,
+                    coordinate_system_zero_based,
+                    tag_fields,
+                )
+                .await?;
+                Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            } else {
+                let stream = get_local_bam(
+                    file_path.clone(),
+                    schema.clone(),
+                    batch_size,
+                    thread_num,
+                    projection,
+                    coordinate_system_zero_based,
+                    tag_fields,
+                )
+                .await?;
+                Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            }
         }
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
             let stream = get_remote_bam_stream(

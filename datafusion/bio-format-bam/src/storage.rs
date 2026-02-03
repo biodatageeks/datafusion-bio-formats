@@ -8,10 +8,12 @@ use noodles_bam::Record;
 use noodles_bam::io::Reader;
 use noodles_bgzf::r#async::io::Reader as AsyncBgzfReader;
 use noodles_bgzf::io::MultithreadedReader;
+use noodles_sam as sam;
+use noodles_sam::alignment::RecordBuf;
 use noodles_sam::header::ReferenceSequences;
 use opendal::FuturesBytesStream;
 use std::fs::File;
-use std::io::Error;
+use std::io::{BufReader, Error};
 use std::num::NonZero;
 use tokio_util::io::StreamReader;
 
@@ -136,6 +138,87 @@ impl BamReader {
                 let header = reader.read_header().await.unwrap();
                 header.reference_sequences().clone()
             }
+        }
+    }
+}
+
+/// Checks if a file path refers to a SAM file based on file extension.
+///
+/// # Arguments
+///
+/// * `path` - File path to check
+///
+/// # Returns
+///
+/// `true` if the path ends with `.sam` (case-insensitive)
+pub fn is_sam_file(path: &str) -> bool {
+    path.to_lowercase().ends_with(".sam")
+}
+
+/// Creates a local SAM reader.
+///
+/// # Arguments
+///
+/// * `file_path` - Path to the local SAM file
+///
+/// # Returns
+///
+/// A SAM reader wrapping a buffered file reader
+pub fn get_local_sam_reader(file_path: String) -> Result<sam::io::Reader<BufReader<File>>, Error> {
+    File::open(file_path)
+        .map(BufReader::new)
+        .map(sam::io::Reader::new)
+}
+
+/// An enum representing a SAM file reader.
+///
+/// SAM files are text-based alignment files. Currently only local reading
+/// is supported since SAM files are not typically used with cloud storage.
+pub enum SamReader {
+    /// Local SAM reader with buffered I/O
+    Local(sam::io::Reader<BufReader<File>>, sam::Header),
+}
+
+impl SamReader {
+    /// Creates a new SAM reader for a local file.
+    ///
+    /// Reads the SAM header during construction.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_path` - Path to the local SAM file
+    ///
+    /// # Returns
+    ///
+    /// A SamReader instance with the header already parsed
+    pub fn new(file_path: String) -> Self {
+        let mut reader = get_local_sam_reader(file_path).unwrap();
+        let header = reader.read_header().unwrap();
+        SamReader::Local(reader, header)
+    }
+
+    /// Returns the reference sequences from the SAM file header.
+    ///
+    /// # Returns
+    ///
+    /// Reference sequences from the SAM header
+    pub fn read_sequences(&self) -> ReferenceSequences {
+        match self {
+            SamReader::Local(_, header) => header.reference_sequences().clone(),
+        }
+    }
+
+    /// Reads SAM records as an async stream.
+    ///
+    /// Wraps the synchronous SAM record iterator as a futures stream
+    /// for compatibility with the async processing pipeline.
+    ///
+    /// # Returns
+    ///
+    /// A boxed stream yielding SAM RecordBuf entries or IO errors
+    pub fn read_records(&mut self) -> BoxStream<'_, Result<RecordBuf, Error>> {
+        match self {
+            SamReader::Local(reader, header) => stream::iter(reader.record_bufs(header)).boxed(),
         }
     }
 }

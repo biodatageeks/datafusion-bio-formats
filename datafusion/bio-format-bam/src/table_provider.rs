@@ -110,18 +110,64 @@ async fn determine_schema_from_file(
 
     // If tag fields are specified, discover their actual types from the file
     if let Some(tags) = tag_fields {
+        use crate::storage::{SamReader, is_sam_file};
         let known_tags = get_known_tags();
 
-        // Create BAM reader to sample records
-        let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
+        // Helper to discover tags from a stream of records implementing the Record trait
+        async fn discover_tags_from_stream<S, R, E>(
+            mut records: S,
+            tags: &[String],
+            sample_size: usize,
+        ) -> HashMap<String, (char, DataType)>
+        where
+            S: futures_util::Stream<Item = Result<R, E>> + Unpin,
+            R: noodles_sam::alignment::Record,
+            E: std::fmt::Debug,
+        {
+            let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+            let mut count = 0;
 
-        // Read header (required before reading records)
-        let _ref_sequences = reader.read_sequences().await;
+            while let Some(result) = records.next().await {
+                if count >= sample_size {
+                    break;
+                }
 
-        // Discover actual tag types by sampling records
-        let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
-        let mut records = reader.read_records().await;
-        let mut count = 0;
+                match result {
+                    Ok(record) => {
+                        let data = record.data();
+                        for tag_name in tags {
+                            if discovered_tags.contains_key(tag_name) {
+                                continue;
+                            }
+                            let tag_bytes = tag_name.as_bytes();
+                            if tag_bytes.len() == 2 {
+                                let tag = noodles_sam::alignment::record::data::field::Tag::from([
+                                    tag_bytes[0],
+                                    tag_bytes[1],
+                                ]);
+                                if let Some(Ok(value)) = data.get(&tag) {
+                                    let (sam_type, arrow_type) =
+                                        infer_type_from_noodles_value(&value);
+                                    debug!(
+                                        "Found tag {} in record {}: sam_type={}, arrow_type={:?}",
+                                        tag_name, count, sam_type, arrow_type
+                                    );
+                                    discovered_tags
+                                        .insert(tag_name.clone(), (sam_type, arrow_type));
+                                }
+                            }
+                        }
+                        count += 1;
+                    }
+                    Err(e) => {
+                        debug!("Error reading record during schema inference: {:?}", e);
+                        continue;
+                    }
+                }
+            }
+            debug!("Schema inference completed after {} records", count);
+            discovered_tags
+        }
 
         debug!(
             "Starting schema inference by sampling {} records",
@@ -129,49 +175,18 @@ async fn determine_schema_from_file(
         );
         debug!("Looking for tags: {:?}", tags);
 
-        while let Some(result) = records.next().await {
-            if count >= sample_size {
-                break;
-            }
+        let discovered_tags = if is_sam_file(&file_path) {
+            let mut reader = SamReader::new(file_path);
+            let _ref_sequences = reader.read_sequences();
+            let records = reader.read_records();
+            discover_tags_from_stream(records, tags, sample_size).await
+        } else {
+            let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
+            let _ref_sequences = reader.read_sequences().await;
+            let records = reader.read_records().await;
+            discover_tags_from_stream(records, tags, sample_size).await
+        };
 
-            match result {
-                Ok(record) => {
-                    let data = record.data();
-
-                    // Look for the requested tags in this record
-                    for tag_name in tags {
-                        if discovered_tags.contains_key(tag_name) {
-                            continue; // Already discovered
-                        }
-
-                        // Parse tag to noodles format
-                        let tag_bytes = tag_name.as_bytes();
-                        if tag_bytes.len() == 2 {
-                            let tag = noodles_sam::alignment::record::data::field::Tag::from([
-                                tag_bytes[0],
-                                tag_bytes[1],
-                            ]);
-
-                            if let Some(Ok(value)) = data.get(&tag) {
-                                let (sam_type, arrow_type) = infer_type_from_noodles_value(&value);
-                                debug!(
-                                    "Found tag {} in record {}: sam_type={}, arrow_type={:?}",
-                                    tag_name, count, sam_type, arrow_type
-                                );
-                                discovered_tags.insert(tag_name.clone(), (sam_type, arrow_type));
-                            }
-                        }
-                    }
-                    count += 1;
-                }
-                Err(e) => {
-                    debug!("Error reading record during schema inference: {:?}", e);
-                    continue;
-                }
-            }
-        }
-
-        debug!("Schema inference completed after {} records", count);
         debug!(
             "Discovered tags: {:?}",
             discovered_tags.keys().collect::<Vec<_>>()
@@ -466,52 +481,61 @@ impl BamTableProvider {
         ctx: &datafusion::prelude::SessionContext,
         sample_size: Option<usize>,
     ) -> Result<DataFrame, DataFusionError> {
-        use crate::storage::BamReader;
+        use crate::storage::{BamReader, SamReader, is_sam_file};
         use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
         use futures_util::StreamExt;
 
         let sample_size = sample_size.unwrap_or(100);
 
-        // Create BAM reader
-        let mut reader = BamReader::new(
-            self.file_path.clone(),
-            self.thread_num,
-            self.object_storage_options.clone(),
-        )
-        .await;
+        // Helper to discover all tags from a stream of records
+        async fn discover_all_tags<S, R, E>(
+            mut records: S,
+            sample_size: usize,
+        ) -> HashMap<String, (char, DataType)>
+        where
+            S: futures_util::Stream<Item = Result<R, E>> + Unpin,
+            R: noodles_sam::alignment::Record,
+        {
+            let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+            let mut count = 0;
 
-        // Read header first (required before reading records)
-        let _ref_sequences = reader.read_sequences().await;
+            while let Some(result) = records.next().await {
+                if count >= sample_size {
+                    break;
+                }
 
-        // Discover tags by reading sample records
-        let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
-        let mut records = reader.read_records().await;
-        let mut count = 0;
-
-        while let Some(result) = records.next().await {
-            if count >= sample_size {
-                break;
-            }
-
-            match result {
-                Ok(record) => {
+                if let Ok(record) = result {
                     let data = record.data();
-
-                    // Iterate through all tags in this record
                     for (tag, value) in data.iter().filter_map(Result::ok) {
                         let tag_str =
                             format!("{}{}", tag.as_ref()[0] as char, tag.as_ref()[1] as char);
-
-                        // Only add if not already discovered
                         discovered_tags
                             .entry(tag_str)
                             .or_insert_with(|| infer_type_from_noodles_value(&value));
                     }
                     count += 1;
                 }
-                Err(_) => continue,
             }
+            discovered_tags
         }
+
+        // Create appropriate reader based on file format
+        let discovered_tags = if is_sam_file(&self.file_path) {
+            let mut reader = SamReader::new(self.file_path.clone());
+            let _ref_sequences = reader.read_sequences();
+            let records = reader.read_records();
+            discover_all_tags(records, sample_size).await
+        } else {
+            let mut reader = BamReader::new(
+                self.file_path.clone(),
+                self.thread_num,
+                self.object_storage_options.clone(),
+            )
+            .await;
+            let _ref_sequences = reader.read_sequences().await;
+            let records = reader.read_records().await;
+            discover_all_tags(records, sample_size).await
+        };
 
         // Build output RecordBatch
         let mut column_names = StringBuilder::new();
