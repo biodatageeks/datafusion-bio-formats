@@ -52,7 +52,7 @@ pub fn calculate_nm_tag<R: Record>(record: &R, reference_seq: Option<&[u8]>) -> 
     for op_result in cigar.as_ref().iter() {
         let op = op_result.ok()?; // Return None if CIGAR parsing fails
         let kind = op.kind();
-        let len = op.len() as usize;
+        let len = op.len();
 
         match kind {
             OpKind::Match | OpKind::SequenceMatch | OpKind::SequenceMismatch => {
@@ -147,7 +147,7 @@ pub fn calculate_md_tag<R: Record>(record: &R, reference_seq: &[u8]) -> Option<S
     for op_result in cigar.as_ref().iter() {
         let op = op_result.ok()?; // Return None if CIGAR parsing fails
         let kind = op.kind();
-        let len = op.len() as usize;
+        let len = op.len();
 
         match kind {
             OpKind::Match | OpKind::SequenceMatch => {
