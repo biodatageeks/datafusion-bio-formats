@@ -17,15 +17,16 @@ async fn main() -> datafusion::error::Result<()> {
     // Path to reference genome (required for CRAM)
     let reference_path = Some("reference/genome.fasta".to_string());
 
-    // Register input CRAM file (replace with actual file path)
+    // Register input CRAM file with automatic tag discovery (replace with actual file path)
     let input_path = "test_data/sample.cram";
-    let input_table = CramTableProvider::new(
+    let input_table = CramTableProvider::try_new_with_inferred_schema(
         input_path.to_string(),
         reference_path.clone(),
-        None, // object storage options
-        true, // 0-based coordinates
-        None, // tag fields
-    )?;
+        None,      // object storage options
+        true,      // 0-based coordinates
+        Some(100), // Sample 100 records to discover tags
+    )
+    .await?;
     ctx.register_table("input_cram", Arc::new(input_table))?;
 
     // Example 1: Filter and write high-quality alignments
@@ -91,13 +92,15 @@ async fn main() -> datafusion::error::Result<()> {
     println!("\nExample 4: Converting BAM to CRAM");
     use datafusion_bio_format_bam::table_provider::BamTableProvider;
 
-    let bam_input = BamTableProvider::new(
+    let bam_input = BamTableProvider::try_new_with_inferred_schema(
         "input.bam".to_string(),
-        None, // thread_num
-        None, // object storage options
-        true, // 0-based coordinates
-        None, // tag fields
-    )?;
+        None,      // thread_num
+        None,      // object storage options
+        true,      // 0-based coordinates
+        None,      // tag_fields (None to discover all)
+        Some(100), // Sample 100 records to discover tags
+    )
+    .await?;
     ctx.register_table("input_bam", Arc::new(bam_input))?;
 
     let cram_output = CramTableProvider::new_for_write(

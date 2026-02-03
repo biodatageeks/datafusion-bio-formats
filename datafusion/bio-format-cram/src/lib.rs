@@ -12,7 +12,7 @@
 //! - Support for CRAM indexes (CRAI)
 //! - Memory-efficient streaming
 //!
-//! # Example
+//! # Basic Usage (Explicit Tags)
 //!
 //! ```rust,no_run
 //! use datafusion::prelude::*;
@@ -22,12 +22,46 @@
 //! # async fn example() -> datafusion::error::Result<()> {
 //! let ctx = SessionContext::new();
 //!
-//! // Register a CRAM file as a table
-//! let table = CramTableProvider::new("data/alignments.cram".to_string(), None, None, true, None)?;
+//! // Register a CRAM file as a table with explicit tag specification
+//! let table = CramTableProvider::new(
+//!     "data/alignments.cram".to_string(),
+//!     Some("reference.fa".to_string()),
+//!     None,
+//!     true,
+//!     Some(vec!["MD".to_string(), "NM".to_string(), "RG".to_string()]),
+//! )?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!
 //! // Query with SQL
-//! let df = ctx.sql("SELECT name, chrom, start FROM alignments LIMIT 10").await?;
+//! let df = ctx.sql("SELECT name, chrom, start, MD, NM FROM alignments LIMIT 10").await?;
+//! df.show().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Automatic Tag Discovery
+//!
+//! ```rust,no_run
+//! use datafusion::prelude::*;
+//! use datafusion_bio_format_cram::table_provider::CramTableProvider;
+//! use std::sync::Arc;
+//!
+//! # async fn example() -> datafusion::error::Result<()> {
+//! let ctx = SessionContext::new();
+//!
+//! // Register a CRAM file with automatic tag discovery
+//! // This samples the file to find all tags and includes MD/NM if reference is available
+//! let table = CramTableProvider::try_new_with_inferred_schema(
+//!     "data/alignments.cram".to_string(),
+//!     Some("reference.fa".to_string()),
+//!     None,
+//!     true,
+//!     Some(100),  // Sample 100 records
+//! ).await?;
+//! ctx.register_table("alignments", Arc::new(table))?;
+//!
+//! // Query with SQL - all discovered tags are available
+//! let df = ctx.sql("SELECT name, chrom, start, MD, NM FROM alignments LIMIT 10").await?;
 //! df.show().await?;
 //! # Ok(())
 //! # }
