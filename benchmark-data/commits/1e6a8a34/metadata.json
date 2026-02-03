@@ -1,0 +1,7 @@
+{
+  "ref": "dependabot/cargo/noodles-db1fb9c03b",
+  "ref_type": "branch",
+  "commit_sha": "1e6a8a346c629a7d9fe095809645bf2375450d45",
+  "timestamp": "2026-02-03T15:37:36Z",
+  "benchmark_mode": "fast"
+}

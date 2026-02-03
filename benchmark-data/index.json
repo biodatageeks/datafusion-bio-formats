@@ -381,6 +381,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "dependabot/cargo/noodles-db1fb9c03b@1e6a8a346c629a7d9fe095809645bf2375450d45@linux",
+      "label": "dependabot/cargo/noodles-db1fb9c03b(1e6a8a34)",
+      "ref": "dependabot/cargo/noodles-db1fb9c03b",
+      "ref_type": "branch",
+      "timestamp": "2026-02-03T15:37:44Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/1e6a8a34/linux",
+      "commit_sha": "1e6a8a346c629a7d9fe095809645bf2375450d45",
+      "is_latest_tag": false
+    },
+    {
+      "id": "dependabot/cargo/noodles-db1fb9c03b@1e6a8a346c629a7d9fe095809645bf2375450d45@macos",
+      "label": "dependabot/cargo/noodles-db1fb9c03b(1e6a8a34)",
+      "ref": "dependabot/cargo/noodles-db1fb9c03b",
+      "ref_type": "branch",
+      "timestamp": "2026-02-03T15:37:44Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/1e6a8a34/macos",
+      "commit_sha": "1e6a8a346c629a7d9fe095809645bf2375450d45",
+      "is_latest_tag": false
+    },
+    {
       "id": "dependabot/cargo/tempfile-3.24.0@2c3dd7bd377329c15880b728df9e0017d55a0f47@linux",
       "label": "dependabot/cargo/tempfile-3.24.0(2c3dd7bd)",
       "ref": "dependabot/cargo/tempfile-3.24.0",
@@ -1914,6 +1938,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "1e0791e0a1c4664321866baa4b20d2a95e046f4c",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@1e6a8a346c629a7d9fe095809645bf2375450d45@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-03T15:37:44Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "1e6a8a346c629a7d9fe095809645bf2375450d45",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@1e6a8a346c629a7d9fe095809645bf2375450d45@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-03T15:37:44Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "1e6a8a346c629a7d9fe095809645bf2375450d45",
       "is_latest_tag": true
     },
     {
@@ -3672,6 +3720,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-03T14:54:21Z",
+  "last_updated": "2026-02-03T15:37:44Z",
   "latest_tag": "v0.1.1"
 }
