@@ -475,7 +475,7 @@ impl TableProvider for CramTableProvider {
         }
 
         // Extract tag fields from schema metadata
-        let tag_fields: Vec<String> = self
+        let mut tag_fields: Vec<String> = self
             .schema
             .fields()
             .iter()
@@ -486,6 +486,16 @@ impl TableProvider for CramTableProvider {
                     .map(|tag| tag.to_string())
             })
             .collect();
+
+        // Merge with explicitly provided tag_fields (if any)
+        // This ensures tags passed to new_for_write are honored even without metadata
+        if let Some(explicit_tags) = &self.tag_fields {
+            for tag in explicit_tags {
+                if !tag_fields.contains(tag) {
+                    tag_fields.push(tag.clone());
+                }
+            }
+        }
 
         Ok(Arc::new(CramWriteExec::new(
             input,

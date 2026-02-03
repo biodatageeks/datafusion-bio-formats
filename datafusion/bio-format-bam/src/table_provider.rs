@@ -747,6 +747,16 @@ impl TableProvider for BamTableProvider {
             }
         }
 
+        // Merge with explicitly provided tag_fields (if any)
+        // This ensures tags passed to new_for_write are honored even without metadata
+        if let Some(explicit_tags) = &self.tag_fields {
+            for tag in explicit_tags {
+                if !tag_fields.contains(tag) {
+                    tag_fields.push(tag.clone());
+                }
+            }
+        }
+
         // Create write execution plan
         Ok(Arc::new(BamWriteExec::new(
             input,
