@@ -1341,6 +1341,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/sam-read-support@5a3b7631a7e2083ec4b1208f7b97010da8c86a8a@linux",
+      "label": "feat/sam-read-support(5a3b7631)",
+      "ref": "feat/sam-read-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-03T19:57:44Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/5a3b7631/linux",
+      "commit_sha": "5a3b7631a7e2083ec4b1208f7b97010da8c86a8a",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/sam-read-support@5a3b7631a7e2083ec4b1208f7b97010da8c86a8a@macos",
+      "label": "feat/sam-read-support(5a3b7631)",
+      "ref": "feat/sam-read-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-03T19:57:44Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/5a3b7631/macos",
+      "commit_sha": "5a3b7631a7e2083ec4b1208f7b97010da8c86a8a",
+      "is_latest_tag": false
+    },
+    {
       "id": "feat/write-support-vcf-fastq@0b631549450f31c7f79b09d8b940b7cffe194fbe@linux",
       "label": "feat/write-support-vcf-fastq(0b631549)",
       "ref": "feat/write-support-vcf-fastq",
@@ -2418,6 +2442,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "53b80733873d4d9118677718886be16f30ba14cd",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@5a3b7631a7e2083ec4b1208f7b97010da8c86a8a@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-03T19:57:44Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "5a3b7631a7e2083ec4b1208f7b97010da8c86a8a",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@5a3b7631a7e2083ec4b1208f7b97010da8c86a8a@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-03T19:57:44Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "5a3b7631a7e2083ec4b1208f7b97010da8c86a8a",
       "is_latest_tag": true
     },
     {
@@ -3768,6 +3816,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-03T19:19:03Z",
+  "last_updated": "2026-02-03T19:57:44Z",
   "latest_tag": "v0.1.1"
 }
