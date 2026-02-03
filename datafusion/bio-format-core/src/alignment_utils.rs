@@ -247,7 +247,8 @@ pub fn cigar_op_to_string(op: Op) -> String {
 
 /// Get chromosome name from BAM reference sequence ID
 ///
-/// BAM uses `io::Result<usize>` for reference sequence IDs
+/// Returns the chromosome name exactly as it appears in the BAM header.
+/// BAM uses `io::Result<usize>` for reference sequence IDs.
 pub fn get_chrom_by_seq_id_bam(rid: Option<io::Result<usize>>, names: &[String]) -> Option<String> {
     match rid {
         Some(rid) => {
@@ -255,11 +256,7 @@ pub fn get_chrom_by_seq_id_bam(rid: Option<io::Result<usize>>, names: &[String])
             let chrom_name = names
                 .get(idx)
                 .expect("reference_sequence_id() should be in bounds");
-            let mut chrom_name = chrom_name.to_string().to_lowercase();
-            if !chrom_name.starts_with("chr") {
-                chrom_name = format!("chr{}", chrom_name);
-            }
-            Some(chrom_name)
+            Some(chrom_name.to_string())
         }
         _ => None,
     }
@@ -267,18 +264,15 @@ pub fn get_chrom_by_seq_id_bam(rid: Option<io::Result<usize>>, names: &[String])
 
 /// Get chromosome name from CRAM reference sequence ID
 ///
-/// CRAM uses `Option<usize>` directly for reference sequence IDs
+/// Returns the chromosome name exactly as it appears in the CRAM header.
+/// CRAM uses `Option<usize>` directly for reference sequence IDs.
 pub fn get_chrom_by_seq_id_cram(rid: Option<usize>, names: &[String]) -> Option<String> {
     match rid {
         Some(rid) => {
             let chrom_name = names
                 .get(rid)
                 .expect("reference_sequence_id() should be in bounds");
-            let mut chrom_name = chrom_name.to_string().to_lowercase();
-            if !chrom_name.starts_with("chr") {
-                chrom_name = format!("chr{}", chrom_name);
-            }
-            Some(chrom_name)
+            Some(chrom_name.to_string())
         }
         _ => None,
     }
@@ -301,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_get_chrom_by_seq_id_cram() {
-        let names = vec!["1".to_string(), "2".to_string(), "X".to_string()];
+        let names = vec!["chr1".to_string(), "chr2".to_string(), "chrM".to_string()];
 
         assert_eq!(
             get_chrom_by_seq_id_cram(Some(0), &names),
@@ -309,14 +303,32 @@ mod tests {
         );
         assert_eq!(
             get_chrom_by_seq_id_cram(Some(2), &names),
-            Some("chrx".to_string())
+            Some("chrM".to_string())
         );
         assert_eq!(get_chrom_by_seq_id_cram(None, &names), None);
     }
 
     #[test]
+    fn test_get_chrom_by_seq_id_cram_preserves_original_names() {
+        let names = vec!["1".to_string(), "X".to_string(), "MT".to_string()];
+
+        assert_eq!(
+            get_chrom_by_seq_id_cram(Some(0), &names),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            get_chrom_by_seq_id_cram(Some(1), &names),
+            Some("X".to_string())
+        );
+        assert_eq!(
+            get_chrom_by_seq_id_cram(Some(2), &names),
+            Some("MT".to_string())
+        );
+    }
+
+    #[test]
     fn test_get_chrom_by_seq_id_bam() {
-        let names = vec!["1".to_string(), "2".to_string(), "X".to_string()];
+        let names = vec!["chr1".to_string(), "chr2".to_string(), "chrM".to_string()];
 
         assert_eq!(
             get_chrom_by_seq_id_bam(Some(Ok(0)), &names),
@@ -324,8 +336,26 @@ mod tests {
         );
         assert_eq!(
             get_chrom_by_seq_id_bam(Some(Ok(2)), &names),
-            Some("chrx".to_string())
+            Some("chrM".to_string())
         );
         assert_eq!(get_chrom_by_seq_id_bam(None, &names), None);
+    }
+
+    #[test]
+    fn test_get_chrom_by_seq_id_bam_preserves_original_names() {
+        let names = vec!["1".to_string(), "X".to_string(), "MT".to_string()];
+
+        assert_eq!(
+            get_chrom_by_seq_id_bam(Some(Ok(0)), &names),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            get_chrom_by_seq_id_bam(Some(Ok(1)), &names),
+            Some("X".to_string())
+        );
+        assert_eq!(
+            get_chrom_by_seq_id_bam(Some(Ok(2)), &names),
+            Some("MT".to_string())
+        );
     }
 }
