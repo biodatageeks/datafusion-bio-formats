@@ -1,9 +1,10 @@
 use crate::physical_exec::CramExec;
+use crate::write_exec::CramWriteExec;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -74,6 +75,30 @@ fn determine_schema(
     Ok(Arc::new(schema))
 }
 
+/// Helper function to infer Arrow DataType from CRAM value
+fn infer_type_from_cram_value(
+    value: &noodles_sam::alignment::record_buf::data::field::Value,
+) -> (char, DataType) {
+    use noodles_sam::alignment::record_buf::data::field::Value as CramValue;
+
+    match value {
+        CramValue::Character(_) => ('A', DataType::Utf8),
+        CramValue::Int8(_)
+        | CramValue::UInt8(_)
+        | CramValue::Int16(_)
+        | CramValue::UInt16(_)
+        | CramValue::Int32(_)
+        | CramValue::UInt32(_) => ('i', DataType::Int32),
+        CramValue::Float(_) => ('f', DataType::Float32),
+        CramValue::String(_) => ('Z', DataType::Utf8),
+        CramValue::Hex(_) => ('H', DataType::Utf8),
+        CramValue::Array(_) => (
+            'B',
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+        ),
+    }
+}
+
 /// DataFusion table provider for CRAM files.
 ///
 /// Allows registering CRAM files as queryable tables in DataFusion.
@@ -123,6 +148,123 @@ impl CramTableProvider {
         })
     }
 
+    /// Creates a new CRAM table provider with automatic tag discovery.
+    ///
+    /// This method samples the CRAM file to discover available tags and
+    /// automatically includes them in the schema. Tags found in sampled
+    /// records will be readable in queries.
+    ///
+    /// For calculable tags (MD/NM) that may not be stored, they will be
+    /// automatically included in the schema if a reference is available.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to CRAM file (local or cloud storage URL)
+    /// * `reference_path` - Optional path to FASTA reference file
+    /// * `object_storage_options` - Optional cloud storage configuration
+    /// * `coordinate_system_zero_based` - If true, output 0-based coordinates; if false, 1-based
+    /// * `sample_size` - Number of records to sample for tag discovery (default: 100)
+    ///
+    /// # Returns
+    /// * `Ok(provider)` - Successfully created provider with inferred schema
+    /// * `Err` - Failed to read file or determine schema
+    pub async fn try_new_with_inferred_schema(
+        file_path: String,
+        reference_path: Option<String>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        sample_size: Option<usize>,
+    ) -> datafusion::common::Result<Self> {
+        use crate::storage::CramReader;
+        use futures_util::StreamExt;
+
+        // Sample the file to discover tags
+        let mut reader = CramReader::new(
+            file_path.clone(),
+            reference_path.clone(),
+            object_storage_options.clone(),
+        )
+        .await;
+
+        let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+        let mut records = reader.read_records().await;
+        let sample_size = sample_size.unwrap_or(100);
+        let mut count = 0;
+
+        while let Some(result) = records.next().await {
+            if count >= sample_size {
+                break;
+            }
+
+            match result {
+                Ok(record) => {
+                    let data = record.data();
+                    for (tag, value) in data.iter() {
+                        let tag_str =
+                            format!("{}{}", tag.as_ref()[0] as char, tag.as_ref()[1] as char);
+                        discovered_tags
+                            .entry(tag_str)
+                            .or_insert_with(|| infer_type_from_cram_value(value));
+                    }
+                    count += 1;
+                }
+                Err(_) => continue,
+            }
+        }
+
+        // Always include MD/NM tags if reference is available
+        // These can be calculated even if not stored
+        if reference_path.is_some() {
+            if !discovered_tags.contains_key("MD") {
+                discovered_tags.insert("MD".to_string(), ('Z', DataType::Utf8));
+            }
+            if !discovered_tags.contains_key("NM") {
+                discovered_tags.insert("NM".to_string(), ('i', DataType::Int32));
+            }
+        } else {
+            // NM can be partially calculated without reference
+            if !discovered_tags.contains_key("NM") {
+                discovered_tags.insert("NM".to_string(), ('i', DataType::Int32));
+            }
+        }
+
+        // Convert discovered tags to tag_fields format
+        let tag_fields: Vec<String> = discovered_tags.keys().cloned().collect();
+
+        // Create provider with discovered tags
+        Self::new(
+            file_path,
+            reference_path,
+            object_storage_options,
+            coordinate_system_zero_based,
+            Some(tag_fields),
+        )
+    }
+
+    /// Creates a new CRAM table provider for write operations.
+    ///
+    /// # Arguments
+    /// * `output_path` - Path to output CRAM file
+    /// * `schema` - Schema defining the structure of data to write
+    /// * `reference_path` - Optional path to FASTA reference file
+    /// * `tag_fields` - Optional list of BAM/SAM tags to write
+    /// * `coordinate_system_zero_based` - If true, input is 0-based; if false, 1-based
+    pub fn new_for_write(
+        output_path: String,
+        schema: SchemaRef,
+        reference_path: Option<String>,
+        tag_fields: Option<Vec<String>>,
+        coordinate_system_zero_based: bool,
+    ) -> Self {
+        Self {
+            file_path: output_path,
+            schema,
+            reference_path,
+            object_storage_options: None,
+            coordinate_system_zero_based,
+            tag_fields,
+        }
+    }
+
     /// Discover available columns by sampling records from the CRAM file.
     ///
     /// Returns a DataFrame describing all columns including:
@@ -139,30 +281,9 @@ impl CramTableProvider {
     ) -> Result<datafusion::prelude::DataFrame, datafusion::common::DataFusionError> {
         use crate::storage::CramReader;
         use datafusion::arrow::array::{BooleanBuilder, RecordBatch, StringBuilder};
-        use datafusion::arrow::datatypes::{Field as ArrowField, Schema};
+        use datafusion::arrow::datatypes::Schema;
         use datafusion::datasource::MemTable;
         use futures_util::StreamExt;
-        use noodles_sam::alignment::record_buf::data::field::Value as CramValue;
-
-        // Helper function to infer type from CRAM value
-        fn infer_type_from_cram_value(value: &CramValue) -> (char, DataType) {
-            match value {
-                CramValue::Character(_) => ('A', DataType::Utf8),
-                CramValue::Int8(_)
-                | CramValue::UInt8(_)
-                | CramValue::Int16(_)
-                | CramValue::UInt16(_)
-                | CramValue::Int32(_)
-                | CramValue::UInt32(_) => ('i', DataType::Int32),
-                CramValue::Float(_) => ('f', DataType::Float32),
-                CramValue::String(_) => ('Z', DataType::Utf8),
-                CramValue::Hex(_) => ('H', DataType::Utf8),
-                CramValue::Array(_) => (
-                    'B',
-                    DataType::List(Arc::new(ArrowField::new("item", DataType::Int32, true))),
-                ),
-            }
-        }
 
         let sample_size = sample_size.unwrap_or(100);
 
@@ -337,5 +458,51 @@ impl TableProvider for CramTableProvider {
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             tag_fields: self.tag_fields.clone(),
         }))
+    }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::common::DataFusionError;
+
+        if insert_op != InsertOp::Overwrite {
+            return Err(DataFusionError::NotImplemented(
+                "CRAM insert_into only supports OVERWRITE mode (INSERT OVERWRITE)".to_string(),
+            ));
+        }
+
+        // Extract tag fields from schema metadata
+        let mut tag_fields: Vec<String> = self
+            .schema
+            .fields()
+            .iter()
+            .filter_map(|field| {
+                field
+                    .metadata()
+                    .get(BAM_TAG_TAG_KEY)
+                    .map(|tag| tag.to_string())
+            })
+            .collect();
+
+        // Merge with explicitly provided tag_fields (if any)
+        // This ensures tags passed to new_for_write are honored even without metadata
+        if let Some(explicit_tags) = &self.tag_fields {
+            for tag in explicit_tags {
+                if !tag_fields.contains(tag) {
+                    tag_fields.push(tag.clone());
+                }
+            }
+        }
+
+        Ok(Arc::new(CramWriteExec::new(
+            input,
+            self.file_path.clone(),
+            self.reference_path.clone(),
+            tag_fields,
+            self.coordinate_system_zero_based,
+        )))
     }
 }

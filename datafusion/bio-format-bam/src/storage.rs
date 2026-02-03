@@ -6,8 +6,8 @@ use futures_util::{StreamExt, stream};
 use noodles_bam as bam;
 use noodles_bam::Record;
 use noodles_bam::io::Reader;
-use noodles_bgzf as bgzf;
-use noodles_bgzf::MultithreadedReader;
+use noodles_bgzf::r#async::io::Reader as AsyncBgzfReader;
+use noodles_bgzf::io::MultithreadedReader;
 use noodles_sam::header::ReferenceSequences;
 use opendal::FuturesBytesStream;
 use std::fs::File;
@@ -29,11 +29,11 @@ pub async fn get_remote_bam_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<
-    bam::r#async::io::Reader<bgzf::AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>>,
+    bam::r#async::io::Reader<AsyncBgzfReader<StreamReader<FuturesBytesStream, bytes::Bytes>>>,
     Error,
 > {
     let stream = get_remote_stream(file_path.clone(), object_storage_options, None).await?;
-    let reader = bam::r#async::io::Reader::from(bgzf::AsyncReader::new(StreamReader::new(stream)));
+    let reader = bam::r#async::io::Reader::from(AsyncBgzfReader::new(StreamReader::new(stream)));
     Ok(reader)
 }
 
@@ -52,12 +52,7 @@ pub async fn get_local_bam_reader(
     thread_num: usize,
 ) -> Result<Reader<MultithreadedReader<File>>, Error> {
     File::open(file_path)
-        .map(|f| {
-            noodles_bgzf::MultithreadedReader::with_worker_count(
-                NonZero::new(thread_num).unwrap(),
-                f,
-            )
-        })
+        .map(|f| MultithreadedReader::with_worker_count(NonZero::new(thread_num).unwrap(), f))
         .map(bam::io::Reader::from)
 }
 
@@ -70,9 +65,7 @@ pub enum BamReader {
     Local(Reader<MultithreadedReader<File>>),
     /// Remote BAM reader for cloud storage access
     Remote(
-        bam::r#async::io::Reader<
-            noodles_bgzf::AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>,
-        >,
+        bam::r#async::io::Reader<AsyncBgzfReader<StreamReader<FuturesBytesStream, bytes::Bytes>>>,
     ),
 }
 

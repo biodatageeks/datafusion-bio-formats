@@ -11,6 +11,7 @@ use datafusion_bio_format_core::alignment_utils::{
     RecordFields, build_record_batch, cigar_op_to_string,
     get_chrom_by_seq_id_cram as get_chrom_by_seq_id,
 };
+use datafusion_bio_format_core::calculated_tags::{calculate_md_tag, calculate_nm_tag};
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
@@ -103,42 +104,91 @@ impl ExecutionPlan for CramExec {
 
 type TagBuilders = (Vec<String>, Vec<DataType>, Vec<OptionalField>, Vec<Tag>);
 
+/// Initialize tag builders based on schema fields
 fn set_tag_builders(
     batch_size: usize,
     tag_fields: Option<Vec<String>>,
+    schema: SchemaRef,
     tag_builders: &mut TagBuilders,
 ) {
     if let Some(tags) = tag_fields {
-        let known_tags = get_known_tags();
         for tag in tags {
-            // Get tag definition from known tags, or use default for unknown tags
-            let (arrow_type, _sam_type) = if let Some(tag_def) = known_tags.get(&tag) {
-                (tag_def.arrow_type.clone(), tag_def.sam_type)
+            // Find the field in the schema for this tag
+            let field = schema.fields().iter().find(|f| f.name() == &tag);
+
+            let arrow_type = if let Some(field) = field {
+                field.data_type().clone()
             } else {
-                // Default for unknown tags: Utf8
-                (DataType::Utf8, 'Z')
+                // Fallback to registry if not in schema
+                let known_tags = get_known_tags();
+                if let Some(tag_def) = known_tags.get(&tag) {
+                    tag_def.arrow_type.clone()
+                } else {
+                    DataType::Utf8
+                }
             };
+
+            debug!("Creating builder for tag {}: {:?}", tag, arrow_type);
 
             if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
                 let tag_bytes = tag.as_bytes();
                 if tag_bytes.len() == 2 {
                     let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
                     tag_builders.0.push(tag.clone());
-                    tag_builders.1.push(arrow_type);
+                    tag_builders.1.push(arrow_type.clone());
                     tag_builders.2.push(builder);
                     tag_builders.3.push(parsed_tag);
+                    debug!("Successfully created builder for tag {}", tag);
+                } else {
+                    debug!("Invalid tag name length for {}", tag);
                 }
+            } else {
+                debug!("Failed to create builder for tag {}: {:?}", tag, arrow_type);
             }
         }
     }
 }
 
-fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
+fn load_tags<R: Record>(
+    record: &R,
+    tag_builders: &mut TagBuilders,
+    reference_seq: Option<&[u8]>,
+) -> Result<(), ArrowError> {
     for i in 0..tag_builders.0.len() {
         let tag = &tag_builders.3[i];
+        let tag_name = &tag_builders.0[i];
         let builder = &mut tag_builders.2[i];
         let data = record.data();
         let tag_result = data.get(tag);
+
+        // Check if this is a calculated tag (MD or NM) that can be computed
+        let is_md_tag = tag_name == "MD";
+        let is_nm_tag = tag_name == "NM";
+
+        if tag_result.is_none() {
+            debug!("Tag {} not found in record data", tag_name);
+
+            // Try to calculate MD or NM tags if not present in data
+            if is_md_tag && reference_seq.is_some() {
+                debug!("Attempting to calculate MD tag from alignment");
+                if let Some(md_value) = calculate_md_tag(record, reference_seq.unwrap()) {
+                    debug!("Successfully calculated MD tag: {}", md_value);
+                    builder.append_string(&md_value)?;
+                    continue;
+                } else {
+                    debug!("Failed to calculate MD tag");
+                }
+            } else if is_nm_tag {
+                debug!("Attempting to calculate NM tag from alignment");
+                if let Some(nm_value) = calculate_nm_tag(record, reference_seq) {
+                    debug!("Successfully calculated NM tag: {}", nm_value);
+                    builder.append_int(nm_value)?;
+                    continue;
+                } else {
+                    debug!("Failed to calculate NM tag");
+                }
+            }
+        }
 
         match tag_result {
             Some(Ok(value)) => match value {
@@ -153,7 +203,11 @@ fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<()
                     Ok(string) => builder.append_string(string)?,
                     Err(_) => builder.append_null()?,
                 },
-                Value::Character(c) => builder.append_string(&c.to_string())?,
+                Value::Character(c) => {
+                    // Convert u8 to char, not to its numeric string representation
+                    let ch = char::from(c);
+                    builder.append_string(&ch.to_string())?
+                }
                 Value::Hex(h) => {
                     let hex_str = hex::encode::<&[u8]>(h.as_ref());
                     builder.append_string(&hex_str)?
@@ -273,7 +327,7 @@ async fn get_remote_cram_stream(
 
         // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        set_tag_builders(batch_size, tag_fields, &mut tag_builders);
+        set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
         let mut record_num = 0;
@@ -282,6 +336,15 @@ async fn get_remote_cram_stream(
         // Process records one by one.
         let ref_sequences = reader.get_sequences();
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+
+        // Load all reference sequences for MD/NM tag calculation
+        let reference_seqs = reader.load_all_references();
+        if reference_seqs.is_some() {
+            debug!("Loaded {} reference sequences for tag calculation", reference_seqs.as_ref().unwrap().len());
+        } else {
+            debug!("No external reference available - MD/NM tags will be NULL if not stored");
+        }
+
         let mut records = reader.read_records().await;
 
         while let Some(result) = records.next().await {
@@ -356,7 +419,28 @@ async fn get_remote_cram_stream(
             };
 
             // Load tag values if present
-            load_tags(&record, &mut tag_builders)?;
+            // Extract reference sequence for MD/NM tag calculation
+            let reference_region = if let Some(ref refs) = reference_seqs {
+                // Get reference sequence ID and alignment positions
+                if let (Some(seq_id), Some(start_pos), Some(end_pos)) = (
+                    record.reference_sequence_id(),
+                    record.alignment_start(),
+                    record.alignment_end(),
+                ) {
+                    // Fetch the reference sequence for this chromosome
+                    refs.get(seq_id).map(|ref_seq| {
+                        let start = (usize::from(start_pos) - 1).min(ref_seq.len()); // Convert to 0-based
+                        let end = usize::from(end_pos).min(ref_seq.len());
+                        &ref_seq[start..end]
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            load_tags(&record, &mut tag_builders, reference_region)?;
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
@@ -460,7 +544,12 @@ async fn get_local_cram(
 
     // Initialize tag builders
     let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    set_tag_builders(batch_size, tag_fields, &mut tag_builders);
+    set_tag_builders(
+        batch_size,
+        tag_fields.clone(),
+        schema.clone(),
+        &mut tag_builders,
+    );
     let num_tag_fields = tag_builders.0.len();
 
     let mut batch_num = 0;
@@ -471,6 +560,15 @@ async fn get_local_cram(
     let stream = try_stream! {
         let ref_sequences = reader.get_sequences();
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+
+        // Load all reference sequences for MD/NM tag calculation
+        let reference_seqs = reader.load_all_references();
+        if reference_seqs.is_some() {
+            debug!("Loaded {} reference sequences for tag calculation", reference_seqs.as_ref().unwrap().len());
+        } else {
+            debug!("No external reference available - MD/NM tags will be NULL if not stored");
+        }
+
         let mut records = reader.read_records().await;
 
         while let Some(result) = records.next().await {
@@ -545,7 +643,28 @@ async fn get_local_cram(
             };
 
             // Load tag values if present
-            load_tags(&record, &mut tag_builders)?;
+            // Extract reference sequence for MD/NM tag calculation
+            let reference_region = if let Some(ref refs) = reference_seqs {
+                // Get reference sequence ID and alignment positions
+                if let (Some(seq_id), Some(start_pos), Some(end_pos)) = (
+                    record.reference_sequence_id(),
+                    record.alignment_start(),
+                    record.alignment_end(),
+                ) {
+                    // Fetch the reference sequence for this chromosome
+                    refs.get(seq_id).map(|ref_seq| {
+                        let start = (usize::from(start_pos) - 1).min(ref_seq.len()); // Convert to 0-based
+                        let end = usize::from(end_pos).min(ref_seq.len());
+                        &ref_seq[start..end]
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            load_tags(&record, &mut tag_builders, reference_region)?;
 
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.

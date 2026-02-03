@@ -103,22 +103,31 @@ impl ExecutionPlan for BamExec {
 /// Type alias for tag builders: (tag_names, tag_types, builders, parsed_tags)
 type TagBuilders = (Vec<String>, Vec<DataType>, Vec<OptionalField>, Vec<Tag>);
 
-/// Initialize tag builders based on requested tag fields
+/// Initialize tag builders based on schema fields
 fn set_tag_builders(
     batch_size: usize,
     tag_fields: Option<Vec<String>>,
+    schema: SchemaRef,
     tag_builders: &mut TagBuilders,
 ) {
     if let Some(tags) = tag_fields {
-        let known_tags = get_known_tags();
         for tag in tags {
-            // Get tag definition from known tags, or use default for unknown tags
-            let (arrow_type, _sam_type) = if let Some(tag_def) = known_tags.get(&tag) {
-                (tag_def.arrow_type.clone(), tag_def.sam_type)
+            // Find the field in the schema for this tag
+            let field = schema.fields().iter().find(|f| f.name() == &tag);
+
+            let arrow_type = if let Some(field) = field {
+                field.data_type().clone()
             } else {
-                // Default for unknown tags: Utf8
-                (DataType::Utf8, 'Z')
+                // Fallback to registry if not in schema
+                let known_tags = get_known_tags();
+                if let Some(tag_def) = known_tags.get(&tag) {
+                    tag_def.arrow_type.clone()
+                } else {
+                    DataType::Utf8
+                }
             };
+
+            debug!("Creating builder for tag {}: {:?}", tag, arrow_type);
 
             if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
                 // Pre-parse tag to avoid parsing on every record
@@ -130,6 +139,8 @@ fn set_tag_builders(
                     tag_builders.2.push(builder);
                     tag_builders.3.push(parsed_tag);
                 }
+            } else {
+                debug!("Failed to create builder for tag {}: {:?}", tag, arrow_type);
             }
         }
     }
@@ -162,7 +173,11 @@ fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<()
                             Err(_) => builder.append_null()?,
                         }
                     }
-                    Value::Character(c) => builder.append_string(&c.to_string())?,
+                    Value::Character(c) => {
+                        // Convert u8 to char, not to its numeric string representation
+                        let ch = char::from(c);
+                        builder.append_string(&ch.to_string())?
+                    }
                     Value::Hex(h) => {
                         // Convert hex bytes to hex string
                         let bytes: &[u8] = h.as_ref();
@@ -271,7 +286,7 @@ macro_rules! process_bam_records_impl {
 
         // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        set_tag_builders($batch_size, $tag_fields, &mut tag_builders);
+        set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
         let mut record_num = 0;
