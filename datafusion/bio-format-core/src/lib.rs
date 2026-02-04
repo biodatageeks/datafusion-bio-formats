@@ -52,10 +52,10 @@ pub mod metadata;
 
 // Re-export commonly used metadata keys, types, and utilities
 pub use metadata::{
-    BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY,
-    BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY,
-    BAM_TAG_TYPE_KEY, ProgramMetadata, ReadGroupMetadata, ReferenceSequenceMetadata,
-    extract_header_metadata, from_json_string, to_json_string,
+    BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_GROUP_ORDER_KEY, BAM_PROGRAM_INFO_KEY,
+    BAM_READ_GROUPS_KEY, BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY, BAM_SUBSORT_ORDER_KEY,
+    BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, ProgramMetadata, ReadGroupMetadata,
+    ReferenceSequenceMetadata, extract_header_metadata, from_json_string, to_json_string,
 };
 /// Alignment utilities shared between BAM and CRAM formats
 pub mod alignment_utils;

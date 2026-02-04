@@ -70,6 +70,12 @@ pub const BAM_FILE_FORMAT_VERSION_KEY: &str = "bio.bam.file_format_version";
 /// BAM sort order (e.g., "coordinate", "queryname", "unsorted") stored in schema metadata
 pub const BAM_SORT_ORDER_KEY: &str = "bio.bam.sort_order";
 
+/// BAM group order (e.g., "none", "query", "reference") stored in schema metadata
+pub const BAM_GROUP_ORDER_KEY: &str = "bio.bam.group_order";
+
+/// BAM subsort order stored in schema metadata
+pub const BAM_SUBSORT_ORDER_KEY: &str = "bio.bam.subsort_order";
+
 /// BAM reference sequences (contigs) stored as JSON array
 pub const BAM_REFERENCE_SEQUENCES_KEY: &str = "bio.bam.reference_sequences";
 
@@ -163,6 +169,9 @@ pub struct ReferenceSequenceMetadata {
     pub name: String,
     /// Reference sequence length in base pairs
     pub length: usize,
+    /// Additional @SQ fields (AS, UR, M5, SP, etc.) keyed by 2-char tag name
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub other_fields: HashMap<String, String>,
 }
 
 /// Read group metadata for BAM/CRAM headers (@RG lines)
@@ -182,6 +191,9 @@ pub struct ReadGroupMetadata {
     /// Description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Additional @RG fields keyed by 2-char tag name
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub other_fields: HashMap<String, String>,
 }
 
 /// Program info metadata for BAM/CRAM headers (@PG lines)
@@ -198,6 +210,9 @@ pub struct ProgramMetadata {
     /// Command line
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command_line: Option<String>,
+    /// Additional @PG fields keyed by 2-char tag name
+    #[serde(skip_serializing_if = "HashMap::is_empty", default)]
+    pub other_fields: HashMap<String, String>,
 }
 
 // ============================================================================
@@ -236,16 +251,41 @@ pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, 
                 String::from_utf8_lossy(sort_order.as_ref()).to_string(),
             );
         }
+        if let Some(group_order) = hd.other_fields().get(&tag::GROUP_ORDER) {
+            metadata.insert(
+                BAM_GROUP_ORDER_KEY.to_string(),
+                String::from_utf8_lossy(group_order.as_ref()).to_string(),
+            );
+        }
+        if let Some(subsort_order) = hd.other_fields().get(&tag::SUBSORT_ORDER) {
+            metadata.insert(
+                BAM_SUBSORT_ORDER_KEY.to_string(),
+                String::from_utf8_lossy(subsort_order.as_ref()).to_string(),
+            );
+        }
     }
 
-    // @SQ: reference sequences
+    // @SQ: reference sequences (including all optional fields like AS, UR, M5, SP)
     let ref_sequences = header.reference_sequences();
     if !ref_sequences.is_empty() {
         let ref_seq_metadata: Vec<ReferenceSequenceMetadata> = ref_sequences
             .iter()
-            .map(|(name, map)| ReferenceSequenceMetadata {
-                name: String::from_utf8_lossy(name.as_ref()).to_string(),
-                length: map.length().get(),
+            .map(|(name, map)| {
+                let mut other = HashMap::new();
+                for (tag, value) in map.other_fields() {
+                    let tag_bytes: &[u8; 2] = tag.as_ref();
+                    if let Ok(tag_str) = std::str::from_utf8(tag_bytes) {
+                        other.insert(
+                            tag_str.to_string(),
+                            String::from_utf8_lossy(value.as_ref()).to_string(),
+                        );
+                    }
+                }
+                ReferenceSequenceMetadata {
+                    name: String::from_utf8_lossy(name.as_ref()).to_string(),
+                    length: map.length().get(),
+                    other_fields: other,
+                }
             })
             .collect();
         metadata.insert(
@@ -254,7 +294,7 @@ pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, 
         );
     }
 
-    // @RG: read groups
+    // @RG: read groups (including all optional fields)
     let read_groups = header.read_groups();
     if !read_groups.is_empty() {
         use noodles_sam::header::record::value::map::read_group::tag;
@@ -262,6 +302,22 @@ pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, 
             .iter()
             .map(|(id, map)| {
                 let fields = map.other_fields();
+                let mut other = HashMap::new();
+                for (t, value) in fields.iter() {
+                    if *t != tag::SAMPLE
+                        && *t != tag::PLATFORM
+                        && *t != tag::LIBRARY
+                        && *t != tag::DESCRIPTION
+                    {
+                        let tag_bytes: &[u8; 2] = t.as_ref();
+                        if let Ok(tag_str) = std::str::from_utf8(tag_bytes) {
+                            other.insert(
+                                tag_str.to_string(),
+                                String::from_utf8_lossy(value.as_ref()).to_string(),
+                            );
+                        }
+                    }
+                }
                 ReadGroupMetadata {
                     id: String::from_utf8_lossy(id.as_ref()).to_string(),
                     sample: fields
@@ -276,6 +332,7 @@ pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, 
                     description: fields
                         .get(&tag::DESCRIPTION)
                         .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                    other_fields: other,
                 }
             })
             .collect();
@@ -285,7 +342,7 @@ pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, 
         );
     }
 
-    // @PG: programs
+    // @PG: programs (including all optional fields)
     let programs = header.programs();
     let programs_map = programs.as_ref();
     if !programs_map.is_empty() {
@@ -294,6 +351,18 @@ pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, 
             .iter()
             .map(|(id, map)| {
                 let fields = map.other_fields();
+                let mut other = HashMap::new();
+                for (t, value) in fields.iter() {
+                    if *t != tag::NAME && *t != tag::VERSION && *t != tag::COMMAND_LINE {
+                        let tag_bytes: &[u8; 2] = t.as_ref();
+                        if let Ok(tag_str) = std::str::from_utf8(tag_bytes) {
+                            other.insert(
+                                tag_str.to_string(),
+                                String::from_utf8_lossy(value.as_ref()).to_string(),
+                            );
+                        }
+                    }
+                }
                 ProgramMetadata {
                     id: String::from_utf8_lossy(id.as_ref()).to_string(),
                     name: fields
@@ -305,6 +374,7 @@ pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, 
                     command_line: fields
                         .get(&tag::COMMAND_LINE)
                         .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                    other_fields: other,
                 }
             })
             .collect();
