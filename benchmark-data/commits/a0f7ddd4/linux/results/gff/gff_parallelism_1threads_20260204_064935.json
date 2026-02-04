@@ -1,0 +1,23 @@
+{
+  "benchmark_name": "gff_parallelism_1threads",
+  "format": "gff",
+  "category": "parallelism",
+  "timestamp": "2026-02-04T06:49:35.306619563Z",
+  "system_info": {
+    "os": "Ubuntu 22.04",
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "cpu_cores": 4,
+    "total_memory_gb": 15.620307922363281
+  },
+  "configuration": {
+    "repetitions": 3,
+    "threads": 1
+  },
+  "metrics": {
+    "throughput_records_per_sec": 770.7735020402375,
+    "elapsed_seconds": 0.001297398,
+    "total_records": 1,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
