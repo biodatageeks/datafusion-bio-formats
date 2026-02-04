@@ -176,6 +176,14 @@ async fn determine_schema_from_file(
         debug!("Looking for tags: {:?}", tags);
 
         let discovered_tags = if is_sam_file(&file_path) {
+            use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+            let storage_type = get_storage_type(file_path.clone());
+            if !matches!(storage_type, StorageType::LOCAL) {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                    file_path
+                )));
+            }
             let mut reader = SamReader::new(file_path);
             let _ref_sequences = reader.read_sequences();
             let records = reader.read_records();
@@ -521,6 +529,14 @@ impl BamTableProvider {
 
         // Create appropriate reader based on file format
         let discovered_tags = if is_sam_file(&self.file_path) {
+            use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+            let storage_type = get_storage_type(self.file_path.clone());
+            if !matches!(storage_type, StorageType::LOCAL) {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                    self.file_path
+                )));
+            }
             let mut reader = SamReader::new(self.file_path.clone());
             let _ref_sequences = reader.read_sequences();
             let records = reader.read_records();
