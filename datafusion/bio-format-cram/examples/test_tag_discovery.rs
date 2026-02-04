@@ -48,7 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true,
         None, // No tags specified
-    )?;
+    )
+    .await?;
 
     let ctx2 = SessionContext::new();
     ctx2.register_table("cram_data_no_tags", Arc::new(provider_no_tags))?;

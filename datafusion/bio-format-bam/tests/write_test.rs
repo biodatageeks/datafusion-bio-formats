@@ -121,7 +121,8 @@ async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         None, // storage options
         true, // 0-based coordinates
         Some(tag_fields.clone()),
-    )?;
+    )
+    .await?;
 
     ctx.register_table("test_bam", Arc::new(read_provider))?;
 

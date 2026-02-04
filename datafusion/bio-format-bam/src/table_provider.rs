@@ -27,6 +27,7 @@ use std::sync::Arc;
 fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
+    header_metadata: Option<HashMap<String, String>>,
 ) -> datafusion::common::Result<SchemaRef> {
     let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
@@ -69,7 +70,7 @@ fn determine_schema(
     }
 
     // Add coordinate system metadata to schema
-    let mut metadata = HashMap::new();
+    let mut metadata = header_metadata.unwrap_or_default();
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
@@ -330,7 +331,7 @@ impl BamTableProvider {
     ///     None,     // No cloud storage
     ///     true,     // Use 0-based coordinates (default)
     ///     None,     // No tag fields
-    /// )?;
+    /// ).await?;
     ///
     /// // With alignment tags
     /// let provider_with_tags = BamTableProvider::new(
@@ -339,18 +340,69 @@ impl BamTableProvider {
     ///     None,
     ///     true,
     ///     Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
-    /// )?;
+    /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(
+    pub async fn new(
         file_path: String,
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema(&tag_fields, coordinate_system_zero_based)?;
+        use crate::storage::{SamReader, is_sam_file};
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+
+        // Best-effort header reading: extract metadata if possible, fall back to empty
+        let storage_type = get_storage_type(file_path.clone());
+        let header_metadata = if is_sam_file(&file_path) {
+            if matches!(storage_type, StorageType::LOCAL) {
+                let reader = SamReader::new(file_path.clone());
+                extract_header_metadata(reader.get_header())
+            } else {
+                debug!("Skipping header read for remote SAM file: {}", file_path);
+                HashMap::new()
+            }
+        } else if matches!(storage_type, StorageType::LOCAL) {
+            // For local BAM files, read header synchronously
+            use noodles_bam as bam;
+            use noodles_bgzf::io::MultithreadedReader;
+            use std::fs::File;
+            use std::num::NonZero;
+
+            match File::open(&file_path)
+                .map(|f| MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
+                .map(bam::io::Reader::from)
+                .and_then(|mut reader| reader.read_header())
+            {
+                Ok(header) => extract_header_metadata(&header),
+                Err(e) => {
+                    debug!(
+                        "Failed to read BAM header from {}: {}, using empty metadata",
+                        file_path, e
+                    );
+                    HashMap::new()
+                }
+            }
+        } else {
+            // For remote BAM files, use async reader
+            use crate::storage::BamReader;
+            let mut reader = BamReader::new(
+                file_path.clone(),
+                thread_num,
+                object_storage_options.clone(),
+            )
+            .await;
+            let header = reader.read_header().await;
+            extract_header_metadata(&header)
+        };
+
+        let schema = determine_schema(
+            &tag_fields,
+            coordinate_system_zero_based,
+            Some(header_metadata),
+        )?;
         Ok(Self {
             file_path,
             schema,
@@ -493,7 +545,7 @@ impl BamTableProvider {
     ///     None,
     ///     true,
     ///     None,
-    /// )?;
+    /// ).await?;
     ///
     /// let schema_df = provider.describe(&ctx, Some(100)).await?;
     /// schema_df.show().await?;

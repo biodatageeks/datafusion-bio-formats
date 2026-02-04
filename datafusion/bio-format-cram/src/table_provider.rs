@@ -24,6 +24,7 @@ use std::sync::Arc;
 fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
+    header_metadata: Option<HashMap<String, String>>,
 ) -> datafusion::common::Result<SchemaRef> {
     let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
@@ -66,7 +67,7 @@ fn determine_schema(
     }
 
     // Add coordinate system metadata to schema
-    let mut metadata = HashMap::new();
+    let mut metadata = header_metadata.unwrap_or_default();
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
@@ -131,14 +132,54 @@ impl CramTableProvider {
     /// # Returns
     /// * `Ok(provider)` - Successfully created provider
     /// * `Err` - Failed to determine schema
-    pub fn new(
+    pub async fn new(
         file_path: String,
         reference_path: Option<String>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema(&tag_fields, coordinate_system_zero_based)?;
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+
+        // Best-effort header reading: extract metadata if possible, fall back to empty
+        let storage_type = get_storage_type(file_path.clone());
+        let header_metadata = if matches!(storage_type, StorageType::LOCAL) {
+            // For local CRAM files, read header synchronously
+            use noodles_cram as cram;
+            use noodles_fasta as fasta;
+
+            match cram::io::reader::Builder::default()
+                .set_reference_sequence_repository(fasta::Repository::default())
+                .build_from_path(&file_path)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                .and_then(|mut reader| reader.read_header())
+            {
+                Ok(header) => extract_header_metadata(&header),
+                Err(e) => {
+                    debug!(
+                        "Failed to read CRAM header from {}: {}, using empty metadata",
+                        file_path, e
+                    );
+                    HashMap::new()
+                }
+            }
+        } else {
+            // For remote CRAM files, use async reader
+            use crate::storage::CramReader;
+            let reader = CramReader::new(
+                file_path.clone(),
+                reference_path.clone(),
+                object_storage_options.clone(),
+            )
+            .await;
+            extract_header_metadata(reader.get_header())
+        };
+
+        let schema = determine_schema(
+            &tag_fields,
+            coordinate_system_zero_based,
+            Some(header_metadata),
+        )?;
         Ok(Self {
             file_path,
             schema,
@@ -235,13 +276,11 @@ impl CramTableProvider {
         let tag_fields: Vec<String> = discovered_tags.keys().cloned().collect();
 
         // Build schema with header metadata included
-        let schema = determine_schema(&Some(tag_fields.clone()), coordinate_system_zero_based)?;
-        let mut merged_metadata = header_metadata;
-        merged_metadata.extend(schema.metadata().clone());
-        let schema = Arc::new(Schema::new_with_metadata(
-            schema.fields().to_vec(),
-            merged_metadata,
-        ));
+        let schema = determine_schema(
+            &Some(tag_fields.clone()),
+            coordinate_system_zero_based,
+            Some(header_metadata),
+        )?;
 
         Ok(Self {
             file_path,

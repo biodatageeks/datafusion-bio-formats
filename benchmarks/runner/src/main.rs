@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use datafusion::prelude::*;
 use datafusion_bio_benchmarks_common::{
-    extract_drive_id, write_result, BenchmarkCategory, BenchmarkResultBuilder, DataDownloader,
-    TestDataFile,
+    BenchmarkCategory, BenchmarkResultBuilder, DataDownloader, TestDataFile, extract_drive_id,
+    write_result,
 };
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use serde::Deserialize;
@@ -239,6 +239,7 @@ async fn register_table(
         "bam" => {
             use datafusion_bio_format_bam::table_provider::BamTableProvider;
             let provider = BamTableProvider::new(file_path.to_string(), None, None, true, None)
+                .await
                 .context("Failed to create BAM table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register BAM table")?;

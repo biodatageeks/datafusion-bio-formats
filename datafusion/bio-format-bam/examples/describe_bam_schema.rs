@@ -17,7 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true, // 0-based coordinates
         None, // No pre-specified tags
-    )?;
+    )
+    .await?;
 
     let schema_df = provider.describe(&ctx, Some(100)).await?;
 

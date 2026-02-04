@@ -23,7 +23,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a BAM file as a table
-//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true, None)?;
+//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true, None).await?;
 //! ctx.register_table("alignments", Arc::new(table.clone()))?;
 //!
 //! // Discover and describe available columns by sampling records

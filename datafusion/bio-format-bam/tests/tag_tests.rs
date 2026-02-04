@@ -12,6 +12,7 @@ async fn test_bam_without_tags() {
         true,
         None, // No tags
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -37,6 +38,7 @@ async fn test_bam_with_specified_tags() {
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -72,6 +74,7 @@ async fn test_query_with_tag_projection() {
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -103,6 +106,7 @@ async fn test_query_without_tag_projection() {
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -134,6 +138,7 @@ async fn test_count_query() {
         true,
         Some(vec!["NM".to_string()]),
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -156,6 +161,7 @@ async fn test_unknown_tag_accepted() {
         true,
         Some(vec!["UNKNOWN_TAG".to_string()]),
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -200,6 +206,7 @@ async fn test_multiple_tags() {
             "RG".to_string(),
         ]),
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -226,6 +233,7 @@ async fn test_empty_tag_list() {
         true,
         Some(vec![]),
     )
+    .await
     .unwrap();
 
     let ctx = SessionContext::new();
@@ -243,8 +251,9 @@ async fn test_empty_tag_list() {
 async fn test_describe_discovers_tags() {
     use datafusion::prelude::*;
 
-    let provider =
-        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None).unwrap();
+    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None)
+        .await
+        .unwrap();
 
     let ctx = SessionContext::new();
 
@@ -297,8 +306,9 @@ async fn test_describe_discovers_tags() {
 async fn test_describe_with_display() {
     use datafusion::prelude::*;
 
-    let provider =
-        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None).unwrap();
+    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None)
+        .await
+        .unwrap();
 
     let ctx = SessionContext::new();
     let schema_df = provider.describe(&ctx, Some(100)).await.unwrap();
@@ -313,8 +323,9 @@ async fn test_describe_method_signature() {
     // Test that describe method exists with correct signature
     use datafusion::prelude::*;
 
-    let provider =
-        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None).unwrap();
+    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None)
+        .await
+        .unwrap();
 
     let ctx = SessionContext::new();
     let result = provider.describe(&ctx, Some(10)).await;
