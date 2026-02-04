@@ -140,6 +140,21 @@ impl BamReader {
             }
         }
     }
+
+    /// Reads the BAM file header and returns the full header.
+    ///
+    /// Must be called before `read_records()` since it consumes the header
+    /// from the stream. This is the same constraint as `read_sequences()`.
+    ///
+    /// # Returns
+    ///
+    /// The full SAM header from the BAM file
+    pub async fn read_header(&mut self) -> sam::Header {
+        match self {
+            BamReader::Local(reader) => reader.read_header().unwrap(),
+            BamReader::Remote(reader) => reader.read_header().await.unwrap(),
+        }
+    }
 }
 
 /// Checks if a file path refers to a SAM file based on file extension.
@@ -205,6 +220,17 @@ impl SamReader {
     pub fn read_sequences(&self) -> ReferenceSequences {
         match self {
             SamReader::Local(_, header) => header.reference_sequences().clone(),
+        }
+    }
+
+    /// Returns a reference to the full SAM header.
+    ///
+    /// # Returns
+    ///
+    /// Reference to the SAM header (already parsed during construction)
+    pub fn get_header(&self) -> &sam::Header {
+        match self {
+            SamReader::Local(_, header) => header,
         }
     }
 

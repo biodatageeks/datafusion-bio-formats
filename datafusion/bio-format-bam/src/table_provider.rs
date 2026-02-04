@@ -17,6 +17,7 @@ use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
     BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
+    extract_header_metadata,
 };
 use log::debug;
 use std::any::Any;
@@ -108,9 +109,33 @@ async fn determine_schema_from_file(
         Field::new("quality_scores", DataType::Utf8, false),
     ];
 
+    use crate::storage::{SamReader, is_sam_file};
+
+    // Extract header metadata from the file (always done, regardless of tag_fields)
+    let header_metadata = if is_sam_file(&file_path) {
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+        let storage_type = get_storage_type(file_path.clone());
+        if !matches!(storage_type, StorageType::LOCAL) {
+            return Err(DataFusionError::NotImplemented(format!(
+                "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                file_path
+            )));
+        }
+        let reader = SamReader::new(file_path.clone());
+        extract_header_metadata(reader.get_header())
+    } else {
+        let mut reader = BamReader::new(
+            file_path.clone(),
+            thread_num,
+            object_storage_options.clone(),
+        )
+        .await;
+        let header = reader.read_header().await;
+        extract_header_metadata(&header)
+    };
+
     // If tag fields are specified, discover their actual types from the file
     if let Some(tags) = tag_fields {
-        use crate::storage::{SamReader, is_sam_file};
         let known_tags = get_known_tags();
 
         // Helper to discover tags from a stream of records implementing the Record trait
@@ -176,21 +201,12 @@ async fn determine_schema_from_file(
         debug!("Looking for tags: {:?}", tags);
 
         let discovered_tags = if is_sam_file(&file_path) {
-            use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
-            let storage_type = get_storage_type(file_path.clone());
-            if !matches!(storage_type, StorageType::LOCAL) {
-                return Err(DataFusionError::NotImplemented(format!(
-                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
-                    file_path
-                )));
-            }
             let mut reader = SamReader::new(file_path);
-            let _ref_sequences = reader.read_sequences();
             let records = reader.read_records();
             discover_tags_from_stream(records, tags, sample_size).await
         } else {
             let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
-            let _ref_sequences = reader.read_sequences().await;
+            let _header = reader.read_header().await;
             let records = reader.read_records().await;
             discover_tags_from_stream(records, tags, sample_size).await
         };
@@ -244,8 +260,8 @@ async fn determine_schema_from_file(
         }
     }
 
-    // Add coordinate system metadata to schema
-    let mut metadata = HashMap::new();
+    // Merge header metadata with coordinate system metadata
+    let mut metadata = header_metadata;
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
@@ -538,7 +554,6 @@ impl BamTableProvider {
                 )));
             }
             let mut reader = SamReader::new(self.file_path.clone());
-            let _ref_sequences = reader.read_sequences();
             let records = reader.read_records();
             discover_all_tags(records, sample_size).await
         } else {
@@ -548,7 +563,7 @@ impl BamTableProvider {
                 self.object_storage_options.clone(),
             )
             .await;
-            let _ref_sequences = reader.read_sequences().await;
+            let _header = reader.read_header().await;
             let records = reader.read_records().await;
             discover_all_tags(records, sample_size).await
         };

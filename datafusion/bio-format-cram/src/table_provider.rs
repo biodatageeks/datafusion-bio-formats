@@ -14,6 +14,7 @@ use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
     BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
+    extract_header_metadata,
 };
 use log::debug;
 use std::any::Any;
@@ -185,6 +186,9 @@ impl CramTableProvider {
         )
         .await;
 
+        // Extract header metadata before borrowing reader for records
+        let header_metadata = extract_header_metadata(reader.get_header());
+
         let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
         let mut records = reader.read_records().await;
         let sample_size = sample_size.unwrap_or(100);
@@ -230,14 +234,23 @@ impl CramTableProvider {
         // Convert discovered tags to tag_fields format
         let tag_fields: Vec<String> = discovered_tags.keys().cloned().collect();
 
-        // Create provider with discovered tags
-        Self::new(
+        // Build schema with header metadata included
+        let schema = determine_schema(&Some(tag_fields.clone()), coordinate_system_zero_based)?;
+        let mut merged_metadata = header_metadata;
+        merged_metadata.extend(schema.metadata().clone());
+        let schema = Arc::new(Schema::new_with_metadata(
+            schema.fields().to_vec(),
+            merged_metadata,
+        ));
+
+        Ok(Self {
             file_path,
+            schema,
             reference_path,
             object_storage_options,
             coordinate_system_zero_based,
-            Some(tag_fields),
-        )
+            tag_fields: Some(tag_fields),
+        })
     }
 
     /// Creates a new CRAM table provider for write operations.

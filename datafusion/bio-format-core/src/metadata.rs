@@ -153,6 +153,54 @@ pub struct AltAlleleMetadata {
 }
 
 // ============================================================================
+// BAM/CRAM Alignment Metadata Structures
+// ============================================================================
+
+/// Reference sequence metadata for BAM/CRAM headers (@SQ lines)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReferenceSequenceMetadata {
+    /// Reference sequence name (e.g., "chr1")
+    pub name: String,
+    /// Reference sequence length in base pairs
+    pub length: usize,
+}
+
+/// Read group metadata for BAM/CRAM headers (@RG lines)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReadGroupMetadata {
+    /// Read group ID (required)
+    pub id: String,
+    /// Sample name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample: Option<String>,
+    /// Platform (e.g., "ILLUMINA")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    /// Library
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
+    /// Description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Program info metadata for BAM/CRAM headers (@PG lines)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramMetadata {
+    /// Program ID (required)
+    pub id: String,
+    /// Program name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Program version
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Command line
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+}
+
+// ============================================================================
 // Utility Functions
 // ============================================================================
 
@@ -164,4 +212,236 @@ pub fn to_json_string<T: Serialize>(value: &T) -> String {
 /// Deserialize from JSON string, returning None on failure
 pub fn from_json_string<'a, T: Deserialize<'a>>(json: &'a str) -> Option<T> {
     serde_json::from_str(json).ok()
+}
+
+/// Extracts header metadata from a SAM/BAM/CRAM header into a HashMap
+/// suitable for storing in Arrow schema metadata.
+///
+/// This function serializes all header sections (@HD, @SQ, @RG, @PG, @CO)
+/// into `bio.bam.*` metadata keys, enabling round-trip read/write fidelity.
+pub fn extract_header_metadata(header: &noodles_sam::Header) -> HashMap<String, String> {
+    let mut metadata = HashMap::new();
+
+    // @HD: file format version and sort order
+    if let Some(hd) = header.header() {
+        metadata.insert(
+            BAM_FILE_FORMAT_VERSION_KEY.to_string(),
+            hd.version().to_string(),
+        );
+
+        use noodles_sam::header::record::value::map::header::tag;
+        if let Some(sort_order) = hd.other_fields().get(&tag::SORT_ORDER) {
+            metadata.insert(
+                BAM_SORT_ORDER_KEY.to_string(),
+                String::from_utf8_lossy(sort_order.as_ref()).to_string(),
+            );
+        }
+    }
+
+    // @SQ: reference sequences
+    let ref_sequences = header.reference_sequences();
+    if !ref_sequences.is_empty() {
+        let ref_seq_metadata: Vec<ReferenceSequenceMetadata> = ref_sequences
+            .iter()
+            .map(|(name, map)| ReferenceSequenceMetadata {
+                name: String::from_utf8_lossy(name.as_ref()).to_string(),
+                length: map.length().get(),
+            })
+            .collect();
+        metadata.insert(
+            BAM_REFERENCE_SEQUENCES_KEY.to_string(),
+            to_json_string(&ref_seq_metadata),
+        );
+    }
+
+    // @RG: read groups
+    let read_groups = header.read_groups();
+    if !read_groups.is_empty() {
+        use noodles_sam::header::record::value::map::read_group::tag;
+        let rg_metadata: Vec<ReadGroupMetadata> = read_groups
+            .iter()
+            .map(|(id, map)| {
+                let fields = map.other_fields();
+                ReadGroupMetadata {
+                    id: String::from_utf8_lossy(id.as_ref()).to_string(),
+                    sample: fields
+                        .get(&tag::SAMPLE)
+                        .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                    platform: fields
+                        .get(&tag::PLATFORM)
+                        .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                    library: fields
+                        .get(&tag::LIBRARY)
+                        .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                    description: fields
+                        .get(&tag::DESCRIPTION)
+                        .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                }
+            })
+            .collect();
+        metadata.insert(
+            BAM_READ_GROUPS_KEY.to_string(),
+            to_json_string(&rg_metadata),
+        );
+    }
+
+    // @PG: programs
+    let programs = header.programs();
+    let programs_map = programs.as_ref();
+    if !programs_map.is_empty() {
+        use noodles_sam::header::record::value::map::program::tag;
+        let pg_metadata: Vec<ProgramMetadata> = programs_map
+            .iter()
+            .map(|(id, map)| {
+                let fields = map.other_fields();
+                ProgramMetadata {
+                    id: String::from_utf8_lossy(id.as_ref()).to_string(),
+                    name: fields
+                        .get(&tag::NAME)
+                        .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                    version: fields
+                        .get(&tag::VERSION)
+                        .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                    command_line: fields
+                        .get(&tag::COMMAND_LINE)
+                        .map(|v| String::from_utf8_lossy(v.as_ref()).to_string()),
+                }
+            })
+            .collect();
+        metadata.insert(
+            BAM_PROGRAM_INFO_KEY.to_string(),
+            to_json_string(&pg_metadata),
+        );
+    }
+
+    // @CO: comments
+    let comments = header.comments();
+    if !comments.is_empty() {
+        let comment_strings: Vec<String> = comments
+            .iter()
+            .map(|c| String::from_utf8_lossy(c.as_ref()).to_string())
+            .collect();
+        metadata.insert(
+            BAM_COMMENTS_KEY.to_string(),
+            to_json_string(&comment_strings),
+        );
+    }
+
+    metadata
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noodles_sam as sam;
+    use noodles_sam::header::record::value::Map;
+    use noodles_sam::header::record::value::map::{
+        Program, ReadGroup, ReferenceSequence, header::Version,
+    };
+    use std::num::NonZeroUsize;
+
+    fn build_test_header() -> sam::Header {
+        let version = Version::new(1, 6);
+        let mut header_map = Map::<sam::header::record::value::map::Header>::new(version);
+
+        use noodles_sam::header::record::value::map::header::tag;
+        header_map
+            .other_fields_mut()
+            .insert(tag::SORT_ORDER, "coordinate".into());
+
+        let mut rg_map = Map::<ReadGroup>::default();
+        {
+            use noodles_sam::header::record::value::map::read_group::tag;
+            rg_map
+                .other_fields_mut()
+                .insert(tag::SAMPLE, "SAMPLE1".into());
+            rg_map
+                .other_fields_mut()
+                .insert(tag::PLATFORM, "ILLUMINA".into());
+        }
+
+        let mut pg_map = Map::<Program>::default();
+        {
+            use noodles_sam::header::record::value::map::program::tag;
+            pg_map.other_fields_mut().insert(tag::NAME, "bwa".into());
+            pg_map
+                .other_fields_mut()
+                .insert(tag::VERSION, "0.7.17".into());
+        }
+
+        sam::Header::builder()
+            .set_header(header_map)
+            .add_reference_sequence(
+                "chr1",
+                Map::<ReferenceSequence>::new(NonZeroUsize::new(249250621).unwrap()),
+            )
+            .add_reference_sequence(
+                "chr2",
+                Map::<ReferenceSequence>::new(NonZeroUsize::new(242193529).unwrap()),
+            )
+            .add_read_group("RG1", rg_map)
+            .add_program("bwa", pg_map)
+            .add_comment("Test comment")
+            .build()
+    }
+
+    #[test]
+    fn test_extract_header_metadata() {
+        let header = build_test_header();
+        let metadata = extract_header_metadata(&header);
+
+        // Check version
+        assert_eq!(
+            metadata.get(BAM_FILE_FORMAT_VERSION_KEY),
+            Some(&"1.6".to_string())
+        );
+
+        // Check sort order
+        assert_eq!(
+            metadata.get(BAM_SORT_ORDER_KEY),
+            Some(&"coordinate".to_string())
+        );
+
+        // Check reference sequences
+        let ref_seqs: Vec<ReferenceSequenceMetadata> =
+            from_json_string(metadata.get(BAM_REFERENCE_SEQUENCES_KEY).unwrap()).unwrap();
+        assert_eq!(ref_seqs.len(), 2);
+        assert_eq!(ref_seqs[0].name, "chr1");
+        assert_eq!(ref_seqs[0].length, 249250621);
+        assert_eq!(ref_seqs[1].name, "chr2");
+        assert_eq!(ref_seqs[1].length, 242193529);
+
+        // Check read groups
+        let rgs: Vec<ReadGroupMetadata> =
+            from_json_string(metadata.get(BAM_READ_GROUPS_KEY).unwrap()).unwrap();
+        assert_eq!(rgs.len(), 1);
+        assert_eq!(rgs[0].id, "RG1");
+        assert_eq!(rgs[0].sample.as_deref(), Some("SAMPLE1"));
+        assert_eq!(rgs[0].platform.as_deref(), Some("ILLUMINA"));
+
+        // Check programs
+        let pgs: Vec<ProgramMetadata> =
+            from_json_string(metadata.get(BAM_PROGRAM_INFO_KEY).unwrap()).unwrap();
+        assert_eq!(pgs.len(), 1);
+        assert_eq!(pgs[0].id, "bwa");
+        assert_eq!(pgs[0].name.as_deref(), Some("bwa"));
+        assert_eq!(pgs[0].version.as_deref(), Some("0.7.17"));
+
+        // Check comments
+        let comments: Vec<String> =
+            from_json_string(metadata.get(BAM_COMMENTS_KEY).unwrap()).unwrap();
+        assert_eq!(comments, vec!["Test comment"]);
+    }
+
+    #[test]
+    fn test_extract_empty_header() {
+        let header = sam::Header::default();
+        let metadata = extract_header_metadata(&header);
+
+        // Empty header should not produce reference_sequences, read_groups, etc.
+        assert!(!metadata.contains_key(BAM_REFERENCE_SEQUENCES_KEY));
+        assert!(!metadata.contains_key(BAM_READ_GROUPS_KEY));
+        assert!(!metadata.contains_key(BAM_PROGRAM_INFO_KEY));
+        assert!(!metadata.contains_key(BAM_COMMENTS_KEY));
+    }
 }

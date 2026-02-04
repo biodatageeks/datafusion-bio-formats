@@ -11,14 +11,14 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{
     BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY,
-    BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY,
+    BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY, ProgramMetadata, ReadGroupMetadata,
+    ReferenceSequenceMetadata, from_json_string,
 };
 use noodles_sam as sam;
 use noodles_sam::header::record::value::Map;
 use noodles_sam::header::record::value::map::{
     Program, ReadGroup, ReferenceSequence, header::Version,
 };
-use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
 
 /// Metadata key for CRAM file format version (CRAM-specific override)
@@ -27,50 +27,6 @@ pub const CRAM_FILE_FORMAT_VERSION_KEY: &str = "bio.cram.file_format_version";
 pub const CRAM_REFERENCE_PATH_KEY: &str = "bio.cram.reference_path";
 /// Metadata key for reference MD5 checksum (CRAM-specific)
 pub const CRAM_REFERENCE_MD5_KEY: &str = "bio.cram.reference_md5";
-
-/// Reference sequence metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReferenceSequenceMetadata {
-    /// Reference sequence name
-    pub name: String,
-    /// Reference sequence length
-    pub length: usize,
-}
-
-/// Read group metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadGroupMetadata {
-    /// Read group ID (required)
-    pub id: String,
-    /// Sample name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sample: Option<String>,
-    /// Platform
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform: Option<String>,
-    /// Library
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub library: Option<String>,
-    /// Description
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// Program info metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramMetadata {
-    /// Program ID (required)
-    pub id: String,
-    /// Program name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Program version
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    /// Command line
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command_line: Option<String>,
-}
 
 /// Builds a SAM header from an Arrow schema for CRAM files
 ///
@@ -205,11 +161,6 @@ pub fn build_cram_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<s
     }
 
     Ok(builder.build())
-}
-
-/// Deserializes a JSON string to a typed value
-fn from_json_string<T: serde::de::DeserializeOwned>(json: &str) -> Option<T> {
-    serde_json::from_str(json).ok()
 }
 
 #[cfg(test)]
