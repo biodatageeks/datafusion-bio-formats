@@ -202,6 +202,14 @@ async fn determine_schema_from_file(
         debug!("Looking for tags: {:?}", tags);
 
         let discovered_tags = if is_sam_file(&file_path) {
+            use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+            let storage_type = get_storage_type(file_path.clone());
+            if !matches!(storage_type, StorageType::LOCAL) {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                    file_path
+                )));
+            }
             let mut reader = SamReader::new(file_path);
             let records = reader.read_records();
             discover_tags_from_stream(records, tags, sample_size).await

@@ -4,6 +4,7 @@ use async_stream::try_stream;
 use datafusion::arrow::array::{ArrayRef, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::error::ArrowError;
+use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
@@ -760,6 +761,12 @@ async fn get_stream(
             }
         }
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
+            if is_sam_file(&file_path) {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                    file_path
+                )));
+            }
             let stream = get_remote_bam_stream(
                 file_path.clone(),
                 schema.clone(),
