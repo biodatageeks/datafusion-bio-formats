@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-02-05T08:22:16Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/sam-read-support",
+  "commit_sha": "8c4755b7814e9f36f1e516c73772b7ee979d733a",
+  "benchmark_mode": "fast"
+}

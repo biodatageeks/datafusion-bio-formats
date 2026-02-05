@@ -1437,6 +1437,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/sam-read-support@8c4755b7814e9f36f1e516c73772b7ee979d733a@linux",
+      "label": "feat/sam-read-support(8c4755b7)",
+      "ref": "feat/sam-read-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-05T08:22:48Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/8c4755b7/linux",
+      "commit_sha": "8c4755b7814e9f36f1e516c73772b7ee979d733a",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/sam-read-support@8c4755b7814e9f36f1e516c73772b7ee979d733a@macos",
+      "label": "feat/sam-read-support(8c4755b7)",
+      "ref": "feat/sam-read-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-05T08:22:48Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/8c4755b7/macos",
+      "commit_sha": "8c4755b7814e9f36f1e516c73772b7ee979d733a",
+      "is_latest_tag": false
+    },
+    {
       "id": "feat/sam-read-support@a0f7ddd4e370498d72547bb1ec40ce6b5c1f8bb8@linux",
       "label": "feat/sam-read-support(a0f7ddd4)",
       "ref": "feat/sam-read-support",
@@ -2973,6 +2997,30 @@
       "is_latest_tag": true
     },
     {
+      "id": "v0.1.1@8c4755b7814e9f36f1e516c73772b7ee979d733a@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-05T08:22:48Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "8c4755b7814e9f36f1e516c73772b7ee979d733a",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@8c4755b7814e9f36f1e516c73772b7ee979d733a@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-05T08:22:48Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "8c4755b7814e9f36f1e516c73772b7ee979d733a",
+      "is_latest_tag": true
+    },
+    {
       "id": "v0.1.1@8d79bfe7639d7bec9901742824237bf2f8cff8ee@linux",
       "label": "v0.1.1",
       "ref": "v0.1.1",
@@ -4056,6 +4104,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-04T21:28:16Z",
+  "last_updated": "2026-02-05T08:22:48Z",
   "latest_tag": "v0.1.1"
 }
