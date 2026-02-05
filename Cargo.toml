@@ -24,9 +24,9 @@ opendal = { version = "0.53.3", features = ["services-gcs", "services-s3","layer
 noodles = { version = "0.93.0",  features = ["bam", "vcf", "bgzf", "cram", "async"]}
 
 noodles-bgzf = { version = "0.36.0",features = ["libdeflate"] }
-noodles-cram  = { git = "https://github.com/biodatageeks/noodles.git",rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a", features = ["async"] }
-noodles-sam = { git = "https://github.com/biodatageeks/noodles.git",rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a" }
-noodles-fasta = { git = "https://github.com/biodatageeks/noodles.git",rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a", features = ["async"] }
+noodles-cram  = { git = "https://github.com/biodatageeks/noodles.git",rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac", features = ["async"] }
+noodles-sam = { git = "https://github.com/biodatageeks/noodles.git",rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac" }
+noodles-fasta = { git = "https://github.com/biodatageeks/noodles.git",rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac", features = ["async"] }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "rt", "macros"] }
 tokio-util = {  version="0.7.13", features = ["io-util", "compat"] }
 bytes = "1.10.0"

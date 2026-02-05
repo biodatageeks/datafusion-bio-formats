@@ -28,7 +28,7 @@ async-trait = "0.1.88"
 hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
-noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a" }
+noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac" }
 
 [dev-dependencies]
 tempfile = "3.10"

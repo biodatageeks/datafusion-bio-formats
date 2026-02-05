@@ -256,4 +256,120 @@ mod tests {
 
         Ok(())
     }
+
+    /// Noodles-level roundtrip test: read CRAM → write CRAM → read back
+    ///
+    /// This test isolates noodles reader/writer compatibility by:
+    /// 1. Reading records from a real CRAM file using noodles directly
+    /// 2. Writing them to a new CRAM file using noodles directly
+    /// 3. Attempting to read the written file back with noodles
+    #[test]
+    fn test_noodles_cram_roundtrip_with_reference() {
+        let cram_path = "/Users/mwiewior/research/git/polars-bio/tests/data/io/cram/external_ref/test_chr20.cram";
+        let ref_path =
+            "/Users/mwiewior/research/git/polars-bio/tests/data/io/cram/external_ref/chr20.fa";
+
+        if !Path::new(cram_path).exists() || !Path::new(ref_path).exists() {
+            eprintln!("Skipping roundtrip test: test data not available");
+            return;
+        }
+
+        // Build reference repository
+        let fasta_file = File::open(ref_path).unwrap();
+        let fasta_reader = std::io::BufReader::new(fasta_file);
+        let fai_path = format!("{}.fai", ref_path);
+        let index_file = File::open(&fai_path).unwrap();
+        let mut index_reader = fasta::fai::io::Reader::new(std::io::BufReader::new(index_file));
+        let index = index_reader.read_index().unwrap();
+        let indexed_reader = fasta::io::IndexedReader::new(fasta_reader, index);
+        let adapter = fasta::repository::adapters::IndexedReader::new(indexed_reader);
+        let repository = fasta::Repository::new(adapter);
+
+        // --- Step 1: Read original CRAM ---
+        let mut reader = cram::io::reader::Builder::default()
+            .set_reference_sequence_repository(repository.clone())
+            .build_from_path(cram_path)
+            .unwrap();
+        let header = reader.read_header().unwrap();
+
+        let mut records: Vec<sam::alignment::RecordBuf> = Vec::new();
+        for result in reader.records(&header) {
+            match result {
+                Ok(record) => records.push(record),
+                Err(e) => {
+                    eprintln!("Error reading record: {}", e);
+                    break;
+                }
+            }
+        }
+        let num_original = records.len();
+        eprintln!(
+            "Read {} records from original CRAM, header has {} ref seqs",
+            num_original,
+            header.reference_sequences().len()
+        );
+        assert!(num_original > 0, "Should read at least one record");
+
+        // --- Step 2: Write to new CRAM ---
+        let temp_file = NamedTempFile::with_suffix(".cram").unwrap();
+        let output_path = temp_file.path().to_path_buf();
+
+        let mut writer = cram::io::writer::Builder::default()
+            .set_reference_sequence_repository(repository.clone())
+            .build_from_writer(BufWriter::new(File::create(&output_path).unwrap()));
+
+        writer.write_header(&header).unwrap();
+        for record in &records {
+            writer.write_alignment_record(&header, record).unwrap();
+        }
+        writer.finish(&header).unwrap();
+        // Explicit flush of BufWriter
+        writer.get_mut().flush().unwrap();
+
+        let output_size = std::fs::metadata(&output_path).unwrap().len();
+        eprintln!(
+            "Wrote {} records to {}, file size: {} bytes",
+            num_original,
+            output_path.display(),
+            output_size
+        );
+
+        // --- Step 3: Read back the written CRAM ---
+        let mut reader2 = cram::io::reader::Builder::default()
+            .set_reference_sequence_repository(repository.clone())
+            .build_from_path(&output_path)
+            .unwrap();
+        let header2 = reader2.read_header().unwrap();
+        eprintln!(
+            "Read-back header has {} ref seqs",
+            header2.reference_sequences().len()
+        );
+
+        let mut count = 0;
+        for result in reader2.records(&header2) {
+            match result {
+                Ok(_) => count += 1,
+                Err(e) => {
+                    eprintln!(
+                        "Error reading back record {} of {}: {}",
+                        count + 1,
+                        num_original,
+                        e
+                    );
+                    panic!(
+                        "Failed to read back record {} of {}: {}",
+                        count + 1,
+                        num_original,
+                        e
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            count, num_original,
+            "Should read back the same number of records"
+        );
+        eprintln!("Roundtrip successful: {} records", count);
+    }
 }

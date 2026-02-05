@@ -12,14 +12,14 @@ readme = "README.md"
 [dependencies]
 datafusion.workspace = true
 opendal.workspace = true
-noodles-bgzf = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a" }
+noodles-bgzf = { git = "https://github.com/biodatageeks/noodles.git", rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac" }
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 datafusion-bio-format-core = {path = "../bio-format-core"}
 futures.workspace = true
 futures-util.workspace = true
-noodles-bam = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a", features = ["async"] }
+noodles-bam = { git = "https://github.com/biodatageeks/noodles.git", rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac", features = ["async"] }
 noodles-sam.workspace = true
 async-stream = "0.3.6"
 log = "0.4.27"
@@ -27,7 +27,7 @@ async-trait = "0.1.88"
 hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
-noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "d6f205e9bb5369762236724fb54d24c5e1d9b79a" }
+noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac" }
 
 [dev-dependencies]
 tempfile = "3.10"
