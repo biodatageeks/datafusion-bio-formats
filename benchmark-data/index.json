@@ -1413,6 +1413,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/sam-read-support@54aa4f3496a87655f323c16e9c3b294f0a73505e@linux",
+      "label": "feat/sam-read-support(54aa4f34)",
+      "ref": "feat/sam-read-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-05T13:46:26Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/54aa4f34/linux",
+      "commit_sha": "54aa4f3496a87655f323c16e9c3b294f0a73505e",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/sam-read-support@54aa4f3496a87655f323c16e9c3b294f0a73505e@macos",
+      "label": "feat/sam-read-support(54aa4f34)",
+      "ref": "feat/sam-read-support",
+      "ref_type": "branch",
+      "timestamp": "2026-02-05T13:46:26Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/54aa4f34/macos",
+      "commit_sha": "54aa4f3496a87655f323c16e9c3b294f0a73505e",
+      "is_latest_tag": false
+    },
+    {
       "id": "feat/sam-read-support@5a3b7631a7e2083ec4b1208f7b97010da8c86a8a@linux",
       "label": "feat/sam-read-support(5a3b7631)",
       "ref": "feat/sam-read-support",
@@ -2682,6 +2706,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "53b80733873d4d9118677718886be16f30ba14cd",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@54aa4f3496a87655f323c16e9c3b294f0a73505e@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-05T13:46:25Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "54aa4f3496a87655f323c16e9c3b294f0a73505e",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@54aa4f3496a87655f323c16e9c3b294f0a73505e@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-05T13:46:25Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "54aa4f3496a87655f323c16e9c3b294f0a73505e",
       "is_latest_tag": true
     },
     {
@@ -4152,6 +4200,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-05T11:59:36Z",
+  "last_updated": "2026-02-05T13:46:26Z",
   "latest_tag": "v0.1.1"
 }

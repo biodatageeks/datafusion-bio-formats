@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-02-05T13:45:58Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/sam-read-support",
+  "commit_sha": "54aa4f3496a87655f323c16e9c3b294f0a73505e",
+  "benchmark_mode": "fast"
+}
