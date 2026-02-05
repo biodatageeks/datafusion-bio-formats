@@ -36,7 +36,7 @@ fn determine_schema(
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false), //FIXME:: optimize storage
         Field::new("cigar", DataType::Utf8, false),
-        Field::new("mapping_quality", DataType::UInt32, false),
+        Field::new("mapping_quality", DataType::UInt32, true),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
@@ -103,7 +103,7 @@ async fn determine_schema_from_file(
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false),
         Field::new("cigar", DataType::Utf8, false),
-        Field::new("mapping_quality", DataType::UInt32, false),
+        Field::new("mapping_quality", DataType::UInt32, true),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
@@ -674,7 +674,7 @@ impl BamTableProvider {
             (
                 "mapping_quality",
                 DataType::UInt32,
-                false,
+                true,
                 "Mapping quality (0-255)",
             ),
             (

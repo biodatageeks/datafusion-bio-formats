@@ -23,7 +23,7 @@ use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
 };
 use futures::StreamExt;
-use log::debug;
+use log::{debug, warn};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
@@ -302,6 +302,13 @@ async fn write_cram_stream(
     // Build header from schema metadata
     let header = build_cram_header(&effective_schema, &tag_fields)?;
 
+    // Warn if writing mapped reads without a reference
+    if reference_path.is_none() && !header.reference_sequences().is_empty() {
+        warn!(
+            "Writing CRAM without reference_path. For better compression, provide a reference FASTA file."
+        );
+    }
+
     // Write header
     writer.write_header(&header)?;
 
@@ -355,7 +362,7 @@ mod tests {
             Field::new("start", DataType::UInt32, true),
             Field::new("flags", DataType::UInt32, false),
             Field::new("cigar", DataType::Utf8, false),
-            Field::new("mapping_quality", DataType::UInt32, false),
+            Field::new("mapping_quality", DataType::UInt32, true),
             Field::new("mate_chrom", DataType::Utf8, true),
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),

@@ -6,6 +6,7 @@
 
 use datafusion::common::{DataFusionError, Result};
 use noodles_cram as cram;
+use noodles_fasta as fasta;
 use noodles_sam as sam;
 use noodles_sam::alignment::io::Write as AlignmentWrite;
 use std::fs::File;
@@ -66,7 +67,40 @@ impl CramLocalWriter {
             DataFusionError::Execution(format!("Failed to create CRAM file: {}", e))
         })?;
         let buf_writer = BufWriter::new(file);
-        let writer = cram::io::Writer::new(buf_writer);
+
+        // Build writer with reference repository if available
+        let writer = if let Some(ref ref_path) = reference_path {
+            let fasta_file = File::open(ref_path).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Failed to open reference FASTA {}: {}",
+                    ref_path.display(),
+                    e
+                ))
+            })?;
+            let fasta_reader = std::io::BufReader::new(fasta_file);
+
+            let fai_path = format!("{}.fai", ref_path.display());
+            let index_file = File::open(&fai_path).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Failed to open reference index {}: {}",
+                    fai_path, e
+                ))
+            })?;
+            let mut index_reader = fasta::fai::io::Reader::new(std::io::BufReader::new(index_file));
+            let index = index_reader.read_index().map_err(|e| {
+                DataFusionError::Execution(format!("Failed to read FASTA index: {}", e))
+            })?;
+
+            let indexed_reader = fasta::io::IndexedReader::new(fasta_reader, index);
+            let adapter = fasta::repository::adapters::IndexedReader::new(indexed_reader);
+            let repository = fasta::Repository::new(adapter);
+
+            cram::io::writer::Builder::default()
+                .set_reference_sequence_repository(repository)
+                .build_from_writer(buf_writer)
+        } else {
+            cram::io::writer::Builder::default().build_from_writer(buf_writer)
+        };
 
         Ok(Self {
             writer,
