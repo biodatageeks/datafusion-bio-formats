@@ -10,7 +10,7 @@ use noodles_fasta as fasta;
 use noodles_sam as sam;
 use noodles_sam::alignment::io::Write as AlignmentWrite;
 use std::fs::File;
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// Writer for CRAM files with reference sequence support
@@ -183,9 +183,13 @@ impl CramLocalWriter {
     ///
     /// Returns an error if finishing fails
     pub fn finish(mut self, header: &sam::Header) -> Result<()> {
-        self.writer
-            .finish(header)
-            .map_err(|e| DataFusionError::Execution(format!("Failed to finish CRAM stream: {}", e)))
+        self.writer.finish(header).map_err(|e| {
+            DataFusionError::Execution(format!("Failed to finish CRAM stream: {}", e))
+        })?;
+        self.writer.get_mut().flush().map_err(|e| {
+            DataFusionError::Execution(format!("Failed to flush CRAM output: {}", e))
+        })?;
+        Ok(())
     }
 }
 
