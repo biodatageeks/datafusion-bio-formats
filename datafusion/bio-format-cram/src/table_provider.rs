@@ -16,7 +16,7 @@ use datafusion_bio_format_core::{
     BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
     COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
-use log::debug;
+use log::{debug, warn};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -158,7 +158,7 @@ impl CramTableProvider {
             {
                 Ok(header) => extract_header_metadata(&header),
                 Err(e) => {
-                    debug!(
+                    warn!(
                         "Failed to read CRAM header from {}: {}, using empty metadata",
                         file_path, e
                     );

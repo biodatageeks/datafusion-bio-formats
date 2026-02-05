@@ -302,6 +302,16 @@ async fn write_cram_stream(
     // Build header from schema metadata
     let header = build_cram_header(&effective_schema, &tag_fields)?;
 
+    // Error if writing mapped reads without a reference
+    if reference_path.is_none() && !header.reference_sequences().is_empty() {
+        return Err(DataFusionError::Execution(
+            "Writing CRAM with mapped reads requires a reference FASTA file. \
+             Please provide reference_path (with .fai index). \
+             Without a reference, only unmapped reads can be written to CRAM."
+                .to_string(),
+        ));
+    }
+
     // Write header
     writer.write_header(&header)?;
 
@@ -355,20 +365,20 @@ mod tests {
             Field::new("start", DataType::UInt32, true),
             Field::new("flags", DataType::UInt32, false),
             Field::new("cigar", DataType::Utf8, false),
-            Field::new("mapping_quality", DataType::UInt32, false),
+            Field::new("mapping_quality", DataType::UInt32, true),
             Field::new("mate_chrom", DataType::Utf8, true),
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),
             Field::new("quality_scores", DataType::Utf8, false),
         ]));
 
-        // Create test data
+        // Create test data with unmapped reads (no reference needed)
         let names = StringArray::from(vec![Some("read1"), Some("read2")]);
-        let chroms = StringArray::from(vec![Some("chr1"), Some("chr1")]);
-        let starts = UInt32Array::from(vec![Some(100u32), Some(200u32)]);
-        let flags = UInt32Array::from(vec![0u32, 16u32]);
-        let cigars = StringArray::from(vec!["10M", "10M"]);
-        let mapping_qualities = UInt32Array::from(vec![60u32, 60u32]);
+        let chroms = StringArray::from(vec![Option::<&str>::None, Option::<&str>::None]);
+        let starts = UInt32Array::from(vec![Option::<u32>::None, Option::<u32>::None]);
+        let flags = UInt32Array::from(vec![4u32, 4u32]); // 0x4 = unmapped
+        let cigars = StringArray::from(vec!["*", "*"]);
+        let mapping_qualities = UInt32Array::from(vec![Option::<u32>::None, Option::<u32>::None]);
         let mate_chroms = StringArray::from(vec![Option::<&str>::None, Option::<&str>::None]);
         let mate_starts = UInt32Array::from(vec![Option::<u32>::None, Option::<u32>::None]);
         let sequences = StringArray::from(vec!["ACGTACGTAC", "TGCATGCATG"]);
