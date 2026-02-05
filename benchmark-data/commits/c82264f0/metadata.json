@@ -1,0 +1,7 @@
+{
+  "ref": "fix/cram-parity-59",
+  "ref_type": "branch",
+  "commit_sha": "c82264f044f57ed235b0576d34d9ef77b9290536",
+  "timestamp": "2026-02-05T19:06:02Z",
+  "benchmark_mode": "fast"
+}
