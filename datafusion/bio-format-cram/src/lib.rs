@@ -29,7 +29,7 @@
 //!     None,
 //!     true,
 //!     Some(vec!["MD".to_string(), "NM".to_string(), "RG".to_string()]),
-//! )?;
+//! ).await?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!
 //! // Query with SQL

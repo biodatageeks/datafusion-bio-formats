@@ -10,60 +10,16 @@
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{
-    BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY,
-    BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY,
+    BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_GROUP_ORDER_KEY, BAM_PROGRAM_INFO_KEY,
+    BAM_READ_GROUPS_KEY, BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY, BAM_SUBSORT_ORDER_KEY,
+    ProgramMetadata, ReadGroupMetadata, ReferenceSequenceMetadata, from_json_string,
 };
 use noodles_sam as sam;
 use noodles_sam::header::record::value::Map;
 use noodles_sam::header::record::value::map::{
     Program, ReadGroup, ReferenceSequence, header::Version,
 };
-use serde::{Deserialize, Serialize};
 use std::num::NonZeroUsize;
-
-/// Reference sequence metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReferenceSequenceMetadata {
-    /// Reference sequence name
-    pub name: String,
-    /// Reference sequence length
-    pub length: usize,
-}
-
-/// Read group metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadGroupMetadata {
-    /// Read group ID (required)
-    pub id: String,
-    /// Sample name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sample: Option<String>,
-    /// Platform
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform: Option<String>,
-    /// Library
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub library: Option<String>,
-    /// Description
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// Program info metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramMetadata {
-    /// Program ID (required)
-    pub id: String,
-    /// Program name
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Program version
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    /// Command line
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub command_line: Option<String>,
-}
 
 /// Builds a SAM header from an Arrow schema
 ///
@@ -100,17 +56,29 @@ pub fn build_bam_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<sa
         .unwrap_or_else(|_| Version::new(1, 6));
     let mut header_map = Map::<sam::header::record::value::map::Header>::new(version);
 
-    // Set sort order if available (using other_fields)
-    if let Some(sort_order_str) = schema_metadata.get(BAM_SORT_ORDER_KEY) {
+    // Set sort order, group order, and subsort order if available
+    {
         use noodles_sam::header::record::value::map::header::tag;
-        header_map
-            .other_fields_mut()
-            .insert(tag::SORT_ORDER, sort_order_str.to_string().into());
+        if let Some(sort_order_str) = schema_metadata.get(BAM_SORT_ORDER_KEY) {
+            header_map
+                .other_fields_mut()
+                .insert(tag::SORT_ORDER, sort_order_str.to_string().into());
+        }
+        if let Some(group_order_str) = schema_metadata.get(BAM_GROUP_ORDER_KEY) {
+            header_map
+                .other_fields_mut()
+                .insert(tag::GROUP_ORDER, group_order_str.to_string().into());
+        }
+        if let Some(subsort_order_str) = schema_metadata.get(BAM_SUBSORT_ORDER_KEY) {
+            header_map
+                .other_fields_mut()
+                .insert(tag::SUBSORT_ORDER, subsort_order_str.to_string().into());
+        }
     }
 
     builder = builder.set_header(header_map);
 
-    // Add reference sequences (@SQ)
+    // Add reference sequences (@SQ) with all optional fields (AS, UR, M5, SP, etc.)
     if let Some(ref_seqs_json) = schema_metadata.get(BAM_REFERENCE_SEQUENCES_KEY) {
         if let Some(ref_seqs) = from_json_string::<Vec<ReferenceSequenceMetadata>>(ref_seqs_json) {
             for ref_seq in ref_seqs {
@@ -119,7 +87,15 @@ pub fn build_bam_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<sa
                         "Reference sequence length cannot be zero".to_string(),
                     )
                 })?;
-                let reference_sequence = Map::<ReferenceSequence>::new(length);
+                let mut reference_sequence = Map::<ReferenceSequence>::new(length);
+                // Restore optional @SQ fields (AS, UR, M5, SP, etc.)
+                for (key, value) in &ref_seq.other_fields {
+                    if let Some(tag) = str_to_sq_tag(key) {
+                        reference_sequence
+                            .other_fields_mut()
+                            .insert(tag, value.to_string().into());
+                    }
+                }
                 builder = builder.add_reference_sequence(ref_seq.name, reference_sequence);
             }
         }
@@ -152,6 +128,14 @@ pub fn build_bam_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<sa
                         .other_fields_mut()
                         .insert(tag::DESCRIPTION, description.into());
                 }
+                // Restore additional @RG fields
+                for (key, value) in &rg.other_fields {
+                    if let Some(t) = str_to_rg_tag(key) {
+                        rg_map
+                            .other_fields_mut()
+                            .insert(t, value.to_string().into());
+                    }
+                }
 
                 builder = builder.add_read_group(rg.id, rg_map);
             }
@@ -180,6 +164,14 @@ pub fn build_bam_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<sa
                         .other_fields_mut()
                         .insert(tag::COMMAND_LINE, command_line.into());
                 }
+                // Restore additional @PG fields
+                for (key, value) in &pg.other_fields {
+                    if let Some(t) = str_to_pg_tag(key) {
+                        pg_map
+                            .other_fields_mut()
+                            .insert(t, value.to_string().into());
+                    }
+                }
 
                 builder = builder.add_program(pg.id, pg_map);
             }
@@ -198,9 +190,67 @@ pub fn build_bam_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<sa
     Ok(builder.build())
 }
 
-/// Deserializes a JSON string to a typed value
-fn from_json_string<T: serde::de::DeserializeOwned>(json: &str) -> Option<T> {
-    serde_json::from_str(json).ok()
+/// Convert a 2-char @SQ tag name to the corresponding noodles tag constant
+fn str_to_sq_tag(
+    s: &str,
+) -> Option<
+    noodles_sam::header::record::value::map::tag::Other<
+        noodles_sam::header::record::value::map::reference_sequence::tag::Standard,
+    >,
+> {
+    use noodles_sam::header::record::value::map::reference_sequence::tag;
+    match s {
+        "AH" => Some(tag::ALTERNATIVE_LOCUS),
+        "AN" => Some(tag::ALTERNATIVE_NAMES),
+        "AS" => Some(tag::ASSEMBLY_ID),
+        "DS" => Some(tag::DESCRIPTION),
+        "M5" => Some(tag::MD5_CHECKSUM),
+        "SP" => Some(tag::SPECIES),
+        "TP" => Some(tag::MOLECULE_TOPOLOGY),
+        "UR" => Some(tag::URI),
+        _ => None,
+    }
+}
+
+/// Convert a 2-char @RG tag name to the corresponding noodles tag constant
+fn str_to_rg_tag(
+    s: &str,
+) -> Option<
+    noodles_sam::header::record::value::map::tag::Other<
+        noodles_sam::header::record::value::map::read_group::tag::Standard,
+    >,
+> {
+    use noodles_sam::header::record::value::map::read_group::tag;
+    match s {
+        "BC" => Some(tag::BARCODE),
+        "CN" => Some(tag::SEQUENCING_CENTER),
+        "DT" => Some(tag::PRODUCED_AT),
+        "FO" => Some(tag::FLOW_ORDER),
+        "KS" => Some(tag::KEY_SEQUENCE),
+        "PG" => Some(tag::PROGRAM),
+        "PI" => Some(tag::PREDICTED_MEDIAN_INSERT_SIZE),
+        "PM" => Some(tag::PLATFORM_MODEL),
+        "PU" => Some(tag::PLATFORM_UNIT),
+        // SM, PL, LB, DS are handled as named fields
+        _ => None,
+    }
+}
+
+/// Convert a 2-char @PG tag name to the corresponding noodles tag constant
+fn str_to_pg_tag(
+    s: &str,
+) -> Option<
+    noodles_sam::header::record::value::map::tag::Other<
+        noodles_sam::header::record::value::map::program::tag::Standard,
+    >,
+> {
+    use noodles_sam::header::record::value::map::program::tag;
+    match s {
+        "PP" => Some(tag::PREVIOUS_PROGRAM_ID),
+        "DS" => Some(tag::DESCRIPTION),
+        // PN, VN, CL are handled as named fields
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -236,10 +286,12 @@ mod tests {
             ReferenceSequenceMetadata {
                 name: "chr1".to_string(),
                 length: 249250621,
+                other_fields: HashMap::new(),
             },
             ReferenceSequenceMetadata {
                 name: "chr2".to_string(),
                 length: 242193529,
+                other_fields: HashMap::new(),
             },
         ];
         metadata.insert(
@@ -275,6 +327,7 @@ mod tests {
             platform: Some("ILLUMINA".to_string()),
             library: Some("LIB1".to_string()),
             description: Some("Test read group".to_string()),
+            other_fields: HashMap::new(),
         }];
         metadata.insert(
             BAM_READ_GROUPS_KEY.to_string(),
@@ -305,6 +358,7 @@ mod tests {
             name: Some("bwa".to_string()),
             version: Some("0.7.17".to_string()),
             command_line: Some("bwa mem ref.fa reads.fq".to_string()),
+            other_fields: HashMap::new(),
         }];
         metadata.insert(
             BAM_PROGRAM_INFO_KEY.to_string(),

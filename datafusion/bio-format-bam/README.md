@@ -56,7 +56,7 @@ let table = BamTableProvider::new(
     None,     // storage options
     true,     // 0-based coordinates
     Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),  // tags
-)?;
+).await?;
 ```
 
 Common supported tags include:
@@ -88,7 +88,7 @@ async fn main() -> datafusion::error::Result<()> {
         None,     // No cloud storage options
         true,     // Use 0-based coordinates
         None,     // No optional tags
-    )?;
+    ).await?;
     ctx.register_table("alignments", Arc::new(table))?;
 
     // Query the data with SQL
@@ -122,7 +122,7 @@ async fn main() -> datafusion::error::Result<()> {
         None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
-    )?;
+    ).await?;
     ctx.register_table("alignments", Arc::new(table))?;
 
     // Query using tag fields
@@ -170,7 +170,7 @@ async fn main() -> datafusion::error::Result<()> {
         None,
         true,  // 0-based coordinates
         None,  // no tags
-    )?;
+    ).await?;
     ctx.register_table("input", Arc::new(input_table))?;
 
     // Create output table for write

@@ -93,7 +93,7 @@ async fn main() -> datafusion::error::Result<()> {
         None,  // cloud storage options
         true,  // 0-based coordinates
         None,  // no tags
-    )?;
+    ).await?;
     ctx.register_table("input", Arc::new(input_table))?;
 
     // Create output table for write

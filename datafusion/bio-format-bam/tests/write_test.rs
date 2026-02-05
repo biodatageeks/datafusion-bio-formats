@@ -7,9 +7,13 @@ use datafusion::arrow::array::{
     Float32Array, Int32Array, ListArray, RecordBatch, StringArray, UInt32Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Int32Type, Schema, UInt8Type};
+use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_bam::table_provider::BamTableProvider;
-use datafusion_bio_format_core::{BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY};
+use datafusion_bio_format_core::{
+    BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY,
+    BAM_TAG_TYPE_KEY,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -104,7 +108,8 @@ async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         output_path.to_str().unwrap().to_string(),
         schema.clone(),
         Some(tag_fields.clone()),
-        true, // 0-based coordinates
+        true,  // 0-based coordinates
+        false, // sort_on_write
     );
     ctx.register_table("output_bam", Arc::new(write_provider))?;
 
@@ -121,7 +126,8 @@ async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         None, // storage options
         true, // 0-based coordinates
         Some(tag_fields.clone()),
-    )?;
+    )
+    .await?;
 
     ctx.register_table("test_bam", Arc::new(read_provider))?;
 
@@ -234,6 +240,7 @@ async fn test_character_tags_round_trip() -> Result<(), Box<dyn std::error::Erro
         schema.clone(),
         Some(tag_fields.clone()),
         true,
+        false,
     );
     ctx.register_table("output_bam", Arc::new(write_provider))?;
 
@@ -345,6 +352,7 @@ async fn test_integer_array_tags_round_trip() -> Result<(), Box<dyn std::error::
         schema.clone(),
         Some(tag_fields.clone()),
         true,
+        false,
     );
     ctx.register_table("output_bam", Arc::new(write_provider))?;
 
@@ -471,6 +479,7 @@ async fn test_byte_array_tags_round_trip() -> Result<(), Box<dyn std::error::Err
         schema.clone(),
         Some(tag_fields.clone()),
         true,
+        false,
     );
     ctx.register_table("output_bam", Arc::new(write_provider))?;
 
@@ -584,6 +593,7 @@ async fn test_float_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> 
         schema.clone(),
         Some(tag_fields.clone()),
         true,
+        false,
     );
     ctx.register_table("output_bam", Arc::new(write_provider))?;
 
@@ -671,6 +681,7 @@ async fn test_write_without_tags() -> Result<(), Box<dyn std::error::Error>> {
         schema.clone(),
         None, // No tags
         true,
+        false,
     );
     ctx.register_table("output_bam", Arc::new(write_provider))?;
 
@@ -681,6 +692,222 @@ async fn test_write_without_tags() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify file was written
     assert!(output_path.exists());
+
+    Ok(())
+}
+
+/// Test that sort_on_write=true sorts records by coordinate and sets SO:coordinate
+#[tokio::test]
+async fn test_sort_on_write_coordinate_order() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_sorted.bam");
+
+    // Schema with reference sequences (needed for coordinate sort)
+    let mut schema_metadata = HashMap::new();
+    schema_metadata.insert(
+        BAM_REFERENCE_SEQUENCES_KEY.to_string(),
+        r#"[{"name":"chr1","length":249250621},{"name":"chr2","length":243199373}]"#.to_string(),
+    );
+
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("flags", DataType::UInt32, false),
+            Field::new("cigar", DataType::Utf8, false),
+            Field::new("mapping_quality", DataType::UInt32, false),
+            Field::new("mate_chrom", DataType::Utf8, true),
+            Field::new("mate_start", DataType::UInt32, true),
+            Field::new("sequence", DataType::Utf8, false),
+            Field::new("quality_scores", DataType::Utf8, false),
+        ],
+        schema_metadata,
+    ));
+
+    // Create out-of-order records: chr2:300, chr1:100, chr1:200
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read_c", "read_a", "read_b"])),
+            Arc::new(StringArray::from(vec!["chr2", "chr1", "chr1"])),
+            Arc::new(UInt32Array::from(vec![300, 100, 200])),
+            Arc::new(UInt32Array::from(vec![0, 0, 0])),
+            Arc::new(StringArray::from(vec!["10M", "10M", "10M"])),
+            Arc::new(UInt32Array::from(vec![60, 60, 60])),
+            Arc::new(StringArray::from(vec![None::<&str>, None, None])),
+            Arc::new(UInt32Array::from(vec![None::<u32>, None, None])),
+            Arc::new(StringArray::from(vec![
+                "ACGTACGTAC",
+                "ACGTACGTAC",
+                "TTTTTTTTTT",
+            ])),
+            Arc::new(StringArray::from(vec![
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+            ])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    // Write with sort_on_write=true
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        None,
+        true,
+        true, // sort_on_write
+    );
+    ctx.register_table("output_bam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_bam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Read back and verify order: chr1:100, chr1:200, chr2:300
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+
+    // Verify header has SO:coordinate
+    let read_schema = read_provider.schema();
+    let sort_order = read_schema.metadata().get(BAM_SORT_ORDER_KEY);
+    assert_eq!(
+        sort_order,
+        Some(&"coordinate".to_string()),
+        "Header should have SO:coordinate"
+    );
+
+    ctx.register_table("sorted_bam", Arc::new(read_provider))?;
+
+    // Don't ORDER BY in SQL - we want to verify the file's physical order
+    let df = ctx.sql("SELECT name, chrom, start FROM sorted_bam").await?;
+    let results = df.collect().await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    assert_eq!(batch.num_rows(), 3);
+
+    let names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let chroms = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let starts = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+
+    // Should be sorted: chr1:100, chr1:200, chr2:300
+    assert_eq!(chroms.value(0), "chr1");
+    assert_eq!(starts.value(0), 100);
+    assert_eq!(names.value(0), "read_a");
+
+    assert_eq!(chroms.value(1), "chr1");
+    assert_eq!(starts.value(1), 200);
+    assert_eq!(names.value(1), "read_b");
+
+    assert_eq!(chroms.value(2), "chr2");
+    assert_eq!(starts.value(2), 300);
+    assert_eq!(names.value(2), "read_c");
+
+    Ok(())
+}
+
+/// Test that sort_on_write=false sets SO:unsorted in the header
+#[tokio::test]
+async fn test_sort_on_write_false_sets_unsorted() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_unsorted.bam");
+
+    let mut schema_metadata = HashMap::new();
+    schema_metadata.insert(
+        BAM_REFERENCE_SEQUENCES_KEY.to_string(),
+        r#"[{"name":"chr1","length":249250621}]"#.to_string(),
+    );
+
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("flags", DataType::UInt32, false),
+            Field::new("cigar", DataType::Utf8, false),
+            Field::new("mapping_quality", DataType::UInt32, false),
+            Field::new("mate_chrom", DataType::Utf8, true),
+            Field::new("mate_start", DataType::UInt32, true),
+            Field::new("sequence", DataType::Utf8, false),
+            Field::new("quality_scores", DataType::Utf8, false),
+        ],
+        schema_metadata,
+    ));
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1"])),
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![100])),
+            Arc::new(UInt32Array::from(vec![0])),
+            Arc::new(StringArray::from(vec!["10M"])),
+            Arc::new(UInt32Array::from(vec![60])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(UInt32Array::from(vec![None::<u32>])),
+            Arc::new(StringArray::from(vec!["ACGTACGTAC"])),
+            Arc::new(StringArray::from(vec!["IIIIIIIIII"])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    // Write with sort_on_write=false
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        None,
+        true,
+        false, // sort_on_write
+    );
+    ctx.register_table("output_bam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_bam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Read back and verify header has SO:unsorted
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        None,
+        true,
+        None,
+    )
+    .await?;
+
+    let read_schema = read_provider.schema();
+    let sort_order = read_schema.metadata().get(BAM_SORT_ORDER_KEY);
+    assert_eq!(
+        sort_order,
+        Some(&"unsorted".to_string()),
+        "Header should have SO:unsorted"
+    );
 
     Ok(())
 }

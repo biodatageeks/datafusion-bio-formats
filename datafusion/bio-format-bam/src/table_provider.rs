@@ -16,7 +16,8 @@ use datafusion::prelude::DataFrame;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
-    BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
+    BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
+    COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
 use log::debug;
 use std::any::Any;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
+    header_metadata: Option<HashMap<String, String>>,
 ) -> datafusion::common::Result<SchemaRef> {
     let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
@@ -68,7 +70,7 @@ fn determine_schema(
     }
 
     // Add coordinate system metadata to schema
-    let mut metadata = HashMap::new();
+    let mut metadata = header_metadata.unwrap_or_default();
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
@@ -108,20 +110,90 @@ async fn determine_schema_from_file(
         Field::new("quality_scores", DataType::Utf8, false),
     ];
 
+    use crate::storage::{SamReader, is_sam_file};
+
+    // Extract header metadata from the file (always done, regardless of tag_fields)
+    let header_metadata = if is_sam_file(&file_path) {
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+        let storage_type = get_storage_type(file_path.clone());
+        if !matches!(storage_type, StorageType::LOCAL) {
+            return Err(DataFusionError::NotImplemented(format!(
+                "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                file_path
+            )));
+        }
+        let reader = SamReader::new(file_path.clone());
+        extract_header_metadata(reader.get_header())
+    } else {
+        let mut reader = BamReader::new(
+            file_path.clone(),
+            thread_num,
+            object_storage_options.clone(),
+        )
+        .await;
+        let header = reader.read_header().await;
+        extract_header_metadata(&header)
+    };
+
     // If tag fields are specified, discover their actual types from the file
     if let Some(tags) = tag_fields {
         let known_tags = get_known_tags();
 
-        // Create BAM reader to sample records
-        let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
+        // Helper to discover tags from a stream of records implementing the Record trait
+        async fn discover_tags_from_stream<S, R, E>(
+            mut records: S,
+            tags: &[String],
+            sample_size: usize,
+        ) -> HashMap<String, (char, DataType)>
+        where
+            S: futures_util::Stream<Item = Result<R, E>> + Unpin,
+            R: noodles_sam::alignment::Record,
+            E: std::fmt::Debug,
+        {
+            let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+            let mut count = 0;
 
-        // Read header (required before reading records)
-        let _ref_sequences = reader.read_sequences().await;
+            while let Some(result) = records.next().await {
+                if count >= sample_size {
+                    break;
+                }
 
-        // Discover actual tag types by sampling records
-        let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
-        let mut records = reader.read_records().await;
-        let mut count = 0;
+                match result {
+                    Ok(record) => {
+                        let data = record.data();
+                        for tag_name in tags {
+                            if discovered_tags.contains_key(tag_name) {
+                                continue;
+                            }
+                            let tag_bytes = tag_name.as_bytes();
+                            if tag_bytes.len() == 2 {
+                                let tag = noodles_sam::alignment::record::data::field::Tag::from([
+                                    tag_bytes[0],
+                                    tag_bytes[1],
+                                ]);
+                                if let Some(Ok(value)) = data.get(&tag) {
+                                    let (sam_type, arrow_type) =
+                                        infer_type_from_noodles_value(&value);
+                                    debug!(
+                                        "Found tag {} in record {}: sam_type={}, arrow_type={:?}",
+                                        tag_name, count, sam_type, arrow_type
+                                    );
+                                    discovered_tags
+                                        .insert(tag_name.clone(), (sam_type, arrow_type));
+                                }
+                            }
+                        }
+                        count += 1;
+                    }
+                    Err(e) => {
+                        debug!("Error reading record during schema inference: {:?}", e);
+                        continue;
+                    }
+                }
+            }
+            debug!("Schema inference completed after {} records", count);
+            discovered_tags
+        }
 
         debug!(
             "Starting schema inference by sampling {} records",
@@ -129,49 +201,25 @@ async fn determine_schema_from_file(
         );
         debug!("Looking for tags: {:?}", tags);
 
-        while let Some(result) = records.next().await {
-            if count >= sample_size {
-                break;
+        let discovered_tags = if is_sam_file(&file_path) {
+            use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+            let storage_type = get_storage_type(file_path.clone());
+            if !matches!(storage_type, StorageType::LOCAL) {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                    file_path
+                )));
             }
+            let mut reader = SamReader::new(file_path);
+            let records = reader.read_records();
+            discover_tags_from_stream(records, tags, sample_size).await
+        } else {
+            let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
+            let _header = reader.read_header().await;
+            let records = reader.read_records().await;
+            discover_tags_from_stream(records, tags, sample_size).await
+        };
 
-            match result {
-                Ok(record) => {
-                    let data = record.data();
-
-                    // Look for the requested tags in this record
-                    for tag_name in tags {
-                        if discovered_tags.contains_key(tag_name) {
-                            continue; // Already discovered
-                        }
-
-                        // Parse tag to noodles format
-                        let tag_bytes = tag_name.as_bytes();
-                        if tag_bytes.len() == 2 {
-                            let tag = noodles_sam::alignment::record::data::field::Tag::from([
-                                tag_bytes[0],
-                                tag_bytes[1],
-                            ]);
-
-                            if let Some(Ok(value)) = data.get(&tag) {
-                                let (sam_type, arrow_type) = infer_type_from_noodles_value(&value);
-                                debug!(
-                                    "Found tag {} in record {}: sam_type={}, arrow_type={:?}",
-                                    tag_name, count, sam_type, arrow_type
-                                );
-                                discovered_tags.insert(tag_name.clone(), (sam_type, arrow_type));
-                            }
-                        }
-                    }
-                    count += 1;
-                }
-                Err(e) => {
-                    debug!("Error reading record during schema inference: {:?}", e);
-                    continue;
-                }
-            }
-        }
-
-        debug!("Schema inference completed after {} records", count);
         debug!(
             "Discovered tags: {:?}",
             discovered_tags.keys().collect::<Vec<_>>()
@@ -221,8 +269,8 @@ async fn determine_schema_from_file(
         }
     }
 
-    // Add coordinate system metadata to schema
-    let mut metadata = HashMap::new();
+    // Merge header metadata with coordinate system metadata
+    let mut metadata = header_metadata;
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
@@ -251,6 +299,8 @@ pub struct BamTableProvider {
     coordinate_system_zero_based: bool,
     /// Optional list of BAM alignment tags to include as columns
     tag_fields: Option<Vec<String>>,
+    /// Whether to sort records by coordinate (chrom ASC, start ASC) on write
+    sort_on_write: bool,
 }
 
 impl BamTableProvider {
@@ -291,7 +341,7 @@ impl BamTableProvider {
     ///     None,     // No cloud storage
     ///     true,     // Use 0-based coordinates (default)
     ///     None,     // No tag fields
-    /// )?;
+    /// ).await?;
     ///
     /// // With alignment tags
     /// let provider_with_tags = BamTableProvider::new(
@@ -300,18 +350,69 @@ impl BamTableProvider {
     ///     None,
     ///     true,
     ///     Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
-    /// )?;
+    /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(
+    pub async fn new(
         file_path: String,
         thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema(&tag_fields, coordinate_system_zero_based)?;
+        use crate::storage::{SamReader, is_sam_file};
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+
+        // Best-effort header reading: extract metadata if possible, fall back to empty
+        let storage_type = get_storage_type(file_path.clone());
+        let header_metadata = if is_sam_file(&file_path) {
+            if matches!(storage_type, StorageType::LOCAL) {
+                let reader = SamReader::new(file_path.clone());
+                extract_header_metadata(reader.get_header())
+            } else {
+                debug!("Skipping header read for remote SAM file: {}", file_path);
+                HashMap::new()
+            }
+        } else if matches!(storage_type, StorageType::LOCAL) {
+            // For local BAM files, read header synchronously
+            use noodles_bam as bam;
+            use noodles_bgzf::io::MultithreadedReader;
+            use std::fs::File;
+            use std::num::NonZero;
+
+            match File::open(&file_path)
+                .map(|f| MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
+                .map(bam::io::Reader::from)
+                .and_then(|mut reader| reader.read_header())
+            {
+                Ok(header) => extract_header_metadata(&header),
+                Err(e) => {
+                    debug!(
+                        "Failed to read BAM header from {}: {}, using empty metadata",
+                        file_path, e
+                    );
+                    HashMap::new()
+                }
+            }
+        } else {
+            // For remote BAM files, use async reader
+            use crate::storage::BamReader;
+            let mut reader = BamReader::new(
+                file_path.clone(),
+                thread_num,
+                object_storage_options.clone(),
+            )
+            .await;
+            let header = reader.read_header().await;
+            extract_header_metadata(&header)
+        };
+
+        let schema = determine_schema(
+            &tag_fields,
+            coordinate_system_zero_based,
+            Some(header_metadata),
+        )?;
         Ok(Self {
             file_path,
             schema,
@@ -319,6 +420,7 @@ impl BamTableProvider {
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
+            sort_on_write: false,
         })
     }
 
@@ -385,6 +487,7 @@ impl BamTableProvider {
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
+            sort_on_write: false,
         })
     }
 
@@ -399,6 +502,9 @@ impl BamTableProvider {
     /// * `schema` - Arrow schema with metadata for header construction
     /// * `tag_fields` - Optional list of alignment tag names to write
     /// * `coordinate_system_zero_based` - If true, input uses 0-based coordinates
+    /// * `sort_on_write` - If true, sort records by coordinate (chrom ASC, start ASC)
+    ///   before writing and set SO:coordinate in the header. If false, write records
+    ///   as-is and set SO:unsorted.
     ///
     /// # Returns
     ///
@@ -408,6 +514,7 @@ impl BamTableProvider {
         schema: SchemaRef,
         tag_fields: Option<Vec<String>>,
         coordinate_system_zero_based: bool,
+        sort_on_write: bool,
     ) -> Self {
         Self {
             file_path: output_path,
@@ -416,6 +523,7 @@ impl BamTableProvider {
             object_storage_options: None,
             coordinate_system_zero_based,
             tag_fields,
+            sort_on_write,
         }
     }
 
@@ -454,7 +562,7 @@ impl BamTableProvider {
     ///     None,
     ///     true,
     ///     None,
-    /// )?;
+    /// ).await?;
     ///
     /// let schema_df = provider.describe(&ctx, Some(100)).await?;
     /// schema_df.show().await?;
@@ -466,52 +574,68 @@ impl BamTableProvider {
         ctx: &datafusion::prelude::SessionContext,
         sample_size: Option<usize>,
     ) -> Result<DataFrame, DataFusionError> {
-        use crate::storage::BamReader;
+        use crate::storage::{BamReader, SamReader, is_sam_file};
         use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
         use futures_util::StreamExt;
 
         let sample_size = sample_size.unwrap_or(100);
 
-        // Create BAM reader
-        let mut reader = BamReader::new(
-            self.file_path.clone(),
-            self.thread_num,
-            self.object_storage_options.clone(),
-        )
-        .await;
+        // Helper to discover all tags from a stream of records
+        async fn discover_all_tags<S, R, E>(
+            mut records: S,
+            sample_size: usize,
+        ) -> HashMap<String, (char, DataType)>
+        where
+            S: futures_util::Stream<Item = Result<R, E>> + Unpin,
+            R: noodles_sam::alignment::Record,
+        {
+            let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+            let mut count = 0;
 
-        // Read header first (required before reading records)
-        let _ref_sequences = reader.read_sequences().await;
+            while let Some(result) = records.next().await {
+                if count >= sample_size {
+                    break;
+                }
 
-        // Discover tags by reading sample records
-        let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
-        let mut records = reader.read_records().await;
-        let mut count = 0;
-
-        while let Some(result) = records.next().await {
-            if count >= sample_size {
-                break;
-            }
-
-            match result {
-                Ok(record) => {
+                if let Ok(record) = result {
                     let data = record.data();
-
-                    // Iterate through all tags in this record
                     for (tag, value) in data.iter().filter_map(Result::ok) {
                         let tag_str =
                             format!("{}{}", tag.as_ref()[0] as char, tag.as_ref()[1] as char);
-
-                        // Only add if not already discovered
                         discovered_tags
                             .entry(tag_str)
                             .or_insert_with(|| infer_type_from_noodles_value(&value));
                     }
                     count += 1;
                 }
-                Err(_) => continue,
             }
+            discovered_tags
         }
+
+        // Create appropriate reader based on file format
+        let discovered_tags = if is_sam_file(&self.file_path) {
+            use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+            let storage_type = get_storage_type(self.file_path.clone());
+            if !matches!(storage_type, StorageType::LOCAL) {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
+                    self.file_path
+                )));
+            }
+            let mut reader = SamReader::new(self.file_path.clone());
+            let records = reader.read_records();
+            discover_all_tags(records, sample_size).await
+        } else {
+            let mut reader = BamReader::new(
+                self.file_path.clone(),
+                self.thread_num,
+                self.object_storage_options.clone(),
+            )
+            .await;
+            let _header = reader.read_header().await;
+            let records = reader.read_records().await;
+            discover_all_tags(records, sample_size).await
+        };
 
         // Build output RecordBatch
         let mut column_names = StringBuilder::new();
@@ -757,13 +881,26 @@ impl TableProvider for BamTableProvider {
             }
         }
 
-        // Create write execution plan
+        // Build metadata overrides for sort order
+        let mut schema_metadata_overrides = HashMap::new();
+        if self.sort_on_write {
+            schema_metadata_overrides
+                .insert(BAM_SORT_ORDER_KEY.to_string(), "coordinate".to_string());
+        } else {
+            schema_metadata_overrides
+                .insert(BAM_SORT_ORDER_KEY.to_string(), "unsorted".to_string());
+        }
+
+        // Create write execution plan (SortExec wrapping happens at execution time
+        // inside BamWriteExec::execute to avoid DataFusion's optimizer stripping it)
         Ok(Arc::new(BamWriteExec::new(
             input,
             self.file_path.clone(),
             None, // Auto-detect compression from file extension
             tag_fields,
             coordinate_system_zero_based,
+            schema_metadata_overrides,
+            self.sort_on_write,
         )))
     }
 }

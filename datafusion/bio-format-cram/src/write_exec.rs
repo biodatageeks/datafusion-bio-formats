@@ -7,10 +7,16 @@ use crate::header_builder::build_cram_header;
 use crate::serializer::batch_to_cram_records;
 use crate::writer::CramLocalWriter;
 use datafusion::arrow::array::{RecordBatch, UInt64Array};
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::{
+    Distribution, EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
+};
+use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -19,6 +25,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 use log::debug;
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -40,6 +47,10 @@ pub struct CramWriteExec {
     tag_fields: Vec<String>,
     /// Whether the input coordinates are 0-based (need +1 for CRAM POS output)
     coordinate_system_zero_based: bool,
+    /// Metadata overrides to merge into the input schema before building the header
+    schema_metadata_overrides: HashMap<String, String>,
+    /// Whether to sort records by coordinate before writing
+    sort_on_write: bool,
     /// Cached plan properties
     cache: PlanProperties,
 }
@@ -64,6 +75,8 @@ impl CramWriteExec {
         reference_path: Option<String>,
         tag_fields: Vec<String>,
         coordinate_system_zero_based: bool,
+        schema_metadata_overrides: HashMap<String, String>,
+        sort_on_write: bool,
     ) -> Self {
         // Output schema is a single count column
         let output_schema = Arc::new(Schema::new(vec![Field::new(
@@ -85,6 +98,8 @@ impl CramWriteExec {
             reference_path,
             tag_fields,
             coordinate_system_zero_based,
+            schema_metadata_overrides,
+            sort_on_write,
             cache,
         }
     }
@@ -140,6 +155,16 @@ impl ExecutionPlan for CramWriteExec {
         &self.cache
     }
 
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        if self.sort_on_write {
+            // Preserve partitions for parallel sort + merge
+            vec![Distribution::UnspecifiedDistribution]
+        } else {
+            // Coalesce all partitions so execute() reads all data
+            vec![Distribution::SinglePartition]
+        }
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -159,6 +184,8 @@ impl ExecutionPlan for CramWriteExec {
             self.reference_path.clone(),
             self.tag_fields.clone(),
             self.coordinate_system_zero_based,
+            self.schema_metadata_overrides.clone(),
+            self.sort_on_write,
         )))
     }
 
@@ -176,8 +203,45 @@ impl ExecutionPlan for CramWriteExec {
         let reference_path = self.reference_path.clone();
         let tag_fields = self.tag_fields.clone();
         let coordinate_system_zero_based = self.coordinate_system_zero_based;
-        let input = self.input.execute(partition, context)?;
+        let schema_metadata_overrides = self.schema_metadata_overrides.clone();
+
+        // If sort_on_write, wrap the input plan in a SortExec at execution time
         let input_schema = self.input.schema();
+        let input = if self.sort_on_write {
+            let chrom_idx = input_schema.index_of("chrom").map_err(|_| {
+                DataFusionError::Plan("Column 'chrom' not found for sort_on_write".to_string())
+            })?;
+            let start_idx = input_schema.index_of("start").map_err(|_| {
+                DataFusionError::Plan("Column 'start' not found for sort_on_write".to_string())
+            })?;
+
+            let sort_exprs = LexOrdering::new(vec![
+                PhysicalSortExpr::new(
+                    Arc::new(Column::new("chrom", chrom_idx)),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: false,
+                    },
+                ),
+                PhysicalSortExpr::new(
+                    Arc::new(Column::new("start", start_idx)),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: false,
+                    },
+                ),
+            ])
+            .expect("sort expressions should not be empty");
+
+            let sort_exec = Arc::new(
+                SortExec::new(sort_exprs.clone(), self.input.clone())
+                    .with_preserve_partitioning(true),
+            );
+            let merge_exec = SortPreservingMergeExec::new(sort_exprs, sort_exec);
+            merge_exec.execute(0, context)?
+        } else {
+            self.input.execute(0, context)?
+        };
         let output_schema = self.schema();
 
         let stream = futures::stream::once(write_cram_stream(
@@ -187,6 +251,7 @@ impl ExecutionPlan for CramWriteExec {
             reference_path,
             tag_fields,
             coordinate_system_zero_based,
+            schema_metadata_overrides,
             output_schema,
         ));
 
@@ -205,6 +270,7 @@ impl ExecutionPlan for CramWriteExec {
 /// 3. Converts each RecordBatch to CRAM records
 /// 4. Writes all records to the file
 /// 5. Returns a count of written records
+#[allow(clippy::too_many_arguments)]
 async fn write_cram_stream(
     mut input: SendableRecordBatchStream,
     input_schema: SchemaRef,
@@ -212,6 +278,7 @@ async fn write_cram_stream(
     reference_path: Option<String>,
     tag_fields: Vec<String>,
     coordinate_system_zero_based: bool,
+    schema_metadata_overrides: HashMap<String, String>,
     output_schema: SchemaRef,
 ) -> Result<RecordBatch> {
     debug!("Starting CRAM write to: {}", output_path);
@@ -220,8 +287,20 @@ async fn write_cram_stream(
     let reference_path_ref = reference_path.as_ref();
     let mut writer = CramLocalWriter::new(&output_path, reference_path_ref)?;
 
+    // Merge metadata overrides into input schema before building header
+    let effective_schema = if schema_metadata_overrides.is_empty() {
+        input_schema
+    } else {
+        let mut metadata = input_schema.metadata().clone();
+        metadata.extend(schema_metadata_overrides);
+        Arc::new(Schema::new_with_metadata(
+            input_schema.fields().iter().cloned().collect::<Vec<_>>(),
+            metadata,
+        ))
+    };
+
     // Build header from schema metadata
-    let header = build_cram_header(&input_schema, &tag_fields)?;
+    let header = build_cram_header(&effective_schema, &tag_fields)?;
 
     // Write header
     writer.write_header(&header)?;
@@ -323,7 +402,15 @@ mod tests {
         let input_plan = provider
             .scan(&SessionContext::new().state(), None, &[], None)
             .await?;
-        let write_exec = CramWriteExec::new(input_plan, output_path.clone(), None, vec![], true);
+        let write_exec = CramWriteExec::new(
+            input_plan,
+            output_path.clone(),
+            None,
+            vec![],
+            true,
+            HashMap::new(),
+            false,
+        );
 
         // Execute the plan
         let ctx = SessionContext::new();

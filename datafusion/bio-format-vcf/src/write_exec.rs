@@ -9,7 +9,7 @@ use datafusion::arrow::array::{RecordBatch, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -157,6 +157,10 @@ impl ExecutionPlan for VcfWriteExec {
         &self.cache
     }
 
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        vec![Distribution::SinglePartition]
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -197,7 +201,7 @@ impl ExecutionPlan for VcfWriteExec {
         let format_fields = self.format_fields.clone();
         let sample_names = self.sample_names.clone();
         let coordinate_system_zero_based = self.coordinate_system_zero_based;
-        let input = self.input.execute(partition, context)?;
+        let input = self.input.execute(0, context)?;
         let input_schema = self.input.schema();
         let output_schema = self.schema();
 

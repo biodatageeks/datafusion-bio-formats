@@ -9,7 +9,7 @@ use datafusion::arrow::array::{RecordBatch, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{Distribution, EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -129,6 +129,10 @@ impl ExecutionPlan for FastqWriteExec {
         &self.cache
     }
 
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        vec![Distribution::SinglePartition]
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -161,7 +165,7 @@ impl ExecutionPlan for FastqWriteExec {
 
         let output_path = self.output_path.clone();
         let compression = self.compression;
-        let input = self.input.execute(partition, context)?;
+        let input = self.input.execute(0, context)?;
         let output_schema = self.schema();
 
         let stream = futures::stream::once(async move {

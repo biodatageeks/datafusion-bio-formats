@@ -1,15 +1,16 @@
-//! BAM (Binary Alignment Map) file format support for Apache DataFusion
+//! BAM/SAM (Binary/Sequence Alignment Map) file format support for Apache DataFusion
 //!
-//! This crate provides DataFusion table provider implementations for reading BAM files,
-//! the binary compressed version of SAM (Sequence Alignment/Map) format.
+//! This crate provides DataFusion table provider implementations for reading and writing
+//! BAM and SAM files. Format is auto-detected from file extension (.bam or .sam).
 //!
 //! # Features
 //!
-//! - Direct SQL queries on BAM files via DataFusion
+//! - Direct SQL queries on BAM and SAM files via DataFusion
 //! - BGZF compression support (native to BAM)
-//! - Cloud storage support (GCS, S3, Azure)
+//! - Cloud storage support (GCS, S3, Azure) for BAM files
 //! - Support for indexed BAM files (BAI)
 //! - Memory-efficient streaming
+//! - Read and write support for both BAM and SAM formats
 //!
 //! # Example
 //!
@@ -22,7 +23,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a BAM file as a table
-//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true, None)?;
+//! let table = BamTableProvider::new("data/alignments.bam".to_string(), None, None, true, None).await?;
 //! ctx.register_table("alignments", Arc::new(table.clone()))?;
 //!
 //! // Discover and describe available columns by sampling records

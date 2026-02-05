@@ -13,7 +13,8 @@ use datafusion::physical_plan::{
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
-    BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
+    BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
+    COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
 use log::debug;
 use std::any::Any;
@@ -23,6 +24,7 @@ use std::sync::Arc;
 fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
+    header_metadata: Option<HashMap<String, String>>,
 ) -> datafusion::common::Result<SchemaRef> {
     let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
@@ -65,7 +67,7 @@ fn determine_schema(
     }
 
     // Add coordinate system metadata to schema
-    let mut metadata = HashMap::new();
+    let mut metadata = header_metadata.unwrap_or_default();
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
@@ -114,6 +116,8 @@ pub struct CramTableProvider {
     coordinate_system_zero_based: bool,
     /// Optional list of CRAM alignment tags to include as columns
     tag_fields: Option<Vec<String>>,
+    /// Whether to sort records by coordinate (chrom ASC, start ASC) on write
+    sort_on_write: bool,
 }
 
 impl CramTableProvider {
@@ -130,14 +134,54 @@ impl CramTableProvider {
     /// # Returns
     /// * `Ok(provider)` - Successfully created provider
     /// * `Err` - Failed to determine schema
-    pub fn new(
+    pub async fn new(
         file_path: String,
         reference_path: Option<String>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema(&tag_fields, coordinate_system_zero_based)?;
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+
+        // Best-effort header reading: extract metadata if possible, fall back to empty
+        let storage_type = get_storage_type(file_path.clone());
+        let header_metadata = if matches!(storage_type, StorageType::LOCAL) {
+            // For local CRAM files, read header synchronously
+            use noodles_cram as cram;
+            use noodles_fasta as fasta;
+
+            match cram::io::reader::Builder::default()
+                .set_reference_sequence_repository(fasta::Repository::default())
+                .build_from_path(&file_path)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                .and_then(|mut reader| reader.read_header())
+            {
+                Ok(header) => extract_header_metadata(&header),
+                Err(e) => {
+                    debug!(
+                        "Failed to read CRAM header from {}: {}, using empty metadata",
+                        file_path, e
+                    );
+                    HashMap::new()
+                }
+            }
+        } else {
+            // For remote CRAM files, use async reader
+            use crate::storage::CramReader;
+            let reader = CramReader::new(
+                file_path.clone(),
+                reference_path.clone(),
+                object_storage_options.clone(),
+            )
+            .await;
+            extract_header_metadata(reader.get_header())
+        };
+
+        let schema = determine_schema(
+            &tag_fields,
+            coordinate_system_zero_based,
+            Some(header_metadata),
+        )?;
         Ok(Self {
             file_path,
             schema,
@@ -145,6 +189,7 @@ impl CramTableProvider {
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
+            sort_on_write: false,
         })
     }
 
@@ -184,6 +229,9 @@ impl CramTableProvider {
             object_storage_options.clone(),
         )
         .await;
+
+        // Extract header metadata before borrowing reader for records
+        let header_metadata = extract_header_metadata(reader.get_header());
 
         let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
         let mut records = reader.read_records().await;
@@ -230,14 +278,22 @@ impl CramTableProvider {
         // Convert discovered tags to tag_fields format
         let tag_fields: Vec<String> = discovered_tags.keys().cloned().collect();
 
-        // Create provider with discovered tags
-        Self::new(
+        // Build schema with header metadata included
+        let schema = determine_schema(
+            &Some(tag_fields.clone()),
+            coordinate_system_zero_based,
+            Some(header_metadata),
+        )?;
+
+        Ok(Self {
             file_path,
+            schema,
             reference_path,
             object_storage_options,
             coordinate_system_zero_based,
-            Some(tag_fields),
-        )
+            tag_fields: Some(tag_fields),
+            sort_on_write: false,
+        })
     }
 
     /// Creates a new CRAM table provider for write operations.
@@ -248,12 +304,16 @@ impl CramTableProvider {
     /// * `reference_path` - Optional path to FASTA reference file
     /// * `tag_fields` - Optional list of BAM/SAM tags to write
     /// * `coordinate_system_zero_based` - If true, input is 0-based; if false, 1-based
+    /// * `sort_on_write` - If true, sort records by coordinate (chrom ASC, start ASC)
+    ///   before writing and set SO:coordinate in the header. If false, write records
+    ///   as-is and set SO:unsorted.
     pub fn new_for_write(
         output_path: String,
         schema: SchemaRef,
         reference_path: Option<String>,
         tag_fields: Option<Vec<String>>,
         coordinate_system_zero_based: bool,
+        sort_on_write: bool,
     ) -> Self {
         Self {
             file_path: output_path,
@@ -262,6 +322,7 @@ impl CramTableProvider {
             object_storage_options: None,
             coordinate_system_zero_based,
             tag_fields,
+            sort_on_write,
         }
     }
 
@@ -497,12 +558,26 @@ impl TableProvider for CramTableProvider {
             }
         }
 
+        // Build metadata overrides for sort order
+        let mut schema_metadata_overrides = HashMap::new();
+        if self.sort_on_write {
+            schema_metadata_overrides
+                .insert(BAM_SORT_ORDER_KEY.to_string(), "coordinate".to_string());
+        } else {
+            schema_metadata_overrides
+                .insert(BAM_SORT_ORDER_KEY.to_string(), "unsorted".to_string());
+        }
+
+        // Create write execution plan (SortExec wrapping happens at execution time
+        // inside CramWriteExec::execute to avoid DataFusion's optimizer stripping it)
         Ok(Arc::new(CramWriteExec::new(
             input,
             self.file_path.clone(),
             self.reference_path.clone(),
             tag_fields,
             self.coordinate_system_zero_based,
+            schema_metadata_overrides,
+            self.sort_on_write,
         )))
     }
 }

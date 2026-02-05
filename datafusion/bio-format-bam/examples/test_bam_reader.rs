@@ -21,6 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         true,
         None, // No tag fields
     )
+    .await
     .unwrap();
 
     let ctx = datafusion::execution::context::SessionContext::new();

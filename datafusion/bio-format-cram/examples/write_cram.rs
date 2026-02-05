@@ -42,8 +42,9 @@ async fn main() -> datafusion::error::Result<()> {
         output_path_1.to_string(),
         df.schema().inner().clone(),
         reference_path.clone(),
-        None, // tag fields (extracted from schema)
-        true, // 0-based coordinates
+        None,  // tag fields (extracted from schema)
+        true,  // 0-based coordinates
+        false, // sort_on_write
     );
     ctx.register_table("output_1", Arc::new(output_table_1))?;
 
@@ -62,6 +63,7 @@ async fn main() -> datafusion::error::Result<()> {
         reference_path.clone(),
         None,
         true,
+        false,
     );
     ctx.register_table("output_2", Arc::new(output_table_2))?;
 
@@ -80,6 +82,7 @@ async fn main() -> datafusion::error::Result<()> {
         None, // No reference - will store full sequences
         None,
         true,
+        false,
     );
     ctx.register_table("output_3", Arc::new(output_table_3))?;
 
@@ -109,6 +112,7 @@ async fn main() -> datafusion::error::Result<()> {
         reference_path,
         None,
         true,
+        false,
     );
     ctx.register_table("cram_output", Arc::new(cram_output))?;
 

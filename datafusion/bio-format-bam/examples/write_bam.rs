@@ -22,7 +22,8 @@ async fn main() -> datafusion::error::Result<()> {
         None, // object storage options
         true, // 0-based coordinates
         None, // tag fields
-    )?;
+    )
+    .await?;
     ctx.register_table("input_bam", Arc::new(input_table))?;
 
     // Example 1: Filter and write high-quality alignments
@@ -37,8 +38,9 @@ async fn main() -> datafusion::error::Result<()> {
     let output_table_1 = BamTableProvider::new_for_write(
         output_path_1.to_string(),
         df.schema().inner().clone(),
-        None, // tag fields (extracted from schema)
-        true, // 0-based coordinates
+        None,  // tag fields (extracted from schema)
+        true,  // 0-based coordinates
+        false, // sort_on_write
     );
     ctx.register_table("output_1", Arc::new(output_table_1))?;
 
@@ -56,6 +58,7 @@ async fn main() -> datafusion::error::Result<()> {
         df.schema().inner().clone(),
         None,
         true,
+        false,
     );
     ctx.register_table("output_2", Arc::new(output_table_2))?;
 
@@ -74,7 +77,8 @@ async fn main() -> datafusion::error::Result<()> {
         None, // object storage options
         true, // 0-based coordinates
         None, // tag fields
-    )?;
+    )
+    .await?;
     ctx.register_table("input_sam", Arc::new(sam_input))?;
 
     // Write as BAM
@@ -83,6 +87,7 @@ async fn main() -> datafusion::error::Result<()> {
         ctx.table("input_sam").await?.schema().inner().clone(),
         None,
         true,
+        false,
     );
     ctx.register_table("bam_output", Arc::new(bam_output))?;
 
