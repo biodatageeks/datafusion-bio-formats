@@ -13,7 +13,7 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::{
-    EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
+    Distribution, EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
 };
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
@@ -158,6 +158,16 @@ impl ExecutionPlan for BamWriteExec {
         &self.cache
     }
 
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        if self.sort_on_write {
+            // Preserve partitions for parallel sort + merge
+            vec![Distribution::UnspecifiedDistribution]
+        } else {
+            // Coalesce all partitions so execute() reads all data
+            vec![Distribution::SinglePartition]
+        }
+    }
+
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![&self.input]
     }
@@ -227,11 +237,14 @@ impl ExecutionPlan for BamWriteExec {
             ])
             .expect("sort expressions should not be empty");
 
-            let sort_exec = Arc::new(SortExec::new(sort_exprs.clone(), self.input.clone()));
+            let sort_exec = Arc::new(
+                SortExec::new(sort_exprs.clone(), self.input.clone())
+                    .with_preserve_partitioning(true),
+            );
             let merge_exec = SortPreservingMergeExec::new(sort_exprs, sort_exec);
             merge_exec.execute(0, context)?
         } else {
-            self.input.execute(partition, context)?
+            self.input.execute(0, context)?
         };
         let output_schema = self.schema();
 
