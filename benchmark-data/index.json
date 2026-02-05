@@ -1965,6 +1965,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "fix/cram-parity-59@588e3356e5c12a20703394c7585c19c63b8f30c2@linux",
+      "label": "fix/cram-parity-59(588e3356)",
+      "ref": "fix/cram-parity-59",
+      "ref_type": "branch",
+      "timestamp": "2026-02-05T20:16:04Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/588e3356/linux",
+      "commit_sha": "588e3356e5c12a20703394c7585c19c63b8f30c2",
+      "is_latest_tag": false
+    },
+    {
+      "id": "fix/cram-parity-59@588e3356e5c12a20703394c7585c19c63b8f30c2@macos",
+      "label": "fix/cram-parity-59(588e3356)",
+      "ref": "fix/cram-parity-59",
+      "ref_type": "branch",
+      "timestamp": "2026-02-05T20:16:04Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/588e3356/macos",
+      "commit_sha": "588e3356e5c12a20703394c7585c19c63b8f30c2",
+      "is_latest_tag": false
+    },
+    {
       "id": "fix/cram-parity-59@c82264f044f57ed235b0576d34d9ef77b9290536@linux",
       "label": "fix/cram-parity-59(c82264f0)",
       "ref": "fix/cram-parity-59",
@@ -2850,6 +2874,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "54aa4f3496a87655f323c16e9c3b294f0a73505e",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@588e3356e5c12a20703394c7585c19c63b8f30c2@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-05T20:16:04Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "588e3356e5c12a20703394c7585c19c63b8f30c2",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@588e3356e5c12a20703394c7585c19c63b8f30c2@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-05T20:16:04Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "588e3356e5c12a20703394c7585c19c63b8f30c2",
       "is_latest_tag": true
     },
     {
@@ -4344,6 +4392,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-05T19:31:11Z",
+  "last_updated": "2026-02-05T20:16:05Z",
   "latest_tag": "v0.1.1"
 }

@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-02-05T20:09:31Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "fix/cram-parity-59",
+  "commit_sha": "588e3356e5c12a20703394c7585c19c63b8f30c2",
+  "benchmark_mode": "fast"
+}

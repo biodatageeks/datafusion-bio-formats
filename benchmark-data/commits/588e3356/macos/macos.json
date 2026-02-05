@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-02-05T20:14:34Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "fix/cram-parity-59",
+  "commit_sha": "588e3356e5c12a20703394c7585c19c63b8f30c2",
+  "benchmark_mode": "fast"
+}
