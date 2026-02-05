@@ -1,0 +1,24 @@
+{
+  "benchmark_name": "gff_predicate_chromosome_filter",
+  "format": "gff",
+  "category": "predicate_pushdown",
+  "timestamp": "2026-02-05T15:30:16.858333912Z",
+  "system_info": {
+    "os": "Ubuntu 22.04",
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "cpu_cores": 4,
+    "total_memory_gb": 15.620311737060547
+  },
+  "configuration": {
+    "query": "SELECT COUNT(*) FROM gencode_annotations WHERE chrom = 'chr1'",
+    "repetitions": 3,
+    "test_name": "chromosome_filter"
+  },
+  "metrics": {
+    "throughput_records_per_sec": 979.3638248466561,
+    "elapsed_seconds": 0.001021071,
+    "total_records": 1,
+    "speedup_vs_baseline": null,
+    "peak_memory_mb": null
+  }
+}
