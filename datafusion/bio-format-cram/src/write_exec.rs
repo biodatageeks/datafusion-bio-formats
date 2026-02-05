@@ -16,6 +16,7 @@ use datafusion::physical_expr::{
     EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
 };
 use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -222,8 +223,9 @@ impl ExecutionPlan for CramWriteExec {
             ])
             .expect("sort expressions should not be empty");
 
-            let sort_exec = SortExec::new(sort_exprs, self.input.clone());
-            sort_exec.execute(partition, context)?
+            let sort_exec = Arc::new(SortExec::new(sort_exprs.clone(), self.input.clone()));
+            let merge_exec = SortPreservingMergeExec::new(sort_exprs, sort_exec);
+            merge_exec.execute(0, context)?
         } else {
             self.input.execute(partition, context)?
         };
