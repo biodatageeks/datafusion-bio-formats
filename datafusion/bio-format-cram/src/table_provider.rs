@@ -13,8 +13,8 @@ use datafusion::physical_plan::{
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
-    BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY,
-    extract_header_metadata,
+    BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
+    COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
 use log::debug;
 use std::any::Any;
@@ -116,6 +116,8 @@ pub struct CramTableProvider {
     coordinate_system_zero_based: bool,
     /// Optional list of CRAM alignment tags to include as columns
     tag_fields: Option<Vec<String>>,
+    /// Whether to sort records by coordinate (chrom ASC, start ASC) on write
+    sort_on_write: bool,
 }
 
 impl CramTableProvider {
@@ -187,6 +189,7 @@ impl CramTableProvider {
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
+            sort_on_write: false,
         })
     }
 
@@ -289,6 +292,7 @@ impl CramTableProvider {
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields: Some(tag_fields),
+            sort_on_write: false,
         })
     }
 
@@ -300,12 +304,16 @@ impl CramTableProvider {
     /// * `reference_path` - Optional path to FASTA reference file
     /// * `tag_fields` - Optional list of BAM/SAM tags to write
     /// * `coordinate_system_zero_based` - If true, input is 0-based; if false, 1-based
+    /// * `sort_on_write` - If true, sort records by coordinate (chrom ASC, start ASC)
+    ///   before writing and set SO:coordinate in the header. If false, write records
+    ///   as-is and set SO:unsorted.
     pub fn new_for_write(
         output_path: String,
         schema: SchemaRef,
         reference_path: Option<String>,
         tag_fields: Option<Vec<String>>,
         coordinate_system_zero_based: bool,
+        sort_on_write: bool,
     ) -> Self {
         Self {
             file_path: output_path,
@@ -314,6 +322,7 @@ impl CramTableProvider {
             object_storage_options: None,
             coordinate_system_zero_based,
             tag_fields,
+            sort_on_write,
         }
     }
 
@@ -549,12 +558,26 @@ impl TableProvider for CramTableProvider {
             }
         }
 
+        // Build metadata overrides for sort order
+        let mut schema_metadata_overrides = HashMap::new();
+        if self.sort_on_write {
+            schema_metadata_overrides
+                .insert(BAM_SORT_ORDER_KEY.to_string(), "coordinate".to_string());
+        } else {
+            schema_metadata_overrides
+                .insert(BAM_SORT_ORDER_KEY.to_string(), "unsorted".to_string());
+        }
+
+        // Create write execution plan (SortExec wrapping happens at execution time
+        // inside CramWriteExec::execute to avoid DataFusion's optimizer stripping it)
         Ok(Arc::new(CramWriteExec::new(
             input,
             self.file_path.clone(),
             self.reference_path.clone(),
             tag_fields,
             self.coordinate_system_zero_based,
+            schema_metadata_overrides,
+            self.sort_on_write,
         )))
     }
 }

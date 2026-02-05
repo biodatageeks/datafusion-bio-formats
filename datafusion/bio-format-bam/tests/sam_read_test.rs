@@ -102,6 +102,7 @@ async fn test_sam_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         schema.clone(),
         None,
         true,
+        false,
     );
     ctx.register_table("output_sam", Arc::new(write_provider))?;
 
@@ -247,6 +248,7 @@ async fn test_sam_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         schema.clone(),
         Some(tag_fields.clone()),
         true,
+        false,
     );
     ctx.register_table("output_sam", Arc::new(write_provider))?;
 
@@ -349,6 +351,7 @@ async fn test_sam_schema_inference() -> Result<(), Box<dyn std::error::Error>> {
         schema.clone(),
         Some(tag_fields.clone()),
         true,
+        false,
     );
     ctx.register_table("output_sam", Arc::new(write_provider))?;
 
@@ -415,6 +418,7 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         schema.clone(),
         None,
         true,
+        false,
     );
     ctx.register_table("output_bam", Arc::new(write_bam))?;
 
@@ -441,6 +445,7 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         bam_read_schema,
         None,
         true,
+        false,
     );
     ctx.register_table("output_sam", Arc::new(write_sam))?;
 

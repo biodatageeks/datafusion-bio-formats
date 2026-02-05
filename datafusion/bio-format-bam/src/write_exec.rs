@@ -7,10 +7,15 @@ use crate::header_builder::build_bam_header;
 use crate::serializer::batch_to_bam_records;
 use crate::writer::{BamCompressionType, BamLocalWriter};
 use datafusion::arrow::array::{RecordBatch, UInt64Array};
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::expressions::Column;
+use datafusion::physical_expr::{
+    EquivalenceProperties, LexOrdering, Partitioning, PhysicalSortExpr,
+};
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
@@ -19,6 +24,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 use log::debug;
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -40,6 +46,10 @@ pub struct BamWriteExec {
     tag_fields: Vec<String>,
     /// Whether the input coordinates are 0-based (need +1 for BAM POS output)
     coordinate_system_zero_based: bool,
+    /// Metadata overrides to merge into the input schema before building the header
+    schema_metadata_overrides: HashMap<String, String>,
+    /// Whether to sort records by coordinate before writing
+    sort_on_write: bool,
     /// Cached plan properties
     cache: PlanProperties,
 }
@@ -64,6 +74,8 @@ impl BamWriteExec {
         compression: Option<BamCompressionType>,
         tag_fields: Vec<String>,
         coordinate_system_zero_based: bool,
+        schema_metadata_overrides: HashMap<String, String>,
+        sort_on_write: bool,
     ) -> Self {
         let compression =
             compression.unwrap_or_else(|| BamCompressionType::from_path(&output_path));
@@ -88,6 +100,8 @@ impl BamWriteExec {
             compression,
             tag_fields,
             coordinate_system_zero_based,
+            schema_metadata_overrides,
+            sort_on_write,
             cache,
         }
     }
@@ -162,6 +176,8 @@ impl ExecutionPlan for BamWriteExec {
             Some(self.compression),
             self.tag_fields.clone(),
             self.coordinate_system_zero_based,
+            self.schema_metadata_overrides.clone(),
+            self.sort_on_write,
         )))
     }
 
@@ -179,8 +195,42 @@ impl ExecutionPlan for BamWriteExec {
         let compression = self.compression;
         let tag_fields = self.tag_fields.clone();
         let coordinate_system_zero_based = self.coordinate_system_zero_based;
-        let input = self.input.execute(partition, context)?;
+        let schema_metadata_overrides = self.schema_metadata_overrides.clone();
+
+        // If sort_on_write, wrap the input plan in a SortExec at execution time
+        // (cannot rely on plan-level wrapping since DataFusion's optimizer may strip it)
         let input_schema = self.input.schema();
+        let input = if self.sort_on_write {
+            let chrom_idx = input_schema.index_of("chrom").map_err(|_| {
+                DataFusionError::Plan("Column 'chrom' not found for sort_on_write".to_string())
+            })?;
+            let start_idx = input_schema.index_of("start").map_err(|_| {
+                DataFusionError::Plan("Column 'start' not found for sort_on_write".to_string())
+            })?;
+
+            let sort_exprs = LexOrdering::new(vec![
+                PhysicalSortExpr::new(
+                    Arc::new(Column::new("chrom", chrom_idx)),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: false,
+                    },
+                ),
+                PhysicalSortExpr::new(
+                    Arc::new(Column::new("start", start_idx)),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: false,
+                    },
+                ),
+            ])
+            .expect("sort expressions should not be empty");
+
+            let sort_exec = SortExec::new(sort_exprs, self.input.clone());
+            sort_exec.execute(partition, context)?
+        } else {
+            self.input.execute(partition, context)?
+        };
         let output_schema = self.schema();
 
         let stream = futures::stream::once(write_bam_stream(
@@ -190,6 +240,7 @@ impl ExecutionPlan for BamWriteExec {
             compression,
             tag_fields,
             coordinate_system_zero_based,
+            schema_metadata_overrides,
             output_schema,
         ));
 
@@ -208,6 +259,7 @@ impl ExecutionPlan for BamWriteExec {
 /// 3. Converts each RecordBatch to BAM records
 /// 4. Writes all records to the file
 /// 5. Returns a count of written records
+#[allow(clippy::too_many_arguments)]
 async fn write_bam_stream(
     mut input: SendableRecordBatchStream,
     input_schema: SchemaRef,
@@ -215,6 +267,7 @@ async fn write_bam_stream(
     compression: BamCompressionType,
     tag_fields: Vec<String>,
     coordinate_system_zero_based: bool,
+    schema_metadata_overrides: HashMap<String, String>,
     output_schema: SchemaRef,
 ) -> Result<RecordBatch> {
     debug!("Starting BAM write to: {}", output_path);
@@ -222,8 +275,20 @@ async fn write_bam_stream(
     // Create writer
     let mut writer = BamLocalWriter::with_compression(&output_path, compression)?;
 
+    // Merge metadata overrides into input schema before building header
+    let effective_schema = if schema_metadata_overrides.is_empty() {
+        input_schema
+    } else {
+        let mut metadata = input_schema.metadata().clone();
+        metadata.extend(schema_metadata_overrides);
+        Arc::new(Schema::new_with_metadata(
+            input_schema.fields().iter().cloned().collect::<Vec<_>>(),
+            metadata,
+        ))
+    };
+
     // Build header from schema metadata
-    let header = build_bam_header(&input_schema, &tag_fields)?;
+    let header = build_bam_header(&effective_schema, &tag_fields)?;
 
     // Write header
     writer.write_header(&header)?;
@@ -325,7 +390,15 @@ mod tests {
         let input_plan = provider
             .scan(&SessionContext::new().state(), None, &[], None)
             .await?;
-        let write_exec = BamWriteExec::new(input_plan, output_path.clone(), None, vec![], true);
+        let write_exec = BamWriteExec::new(
+            input_plan,
+            output_path.clone(),
+            None,
+            vec![],
+            true,
+            HashMap::new(),
+            false,
+        );
 
         // Execute the plan
         let ctx = SessionContext::new();
