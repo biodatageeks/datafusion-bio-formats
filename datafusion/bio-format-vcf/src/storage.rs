@@ -7,6 +7,7 @@ use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_remote_stream,
     get_remote_stream_bgzf_async, get_remote_stream_gz_async, get_storage_type,
 };
+use datafusion_bio_format_core::record_filter::RecordFieldAccessor;
 use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
@@ -649,5 +650,88 @@ impl VcfReader {
             VcfReader::Local(reader) => reader.read_records(),
             VcfReader::Remote(reader) => reader.read_records().await,
         }
+    }
+}
+
+/// A local indexed VCF reader for region-based queries.
+///
+/// Uses noodles' `IndexedReader::Builder` to support random-access queries using TBI/CSI indexes.
+/// This is used when an index file is available and genomic region filters are present.
+pub struct IndexedVcfReader {
+    reader: vcf::io::IndexedReader<noodles_bgzf_vcf::io::Reader<File>>,
+    header: vcf::Header,
+}
+
+impl IndexedVcfReader {
+    /// Creates a new indexed VCF reader.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the BGZF-compressed VCF file (.vcf.gz)
+    /// * `index_path` - Path to the TBI or CSI index file
+    pub fn new(file_path: &str, index_path: &str) -> Result<Self, std::io::Error> {
+        let index = noodles_tabix::fs::read(index_path)?;
+        let mut reader = vcf::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(file_path)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let header = reader.read_header()?;
+        Ok(Self { reader, header })
+    }
+
+    /// Returns a reference to the VCF header.
+    pub fn header(&self) -> &vcf::Header {
+        &self.header
+    }
+
+    /// Returns contig names from the header.
+    pub fn contig_names(&self) -> Vec<String> {
+        self.header
+            .contigs()
+            .keys()
+            .map(|k| k.to_string())
+            .collect()
+    }
+
+    /// Query records overlapping a genomic region.
+    pub fn query(
+        &mut self,
+        region: &noodles_core::Region,
+    ) -> Result<impl Iterator<Item = Result<Record, std::io::Error>> + '_, std::io::Error> {
+        self.reader.query(&self.header, region)
+    }
+}
+
+/// Record field accessor for VCF records, used for record-level filter evaluation.
+pub struct VcfRecordFields {
+    /// Chromosome name
+    pub chrom: Option<String>,
+    /// Start position (in the output coordinate system)
+    pub start: Option<u32>,
+    /// End position (in the output coordinate system)
+    pub end: Option<u32>,
+}
+
+impl RecordFieldAccessor for VcfRecordFields {
+    fn get_string_field(&self, name: &str) -> Option<String> {
+        match name {
+            "chrom" => self.chrom.clone(),
+            _ => None,
+        }
+    }
+
+    fn get_u32_field(&self, name: &str) -> Option<u32> {
+        match name {
+            "start" => self.start,
+            "end" => self.end,
+            _ => None,
+        }
+    }
+
+    fn get_f32_field(&self, _name: &str) -> Option<f32> {
+        None
+    }
+
+    fn get_f64_field(&self, _name: &str) -> Option<f64> {
+        None
     }
 }

@@ -15,21 +15,22 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 |-------|-------------|-------------------|---------------------|----------------|---------------|--------|
 | **[datafusion-bio-format-core](datafusion/bio-format-core)** | Core utilities and object storage support | N/A | N/A | N/A | N/A | ✅ |
 | **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ❌ |✅ (BGZF) | ✅ | ✅ |
-| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ❌ | ❌ | ❌ | ✅ | ✅ |
-| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ✅ (TBI/CSI) | ❌ | ✅ (indexed) | ✅ | ✅ |
+| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ✅ (BAI/CSI) | ❌ | ✅ (indexed) | ✅ | ✅ |
 | **[datafusion-bio-format-bed](datafusion/bio-format-bed)** | BED genomic intervals | ❌ | ❌  | ❌ | ❌ | ✅ |
 | **[datafusion-bio-format-gff](datafusion/bio-format-gff)** | GFF genome annotations | ✅ | ✅ | ✅ (BGZF) | ❌ | ✅ |
 | **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ❌  | ❌ | ❌ | ✅ |
-| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ❌ | ❌  | ❌ | ❌ | ✅ |
+| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ✅ (CRAI) | ❌  | ✅ (indexed) | ✅ | ✅ |
 
 ## Features
 
-- 🚀 **High Performance**: Parallel reading of BGZF-compressed files
+- 🚀 **High Performance**: Index-based random access and parallel reading across chromosomes
+- 🔍 **Predicate Pushdown**: SQL `WHERE` clauses on genomic coordinates use BAI/CRAI/TBI indexes to skip irrelevant data
 - ☁️ **Cloud Native**: Built-in support for GCS, S3, and Azure Blob Storage
 - 📊 **SQL Interface**: Query genomic data using familiar SQL syntax
 - 💾 **Memory Efficient**: Streaming architecture for large files
 - 🔧 **DataFusion Integration**: Seamless integration with Apache DataFusion ecosystem
-- ✍️ **Write Support**: Export query results to FASTQ and VCF files with compression
+- ✍️ **Write Support**: Export query results to BAM/SAM, CRAM, FASTQ, and VCF files with compression
 
 ## Installation
 
@@ -249,6 +250,110 @@ The writer uses this metadata to reconstruct proper VCF header lines:
 ```
 
 For write-only operations (new output files), use `VcfTableProvider::new_for_write()` which accepts the schema directly without reading from file.
+
+## Index-Based Range Queries
+
+BAM, CRAM, and VCF table providers support **index-based predicate pushdown** for efficient genomic region queries. When an index file is present alongside the data file, SQL filters on `chrom`, `start`, and `end` columns are translated into indexed random access, skipping irrelevant data entirely.
+
+### Supported Index Formats
+
+| Data Format | Index Formats | Naming Convention |
+|-------------|---------------|-------------------|
+| BAM | BAI, CSI | `sample.bam.bai` or `sample.bai`, `sample.bam.csi` |
+| CRAM | CRAI | `sample.cram.crai` |
+| VCF (bgzf) | TBI, CSI | `sample.vcf.gz.tbi`, `sample.vcf.gz.csi` |
+
+Index files are **auto-discovered** — place them alongside the data file and the table provider will find them automatically. No configuration needed.
+
+### SQL Query Patterns
+
+All standard genomic filter patterns are supported:
+
+```sql
+-- Single region query
+SELECT * FROM alignments
+WHERE chrom = 'chr1' AND start >= 1000000 AND end <= 2000000;
+
+-- Multi-chromosome query (parallel across chromosomes)
+SELECT * FROM alignments
+WHERE chrom IN ('chr1', 'chr2', 'chr3');
+
+-- Range with BETWEEN
+SELECT * FROM alignments
+WHERE chrom = 'chr1' AND start BETWEEN 1000000 AND 2000000;
+
+-- Combine genomic region with record-level filters
+SELECT * FROM alignments
+WHERE chrom = 'chr1' AND start >= 1000000 AND mapping_quality >= 30;
+```
+
+### How It Works
+
+```
+┌────────────────────────────────────────┐
+│  SQL: WHERE chrom = 'chr1'             │
+│        AND start >= 1000000            │
+│        AND mapping_quality >= 30       │
+└──────────┬─────────────────────────────┘
+           │
+    ┌──────▼─────────────────────┐
+    │  1. Extract genomic regions │  chrom/start/end → index query regions
+    │  2. Separate residual       │  mapping_quality → post-read filter
+    └──────┬─────────────────────┘
+           │
+    ┌──────▼─────────────────────┐
+    │  3. Partition by region     │  Each region = 1 DataFusion partition
+    │     (parallel execution)    │  Executed concurrently by DataFusion
+    └──────┬─────────────────────┘
+           │
+    ┌──────▼─────────────────────┐
+    │  4. Per-partition:          │
+    │     IndexedReader.query()   │  Seek directly via BAI/CRAI/TBI
+    │     → apply residual filter │  mapping_quality >= 30
+    │     → build RecordBatch     │
+    └────────────────────────────┘
+```
+
+**Partitioning behavior:**
+
+| Index Available? | SQL Filters | Partitions |
+|-----------------|-------------|------------|
+| Yes | `chrom = 'chr1' AND start >= 1000` | 1 (the specified region) |
+| Yes | `chrom IN ('chr1', 'chr2')` | 2 (one per chromosome) |
+| Yes | `mapping_quality >= 30` (no genomic filter) | N (one per chromosome in file) |
+| Yes | None (full scan) | N (one per chromosome — parallel full scan) |
+| No | Any | 1 (sequential full scan) |
+
+When an index exists but no genomic filters are specified, the query is automatically parallelized across all chromosomes in the file.
+
+### Record-Level Filter Pushdown
+
+Beyond index-based region queries, all formats support record-level predicate evaluation. Filters on columns like `mapping_quality`, `flag`, `score`, or `strand` are evaluated as each record is read, filtering early before Arrow `RecordBatch` construction.
+
+This works **with or without** an index file:
+
+```sql
+-- No index needed — filters applied per-record during sequential scan
+SELECT * FROM alignments WHERE mapping_quality >= 30 AND flag & 4 = 0;
+```
+
+### Index File Generation
+
+Create index files using standard bioinformatics tools:
+
+```bash
+# BAM: sort and index
+samtools sort input.bam -o sorted.bam
+samtools index sorted.bam                # creates sorted.bam.bai
+
+# CRAM: sort and index
+samtools sort input.cram -o sorted.cram --reference ref.fa
+samtools index sorted.cram               # creates sorted.cram.crai
+
+# VCF: sort, compress, and index
+bcftools sort input.vcf -Oz -o sorted.vcf.gz
+bcftools index -t sorted.vcf.gz          # creates sorted.vcf.gz.tbi
+```
 
 ## Performance Benchmarks
 

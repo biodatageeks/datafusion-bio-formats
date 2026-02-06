@@ -1,6 +1,7 @@
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_remote_stream, get_storage_type,
 };
+use datafusion_bio_format_core::record_filter::RecordFieldAccessor;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
 use noodles_bam as bam;
@@ -246,5 +247,99 @@ impl SamReader {
         match self {
             SamReader::Local(reader, header) => stream::iter(reader.record_bufs(header)).boxed(),
         }
+    }
+}
+
+/// A local indexed BAM reader for region-based queries.
+///
+/// Uses noodles' `IndexedReader::Builder` to support random-access queries using BAI indexes.
+/// This is used when an index file is available and genomic region filters are present.
+pub struct IndexedBamReader {
+    reader: bam::io::IndexedReader<noodles_bgzf::io::Reader<File>>,
+    header: sam::Header,
+}
+
+impl IndexedBamReader {
+    /// Creates a new indexed BAM reader.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the BAM file
+    /// * `index_path` - Path to the BAI index file
+    pub fn new(file_path: &str, index_path: &str) -> Result<Self, Error> {
+        let mut reader = bam::io::indexed_reader::Builder::default()
+            .set_index(bam::bai::fs::read(index_path)?)
+            .build_from_path(file_path)
+            .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+        let header = reader.read_header()?;
+        Ok(Self { reader, header })
+    }
+
+    /// Returns a reference to the SAM header.
+    pub fn header(&self) -> &sam::Header {
+        &self.header
+    }
+
+    /// Returns reference sequence names from the header.
+    pub fn reference_names(&self) -> Vec<String> {
+        self.header
+            .reference_sequences()
+            .keys()
+            .map(|k| k.to_string())
+            .collect()
+    }
+
+    /// Query records overlapping a genomic region.
+    ///
+    /// Returns an iterator of BAM records overlapping the specified region.
+    /// The region string uses noodles format: "chr1:1000-2000" (1-based, closed).
+    pub fn query(
+        &mut self,
+        region: &noodles_core::Region,
+    ) -> Result<impl Iterator<Item = Result<Record, Error>> + '_, Error> {
+        self.reader.query(&self.header, region)
+    }
+}
+
+/// Record field accessor for BAM records, used for record-level filter evaluation.
+///
+/// This struct holds pre-extracted field values from a BAM record
+/// for efficient access during filter evaluation.
+pub struct BamRecordFields {
+    /// Chromosome name
+    pub chrom: Option<String>,
+    /// Start position (in the output coordinate system)
+    pub start: Option<u32>,
+    /// End position (in the output coordinate system)
+    pub end: Option<u32>,
+    /// Mapping quality
+    pub mapping_quality: Option<u32>,
+    /// SAM flags
+    pub flags: u32,
+}
+
+impl RecordFieldAccessor for BamRecordFields {
+    fn get_string_field(&self, name: &str) -> Option<String> {
+        match name {
+            "chrom" => self.chrom.clone(),
+            _ => None,
+        }
+    }
+
+    fn get_u32_field(&self, name: &str) -> Option<u32> {
+        match name {
+            "start" => self.start,
+            "end" => self.end,
+            "mapping_quality" => self.mapping_quality,
+            "flags" => Some(self.flags),
+            _ => None,
+        }
+    }
+
+    fn get_f32_field(&self, _name: &str) -> Option<f32> {
+        None
+    }
+
+    fn get_f64_field(&self, _name: &str) -> Option<f64> {
+        None
     }
 }

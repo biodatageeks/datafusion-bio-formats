@@ -4,13 +4,18 @@ use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::{Expr, dml::InsertOp};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
+use datafusion_bio_format_core::genomic_filter::{
+    build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
+};
+use datafusion_bio_format_core::index_utils::discover_cram_index;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
     BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
@@ -118,6 +123,10 @@ pub struct CramTableProvider {
     tag_fields: Option<Vec<String>>,
     /// Whether to sort records by coordinate (chrom ASC, start ASC) on write
     sort_on_write: bool,
+    /// Path to an index file (CRAI). Auto-discovered if not provided.
+    index_path: Option<String>,
+    /// Reference sequence names from the file header (for partitioning full scans by chromosome)
+    reference_names: Vec<String>,
 }
 
 impl CramTableProvider {
@@ -177,11 +186,34 @@ impl CramTableProvider {
             extract_header_metadata(reader.get_header())
         };
 
+        // Extract reference sequence names for partitioning
+        let reference_names: Vec<String> = header_metadata
+            .get(datafusion_bio_format_core::BAM_REFERENCE_SEQUENCES_KEY)
+            .and_then(|json| {
+                serde_json::from_str::<Vec<datafusion_bio_format_core::ReferenceSequenceMetadata>>(
+                    json,
+                )
+                .ok()
+            })
+            .map(|refs| refs.into_iter().map(|r| r.name).collect())
+            .unwrap_or_default();
+
         let schema = determine_schema(
             &tag_fields,
             coordinate_system_zero_based,
             Some(header_metadata),
         )?;
+
+        // Auto-discover index file for local files
+        let index_path = if matches!(storage_type, StorageType::LOCAL) {
+            discover_cram_index(&file_path).map(|(path, fmt)| {
+                debug!("Discovered CRAM index: {} (format: {:?})", path, fmt);
+                path
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             file_path,
             schema,
@@ -190,6 +222,8 @@ impl CramTableProvider {
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write: false,
+            index_path,
+            reference_names,
         })
     }
 
@@ -282,8 +316,29 @@ impl CramTableProvider {
         let schema = determine_schema(
             &Some(tag_fields.clone()),
             coordinate_system_zero_based,
-            Some(header_metadata),
+            Some(header_metadata.clone()),
         )?;
+
+        // Extract reference names from header metadata
+        let reference_names: Vec<String> = header_metadata
+            .get(datafusion_bio_format_core::BAM_REFERENCE_SEQUENCES_KEY)
+            .and_then(|json| {
+                serde_json::from_str::<Vec<datafusion_bio_format_core::ReferenceSequenceMetadata>>(
+                    json,
+                )
+                .ok()
+            })
+            .map(|refs| refs.into_iter().map(|r| r.name).collect())
+            .unwrap_or_default();
+
+        // Auto-discover index file
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+        let storage_type = get_storage_type(file_path.clone());
+        let index_path = if matches!(storage_type, StorageType::LOCAL) {
+            discover_cram_index(&file_path).map(|(path, _)| path)
+        } else {
+            None
+        };
 
         Ok(Self {
             file_path,
@@ -293,6 +348,8 @@ impl CramTableProvider {
             coordinate_system_zero_based,
             tag_fields: Some(tag_fields),
             sort_on_write: false,
+            index_path,
+            reference_names,
         })
     }
 
@@ -323,6 +380,8 @@ impl CramTableProvider {
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write,
+            index_path: None,
+            reference_names: Vec::new(),
         }
     }
 
@@ -471,11 +530,34 @@ impl TableProvider for CramTableProvider {
         TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::common::Result<Vec<TableProviderFilterPushDown>> {
+        let pushdown_support = filters
+            .iter()
+            .map(|expr| {
+                // Genomic coordinate filters get Inexact when index is available
+                if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
+                    debug!("CRAM filter can be pushed down (indexed): {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else if can_push_down_record_filter(expr, &self.schema) {
+                    debug!("CRAM filter can be pushed down (record-level): {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    debug!("CRAM filter cannot be pushed down: {:?}", expr);
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect();
+        Ok(pushdown_support)
+    }
+
     async fn scan(
         &self,
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         debug!("CramTableProvider::scan");
@@ -503,6 +585,59 @@ impl TableProvider for CramTableProvider {
 
         let schema = project_schema(&self.schema, projection);
 
+        // Determine regions and partitioning when index is available
+        if let Some(ref index_path) = self.index_path {
+            let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
+
+            let regions = if !analysis.regions.is_empty() {
+                // Use extracted regions from filters
+                analysis.regions
+            } else if !self.reference_names.is_empty() {
+                // Full scan: partition by chromosome for parallel reading
+                build_full_scan_regions(&self.reference_names)
+            } else {
+                Vec::new()
+            };
+
+            if !regions.is_empty() {
+                let num_partitions = regions.len();
+
+                // Collect filters for record-level evaluation
+                let record_filters: Vec<Expr> = filters
+                    .iter()
+                    .filter(|expr| can_push_down_record_filter(expr, &self.schema))
+                    .cloned()
+                    .collect();
+
+                debug!(
+                    "CRAM indexed scan: {} regions, {} record-level filters",
+                    num_partitions,
+                    record_filters.len()
+                );
+
+                return Ok(Arc::new(CramExec {
+                    cache: PlanProperties::new(
+                        EquivalenceProperties::new(schema.clone()),
+                        Partitioning::UnknownPartitioning(num_partitions),
+                        EmissionType::Final,
+                        Boundedness::Bounded,
+                    ),
+                    file_path: self.file_path.clone(),
+                    schema: schema.clone(),
+                    projection: projection.cloned(),
+                    limit,
+                    reference_path: self.reference_path.clone(),
+                    object_storage_options: self.object_storage_options.clone(),
+                    coordinate_system_zero_based: self.coordinate_system_zero_based,
+                    tag_fields: self.tag_fields.clone(),
+                    regions: Some(regions),
+                    index_path: Some(index_path.clone()),
+                    residual_filters: record_filters,
+                }));
+            }
+        }
+
+        // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(CramExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
@@ -518,6 +653,9 @@ impl TableProvider for CramTableProvider {
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             tag_fields: self.tag_fields.clone(),
+            regions: None,
+            index_path: None,
+            residual_filters: Vec::new(),
         }))
     }
 
