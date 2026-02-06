@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "runner": "macos-latest",
+  "os": "Darwin",
+  "os_version": "24.6.0",
+  "arch": "arm64",
+  "timestamp": "2026-02-06T13:42:45Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/index-based-predicate-pushdown",
+  "commit_sha": "e1104b7dbc5699b0879f4f36baceb0dbd2ac8dca",
+  "benchmark_mode": "fast"
+}
