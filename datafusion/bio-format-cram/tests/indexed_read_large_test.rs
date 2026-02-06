@@ -1,7 +1,6 @@
 //! Large integration tests for index-based predicate pushdown with CRAM data.
 //!
 //! Uses multi_chrom_large.cram: 4277 reads across chr1(1662), chr2(1694), chrX(921).
-//! All tests are ignored because noodles' indexed CRAM reader panics on no_ref CRAMs.
 
 use datafusion::arrow::array::Array;
 use datafusion::prelude::*;
@@ -49,7 +48,6 @@ async fn setup_cram_ctx() -> datafusion::error::Result<SessionContext> {
 }
 
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with region queries"]
 async fn test_cram_single_region_query_large() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -65,7 +63,6 @@ async fn test_cram_single_region_query_large() -> datafusion::error::Result<()> 
 }
 
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_multi_chromosome_query_large() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -81,7 +78,6 @@ async fn test_cram_multi_chromosome_query_large() -> datafusion::error::Result<(
 }
 
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_full_scan_total_count_large() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -92,7 +88,6 @@ async fn test_cram_full_scan_total_count_large() -> datafusion::error::Result<()
 }
 
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_record_level_filter_large() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -106,7 +101,6 @@ async fn test_cram_record_level_filter_large() -> datafusion::error::Result<()> 
 }
 
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_combined_genomic_and_record_filter_large() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -124,7 +118,6 @@ async fn test_cram_combined_genomic_and_record_filter_large() -> datafusion::err
 }
 
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with region queries"]
 async fn test_cram_region_with_start_end_large() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -143,7 +136,6 @@ async fn test_cram_region_with_start_end_large() -> datafusion::error::Result<()
 }
 
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with region queries"]
 async fn test_cram_indexed_vs_full_scan_correctness_large() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 

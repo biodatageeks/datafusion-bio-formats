@@ -7,7 +7,8 @@
 //! - Produce correct results compared to full-scan queries
 //!
 //! The test CRAM file was generated with `no_ref` mode (reference-free),
-//! so no external reference path is needed.
+//! so no external reference path is needed. The noodles fork includes a fix
+//! for multi-ref slice handling in no_ref CRAMs (biodatageeks/noodles@da905ff).
 //!
 //! Uses multi_chrom.cram: 421 reads across chr1(160), chr2(159), chrX(102).
 
@@ -60,10 +61,7 @@ async fn setup_cram_ctx() -> datafusion::error::Result<SessionContext> {
 }
 
 /// Test: single chromosome filter via index pushdown.
-/// NOTE: Ignored because noodles' indexed CRAM reader panics on no_ref CRAMs
-/// when querying specific regions ("invalid reference sequence name").
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with region queries"]
 async fn test_cram_single_region_query() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -80,10 +78,7 @@ async fn test_cram_single_region_query() -> datafusion::error::Result<()> {
 }
 
 /// Test: multi-chromosome filter via index pushdown.
-/// NOTE: Ignored because noodles' indexed CRAM reader panics on no_ref CRAMs
-/// when multiple partitions are queried concurrently ("invalid reference sequence name").
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_multi_chromosome_query() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -108,10 +103,7 @@ async fn test_cram_multi_chromosome_query() -> datafusion::error::Result<()> {
 }
 
 /// Test: full scan without chromosome filter.
-/// NOTE: Ignored because noodles' indexed CRAM reader panics on no_ref CRAMs
-/// when the index triggers multi-partition reads ("invalid reference sequence name").
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_full_scan_total_count() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -136,10 +128,7 @@ async fn test_cram_full_scan_total_count() -> datafusion::error::Result<()> {
 }
 
 /// Test: record-level filter (mapping quality).
-/// NOTE: Ignored because noodles' indexed CRAM reader panics on no_ref CRAMs
-/// when the index triggers multi-partition reads ("invalid reference sequence name").
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_record_level_filter() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -161,10 +150,7 @@ async fn test_cram_record_level_filter() -> datafusion::error::Result<()> {
 }
 
 /// Test: combined genomic region + record-level filter.
-/// NOTE: Ignored because noodles' indexed CRAM reader panics on no_ref CRAMs
-/// when the index triggers multi-partition reads ("invalid reference sequence name").
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with multiple partitions"]
 async fn test_cram_combined_genomic_and_record_filter() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -187,10 +173,7 @@ async fn test_cram_combined_genomic_and_record_filter() -> datafusion::error::Re
 }
 
 /// Test: genomic region with start/end position bounds.
-/// NOTE: Ignored because noodles' indexed CRAM reader panics on no_ref CRAMs
-/// when querying specific regions ("invalid reference sequence name").
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with region queries"]
 async fn test_cram_region_with_start_end() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
@@ -198,7 +181,7 @@ async fn test_cram_region_with_start_end() -> datafusion::error::Result<()> {
 
     let region_count = count_rows(
         &ctx,
-        "SELECT chrom FROM cram WHERE chrom = 'chr1' AND start >= 100002700 AND \"end\" <= 100003500",
+        "SELECT chrom FROM cram WHERE chrom = 'chr1' AND start >= 55004999 AND \"end\" <= 55015000",
     )
     .await;
 
@@ -214,10 +197,7 @@ async fn test_cram_region_with_start_end() -> datafusion::error::Result<()> {
 }
 
 /// Test: correctness of indexed vs full scan results.
-/// NOTE: Ignored because noodles' indexed CRAM reader panics on no_ref CRAMs
-/// when querying specific regions ("invalid reference sequence name").
 #[tokio::test]
-#[ignore = "noodles indexed CRAM reader panics on no_ref CRAMs with region queries"]
 async fn test_cram_indexed_vs_full_scan_correctness() -> datafusion::error::Result<()> {
     let ctx = setup_cram_ctx().await?;
 
