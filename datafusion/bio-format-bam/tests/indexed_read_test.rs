@@ -1,10 +1,12 @@
-//! Integration tests for index-based predicate pushdown and parallel reading.
+//! Integration tests for index-based predicate pushdown with BAM data.
 //!
 //! Tests verify that BAM files with BAI indexes correctly:
 //! - Partition reads by genomic region
 //! - Push down chromosome and position filters via index
 //! - Apply record-level filters (e.g., mapping quality)
 //! - Produce correct results compared to full-scan queries
+//!
+//! Uses multi_chrom.bam: 421 reads across chr1(160), chr2(159), chrX(102).
 
 use datafusion::arrow::array::Array;
 use datafusion::prelude::*;
@@ -67,7 +69,7 @@ async fn test_bam_single_region_query() -> datafusion::error::Result<()> {
     assert!(chroms.contains("chr1"));
 
     let count = count_rows(&ctx, "SELECT chrom FROM bam WHERE chrom = 'chr1'").await;
-    assert!(count > 0, "Expected reads on chr1");
+    assert_eq!(count, 160, "Expected 160 reads on chr1");
 
     Ok(())
 }
@@ -95,6 +97,13 @@ async fn test_bam_multi_chromosome_query() -> datafusion::error::Result<()> {
         chroms
     );
 
+    let count = count_rows(
+        &ctx,
+        "SELECT chrom FROM bam WHERE chrom IN ('chr1', 'chr2')",
+    )
+    .await;
+    assert_eq!(count, 160 + 159, "Expected 319 reads on chr1 + chr2");
+
     Ok(())
 }
 
@@ -106,7 +115,7 @@ async fn test_bam_full_scan_total_count() -> datafusion::error::Result<()> {
     let ctx = setup_bam_ctx().await?;
 
     let total = count_rows(&ctx, "SELECT chrom FROM bam").await;
-    assert!(total > 0, "Expected some reads in full scan");
+    assert_eq!(total, 421, "Expected 421 total reads in full scan");
 
     let chr1 = count_rows(&ctx, "SELECT chrom FROM bam WHERE chrom = 'chr1'").await;
     let chr2 = count_rows(&ctx, "SELECT chrom FROM bam WHERE chrom = 'chr2'").await;
@@ -184,14 +193,14 @@ async fn test_bam_region_with_start_end() -> datafusion::error::Result<()> {
     // Query a subregion of chr1 (positions are 0-based)
     let region_count = count_rows(
         &ctx,
-        "SELECT chrom FROM bam WHERE chrom = 'chr1' AND start >= 100002700 AND \"end\" <= 100003500",
+        "SELECT chrom FROM bam WHERE chrom = 'chr1' AND start >= 55004999 AND \"end\" <= 55015000",
     )
     .await;
 
     assert!(region_count > 0, "Expected reads in the specified region");
     assert!(
-        region_count <= chr1_total,
-        "Region count ({}) should be <= chr1 total ({})",
+        region_count < chr1_total,
+        "Region count ({}) should be < chr1 total ({})",
         region_count,
         chr1_total
     );
