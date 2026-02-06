@@ -1365,6 +1365,30 @@
       "is_latest_tag": false
     },
     {
+      "id": "feat/index-based-predicate-pushdown@132d1e8819b75ec4576731dc2f9a58be22a616f3@linux",
+      "label": "feat/index-based-predicate-pushdown(132d1e88)",
+      "ref": "feat/index-based-predicate-pushdown",
+      "ref_type": "branch",
+      "timestamp": "2026-02-06T15:10:23Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "commits/132d1e88/linux",
+      "commit_sha": "132d1e8819b75ec4576731dc2f9a58be22a616f3",
+      "is_latest_tag": false
+    },
+    {
+      "id": "feat/index-based-predicate-pushdown@132d1e8819b75ec4576731dc2f9a58be22a616f3@macos",
+      "label": "feat/index-based-predicate-pushdown(132d1e88)",
+      "ref": "feat/index-based-predicate-pushdown",
+      "ref_type": "branch",
+      "timestamp": "2026-02-06T15:10:23Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "commits/132d1e88/macos",
+      "commit_sha": "132d1e8819b75ec4576731dc2f9a58be22a616f3",
+      "is_latest_tag": false
+    },
+    {
       "id": "feat/index-based-predicate-pushdown@e1104b7dbc5699b0879f4f36baceb0dbd2ac8dca@linux",
       "label": "feat/index-based-predicate-pushdown(e1104b7d)",
       "ref": "feat/index-based-predicate-pushdown",
@@ -2274,6 +2298,30 @@
       "runner_label": "macOS ARM64",
       "path": "tags/v0.1.1/macos",
       "commit_sha": "11d5ea5f8f86670c6c7df6781b59d80f653ac025",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@132d1e8819b75ec4576731dc2f9a58be22a616f3@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-06T15:10:23Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "132d1e8819b75ec4576731dc2f9a58be22a616f3",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@132d1e8819b75ec4576731dc2f9a58be22a616f3@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-06T15:10:23Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "132d1e8819b75ec4576731dc2f9a58be22a616f3",
       "is_latest_tag": true
     },
     {
@@ -4488,6 +4536,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-06T13:43:37Z",
+  "last_updated": "2026-02-06T15:10:23Z",
   "latest_tag": "v0.1.1"
 }

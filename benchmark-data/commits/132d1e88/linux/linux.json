@@ -1,0 +1,12 @@
+{
+  "platform": "linux",
+  "runner": "ubuntu-22.04",
+  "os": "Linux",
+  "os_version": "6.8.0-1044-azure",
+  "arch": "x86_64",
+  "timestamp": "2026-02-06T15:07:45Z",
+  "baseline_tag": "v0.1.1",
+  "target_ref": "feat/index-based-predicate-pushdown",
+  "commit_sha": "132d1e8819b75ec4576731dc2f9a58be22a616f3",
+  "benchmark_mode": "fast"
+}
