@@ -1,5 +1,6 @@
 use crate::filter_utils::can_push_down_filter;
 use crate::physical_exec::GffExec;
+use crate::storage::IndexedGffReader;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
@@ -11,7 +12,13 @@ use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
 };
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::genomic_filter::{
+    build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
+};
+use datafusion_bio_format_core::index_utils::discover_gff_index;
+use datafusion_bio_format_core::object_storage::{
+    ObjectStorageOptions, StorageType, get_storage_type,
+};
 use log::debug;
 use std::any::Any;
 use std::collections::HashMap;
@@ -102,6 +109,10 @@ pub struct GffTableProvider {
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
+    /// Path to the TBI/CSI index file, if discovered
+    index_path: Option<String>,
+    /// Contig names extracted from the index header
+    contig_names: Vec<String>,
 }
 
 impl GffTableProvider {
@@ -129,6 +140,27 @@ impl GffTableProvider {
         // Schema construction based on Python-provided attribute fields
         let schema = determine_schema_on_demand(attr_fields.clone(), coordinate_system_zero_based)?;
 
+        // Auto-discover index file for local BGZF-compressed files
+        let storage_type = get_storage_type(file_path.clone());
+        let (index_path, contig_names) = if matches!(storage_type, StorageType::LOCAL) {
+            if let Some((idx_path, idx_fmt)) = discover_gff_index(&file_path) {
+                debug!("Discovered GFF index: {} (format: {:?})", idx_path, idx_fmt);
+                // Read contig names from the index
+                let names = match IndexedGffReader::new(&file_path, &idx_path) {
+                    Ok(reader) => reader.contig_names().to_vec(),
+                    Err(e) => {
+                        debug!("Failed to read GFF index contig names: {}", e);
+                        Vec::new()
+                    }
+                };
+                (Some(idx_path), names)
+            } else {
+                (None, Vec::new())
+            }
+        } else {
+            (None, Vec::new())
+        };
+
         debug!(
             "GffTableProvider::new - constructed schema for file: {}",
             file_path
@@ -141,6 +173,8 @@ impl GffTableProvider {
             thread_num,
             object_storage_options,
             coordinate_system_zero_based,
+            index_path,
+            contig_names,
         })
     }
 }
@@ -173,11 +207,14 @@ impl TableProvider for GffTableProvider {
         let pushdown_support = filters
             .iter()
             .map(|expr| {
-                if can_push_down_filter(expr, &self.schema) {
-                    debug!("Filter can be pushed down: {:?}", expr);
+                if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
+                    debug!("GFF filter can be pushed down (indexed): {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else if can_push_down_filter(expr, &self.schema) {
+                    debug!("GFF filter can be pushed down (record-level): {:?}", expr);
                     TableProviderFilterPushDown::Inexact
                 } else {
-                    debug!("Filter cannot be pushed down: {:?}", expr);
+                    debug!("GFF filter cannot be pushed down: {:?}", expr);
                     TableProviderFilterPushDown::Unsupported
                 }
             })
@@ -241,6 +278,58 @@ impl TableProvider for GffTableProvider {
             filters.len()
         );
 
+        // Indexed path: use TBI/CSI index for region-based queries
+        if let Some(ref index_path) = self.index_path {
+            let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
+
+            let regions = if !analysis.regions.is_empty() {
+                analysis.regions
+            } else if !self.contig_names.is_empty() {
+                build_full_scan_regions(&self.contig_names)
+            } else {
+                Vec::new()
+            };
+
+            if !regions.is_empty() {
+                let num_partitions = regions.len();
+
+                // Collect residual filters for record-level evaluation
+                let residual_filters: Vec<Expr> = filters
+                    .iter()
+                    .filter(|expr| can_push_down_filter(expr, &self.schema))
+                    .cloned()
+                    .collect();
+
+                debug!(
+                    "GFF indexed scan: {} regions, {} residual filters",
+                    num_partitions,
+                    residual_filters.len()
+                );
+
+                return Ok(Arc::new(GffExec {
+                    cache: PlanProperties::new(
+                        EquivalenceProperties::new(projected_schema.clone()),
+                        Partitioning::UnknownPartitioning(num_partitions),
+                        EmissionType::Final,
+                        Boundedness::Bounded,
+                    ),
+                    file_path: self.file_path.clone(),
+                    attr_fields: self.attr_fields.clone(),
+                    schema: projected_schema.clone(),
+                    projection: projection.cloned(),
+                    filters: pushable_filters,
+                    limit,
+                    thread_num: self.thread_num,
+                    object_storage_options: self.object_storage_options.clone(),
+                    coordinate_system_zero_based: self.coordinate_system_zero_based,
+                    regions: Some(regions),
+                    index_path: Some(index_path.clone()),
+                    residual_filters,
+                }));
+            }
+        }
+
+        // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(GffExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
@@ -249,14 +338,17 @@ impl TableProvider for GffTableProvider {
                 Boundedness::Bounded,
             ),
             file_path: self.file_path.clone(),
-            attr_fields: self.attr_fields.clone(), // Pass original Python-provided fields to executor
+            attr_fields: self.attr_fields.clone(),
             schema: projected_schema.clone(),
             projection: projection.cloned(),
-            filters: pushable_filters, // Pass pushable filters to executor
+            filters: pushable_filters,
             limit,
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
+            regions: None,
+            index_path: None,
+            residual_filters: Vec::new(),
         }))
     }
 }

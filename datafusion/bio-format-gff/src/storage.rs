@@ -156,9 +156,11 @@ impl GffRecordTrait for UnifiedGffRecord {
         }
     }
 }
+use noodles_csi::BinningIndex;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufReader, Error};
+use std::path::Path;
 use tokio_util::io::StreamReader;
 
 /// Parser type selection for GFF processing
@@ -918,5 +920,67 @@ impl GffLocalReader {
                 unimplemented!("get_attributes not yet implemented for SIMD parsers")
             }
         }
+    }
+}
+
+/// A local indexed GFF reader for region-based queries.
+///
+/// Uses noodles' tabix `IndexedReader::Builder` to support random-access queries on
+/// BGZF-compressed, tabix-indexed GFF files. This is used when an index file (.tbi/.csi)
+/// is available and genomic region filters are present.
+pub struct IndexedGffReader {
+    reader:
+        noodles_csi::io::IndexedReader<noodles_bgzf_gff::io::Reader<File>, noodles_tabix::Index>,
+    contig_names: Vec<String>,
+}
+
+impl IndexedGffReader {
+    /// Creates a new indexed GFF reader.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the BGZF-compressed GFF file (.gff3.gz)
+    /// * `index_path` - Path to the TBI or CSI index file
+    pub fn new(file_path: &str, index_path: &str) -> Result<Self, std::io::Error> {
+        let index = noodles_tabix::fs::read(index_path)?;
+
+        // Extract contig names from the index header
+        let contig_names = index
+            .header()
+            .map(|h| {
+                h.reference_sequence_names()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let reader = noodles_tabix::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(Path::new(file_path))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        Ok(Self {
+            reader,
+            contig_names,
+        })
+    }
+
+    /// Returns the contig names from the tabix index header.
+    pub fn contig_names(&self) -> &[String] {
+        &self.contig_names
+    }
+
+    /// Query records overlapping a genomic region.
+    ///
+    /// Returns an iterator over raw indexed records. Each record can be accessed
+    /// as a string reference via `.as_ref()` to get the raw GFF line.
+    pub fn query<'a>(
+        &'a mut self,
+        region: &'a noodles_core::Region,
+    ) -> Result<
+        impl Iterator<Item = Result<noodles_csi::io::indexed_records::Record, std::io::Error>> + 'a,
+        std::io::Error,
+    > {
+        self.reader.query(region)
     }
 }
