@@ -2,7 +2,7 @@
 //!
 //! Provides a generic mechanism for evaluating DataFusion filter expressions
 //! against individual records from any file format (BAM, CRAM, VCF, GFF).
-//! Each format implements the [`RecordFieldAccessor`] trait for its record type.
+//! Each format implements the [`RecordFieldAccessor`](crate::record_filter::RecordFieldAccessor) trait for its record type.
 
 use datafusion::arrow::datatypes::{DataType, Schema};
 use datafusion::common::ScalarValue;
