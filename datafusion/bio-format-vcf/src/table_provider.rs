@@ -14,6 +14,7 @@ use datafusion_bio_format_core::metadata::{
     VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
     VCF_SAMPLE_NAMES_KEY, to_json_string,
 };
+use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use std::collections::HashMap;
 
@@ -307,6 +308,8 @@ pub struct VcfTableProvider {
     index_path: Option<String>,
     /// Contig names from the file header (for partitioning full scans by chromosome)
     contig_names: Vec<String>,
+    /// Contig lengths from the file header (for balanced partitioning)
+    contig_lengths: Vec<u64>,
 }
 
 impl VcfTableProvider {
@@ -347,13 +350,17 @@ impl VcfTableProvider {
             coordinate_system_zero_based,
         ))?;
 
-        // Extract contig names from schema metadata
-        let contig_names: Vec<String> = schema
+        // Extract contig names and lengths from schema metadata
+        let contig_metadata: Vec<ContigMetadata> = schema
             .metadata()
             .get(VCF_CONTIGS_KEY)
             .and_then(|json| serde_json::from_str::<Vec<ContigMetadata>>(json).ok())
-            .map(|contigs| contigs.into_iter().map(|c| c.id).collect())
             .unwrap_or_default();
+        let contig_names: Vec<String> = contig_metadata.iter().map(|c| c.id.clone()).collect();
+        let contig_lengths: Vec<u64> = contig_metadata
+            .iter()
+            .map(|c| c.length.unwrap_or(0))
+            .collect();
 
         // Auto-discover index file for local BGZF-compressed files
         let storage_type = get_storage_type(file_path.clone());
@@ -377,6 +384,7 @@ impl VcfTableProvider {
             sample_names,
             index_path,
             contig_names,
+            contig_lengths,
         })
     }
 
@@ -425,6 +433,7 @@ impl VcfTableProvider {
             sample_names,
             index_path: None,
             contig_names: Vec::new(),
+            contig_lengths: Vec::new(),
         }
     }
 }
@@ -469,7 +478,7 @@ impl TableProvider for VcfTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -514,7 +523,16 @@ impl TableProvider for VcfTableProvider {
             };
 
             if !regions.is_empty() {
-                let num_partitions = regions.len();
+                // Use balanced partitioning with index size estimates
+                let target_partitions = state.config().target_partitions();
+                let estimates = crate::storage::estimate_sizes_from_tbi(
+                    index_path,
+                    &regions,
+                    &self.contig_names,
+                    &self.contig_lengths,
+                );
+                let assignments = balance_partitions(estimates, target_partitions);
+                let num_partitions = assignments.len();
 
                 // Collect filters for record-level evaluation
                 let record_filters: Vec<Expr> = filters
@@ -524,8 +542,10 @@ impl TableProvider for VcfTableProvider {
                     .collect();
 
                 debug!(
-                    "VCF indexed scan: {} regions, {} record-level filters",
+                    "VCF indexed scan: {} partitions (from {} regions, target {}), {} record-level filters",
                     num_partitions,
+                    assignments.iter().map(|a| a.regions.len()).sum::<usize>(),
+                    target_partitions,
                     record_filters.len()
                 );
 
@@ -546,7 +566,7 @@ impl TableProvider for VcfTableProvider {
                     thread_num: self.thread_num,
                     object_storage_options: self.object_storage_options.clone(),
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
-                    regions: Some(regions),
+                    partition_assignments: Some(assignments),
                     index_path: Some(index_path.clone()),
                     residual_filters: record_filters,
                 }));
@@ -571,7 +591,7 @@ impl TableProvider for VcfTableProvider {
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
-            regions: None,
+            partition_assignments: None,
             index_path: None,
             residual_filters: Vec::new(),
         }))

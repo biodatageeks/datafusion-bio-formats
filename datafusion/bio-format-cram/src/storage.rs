@@ -497,6 +497,63 @@ impl IndexedCramReader {
     }
 }
 
+/// Estimate compressed byte sizes per region from a CRAI index.
+pub fn estimate_sizes_from_crai(
+    index_path: &str,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    reference_names: &[String],
+    reference_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+
+    let records = match cram::crai::fs::read(index_path) {
+        Ok(recs) => recs,
+        Err(e) => {
+            log::debug!("Failed to read CRAI index for size estimation: {}", e);
+            return regions
+                .iter()
+                .map(|r| RegionSizeEstimate {
+                    region: r.clone(),
+                    estimated_bytes: 1,
+                    contig_length: None,
+                })
+                .collect();
+        }
+    };
+
+    // Group slice lengths by reference sequence id
+    let mut bytes_by_ref: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+    for record in &records {
+        if let Some(ref_id) = record.reference_sequence_id() {
+            *bytes_by_ref.entry(ref_id).or_insert(0) += record.slice_length();
+        }
+    }
+
+    let ref_name_to_idx: std::collections::HashMap<&str, usize> = reference_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    regions
+        .iter()
+        .map(|region| {
+            let ref_idx = ref_name_to_idx.get(region.chrom.as_str()).copied();
+            let estimated_bytes = ref_idx
+                .and_then(|idx| bytes_by_ref.get(&idx).copied())
+                .unwrap_or(1);
+            let contig_length = ref_idx
+                .and_then(|idx| reference_lengths.get(idx).copied())
+                .filter(|&len| len > 0);
+            RegionSizeEstimate {
+                region: region.clone(),
+                estimated_bytes,
+                contig_length,
+            }
+        })
+        .collect()
+}
+
 /// Record field accessor for CRAM records, used for record-level filter evaluation.
 ///
 /// This struct holds pre-extracted field values from a CRAM record

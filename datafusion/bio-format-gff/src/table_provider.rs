@@ -19,6 +19,7 @@ use datafusion_bio_format_core::index_utils::discover_gff_index;
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
+use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use log::debug;
 use std::any::Any;
 use std::collections::HashMap;
@@ -225,7 +226,7 @@ impl TableProvider for GffTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -291,7 +292,16 @@ impl TableProvider for GffTableProvider {
             };
 
             if !regions.is_empty() {
-                let num_partitions = regions.len();
+                // Use balanced partitioning with index size estimates
+                let target_partitions = state.config().target_partitions();
+                let estimates = crate::storage::estimate_sizes_from_tbi(
+                    index_path,
+                    &regions,
+                    &self.contig_names,
+                    &[], // GFF typically lacks contig length info
+                );
+                let assignments = balance_partitions(estimates, target_partitions);
+                let num_partitions = assignments.len();
 
                 // Collect residual filters for record-level evaluation
                 let residual_filters: Vec<Expr> = filters
@@ -301,8 +311,10 @@ impl TableProvider for GffTableProvider {
                     .collect();
 
                 debug!(
-                    "GFF indexed scan: {} regions, {} residual filters",
+                    "GFF indexed scan: {} partitions (from {} regions, target {}), {} residual filters",
                     num_partitions,
+                    assignments.iter().map(|a| a.regions.len()).sum::<usize>(),
+                    target_partitions,
                     residual_filters.len()
                 );
 
@@ -322,7 +334,7 @@ impl TableProvider for GffTableProvider {
                     thread_num: self.thread_num,
                     object_storage_options: self.object_storage_options.clone(),
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
-                    regions: Some(regions),
+                    partition_assignments: Some(assignments),
                     index_path: Some(index_path.clone()),
                     residual_filters,
                 }));
@@ -346,7 +358,7 @@ impl TableProvider for GffTableProvider {
             thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
-            regions: None,
+            partition_assignments: None,
             index_path: None,
             residual_filters: Vec::new(),
         }))

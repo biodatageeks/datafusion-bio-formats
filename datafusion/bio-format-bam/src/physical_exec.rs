@@ -17,6 +17,7 @@ use datafusion_bio_format_core::genomic_filter::GenomicRegion;
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
+use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
 use datafusion_bio_format_core::record_filter::evaluate_record_filters;
 use datafusion_bio_format_core::table_utils::OptionalField;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
@@ -43,8 +44,8 @@ pub struct BamExec {
     pub(crate) coordinate_system_zero_based: bool,
     /// Optional list of BAM alignment tags to include as columns
     pub(crate) tag_fields: Option<Vec<String>>,
-    /// Genomic regions for index-based reading (None = full scan)
-    pub(crate) regions: Option<Vec<datafusion_bio_format_core::genomic_filter::GenomicRegion>>,
+    /// Partition assignments for index-based reading (None = full scan)
+    pub(crate) partition_assignments: Option<Vec<PartitionAssignment>>,
     /// Path to the index file (BAI/CSI)
     pub(crate) index_path: Option<String>,
     /// Residual filters for record-level evaluation
@@ -97,10 +98,12 @@ impl ExecutionPlan for BamExec {
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
 
-        // Use indexed reading when regions and index are available
-        if let (Some(regions), Some(index_path)) = (&self.regions, &self.index_path) {
-            if partition < regions.len() {
-                let region = regions[partition].clone();
+        // Use indexed reading when partition assignments and index are available
+        if let (Some(assignments), Some(index_path)) =
+            (&self.partition_assignments, &self.index_path)
+        {
+            if partition < assignments.len() {
+                let regions = assignments[partition].regions.clone();
                 let file_path = self.file_path.clone();
                 let index_path = index_path.clone();
                 let projection = self.projection.clone();
@@ -111,7 +114,7 @@ impl ExecutionPlan for BamExec {
                 let fut = get_indexed_stream(
                     file_path,
                     index_path,
-                    region,
+                    regions,
                     schema.clone(),
                     batch_size,
                     projection,
@@ -834,16 +837,16 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
         .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
 }
 
-/// Get a stream of RecordBatches from an indexed BAM file for a specific region.
+/// Get a streaming RecordBatch stream from an indexed BAM file for one or more regions.
 ///
-/// Uses `spawn_blocking` because noodles' `IndexedReader` is not `Send` (it holds
-/// a trait object `dyn BinningIndex`). All I/O is done synchronously inside the
-/// blocking task, which builds all batches and then streams them out.
+/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
+/// Each partition processes its assigned regions sequentially, keeping only ~3 batches
+/// in memory at a time (constant memory regardless of data volume).
 #[allow(clippy::too_many_arguments)]
 async fn get_indexed_stream(
     file_path: String,
     index_path: String,
-    region: GenomicRegion,
+    regions: Vec<GenomicRegion>,
     schema_ref: SchemaRef,
     batch_size: usize,
     projection: Option<Vec<usize>>,
@@ -852,19 +855,16 @@ async fn get_indexed_stream(
     residual_filters: Vec<datafusion::logical_expr::Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let schema = schema_ref.clone();
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    // Build all batches synchronously in a blocking task
-    let batches =
-        tokio::task::spawn_blocking(move || -> Result<Vec<RecordBatch>, DataFusionError> {
+    std::thread::spawn(move || {
+        let read_and_send = || -> Result<(), DataFusionError> {
             let mut indexed_reader =
                 IndexedBamReader::new(&file_path, &index_path).map_err(|e| {
                     DataFusionError::Execution(format!("Failed to open indexed BAM: {}", e))
                 })?;
 
             let names = indexed_reader.reference_names();
-            let noodles_region = build_noodles_region(&region)?;
-
-            let mut all_batches = Vec::new();
 
             // Initialize accumulators
             let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
@@ -883,159 +883,170 @@ async fn get_indexed_stream(
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
-            let mut record_num = 0;
+            let mut total_records = 0usize;
 
-            let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                DataFusionError::Execution(format!("BAM region query failed: {}", e))
-            })?;
-
-            for result in records {
-                let record = result.map_err(|e| {
-                    DataFusionError::Execution(format!("BAM record read error: {}", e))
+            for region in &regions {
+                let noodles_region = build_noodles_region(region)?;
+                let records = indexed_reader.query(&noodles_region).map_err(|e| {
+                    DataFusionError::Execution(format!("BAM region query failed: {}", e))
                 })?;
 
-                let chrom_name = get_chrom_by_seq_id(record.reference_sequence_id(), &names);
+                for result in records {
+                    let record = result.map_err(|e| {
+                        DataFusionError::Execution(format!("BAM record read error: {}", e))
+                    })?;
 
-                let start_val = match record.alignment_start() {
-                    Some(start_pos) => {
-                        let pos = start_pos
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!("BAM position error: {}", e))
-                            })?
-                            .get() as u32;
-                        Some(if coordinate_system_zero_based {
-                            pos - 1
-                        } else {
-                            pos
-                        })
-                    }
-                    None => None,
-                };
+                    let chrom_name = get_chrom_by_seq_id(record.reference_sequence_id(), &names);
 
-                let end_val = match record.alignment_end() {
-                    Some(end_pos) => Some(
-                        end_pos
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!("BAM end pos error: {}", e))
-                            })?
-                            .get() as u32,
-                    ),
-                    None => None,
-                };
-
-                let mq = record.mapping_quality().map(|q| q.get() as u32);
-
-                // Apply residual filters
-                if !residual_filters.is_empty() {
-                    let fields = BamRecordFields {
-                        chrom: chrom_name.clone(),
-                        start: start_val,
-                        end: end_val,
-                        mapping_quality: mq,
-                        flags: record.flags().bits() as u32,
+                    let start_val = match record.alignment_start() {
+                        Some(start_pos) => {
+                            let pos = start_pos
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!("BAM position error: {}", e))
+                                })?
+                                .get() as u32;
+                            Some(if coordinate_system_zero_based {
+                                pos - 1
+                            } else {
+                                pos
+                            })
+                        }
+                        None => None,
                     };
-                    if !evaluate_record_filters(&fields, &residual_filters) {
-                        continue;
-                    }
-                }
 
-                match record.name() {
-                    Some(read_name) => name.push(Some(read_name.to_string())),
-                    _ => name.push(None),
-                };
-
-                chrom.push(chrom_name);
-                start.push(start_val);
-                end.push(end_val);
-                mapping_quality.push(mq);
-
-                let seq_string: String = record.sequence().iter().map(char::from).collect();
-                sequence.push(seq_string);
-
-                quality_scores.push(
-                    record
-                        .quality_scores()
-                        .iter()
-                        .map(|p| char::from(p + 33))
-                        .collect::<String>(),
-                );
-
-                flag.push(record.flags().bits() as u32);
-                cigar.push(
-                    record
-                        .cigar()
-                        .iter()
-                        .map(|p| p.unwrap())
-                        .map(cigar_op_to_string)
-                        .collect::<Vec<String>>()
-                        .join(""),
-                );
-
-                let mate_chrom_name =
-                    get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
-                mate_chrom.push(mate_chrom_name);
-
-                match record.mate_alignment_start() {
-                    Some(mate_start_pos) => {
-                        let pos = mate_start_pos
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!("BAM mate pos error: {}", e))
-                            })?
-                            .get() as u32;
-                        mate_start.push(Some(if coordinate_system_zero_based {
-                            pos - 1
-                        } else {
-                            pos
-                        }));
-                    }
-                    _ => mate_start.push(None),
-                };
-
-                load_tags(&record, &mut tag_builders)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-
-                record_num += 1;
-
-                if record_num % batch_size == 0 {
-                    let tag_arrays = if num_tag_fields > 0 {
-                        Some(
-                            builders_to_arrays(&mut tag_builders.2)
-                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-                        )
-                    } else {
-                        None
+                    let end_val = match record.alignment_end() {
+                        Some(end_pos) => Some(
+                            end_pos
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!("BAM end pos error: {}", e))
+                                })?
+                                .get() as u32,
+                        ),
+                        None => None,
                     };
-                    let batch = build_record_batch(
-                        Arc::clone(&schema),
-                        RecordFields {
-                            name: &name,
-                            chrom: &chrom,
-                            start: &start,
-                            end: &end,
-                            flag: &flag,
-                            cigar: &cigar,
-                            mapping_quality: &mapping_quality,
-                            mate_chrom: &mate_chrom,
-                            mate_start: &mate_start,
-                            sequence: &sequence,
-                            quality_scores: &quality_scores,
-                        },
-                        tag_arrays.as_ref(),
-                        projection.clone(),
-                    )?;
-                    all_batches.push(batch);
 
-                    name.clear();
-                    chrom.clear();
-                    start.clear();
-                    end.clear();
-                    flag.clear();
-                    cigar.clear();
-                    mapping_quality.clear();
-                    mate_chrom.clear();
-                    mate_start.clear();
-                    sequence.clear();
-                    quality_scores.clear();
+                    let mq = record.mapping_quality().map(|q| q.get() as u32);
+
+                    // Apply residual filters
+                    if !residual_filters.is_empty() {
+                        let fields = BamRecordFields {
+                            chrom: chrom_name.clone(),
+                            start: start_val,
+                            end: end_val,
+                            mapping_quality: mq,
+                            flags: record.flags().bits() as u32,
+                        };
+                        if !evaluate_record_filters(&fields, &residual_filters) {
+                            continue;
+                        }
+                    }
+
+                    match record.name() {
+                        Some(read_name) => name.push(Some(read_name.to_string())),
+                        _ => name.push(None),
+                    };
+
+                    chrom.push(chrom_name);
+                    start.push(start_val);
+                    end.push(end_val);
+                    mapping_quality.push(mq);
+
+                    let seq_string: String = record.sequence().iter().map(char::from).collect();
+                    sequence.push(seq_string);
+
+                    quality_scores.push(
+                        record
+                            .quality_scores()
+                            .iter()
+                            .map(|p| char::from(p + 33))
+                            .collect::<String>(),
+                    );
+
+                    flag.push(record.flags().bits() as u32);
+                    cigar.push(
+                        record
+                            .cigar()
+                            .iter()
+                            .map(|p| p.unwrap())
+                            .map(cigar_op_to_string)
+                            .collect::<Vec<String>>()
+                            .join(""),
+                    );
+
+                    let mate_chrom_name =
+                        get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
+                    mate_chrom.push(mate_chrom_name);
+
+                    match record.mate_alignment_start() {
+                        Some(mate_start_pos) => {
+                            let pos = mate_start_pos
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!("BAM mate pos error: {}", e))
+                                })?
+                                .get() as u32;
+                            mate_start.push(Some(if coordinate_system_zero_based {
+                                pos - 1
+                            } else {
+                                pos
+                            }));
+                        }
+                        _ => mate_start.push(None),
+                    };
+
+                    load_tags(&record, &mut tag_builders)
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+
+                    total_records += 1;
+
+                    if total_records % batch_size == 0 {
+                        let tag_arrays = if num_tag_fields > 0 {
+                            Some(
+                                builders_to_arrays(&mut tag_builders.2)
+                                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                            )
+                        } else {
+                            None
+                        };
+                        let batch = build_record_batch(
+                            Arc::clone(&schema),
+                            RecordFields {
+                                name: &name,
+                                chrom: &chrom,
+                                start: &start,
+                                end: &end,
+                                flag: &flag,
+                                cigar: &cigar,
+                                mapping_quality: &mapping_quality,
+                                mate_chrom: &mate_chrom,
+                                mate_start: &mate_start,
+                                sequence: &sequence,
+                                quality_scores: &quality_scores,
+                            },
+                            tag_arrays.as_ref(),
+                            projection.clone(),
+                        )?;
+
+                        // Send batch with backpressure
+                        loop {
+                            match tx.try_send(Ok(batch.clone())) {
+                                Ok(()) => break,
+                                Err(e) if e.is_disconnected() => return Ok(()),
+                                Err(_) => std::thread::yield_now(),
+                            }
+                        }
+
+                        name.clear();
+                        chrom.clear();
+                        start.clear();
+                        end.clear();
+                        flag.clear();
+                        cigar.clear();
+                        mapping_quality.clear();
+                        mate_chrom.clear();
+                        mate_start.clear();
+                        sequence.clear();
+                        quality_scores.clear();
+                    }
                 }
             }
 
@@ -1067,19 +1078,22 @@ async fn get_indexed_stream(
                     tag_arrays.as_ref(),
                     projection.clone(),
                 )?;
-                all_batches.push(batch);
+                let _ = tx.try_send(Ok(batch));
             }
 
             debug!(
-                "Indexed BAM scan: {} records for region {:?}",
-                record_num, region
+                "Indexed BAM scan: {} records for {} regions",
+                total_records,
+                regions.len()
             );
-            Ok(all_batches)
-        })
-        .await
-        .map_err(|e| DataFusionError::Execution(format!("Indexed BAM task join error: {}", e)))??;
+            Ok(())
+        };
+        if let Err(e) = read_and_send() {
+            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
+        }
+    });
 
-    // Stream out the pre-built batches
-    let stream = futures::stream::iter(batches.into_iter().map(Ok));
+    // Stream batches from the channel
+    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }

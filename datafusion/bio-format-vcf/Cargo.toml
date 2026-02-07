@@ -27,6 +27,7 @@ async-compression.workspace = true
 
 datafusion-bio-format-core = {path = "../bio-format-core"}
 noodles-tabix = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
+noodles-csi = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
 noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
 
 log = "0.4.22"

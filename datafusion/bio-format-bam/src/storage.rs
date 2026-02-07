@@ -300,6 +300,82 @@ impl IndexedBamReader {
     }
 }
 
+/// Estimate compressed byte sizes per region from a BAI index.
+///
+/// Reads the BAI index and estimates the compressed byte range for each genomic region
+/// by examining the chunks in each reference's bins. Uses `VirtualPosition.compressed()`
+/// to find the min/max compressed offsets per reference.
+///
+/// # Arguments
+/// * `index_path` - Path to the BAI index file
+/// * `regions` - Genomic regions to estimate sizes for
+/// * `reference_names` - Reference sequence names from the header (in order)
+/// * `reference_lengths` - Optional reference sequence lengths (for sub-region splitting)
+pub fn estimate_sizes_from_bai(
+    index_path: &str,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    reference_names: &[String],
+    reference_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+
+    let index = match bam::bai::fs::read(index_path) {
+        Ok(idx) => idx,
+        Err(e) => {
+            log::debug!("Failed to read BAI index for size estimation: {}", e);
+            // Return uniform estimates as fallback
+            return regions
+                .iter()
+                .map(|r| RegionSizeEstimate {
+                    region: r.clone(),
+                    estimated_bytes: 1,
+                    contig_length: None,
+                })
+                .collect();
+        }
+    };
+
+    let ref_name_to_idx: std::collections::HashMap<&str, usize> = reference_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    regions
+        .iter()
+        .map(|region| {
+            let ref_idx = ref_name_to_idx.get(region.chrom.as_str()).copied();
+            let estimated_bytes = ref_idx
+                .and_then(|idx| {
+                    index.reference_sequences().get(idx).map(|ref_seq| {
+                        let mut min_offset = u64::MAX;
+                        let mut max_offset = 0u64;
+                        for (_bin_id, bin) in ref_seq.bins() {
+                            for chunk in bin.chunks() {
+                                let start = chunk.start().compressed();
+                                let end = chunk.end().compressed();
+                                min_offset = min_offset.min(start);
+                                max_offset = max_offset.max(end);
+                            }
+                        }
+                        max_offset.saturating_sub(min_offset)
+                    })
+                })
+                .unwrap_or(1);
+
+            let contig_length = ref_idx
+                .and_then(|idx| reference_lengths.get(idx).copied())
+                .filter(|&len| len > 0);
+
+            RegionSizeEstimate {
+                region: region.clone(),
+                estimated_bytes,
+                contig_length,
+            }
+        })
+        .collect()
+}
+
 /// Record field accessor for BAM records, used for record-level filter evaluation.
 ///
 /// This struct holds pre-extracted field values from a BAM record

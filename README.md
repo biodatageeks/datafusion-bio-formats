@@ -24,13 +24,13 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 
 ## Features
 
-- 🚀 **High Performance**: Index-based random access and parallel reading across chromosomes
-- 🔍 **Predicate Pushdown**: SQL `WHERE` clauses on genomic coordinates use BAI/CRAI/TBI indexes to skip irrelevant data
-- ☁️ **Cloud Native**: Built-in support for GCS, S3, and Azure Blob Storage
-- 📊 **SQL Interface**: Query genomic data using familiar SQL syntax
-- 💾 **Memory Efficient**: Streaming architecture for large files
-- 🔧 **DataFusion Integration**: Seamless integration with Apache DataFusion ecosystem
-- ✍️ **Write Support**: Export query results to BAM/SAM, CRAM, FASTQ, and VCF files with compression
+- **High Performance**: Index-based random access with balanced partitioning across genomic regions
+- **Predicate Pushdown**: SQL `WHERE` clauses on genomic coordinates use BAI/CRAI/TBI indexes to skip irrelevant data
+- **Cloud Native**: Built-in support for GCS, S3, and Azure Blob Storage
+- **SQL Interface**: Query genomic data using familiar SQL syntax
+- **Constant Memory**: Streaming I/O with backpressure keeps memory usage constant regardless of file size
+- **DataFusion Integration**: Seamless integration with Apache DataFusion ecosystem
+- **Write Support**: Export query results to BAM/SAM, CRAM, FASTQ, and VCF files with compression
 
 ## Installation
 
@@ -262,6 +262,7 @@ BAM, CRAM, and VCF table providers support **index-based predicate pushdown** fo
 | BAM | BAI, CSI | `sample.bam.bai` or `sample.bai`, `sample.bam.csi` |
 | CRAM | CRAI | `sample.cram.crai` |
 | VCF (bgzf) | TBI, CSI | `sample.vcf.gz.tbi`, `sample.vcf.gz.csi` |
+| GFF (bgzf) | TBI, CSI | `sample.gff.gz.tbi`, `sample.gff.gz.csi` |
 
 Index files are **auto-discovered** — place them alongside the data file and the table provider will find them automatically. No configuration needed.
 
@@ -296,35 +297,41 @@ WHERE chrom = 'chr1' AND start >= 1000000 AND mapping_quality >= 30;
 │        AND mapping_quality >= 30       │
 └──────────┬─────────────────────────────┘
            │
-    ┌──────▼─────────────────────┐
-    │  1. Extract genomic regions │  chrom/start/end → index query regions
-    │  2. Separate residual       │  mapping_quality → post-read filter
-    └──────┬─────────────────────┘
+    ┌──────▼──────────────────────┐
+    │  1. Extract genomic regions  │  chrom/start/end → index query regions
+    │  2. Separate residual        │  mapping_quality → post-read filter
+    └──────┬──────────────────────┘
            │
-    ┌──────▼─────────────────────┐
-    │  3. Partition by region     │  Each region = 1 DataFusion partition
-    │     (parallel execution)    │  Executed concurrently by DataFusion
-    └──────┬─────────────────────┘
+    ┌──────▼──────────────────────┐
+    │  3. Estimate region sizes    │  Read index metadata (BAI/CRAI/TBI)
+    │     from index               │  to estimate compressed bytes per region
+    └──────┬──────────────────────┘
            │
-    ┌──────▼─────────────────────┐
-    │  4. Per-partition:          │
-    │     IndexedReader.query()   │  Seek directly via BAI/CRAI/TBI
-    │     → apply residual filter │  mapping_quality >= 30
-    │     → build RecordBatch     │
-    └────────────────────────────┘
+    ┌──────▼──────────────────────┐
+    │  4. Balance partitions       │  Greedy bin-packing distributes regions
+    │     (target_partitions)      │  across N balanced partitions
+    └──────┬──────────────────────┘
+           │
+    ┌──────▼──────────────────────┐
+    │  5. Per-partition (streaming)│
+    │     For each assigned region:│  Sequential within partition
+    │       IndexedReader.query()  │  Seek directly via BAI/CRAI/TBI
+    │       → apply residual filter│  mapping_quality >= 30
+    │       → stream RecordBatches │  via channel(2) backpressure
+    └─────────────────────────────┘
 ```
 
 **Partitioning behavior:**
 
 | Index Available? | SQL Filters | Partitions |
 |-----------------|-------------|------------|
-| Yes | `chrom = 'chr1' AND start >= 1000` | 1 (the specified region) |
-| Yes | `chrom IN ('chr1', 'chr2')` | 2 (one per chromosome) |
-| Yes | `mapping_quality >= 30` (no genomic filter) | N (one per chromosome in file) |
-| Yes | None (full scan) | N (one per chromosome — parallel full scan) |
+| Yes | `chrom = 'chr1' AND start >= 1000` | 1 (single region) |
+| Yes | `chrom IN ('chr1', 'chr2')` | min(2, target_partitions) |
+| Yes | `mapping_quality >= 30` (no genomic filter) | min(N chroms, target_partitions) |
+| Yes | None (full scan) | min(N chroms, target_partitions) |
 | No | Any | 1 (sequential full scan) |
 
-When an index exists but no genomic filters are specified, the query is automatically parallelized across all chromosomes in the file.
+When an index exists, regions are distributed across `target_partitions` using a greedy bin-packing algorithm that estimates data volume from the index. This ensures balanced work distribution even when chromosomes have vastly different sizes (e.g., chr1 at ~249Mb vs chrY at ~57Mb).
 
 ### Record-Level Filter Pushdown
 
@@ -335,6 +342,59 @@ This works **with or without** an index file:
 ```sql
 -- No index needed — filters applied per-record during sequential scan
 SELECT * FROM alignments WHERE mapping_quality >= 30 AND flag & 4 = 0;
+```
+
+### Balanced Partitioning and Streaming I/O
+
+When an index is available, the query engine uses a three-stage execution model:
+
+**1. Size Estimation** — Each format reads its index to estimate compressed data volume per region:
+
+| Format | Index | Estimation Method |
+|--------|-------|-------------------|
+| BAM | BAI | Min/max compressed byte offsets from bin chunks |
+| CRAM | CRAI | Sum of `slice_length` per reference sequence (exact) |
+| VCF | TBI | Min/max compressed byte offsets from bin chunks |
+| GFF | TBI/CSI | Min/max compressed byte offsets from bin chunks |
+
+**2. Balanced Partitioning** — A greedy bin-packing algorithm distributes regions across `target_partitions` bins:
+- Regions sorted by estimated size (descending)
+- Each region assigned to the bin with the smallest current total
+- Large regions (>1.5x ideal share) are split into sub-regions when contig length is known
+- Result: `min(target_partitions, num_regions)` partitions with roughly equal work
+
+**3. Streaming I/O** — Each partition processes its assigned regions using constant-memory streaming:
+- Dedicated OS thread per partition (not tokio's blocking pool)
+- `mpsc::channel(2)` provides backpressure between producer and consumer
+- At most ~3 RecordBatches in flight per partition (~3-8 MB)
+- Total memory: ~3 batches x `target_partitions` (constant regardless of file size)
+
+```
+                     target_partitions = 4
+                     ┌──────────────────┐
+Partition 0 (thread) │ chr1:1-125M      │ ─── sequential within partition
+                     │ chr1:125M-249M   │     streaming via channel(2)
+                     ├──────────────────┤
+Partition 1 (thread) │ chr2             │ ─── concurrent across partitions
+                     │ chr3             │     max 4 threads active
+                     ├──────────────────┤
+Partition 2 (thread) │ chr4             │
+                     │ chr5, chr6       │
+                     ├──────────────────┤
+Partition 3 (thread) │ chrX             │
+                     │ chrY, chrM       │
+                     └──────────────────┘
+```
+
+**Configuration:**
+
+Control the number of concurrent partitions via DataFusion's `SessionConfig`:
+
+```rust
+use datafusion::prelude::*;
+
+let config = SessionConfig::new().with_target_partitions(8);  // default varies by system
+let ctx = SessionContext::new_with_config(config);
 ```
 
 ### Index File Generation
@@ -353,6 +413,10 @@ samtools index sorted.cram               # creates sorted.cram.crai
 # VCF: sort, compress, and index
 bcftools sort input.vcf -Oz -o sorted.vcf.gz
 bcftools index -t sorted.vcf.gz          # creates sorted.vcf.gz.tbi
+
+# GFF: sort, compress, and index
+(grep "^#" input.gff; grep -v "^#" input.gff | sort -k1,1 -k4,4n) | bgzip > sorted.gff.gz
+tabix -p gff sorted.gff.gz              # creates sorted.gff.gz.tbi
 ```
 
 ## Performance Benchmarks

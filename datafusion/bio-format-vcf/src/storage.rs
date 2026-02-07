@@ -701,6 +701,82 @@ impl IndexedVcfReader {
     }
 }
 
+/// Estimate compressed byte sizes per region from a TBI (tabix) index.
+///
+/// For each region, this reads the tabix index and finds the min/max compressed
+/// byte offsets across all bins for the corresponding reference sequence. The
+/// difference gives a rough estimate of how many compressed bytes that region spans.
+///
+/// # Arguments
+///
+/// * `index_path` - Path to the TBI index file
+/// * `regions` - Genomic regions to estimate sizes for
+/// * `contig_names` - Contig names from the VCF header (in order)
+/// * `contig_lengths` - Contig lengths from the VCF header (for sub-region splitting)
+pub fn estimate_sizes_from_tbi(
+    index_path: &str,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    contig_names: &[String],
+    contig_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+
+    let index = match noodles_tabix::fs::read(index_path) {
+        Ok(idx) => idx,
+        Err(e) => {
+            log::debug!("Failed to read TBI index for size estimation: {}", e);
+            return regions
+                .iter()
+                .map(|r| RegionSizeEstimate {
+                    region: r.clone(),
+                    estimated_bytes: 1,
+                    contig_length: None,
+                })
+                .collect();
+        }
+    };
+
+    let contig_name_to_idx: std::collections::HashMap<&str, usize> = contig_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    regions
+        .iter()
+        .map(|region| {
+            let ref_idx = contig_name_to_idx.get(region.chrom.as_str()).copied();
+            let estimated_bytes = ref_idx
+                .and_then(|idx| {
+                    index.reference_sequences().get(idx).map(|ref_seq| {
+                        let mut min_offset = u64::MAX;
+                        let mut max_offset = 0u64;
+                        for (_bin_id, bin) in ref_seq.bins() {
+                            for chunk in bin.chunks() {
+                                let start = chunk.start().compressed();
+                                let end = chunk.end().compressed();
+                                min_offset = min_offset.min(start);
+                                max_offset = max_offset.max(end);
+                            }
+                        }
+                        max_offset.saturating_sub(min_offset)
+                    })
+                })
+                .unwrap_or(1);
+
+            let contig_length = ref_idx
+                .and_then(|idx| contig_lengths.get(idx).copied())
+                .filter(|&len| len > 0);
+
+            RegionSizeEstimate {
+                region: region.clone(),
+                estimated_bytes,
+                contig_length,
+            }
+        })
+        .collect()
+}
+
 /// Record field accessor for VCF records, used for record-level filter evaluation.
 pub struct VcfRecordFields {
     /// Chromosome name

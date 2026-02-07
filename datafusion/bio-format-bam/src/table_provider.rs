@@ -18,6 +18,7 @@ use datafusion_bio_format_core::genomic_filter::{
 };
 use datafusion_bio_format_core::index_utils::discover_bam_index;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
@@ -310,6 +311,8 @@ pub struct BamTableProvider {
     index_path: Option<String>,
     /// Reference sequence names from the file header (for partitioning full scans by chromosome)
     reference_names: Vec<String>,
+    /// Reference sequence lengths from the file header (for balanced partitioning)
+    reference_lengths: Vec<u64>,
 }
 
 impl BamTableProvider {
@@ -417,17 +420,13 @@ impl BamTableProvider {
             extract_header_metadata(&header)
         };
 
-        // Extract reference sequence names for partitioning
-        let reference_names: Vec<String> = header_metadata
+        // Extract reference sequence names and lengths for partitioning
+        let ref_seqs: Vec<datafusion_bio_format_core::ReferenceSequenceMetadata> = header_metadata
             .get(datafusion_bio_format_core::BAM_REFERENCE_SEQUENCES_KEY)
-            .and_then(|json| {
-                serde_json::from_str::<Vec<datafusion_bio_format_core::ReferenceSequenceMetadata>>(
-                    json,
-                )
-                .ok()
-            })
-            .map(|refs| refs.into_iter().map(|r| r.name).collect())
+            .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
+        let reference_names: Vec<String> = ref_seqs.iter().map(|r| r.name.clone()).collect();
+        let reference_lengths: Vec<u64> = ref_seqs.iter().map(|r| r.length as u64).collect();
 
         let schema = determine_schema(
             &tag_fields,
@@ -455,6 +454,7 @@ impl BamTableProvider {
             sort_on_write: false,
             index_path,
             reference_names,
+            reference_lengths,
         })
     }
 
@@ -518,18 +518,14 @@ impl BamTableProvider {
         )
         .await?;
 
-        // Extract reference names from schema metadata
-        let reference_names: Vec<String> = schema
+        // Extract reference names and lengths from schema metadata
+        let ref_seqs: Vec<datafusion_bio_format_core::ReferenceSequenceMetadata> = schema
             .metadata()
             .get(datafusion_bio_format_core::BAM_REFERENCE_SEQUENCES_KEY)
-            .and_then(|json| {
-                serde_json::from_str::<Vec<datafusion_bio_format_core::ReferenceSequenceMetadata>>(
-                    json,
-                )
-                .ok()
-            })
-            .map(|refs| refs.into_iter().map(|r| r.name).collect())
+            .and_then(|json| serde_json::from_str(json).ok())
             .unwrap_or_default();
+        let reference_names: Vec<String> = ref_seqs.iter().map(|r| r.name.clone()).collect();
+        let reference_lengths: Vec<u64> = ref_seqs.iter().map(|r| r.length as u64).collect();
 
         // Auto-discover index file
         let storage_type = get_storage_type(file_path.clone());
@@ -549,6 +545,7 @@ impl BamTableProvider {
             sort_on_write: false,
             index_path,
             reference_names,
+            reference_lengths,
         })
     }
 
@@ -587,6 +584,7 @@ impl BamTableProvider {
             sort_on_write,
             index_path: None,
             reference_names: Vec::new(),
+            reference_lengths: Vec::new(),
         }
     }
 
@@ -880,7 +878,7 @@ impl TableProvider for BamTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -922,7 +920,16 @@ impl TableProvider for BamTableProvider {
             };
 
             if !regions.is_empty() {
-                let num_partitions = regions.len();
+                // Use balanced partitioning with index size estimates
+                let target_partitions = state.config().target_partitions();
+                let estimates = crate::storage::estimate_sizes_from_bai(
+                    index_path,
+                    &regions,
+                    &self.reference_names,
+                    &self.reference_lengths,
+                );
+                let assignments = balance_partitions(estimates, target_partitions);
+                let num_partitions = assignments.len();
 
                 // Collect filters for record-level evaluation
                 let record_filters: Vec<Expr> = filters
@@ -932,8 +939,10 @@ impl TableProvider for BamTableProvider {
                     .collect();
 
                 debug!(
-                    "BAM indexed scan: {} regions, {} record-level filters",
+                    "BAM indexed scan: {} partitions (from {} regions, target {}), {} record-level filters",
                     num_partitions,
+                    assignments.iter().map(|a| a.regions.len()).sum::<usize>(),
+                    target_partitions,
                     record_filters.len()
                 );
 
@@ -952,7 +961,7 @@ impl TableProvider for BamTableProvider {
                     object_storage_options: self.object_storage_options.clone(),
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
                     tag_fields: self.tag_fields.clone(),
-                    regions: Some(regions),
+                    partition_assignments: Some(assignments),
                     index_path: Some(index_path.clone()),
                     residual_filters: record_filters,
                 }));
@@ -975,7 +984,7 @@ impl TableProvider for BamTableProvider {
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             tag_fields: self.tag_fields.clone(),
-            regions: None,
+            partition_assignments: None,
             index_path: None,
             residual_filters: Vec::new(),
         }))
