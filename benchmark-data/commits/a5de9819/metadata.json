@@ -1,6 +1,6 @@
 {
-  "ref": "v0.1.1",
-  "ref_type": "tag",
+  "ref": "feat/index-based-predicate-pushdown",
+  "ref_type": "branch",
   "commit_sha": "a5de981927a9def9c320e33107730220b02c0d03",
   "timestamp": "2026-02-07T09:19:02Z",
   "benchmark_mode": "fast"
