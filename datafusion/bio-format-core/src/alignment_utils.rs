@@ -7,6 +7,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use log::debug;
 use noodles_sam::alignment::record::cigar::op::{Kind as OpKind, Op};
+use std::fmt::Write;
 use std::io;
 use std::sync::Arc;
 
@@ -144,19 +145,30 @@ pub fn build_record_batch(
     let sequence = fields.sequence;
     let quality_scores = fields.quality_scores;
 
-    let name_array = Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>;
-    let chrom_array = Arc::new(StringArray::from(chrom.to_vec())) as Arc<dyn Array>;
-    let start_array = Arc::new(UInt32Array::from(start.to_vec())) as Arc<dyn Array>;
-    let end_array = Arc::new(UInt32Array::from(end.to_vec())) as Arc<dyn Array>;
-    let flag_array = Arc::new(UInt32Array::from(flag.to_vec())) as Arc<dyn Array>;
-    let cigar_array = Arc::new(StringArray::from(cigar.to_vec())) as Arc<dyn Array>;
+    let name_array =
+        Arc::new(StringArray::from_iter(name.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
+    let chrom_array =
+        Arc::new(StringArray::from_iter(chrom.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
+    let start_array = Arc::new(UInt32Array::from_iter(start.iter().copied())) as Arc<dyn Array>;
+    let end_array = Arc::new(UInt32Array::from_iter(end.iter().copied())) as Arc<dyn Array>;
+    let flag_array =
+        Arc::new(UInt32Array::from_iter_values(flag.iter().copied())) as Arc<dyn Array>;
+    let cigar_array = Arc::new(StringArray::from_iter_values(
+        cigar.iter().map(|s| s.as_str()),
+    )) as Arc<dyn Array>;
     let mapping_quality_array =
-        Arc::new(UInt32Array::from(mapping_quality.to_vec())) as Arc<dyn Array>;
-    let mate_chrom_array = Arc::new(StringArray::from(mate_chrom.to_vec())) as Arc<dyn Array>;
-    let mate_start_array = Arc::new(UInt32Array::from(mate_start.to_vec())) as Arc<dyn Array>;
-    let sequence_array = Arc::new(StringArray::from(sequence.to_vec())) as Arc<dyn Array>;
-    let quality_scores_array =
-        Arc::new(StringArray::from(quality_scores.to_vec())) as Arc<dyn Array>;
+        Arc::new(UInt32Array::from_iter(mapping_quality.iter().copied())) as Arc<dyn Array>;
+    let mate_chrom_array = Arc::new(StringArray::from_iter(
+        mate_chrom.iter().map(|s| s.as_deref()),
+    )) as Arc<dyn Array>;
+    let mate_start_array =
+        Arc::new(UInt32Array::from_iter(mate_start.iter().copied())) as Arc<dyn Array>;
+    let sequence_array = Arc::new(StringArray::from_iter_values(
+        sequence.iter().map(|s| s.as_str()),
+    )) as Arc<dyn Array>;
+    let quality_scores_array = Arc::new(StringArray::from_iter_values(
+        quality_scores.iter().map(|s| s.as_str()),
+    )) as Arc<dyn Array>;
 
     let arrays = match projection {
         None => {
@@ -245,6 +257,44 @@ pub fn cigar_op_to_string(op: Op) -> String {
     format!("{}{}", op.len(), kind)
 }
 
+/// Convert a CIGAR operation kind to its SAM character representation
+#[inline]
+fn cigar_op_char(kind: OpKind) -> char {
+    match kind {
+        OpKind::Match => 'M',
+        OpKind::Insertion => 'I',
+        OpKind::Deletion => 'D',
+        OpKind::Skip => 'N',
+        OpKind::SoftClip => 'S',
+        OpKind::HardClip => 'H',
+        OpKind::Pad => 'P',
+        OpKind::SequenceMatch => '=',
+        OpKind::SequenceMismatch => 'X',
+    }
+}
+
+/// Format CIGAR operations from an iterator of owned `Op` values into a reusable buffer.
+///
+/// Clears the buffer first, then writes each operation as `<len><kind_char>`.
+/// The buffer retains its allocation across calls, avoiding per-record heap allocations.
+pub fn format_cigar_ops(ops: impl Iterator<Item = Op>, buf: &mut String) {
+    buf.clear();
+    for op in ops {
+        let _ = write!(buf, "{}{}", op.len(), cigar_op_char(op.kind()));
+    }
+}
+
+/// Format CIGAR operations from an iterator of `io::Result<Op>` values (BAM records).
+///
+/// Same as `format_cigar_ops` but unwraps `Result` values, as used by BAM lazy records.
+pub fn format_cigar_ops_unwrap(ops: impl Iterator<Item = io::Result<Op>>, buf: &mut String) {
+    buf.clear();
+    for op in ops {
+        let op = op.unwrap();
+        let _ = write!(buf, "{}{}", op.len(), cigar_op_char(op.kind()));
+    }
+}
+
 /// Get chromosome name from BAM reference sequence ID
 ///
 /// Returns the chromosome name exactly as it appears in the BAM header.
@@ -291,6 +341,61 @@ mod tests {
         assert_eq!(cigar_op_to_string(Op::new(Kind::Skip, 100)), "100N");
         assert_eq!(cigar_op_to_string(Op::new(Kind::SoftClip, 7)), "7S");
         assert_eq!(cigar_op_to_string(Op::new(Kind::HardClip, 2)), "2H");
+    }
+
+    #[test]
+    fn test_format_cigar_ops() {
+        let ops = vec![
+            Op::new(Kind::Match, 10),
+            Op::new(Kind::Insertion, 5),
+            Op::new(Kind::Deletion, 3),
+        ];
+        let mut buf = String::new();
+        format_cigar_ops(ops.into_iter(), &mut buf);
+        assert_eq!(buf, "10M5I3D");
+    }
+
+    #[test]
+    fn test_format_cigar_ops_single() {
+        let ops = vec![Op::new(Kind::Match, 150)];
+        let mut buf = String::new();
+        format_cigar_ops(ops.into_iter(), &mut buf);
+        assert_eq!(buf, "150M");
+    }
+
+    #[test]
+    fn test_format_cigar_ops_empty() {
+        let ops: Vec<Op> = vec![];
+        let mut buf = String::new();
+        format_cigar_ops(ops.into_iter(), &mut buf);
+        assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn test_format_cigar_ops_unwrap() {
+        let ops: Vec<std::io::Result<Op>> = vec![
+            Ok(Op::new(Kind::SoftClip, 7)),
+            Ok(Op::new(Kind::Match, 100)),
+            Ok(Op::new(Kind::SoftClip, 3)),
+        ];
+        let mut buf = String::new();
+        format_cigar_ops_unwrap(ops.into_iter(), &mut buf);
+        assert_eq!(buf, "7S100M3S");
+    }
+
+    #[test]
+    fn test_format_cigar_ops_buffer_reuse() {
+        let mut buf = String::new();
+
+        format_cigar_ops(vec![Op::new(Kind::Match, 50)].into_iter(), &mut buf);
+        assert_eq!(buf, "50M");
+
+        // Second call reuses the buffer (clears it first)
+        format_cigar_ops(
+            vec![Op::new(Kind::HardClip, 2), Op::new(Kind::Match, 100)].into_iter(),
+            &mut buf,
+        );
+        assert_eq!(buf, "2H100M");
     }
 
     #[test]

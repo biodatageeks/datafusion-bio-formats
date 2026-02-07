@@ -9,7 +9,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::alignment_utils::{
-    RecordFields, build_record_batch, cigar_op_to_string,
+    RecordFields, build_record_batch, format_cigar_ops,
     get_chrom_by_seq_id_cram as get_chrom_by_seq_id,
 };
 use datafusion_bio_format_core::calculated_tags::{calculate_md_tag, calculate_nm_tag};
@@ -406,6 +406,7 @@ async fn get_remote_cram_stream(
         set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
+        let mut cigar_buf = String::new();
         let mut record_num = 0;
         let mut batch_num = 0;
 
@@ -477,9 +478,8 @@ async fn get_remote_cram_stream(
                 .collect::<String>());
 
             flag.push(record.flags().bits() as u32);
-            cigar.push(record.cigar().as_ref().iter()
-                .map(|op| cigar_op_to_string(*op))
-                .collect::<Vec<String>>().join(""));
+            format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+            cigar.push(cigar_buf.clone());
             let chrom_name = get_chrom_by_seq_id(
                 record.mate_reference_sequence_id(),
                 &names,
@@ -628,6 +628,7 @@ async fn get_local_cram(
     );
     let num_tag_fields = tag_builders.0.len();
 
+    let mut cigar_buf = String::new();
     let mut batch_num = 0;
     let file_path = file_path.clone();
     let mut reader = CramReader::new(file_path.clone(), reference_path, None).await;
@@ -701,9 +702,8 @@ async fn get_local_cram(
                 }
             };
             flag.push(record.flags().bits() as u32);
-            cigar.push(record.cigar().as_ref().iter()
-                .map(|op| cigar_op_to_string(*op))
-                .collect::<Vec<String>>().join(""));
+            format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+            cigar.push(cigar_buf.clone());
              let chrom_name = get_chrom_by_seq_id(
                 record.mate_reference_sequence_id(),
                 &names,
@@ -927,6 +927,7 @@ async fn get_indexed_stream(
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
+            let mut cigar_buf = String::new();
             let mut total_records = 0usize;
 
             for region in &regions {
@@ -1028,15 +1029,8 @@ async fn get_indexed_stream(
                     );
 
                     flag.push(record.flags().bits() as u32);
-                    cigar.push(
-                        record
-                            .cigar()
-                            .as_ref()
-                            .iter()
-                            .map(|op| cigar_op_to_string(*op))
-                            .collect::<Vec<String>>()
-                            .join(""),
-                    );
+                    format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+                    cigar.push(cigar_buf.clone());
 
                     let mate_chrom_name =
                         get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);

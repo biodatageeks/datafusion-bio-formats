@@ -44,3 +44,7 @@ path = "./examples/test_bam_with_tags.rs"
 [[example]]
 name = "describe_bam_schema"
 path = "./examples/describe_bam_schema.rs"
+
+[[example]]
+name = "benchmark_read"
+path = "./examples/benchmark_read.rs"
