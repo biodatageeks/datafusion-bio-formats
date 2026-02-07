@@ -1262,6 +1262,10 @@ async fn get_indexed_gff_stream(
             let mut total_records = 0usize;
 
             for region in &regions {
+                // Sub-region bounds for deduplication (1-based, from partition balancer)
+                let region_start_1based = region.start.map(|s| s as u32);
+                let region_end_1based = region.end.map(|e| e as u32);
+
                 let noodles_region = build_noodles_region(region)?;
 
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
@@ -1285,6 +1289,19 @@ async fn get_indexed_gff_stream(
                     let type_str = fields[2].to_string();
                     let start_1based: u32 = fields[3].parse().unwrap_or(0);
                     let end_1based: u32 = fields[4].parse().unwrap_or(0);
+
+                    // Skip records outside the sub-region bounds (TBI/CSI bins may return
+                    // overlapping records at sub-region boundaries)
+                    if let Some(rs) = region_start_1based {
+                        if start_1based < rs {
+                            continue;
+                        }
+                    }
+                    if let Some(re) = region_end_1based {
+                        if start_1based > re {
+                            continue;
+                        }
+                    }
                     let score_val: Option<f32> = if fields[5] == "." {
                         None
                     } else {

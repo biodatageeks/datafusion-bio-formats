@@ -1004,6 +1004,10 @@ async fn get_indexed_vcf_stream(
             let mut total_records = 0usize;
 
             for region in &regions {
+                // Sub-region bounds for deduplication (1-based, from partition balancer)
+                let region_start_1based = region.start.map(|s| s as u32);
+                let region_end_1based = region.end.map(|e| e as u32);
+
                 let noodles_region = build_noodles_region(region)?;
 
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
@@ -1029,6 +1033,20 @@ async fn get_indexed_vcf_stream(
                     } else {
                         start_pos
                     };
+
+                    // Skip records outside the sub-region bounds (TBI bins may return
+                    // overlapping records at sub-region boundaries)
+                    if let Some(rs) = region_start_1based {
+                        if start_pos < rs {
+                            continue;
+                        }
+                    }
+                    if let Some(re) = region_end_1based {
+                        if start_pos > re {
+                            continue;
+                        }
+                    }
+
                     let end_val = get_variant_end(&record, &header);
 
                     // Apply residual filters

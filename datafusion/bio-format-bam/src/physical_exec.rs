@@ -886,6 +886,10 @@ async fn get_indexed_stream(
             let mut total_records = 0usize;
 
             for region in &regions {
+                // Sub-region bounds for deduplication (1-based, from partition balancer)
+                let region_start_1based = region.start.map(|s| s as u32);
+                let region_end_1based = region.end.map(|e| e as u32);
+
                 let noodles_region = build_noodles_region(region)?;
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
                     DataFusionError::Execution(format!("BAM region query failed: {}", e))
@@ -913,6 +917,27 @@ async fn get_indexed_stream(
                         }
                         None => None,
                     };
+
+                    // Skip records outside the sub-region bounds (BAI bins may return
+                    // overlapping records at sub-region boundaries)
+                    if let Some(pos_1based) = start_val.map(|s| {
+                        if coordinate_system_zero_based {
+                            s + 1
+                        } else {
+                            s
+                        }
+                    }) {
+                        if let Some(rs) = region_start_1based {
+                            if pos_1based < rs {
+                                continue;
+                            }
+                        }
+                        if let Some(re) = region_end_1based {
+                            if pos_1based > re {
+                                continue;
+                            }
+                        }
+                    }
 
                     let end_val = match record.alignment_end() {
                         Some(end_pos) => Some(
