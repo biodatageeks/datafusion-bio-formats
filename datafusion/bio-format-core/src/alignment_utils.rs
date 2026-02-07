@@ -111,10 +111,10 @@ pub struct RecordFields<'a> {
     pub mate_chrom: &'a [Option<String>],
     /// Mate/next segment alignment start positions
     pub mate_start: &'a [Option<u32>],
-    /// Read sequences
-    pub sequence: &'a [String],
-    /// Base quality scores
-    pub quality_scores: &'a [String],
+    /// Read sequences (pre-built Arrow array)
+    pub sequence: ArrayRef,
+    /// Base quality scores (pre-built Arrow array)
+    pub quality_scores: ArrayRef,
 }
 
 /// Build a RecordBatch from alignment record fields
@@ -142,8 +142,8 @@ pub fn build_record_batch(
     let mapping_quality = fields.mapping_quality;
     let mate_chrom = fields.mate_chrom;
     let mate_start = fields.mate_start;
-    let sequence = fields.sequence;
-    let quality_scores = fields.quality_scores;
+    let sequence_array = fields.sequence;
+    let quality_scores_array = fields.quality_scores;
 
     let name_array =
         Arc::new(StringArray::from_iter(name.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
@@ -163,12 +163,6 @@ pub fn build_record_batch(
     )) as Arc<dyn Array>;
     let mate_start_array =
         Arc::new(UInt32Array::from_iter(mate_start.iter().copied())) as Arc<dyn Array>;
-    let sequence_array = Arc::new(StringArray::from_iter_values(
-        sequence.iter().map(|s| s.as_str()),
-    )) as Arc<dyn Array>;
-    let quality_scores_array = Arc::new(StringArray::from_iter_values(
-        quality_scores.iter().map(|s| s.as_str()),
-    )) as Arc<dyn Array>;
 
     let arrays = match projection {
         None => {

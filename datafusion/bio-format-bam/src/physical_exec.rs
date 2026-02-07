@@ -1,7 +1,7 @@
 use crate::storage::{BamReader, BamRecordFields, IndexedBamReader, SamReader, is_sam_file};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{ArrayRef, RecordBatch};
+use datafusion::arrow::array::{ArrayRef, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::common::DataFusionError;
@@ -357,8 +357,8 @@ macro_rules! process_bam_records_impl {
         let mut cigar: Vec<String> = Vec::with_capacity($batch_size);
         let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
         let mut mate_start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut quality_scores: Vec<String> = Vec::with_capacity($batch_size);
-        let mut sequence: Vec<String> = Vec::with_capacity($batch_size);
+        let mut seq_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
+        let mut qual_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
 
         // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -366,6 +366,8 @@ macro_rules! process_bam_records_impl {
         let num_tag_fields = tag_builders.0.len();
 
         let mut cigar_buf = String::new();
+        let mut seq_buf = String::new();
+        let mut qual_buf = String::new();
         let mut record_num = 0;
         let mut batch_num = 0;
 
@@ -428,15 +430,14 @@ macro_rules! process_bam_records_impl {
             };
 
             // Extract sequence
-            let seq_string = record.sequence().iter()
-                .map(char::from)
-                .collect();
-            sequence.push(seq_string);
+            seq_buf.clear();
+            seq_buf.extend(record.sequence().iter().map(char::from));
+            seq_builder.append_value(&seq_buf);
 
             // Extract quality scores
-            quality_scores.push(record.quality_scores().iter()
-                .map(|p| char::from(p+33))
-                .collect::<String>());
+            qual_buf.clear();
+            qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
+            qual_builder.append_value(&qual_buf);
 
             // Extract flags and CIGAR
             flag.push(record.flags().bits() as u32);
@@ -484,8 +485,8 @@ macro_rules! process_bam_records_impl {
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,
-                        sequence: &sequence,
-                        quality_scores: &quality_scores,
+                        sequence: Arc::new(seq_builder.finish()),
+                        quality_scores: Arc::new(qual_builder.finish()),
                     },
                     tag_arrays.as_ref(),
                     $projection.clone(),
@@ -504,8 +505,6 @@ macro_rules! process_bam_records_impl {
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
-                sequence.clear();
-                quality_scores.clear();
             }
         }
 
@@ -528,8 +527,8 @@ macro_rules! process_bam_records_impl {
                     mapping_quality: &mapping_quality,
                     mate_chrom: &mate_chrom,
                     mate_start: &mate_start,
-                    sequence: &sequence,
-                    quality_scores: &quality_scores,
+                    sequence: Arc::new(seq_builder.finish()),
+                    quality_scores: Arc::new(qual_builder.finish()),
                 },
                 tag_arrays.as_ref(),
                 $projection.clone(),
@@ -603,14 +602,16 @@ macro_rules! process_sam_records_impl {
         let mut cigar: Vec<String> = Vec::with_capacity($batch_size);
         let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
         let mut mate_start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut quality_scores: Vec<String> = Vec::with_capacity($batch_size);
-        let mut sequence: Vec<String> = Vec::with_capacity($batch_size);
+        let mut seq_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
+        let mut qual_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
 
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
         let mut cigar_buf = String::new();
+        let mut seq_buf = String::new();
+        let mut qual_buf = String::new();
         let mut record_num = 0;
         let mut batch_num = 0;
 
@@ -665,14 +666,13 @@ macro_rules! process_sam_records_impl {
                 }
             };
 
-            let seq_string = record.sequence().as_ref().iter()
-                .map(|b| char::from(*b))
-                .collect();
-            sequence.push(seq_string);
+            seq_buf.clear();
+            seq_buf.extend(record.sequence().as_ref().iter().map(|b| char::from(*b)));
+            seq_builder.append_value(&seq_buf);
 
-            quality_scores.push(record.quality_scores().as_ref().iter()
-                .map(|s| char::from(*s+33))
-                .collect::<String>());
+            qual_buf.clear();
+            qual_buf.extend(record.quality_scores().as_ref().iter().map(|s| char::from(*s + 33)));
+            qual_builder.append_value(&qual_buf);
 
             flag.push(record.flags().bits() as u32);
             format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
@@ -715,8 +715,8 @@ macro_rules! process_sam_records_impl {
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,
-                        sequence: &sequence,
-                        quality_scores: &quality_scores,
+                        sequence: Arc::new(seq_builder.finish()),
+                        quality_scores: Arc::new(qual_builder.finish()),
                     },
                     tag_arrays.as_ref(),
                     $projection.clone(),
@@ -734,8 +734,6 @@ macro_rules! process_sam_records_impl {
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
-                sequence.clear();
-                quality_scores.clear();
             }
         }
 
@@ -757,8 +755,8 @@ macro_rules! process_sam_records_impl {
                     mapping_quality: &mapping_quality,
                     mate_chrom: &mate_chrom,
                     mate_start: &mate_start,
-                    sequence: &sequence,
-                    quality_scores: &quality_scores,
+                    sequence: Arc::new(seq_builder.finish()),
+                    quality_scores: Arc::new(qual_builder.finish()),
                 },
                 tag_arrays.as_ref(),
                 $projection.clone(),
@@ -910,14 +908,16 @@ async fn get_indexed_stream(
             let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
             let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
             let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-            let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
-            let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
+            let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
+            let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
 
             let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
             let mut cigar_buf = String::new();
+            let mut seq_buf = String::new();
+            let mut qual_buf = String::new();
             let mut total_records = 0usize;
 
             for region in &regions {
@@ -1011,16 +1011,13 @@ async fn get_indexed_stream(
                     end.push(end_val);
                     mapping_quality.push(mq);
 
-                    let seq_string: String = record.sequence().iter().map(char::from).collect();
-                    sequence.push(seq_string);
+                    seq_buf.clear();
+                    seq_buf.extend(record.sequence().iter().map(char::from));
+                    seq_builder.append_value(&seq_buf);
 
-                    quality_scores.push(
-                        record
-                            .quality_scores()
-                            .iter()
-                            .map(|p| char::from(p + 33))
-                            .collect::<String>(),
-                    );
+                    qual_buf.clear();
+                    qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
+                    qual_builder.append_value(&qual_buf);
 
                     flag.push(record.flags().bits() as u32);
                     format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
@@ -1072,8 +1069,8 @@ async fn get_indexed_stream(
                                 mapping_quality: &mapping_quality,
                                 mate_chrom: &mate_chrom,
                                 mate_start: &mate_start,
-                                sequence: &sequence,
-                                quality_scores: &quality_scores,
+                                sequence: Arc::new(seq_builder.finish()),
+                                quality_scores: Arc::new(qual_builder.finish()),
                             },
                             tag_arrays.as_ref(),
                             projection.clone(),
@@ -1097,8 +1094,6 @@ async fn get_indexed_stream(
                         mapping_quality.clear();
                         mate_chrom.clear();
                         mate_start.clear();
-                        sequence.clear();
-                        quality_scores.clear();
                     }
                 }
             }
@@ -1125,8 +1120,8 @@ async fn get_indexed_stream(
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,
-                        sequence: &sequence,
-                        quality_scores: &quality_scores,
+                        sequence: Arc::new(seq_builder.finish()),
+                        quality_scores: Arc::new(qual_builder.finish()),
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
