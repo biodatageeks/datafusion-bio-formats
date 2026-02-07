@@ -3,9 +3,9 @@
 //! When an index (BAI/CRAI/TBI/CSI) is available, this module distributes genomic regions
 //! across a target number of partitions using index-derived size estimates. This achieves:
 //!
-//! - **Balanced workloads**: Greedy bin-packing distributes regions by estimated byte size
-//! - **Controlled concurrency**: Number of partitions = `min(target_partitions, num_regions)`
-//! - **Large region splitting**: Chromosomes that dominate total size are split into sub-regions
+//! - **Balanced workloads**: Linear-scan partitioning places boundaries at byte thresholds
+//! - **Controlled concurrency**: Number of partitions = `min(target_partitions, effective_regions)`
+//! - **Precise region splitting**: Chromosomes are split at exact byte-budget boundaries
 
 use crate::genomic_filter::GenomicRegion;
 use log::debug;
@@ -34,22 +34,25 @@ pub struct PartitionAssignment {
     pub total_estimated_bytes: u64,
 }
 
-/// Distribute genomic regions across `target_partitions` bins using greedy bin-packing.
+/// Distribute genomic regions across `target_partitions` using linear-scan partitioning.
 ///
 /// # Algorithm
 ///
-/// 1. **Proportional splitting**: If a region's `estimated_bytes` exceeds the ideal
-///    per-partition share AND `contig_length` is known, split it into `ceil(bytes/ideal)`
-///    equal-bp sub-regions. If the region has unmapped reads (from BAI metadata),
-///    an additional `unmapped_tail` region is emitted for direct-seek reading.
-/// 2. **Greedy bin-packing**: Sort regions by `estimated_bytes` descending. Assign each
-///    to the bin with the smallest current total.
+/// Walk through regions in order, maintaining a byte budget per partition.
+/// When the budget is exhausted, start a new partition. If a region exceeds
+/// the remaining budget AND has a known `contig_length`, split it at the
+/// byte-budget boundary (proportional to base pairs). This guarantees each
+/// partition receives approximately `total_bytes / target` estimated bytes.
+///
+/// When a chromosome is split and has unmapped reads (from BAI metadata),
+/// an `unmapped_tail` region is emitted after the last sub-region for
+/// direct-seek reading of unmapped records.
 ///
 /// # Edge cases
 ///
 /// - `target_partitions <= 1` → single partition with all regions
 /// - All estimates are 0 → round-robin distribution
-/// - Fewer regions than `target_partitions` → one region per partition
+/// - Regions without `contig_length` are treated as atomic (unsplittable)
 pub fn balance_partitions(
     estimates: Vec<RegionSizeEstimate>,
     target_partitions: usize,
@@ -71,117 +74,168 @@ pub fn balance_partitions(
 
     let total_bytes: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
 
-    // Step 1: Proportional splitting — split any region that exceeds its fair share
-    let ideal_per_partition = if total_bytes > 0 {
-        total_bytes / target as u64
-    } else {
-        0
+    // All-zero: round-robin distribution
+    if total_bytes == 0 {
+        let num_bins = target.min(estimates.len());
+        let mut bins: Vec<PartitionAssignment> = (0..num_bins)
+            .map(|_| PartitionAssignment {
+                regions: Vec::new(),
+                total_estimated_bytes: 0,
+            })
+            .collect();
+        for (i, est) in estimates.into_iter().enumerate() {
+            bins[i % num_bins].regions.push(est.region);
+        }
+        return bins;
+    }
+
+    // Cap effective target: can't create more useful partitions than total bytes
+    let effective_target = target.min(total_bytes as usize);
+
+    // Compute per-partition budgets: distribute total_bytes evenly with remainder
+    // First `extra` partitions get base_budget+1, rest get base_budget
+    let base_budget = total_bytes / effective_target as u64;
+    let extra = (total_bytes % effective_target as u64) as usize;
+
+    let budget_for = |idx: usize| -> u64 {
+        if idx < extra {
+            base_budget + 1
+        } else {
+            base_budget
+        }
     };
 
-    let mut expanded: Vec<RegionSizeEstimate> = Vec::with_capacity(estimates.len());
-    for est in estimates {
-        if ideal_per_partition > 0
-            && est.estimated_bytes > ideal_per_partition
-            && est.contig_length.is_some()
-        {
-            let contig_len = est.contig_length.unwrap();
-            // Proportional: each chromosome gets ceil(bytes/ideal) sub-regions
-            let num_splits = est.estimated_bytes.div_ceil(ideal_per_partition) as usize;
-            let num_splits = num_splits.max(2); // at least 2 splits
-            let bp_per_split = contig_len / num_splits as u64;
-            let bytes_per_split = est.estimated_bytes / num_splits as u64;
+    // Linear scan: walk through regions placing partition boundaries at byte thresholds
+    let mut partitions: Vec<PartitionAssignment> = Vec::with_capacity(effective_target);
+    partitions.push(PartitionAssignment {
+        regions: Vec::new(),
+        total_estimated_bytes: 0,
+    });
+    let mut budget: u64 = budget_for(0);
 
-            debug!(
-                "Splitting region {} into {} sub-regions ({} bp each, ~{} bytes each)",
-                est.region.chrom, num_splits, bp_per_split, bytes_per_split
-            );
+    for est in &estimates {
+        let mut remaining: u64 = est.estimated_bytes;
 
-            for i in 0..num_splits {
-                // 1-based coordinates
-                let sub_start = i as u64 * bp_per_split + 1;
-                let sub_end = if i == num_splits - 1 {
-                    contig_len // last sub-region extends to end
-                } else {
-                    (i as u64 + 1) * bp_per_split
-                };
-                expanded.push(RegionSizeEstimate {
-                    region: GenomicRegion {
+        // Determine the splittable range for this region (1-based inclusive coordinates)
+        let (eff_start, eff_end) = match (est.region.start, est.region.end, est.contig_length) {
+            (Some(s), Some(e), _) if e >= s => (s, e),
+            (_, _, Some(cl)) if cl > 0 => (1u64, cl),
+            _ => (0, 0), // not splittable
+        };
+        let can_split = eff_end > 0 && eff_end >= eff_start;
+        let mut pos: u64 = eff_start; // current 1-based start position
+        let mut was_split = false;
+
+        // 0-byte regions still need to be assigned (they may have data
+        // despite having 0 estimated bytes — e.g., when all contigs share
+        // a single BGZF block and the compressed offset range is 0).
+        if remaining == 0 {
+            let p = partitions.last_mut().unwrap();
+            p.regions.push(est.region.clone());
+            continue;
+        }
+
+        while remaining > 0 {
+            // If budget exhausted, start a new partition
+            if budget == 0 && partitions.len() < effective_target {
+                let new_idx = partitions.len();
+                partitions.push(PartitionAssignment {
+                    regions: Vec::new(),
+                    total_estimated_bytes: 0,
+                });
+                budget = budget_for(new_idx);
+            }
+
+            let is_last = partitions.len() >= effective_target;
+            // Check if we have enough base pairs remaining to split
+            let remaining_bp = if can_split && pos <= eff_end {
+                eff_end - pos + 1
+            } else {
+                0
+            };
+            let splittable = remaining_bp > 1; // need >=2 bp for a meaningful split
+
+            if remaining <= budget || is_last || !splittable {
+                // Take all remaining bytes: fits in budget, last partition, or can't split
+                let region = if can_split && pos <= eff_end && was_split {
+                    GenomicRegion {
                         chrom: est.region.chrom.clone(),
-                        start: Some(sub_start),
-                        end: Some(sub_end),
+                        start: Some(pos),
+                        end: Some(eff_end),
                         unmapped_tail: false,
-                    },
-                    estimated_bytes: bytes_per_split,
-                    contig_length: None, // sub-regions are not further splittable
-                    unmapped_count: 0,
-                });
+                    }
+                } else {
+                    est.region.clone()
+                };
+                let p = partitions.last_mut().unwrap();
+                p.regions.push(region);
+                p.total_estimated_bytes += remaining;
+                budget = budget.saturating_sub(remaining);
+                remaining = 0;
+            } else {
+                // Split: take budget's worth of base pairs from this chromosome
+                was_split = true;
+                let bp_to_take = (remaining_bp as u128 * budget as u128 / remaining as u128) as u64;
+                // Clamp: at least 1bp, leave at least 1bp for next partition
+                let bp_to_take = bp_to_take.clamp(1, remaining_bp - 1);
+                let sub_end = pos + bp_to_take - 1;
+
+                debug!(
+                    "Splitting {} at bp {} (budget={}, remaining={})",
+                    est.region.chrom, sub_end, budget, remaining
+                );
+
+                let region = GenomicRegion {
+                    chrom: est.region.chrom.clone(),
+                    start: Some(pos),
+                    end: Some(sub_end),
+                    unmapped_tail: false,
+                };
+                let p = partitions.last_mut().unwrap();
+                p.regions.push(region);
+                p.total_estimated_bytes += budget;
+                remaining -= budget;
+                pos = sub_end + 1;
+
+                // Start new partition
+                if partitions.len() < effective_target {
+                    let new_idx = partitions.len();
+                    partitions.push(PartitionAssignment {
+                        regions: Vec::new(),
+                        total_estimated_bytes: 0,
+                    });
+                    budget = budget_for(new_idx);
+                } else {
+                    budget = 0; // is_last will handle on next iteration
+                }
             }
+        }
 
-            // Emit unmapped tail if BAI metadata confirms unmapped reads exist
-            if est.unmapped_count > 0 {
-                expanded.push(RegionSizeEstimate {
-                    region: GenomicRegion {
-                        chrom: est.region.chrom.clone(),
-                        start: None,
-                        end: None,
-                        unmapped_tail: true,
-                    },
-                    estimated_bytes: 1, // minimal weight for bin-packing
-                    contig_length: None,
-                    unmapped_count: 0,
-                });
-            }
-        } else {
-            expanded.push(est);
+        // Emit unmapped tail if chromosome was split and has unmapped reads
+        if was_split && est.unmapped_count > 0 {
+            let tail = GenomicRegion {
+                chrom: est.region.chrom.clone(),
+                start: None,
+                end: None,
+                unmapped_tail: true,
+            };
+            let p = partitions.last_mut().unwrap();
+            p.regions.push(tail);
+            p.total_estimated_bytes += 1;
+            budget = budget.saturating_sub(1);
         }
     }
 
-    // Check if all estimates are zero — use round-robin in that case
-    let all_zero = expanded.iter().all(|e| e.estimated_bytes == 0);
-
-    // Step 2: Greedy bin-packing
-    let num_bins = target.min(expanded.len());
-
-    // Sort by estimated_bytes descending (largest first for best packing)
-    if !all_zero {
-        expanded.sort_by(|a, b| b.estimated_bytes.cmp(&a.estimated_bytes));
-    }
-
-    let mut bins: Vec<PartitionAssignment> = (0..num_bins)
-        .map(|_| PartitionAssignment {
-            regions: Vec::new(),
-            total_estimated_bytes: 0,
-        })
-        .collect();
-
-    if all_zero {
-        // Round-robin for zero estimates
-        for (i, est) in expanded.into_iter().enumerate() {
-            let bin_idx = i % num_bins;
-            bins[bin_idx].regions.push(est.region);
-        }
-    } else {
-        // Greedy: assign each region to the bin with smallest current total
-        for est in expanded {
-            let min_bin = bins
-                .iter_mut()
-                .min_by_key(|b| b.total_estimated_bytes)
-                .unwrap();
-            min_bin.total_estimated_bytes += est.estimated_bytes;
-            min_bin.regions.push(est.region);
-        }
-    }
-
-    // Remove empty bins (shouldn't happen, but be safe)
-    bins.retain(|b| !b.regions.is_empty());
+    // Remove empty partitions
+    partitions.retain(|p| !p.regions.is_empty());
 
     debug!(
         "Balanced {} regions into {} partitions (target: {})",
-        bins.iter().map(|b| b.regions.len()).sum::<usize>(),
-        bins.len(),
+        partitions.iter().map(|b| b.regions.len()).sum::<usize>(),
+        partitions.len(),
         target
     );
-    for (i, bin) in bins.iter().enumerate() {
+    for (i, bin) in partitions.iter().enumerate() {
         debug!(
             "  Partition {}: {} regions, ~{} estimated bytes",
             i,
@@ -190,7 +244,7 @@ pub fn balance_partitions(
         );
     }
 
-    bins
+    partitions
 }
 
 #[cfg(test)]
@@ -245,14 +299,16 @@ mod tests {
         ];
         let result = balance_partitions(estimates, 2);
         assert_eq!(result.len(), 2);
-        // Each bin should get 2 regions of 100 bytes each
+        // Each partition should get 2 regions of 100 bytes each
         assert_eq!(result[0].total_estimated_bytes, 200);
         assert_eq!(result[1].total_estimated_bytes, 200);
     }
 
     #[test]
-    fn test_skewed_distribution() {
-        // chr1 is much larger than others
+    fn test_skewed_unsplittable() {
+        // chr1 is much larger than others, but none have contig_length (unsplittable)
+        // Linear scan: chr1(100) exceeds budget(80), can't split → P0=100.
+        // chr2+chr3 fill P1=60.
         let estimates = vec![
             estimate("chr1", 100, None),
             estimate("chr2", 50, None),
@@ -260,9 +316,26 @@ mod tests {
         ];
         let result = balance_partitions(estimates, 2);
         assert_eq!(result.len(), 2);
-        // Greedy: chr1 (100) goes to bin 0, chr2 (50) to bin 1, chr3 (10) to bin 1
         assert_eq!(result[0].total_estimated_bytes, 100);
         assert_eq!(result[1].total_estimated_bytes, 60);
+    }
+
+    #[test]
+    fn test_skewed_splittable() {
+        // Same sizes but with contig_length → chr1 can be split at budget boundary
+        // total=160, target=2, budget=80 each
+        // chr1(100): take 80 → P0, remaining 20 → P1
+        // chr2(50): add to P1 → P1=70
+        // chr3(10): add to P1 → P1=80
+        let estimates = vec![
+            estimate("chr1", 100, Some(249_000_000)),
+            estimate("chr2", 50, None),
+            estimate("chr3", 10, None),
+        ];
+        let result = balance_partitions(estimates, 2);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].total_estimated_bytes, 80);
+        assert_eq!(result[1].total_estimated_bytes, 80);
     }
 
     #[test]
@@ -299,15 +372,35 @@ mod tests {
     }
 
     #[test]
-    fn test_fewer_regions_than_partitions() {
+    fn test_fewer_regions_than_partitions_unsplittable() {
+        // Without contig_length, can't split → only 2 partitions
         let estimates = vec![estimate("chr1", 100, None), estimate("chr2", 50, None)];
         let result = balance_partitions(estimates, 8);
-        // Can't have more partitions than regions
         assert_eq!(result.len(), 2);
     }
 
     #[test]
-    fn test_single_region() {
+    fn test_fewer_regions_than_partitions_splittable() {
+        // With contig_length, can split to fill all target partitions
+        let estimates = vec![
+            estimate("chr1", 100, Some(249_000_000)),
+            estimate("chr2", 50, Some(243_000_000)),
+        ];
+        let result = balance_partitions(estimates, 8);
+        assert!(
+            result.len() <= 8,
+            "Should not exceed target: got {}",
+            result.len()
+        );
+        assert!(
+            result.len() > 2,
+            "Splittable regions should fill more than 2 partitions: got {}",
+            result.len()
+        );
+    }
+
+    #[test]
+    fn test_single_region_unsplittable() {
         let estimates = vec![estimate("chr1", 100, None)];
         let result = balance_partitions(estimates, 4);
         assert_eq!(result.len(), 1);
@@ -346,13 +439,13 @@ mod tests {
             .flat_map(|b| b.regions.iter().map(|r| r.chrom.clone()))
             .collect();
         all_chroms.sort();
+        all_chroms.dedup();
         assert_eq!(all_chroms, vec!["chr1", "chr2", "chr3", "chrX"]);
     }
 
     #[test]
     fn test_single_contig_splits_to_target_partitions() {
         // Single contig with known length: should split to exactly target_partitions
-        // This simulates reading a single-chromosome BAM file (e.g., chr1-only)
         let estimates = vec![estimate("chr1", 1000, Some(249_000_000))];
 
         for target in [2, 4, 8] {
@@ -411,16 +504,15 @@ mod tests {
         assert!(result.len() <= 8);
         assert!(!result.is_empty());
 
-        // Check that total estimated bytes is preserved (approximately, splits may round)
+        // Total bytes should be exactly preserved (integer arithmetic)
         let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
-        assert!(
-            (result_total as i64 - total as i64).unsigned_abs() <= result.len() as u64,
-            "Total bytes should be approximately preserved: {} vs {}",
-            result_total,
-            total
+        assert_eq!(
+            result_total, total,
+            "Total bytes should be exactly preserved: {} vs {}",
+            result_total, total
         );
 
-        // Check balance: max partition shouldn't be more than 2x the min
+        // Linear scan guarantees near-perfect balance
         let max_bytes = result
             .iter()
             .map(|b| b.total_estimated_bytes)
@@ -431,8 +523,9 @@ mod tests {
             .map(|b| b.total_estimated_bytes)
             .min()
             .unwrap();
+        // With linear scan, max/min ratio should be very close to 1
         assert!(
-            max_bytes <= min_bytes * 3,
+            max_bytes <= min_bytes * 2,
             "Partitions too imbalanced: max={} min={}",
             max_bytes,
             min_bytes
@@ -511,13 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn test_proportional_splitting_no_threshold() {
-        // With the old 1.5x threshold, chr1 at 1.44x ideal would NOT be split.
-        // With proportional splitting, chr1 at 1.44x (> 1.0x) SHOULD be split.
-        //
-        // total = 249 + 243 + 198 + 60 = 750
-        // target = 4 → ideal = 187.5
-        // chr1 (249) > ideal → should be split into ceil(249/187) = 2 pieces
+    fn test_linear_scan_perfect_balance() {
+        // Linear scan should produce near-perfect balance for splittable regions
+        // total = 750, target = 4 → budget = 187 or 188 each
         let estimates = vec![
             estimate("chr1", 249, Some(249_000_000)),
             estimate("chr2", 243, Some(243_000_000)),
@@ -526,12 +615,61 @@ mod tests {
         ];
         let result = balance_partitions(estimates, 4);
 
-        // All three large chromosomes should be split, giving more sub-regions
-        let total_regions: usize = result.iter().map(|b| b.regions.len()).sum();
-        assert!(
-            total_regions > 4,
-            "Proportional splitting should produce > 4 sub-regions, got {}",
-            total_regions
+        assert_eq!(result.len(), 4);
+        let total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
+        assert_eq!(total, 750);
+
+        // Each partition should be within ±1 of ideal (187.5)
+        for (i, p) in result.iter().enumerate() {
+            assert!(
+                p.total_estimated_bytes >= 187 && p.total_estimated_bytes <= 189,
+                "Partition {} has {} bytes, expected ~188",
+                i,
+                p.total_estimated_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn test_zero_byte_regions_not_dropped() {
+        // When some contigs share a BGZF block, their compressed byte range is 0.
+        // These regions must still be included in partition assignments.
+        let estimates = vec![
+            estimate("chr1", 0, None),
+            estimate("chr2", 100, None),
+            estimate("chrX", 0, None),
+        ];
+        let result = balance_partitions(estimates, 4);
+
+        let mut all_chroms: Vec<String> = result
+            .iter()
+            .flat_map(|b| b.regions.iter().map(|r| r.chrom.clone()))
+            .collect();
+        all_chroms.sort();
+        assert_eq!(
+            all_chroms,
+            vec!["chr1", "chr2", "chrX"],
+            "All regions must be present even with 0-byte estimates"
         );
+    }
+
+    #[test]
+    fn test_linear_scan_preserves_total_bytes() {
+        // Verify total bytes are exactly preserved across various configurations
+        for target in [2, 3, 4, 8, 16] {
+            let estimates = vec![
+                estimate("chr1", 249, Some(249_000_000)),
+                estimate("chr2", 243, Some(243_000_000)),
+                estimate("chr3", 198, Some(198_000_000)),
+            ];
+            let total: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
+            let result = balance_partitions(estimates, target);
+            let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
+            assert_eq!(
+                result_total, total,
+                "Total bytes not preserved for target={}: {} vs {}",
+                target, result_total, total
+            );
+        }
     }
 }
