@@ -80,8 +80,9 @@ pub fn balance_partitions(
             && est.contig_length.is_some()
         {
             let contig_len = est.contig_length.unwrap();
-            // How many sub-regions do we need to bring each under the threshold?
-            let num_splits = est.estimated_bytes.div_ceil(split_threshold) as usize;
+            // Split to ideal_per_partition-sized pieces (not split_threshold-sized).
+            // The threshold gates WHETHER to split; the ideal size controls HOW MANY splits.
+            let num_splits = est.estimated_bytes.div_ceil(ideal_per_partition) as usize;
             let num_splits = num_splits.min(target).max(2); // at least 2, at most target_partitions
             let bp_per_split = contig_len / num_splits as u64;
             let bytes_per_split = est.estimated_bytes / num_splits as u64;
@@ -323,6 +324,33 @@ mod tests {
             .collect();
         all_chroms.sort();
         assert_eq!(all_chroms, vec!["chr1", "chr2", "chr3", "chrX"]);
+    }
+
+    #[test]
+    fn test_single_contig_splits_to_target_partitions() {
+        // Single contig with known length: should split to exactly target_partitions
+        // This simulates reading a single-chromosome BAM file (e.g., chr1-only)
+        let estimates = vec![estimate("chr1", 1000, Some(249_000_000))];
+
+        for target in [2, 4, 8] {
+            let result = balance_partitions(estimates.clone(), target);
+            assert_eq!(
+                result.len(),
+                target,
+                "Single contig with target={} should produce {} partitions, got {}",
+                target,
+                target,
+                result.len()
+            );
+            // All sub-regions should be chr1
+            for bin in &result {
+                for region in &bin.regions {
+                    assert_eq!(region.chrom, "chr1");
+                    assert!(region.start.is_some(), "Sub-regions should have start");
+                    assert!(region.end.is_some(), "Sub-regions should have end");
+                }
+            }
+        }
     }
 
     #[test]
