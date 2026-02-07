@@ -358,7 +358,7 @@ mod tests {
         let result = balance_partitions(estimates, 8);
 
         assert!(result.len() <= 8);
-        assert!(result.len() >= 1);
+        assert!(!result.is_empty());
 
         // Check that total estimated bytes is preserved (approximately, splits may round)
         let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
