@@ -1,7 +1,7 @@
 {
   "ref": "v0.1.1",
   "ref_type": "tag",
-  "commit_sha": "2aad9ae8c8bd5fd88a013b9493398bb6cb6d7b0e",
-  "timestamp": "2026-02-07T16:49:31Z",
+  "commit_sha": "8af7fa1e67ae17a4b78fdb5982c2cc5e78da66f7",
+  "timestamp": "2026-02-07T17:33:09Z",
   "benchmark_mode": "fast"
 }
