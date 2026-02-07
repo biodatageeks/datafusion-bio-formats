@@ -325,11 +325,13 @@ WHERE chrom = 'chr1' AND start >= 1000000 AND mapping_quality >= 30;
 
 | Index Available? | SQL Filters | Partitions |
 |-----------------|-------------|------------|
-| Yes | `chrom = 'chr1' AND start >= 1000` | 1 (single region) |
+| Yes | `chrom = 'chr1' AND start >= 1000` | 1 or more (split into sub-regions if contig length is known*) |
 | Yes | `chrom IN ('chr1', 'chr2')` | min(2, target_partitions) |
 | Yes | `mapping_quality >= 30` (no genomic filter) | min(N chroms, target_partitions) |
 | Yes | None (full scan) | min(N chroms, target_partitions) |
 | No | Any | 1 (sequential full scan) |
+
+*Large single-region queries are automatically split into sub-regions when contig lengths are available from the file header. BAM and CRAM always have contig lengths; VCF has them when the header contains `##contig=<...,length=N>` lines; GFF typically does not.
 
 When an index exists, regions are distributed across `target_partitions` using a greedy bin-packing algorithm that estimates data volume from the index. This ensures balanced work distribution even when chromosomes have vastly different sizes (e.g., chr1 at ~249Mb vs chrY at ~57Mb).
 
