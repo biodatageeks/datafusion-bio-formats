@@ -233,23 +233,35 @@ fn load_tags<R: Record>(
             }
         }
 
+        let expected_type = &tag_builders.1[i]; // Expected Arrow type from schema
+
         match tag_result {
             Some(Ok(value)) => match value {
-                Value::Int8(v) => builder.append_int(v as i32)?,
-                Value::UInt8(v) => builder.append_int(v as i32)?,
-                Value::Int16(v) => builder.append_int(v as i32)?,
-                Value::UInt16(v) => builder.append_int(v as i32)?,
-                Value::Int32(v) => builder.append_int(v)?,
-                Value::UInt32(v) => builder.append_int(v as i32)?,
-                Value::Float(f) => builder.append_float(f)?,
+                Value::Int8(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::UInt8(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::Int16(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::UInt16(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::Int32(v) => append_int_value(builder, expected_type, v)?,
+                Value::UInt32(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::Float(f) => {
+                    if matches!(expected_type, DataType::Utf8) {
+                        builder.append_string(&f.to_string())?
+                    } else {
+                        builder.append_float(f)?
+                    }
+                }
                 Value::String(s) => match std::str::from_utf8(s.as_ref()) {
                     Ok(string) => builder.append_string(string)?,
                     Err(_) => builder.append_null()?,
                 },
                 Value::Character(c) => {
-                    // Convert u8 to char, not to its numeric string representation
-                    let ch = char::from(c);
-                    builder.append_string(&ch.to_string())?
+                    if matches!(expected_type, DataType::Int32) {
+                        builder.append_int(c as i32)?
+                    } else {
+                        // Convert u8 to char, not to its numeric string representation
+                        let ch = char::from(c);
+                        builder.append_string(&ch.to_string())?
+                    }
                 }
                 Value::Hex(h) => {
                     let hex_str = hex::encode::<&[u8]>(h.as_ref());
@@ -331,6 +343,27 @@ fn load_tags<R: Record>(
         }
     }
     Ok(())
+}
+
+/// Append an integer value to the builder, converting to string if the builder expects Utf8.
+///
+/// Some BAM/CRAM files encode character tags (SAM type 'A') as integer types ('c', 'C', etc.)
+/// in the binary format. When the schema expects Utf8 but noodles decodes the value as an
+/// integer, we convert the byte to its ASCII character representation.
+fn append_int_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    value: i32,
+) -> Result<(), ArrowError> {
+    if matches!(expected_type, DataType::Utf8) {
+        if let Some(ch) = char::from_u32(value as u32) {
+            builder.append_string(&ch.to_string())
+        } else {
+            builder.append_string(&value.to_string())
+        }
+    } else {
+        builder.append_int(value)
+    }
 }
 
 fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, ArrowError> {

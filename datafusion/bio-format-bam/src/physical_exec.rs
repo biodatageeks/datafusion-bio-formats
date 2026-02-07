@@ -192,6 +192,7 @@ fn set_tag_builders(
 fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
     for i in 0..tag_builders.0.len() {
         let builder = &mut tag_builders.2[i];
+        let expected_type = &tag_builders.1[i]; // Expected Arrow type from schema
         let tag = &tag_builders.3[i]; // Use pre-parsed tag
 
         // Access tag using noodles API: record.data().get(tag)
@@ -201,13 +202,19 @@ fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<()
         match tag_result {
             Some(Ok(value)) => {
                 match value {
-                    Value::Int8(v) => builder.append_int(v as i32)?,
-                    Value::UInt8(v) => builder.append_int(v as i32)?,
-                    Value::Int16(v) => builder.append_int(v as i32)?,
-                    Value::UInt16(v) => builder.append_int(v as i32)?,
-                    Value::Int32(v) => builder.append_int(v)?,
-                    Value::UInt32(v) => builder.append_int(v as i32)?,
-                    Value::Float(f) => builder.append_float(f)?,
+                    Value::Int8(v) => append_int_value(builder, expected_type, v as i32)?,
+                    Value::UInt8(v) => append_int_value(builder, expected_type, v as i32)?,
+                    Value::Int16(v) => append_int_value(builder, expected_type, v as i32)?,
+                    Value::UInt16(v) => append_int_value(builder, expected_type, v as i32)?,
+                    Value::Int32(v) => append_int_value(builder, expected_type, v)?,
+                    Value::UInt32(v) => append_int_value(builder, expected_type, v as i32)?,
+                    Value::Float(f) => {
+                        if matches!(expected_type, DataType::Utf8) {
+                            builder.append_string(&f.to_string())?
+                        } else {
+                            builder.append_float(f)?
+                        }
+                    }
                     Value::String(s) => {
                         // BStr needs to be converted to str
                         match std::str::from_utf8(s.as_ref()) {
@@ -216,9 +223,13 @@ fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<()
                         }
                     }
                     Value::Character(c) => {
-                        // Convert u8 to char, not to its numeric string representation
-                        let ch = char::from(c);
-                        builder.append_string(&ch.to_string())?
+                        if matches!(expected_type, DataType::Int32) {
+                            builder.append_int(c as i32)?
+                        } else {
+                            // Convert u8 to char, not to its numeric string representation
+                            let ch = char::from(c);
+                            builder.append_string(&ch.to_string())?
+                        }
                     }
                     Value::Hex(h) => {
                         // Convert hex bytes to hex string
@@ -291,6 +302,29 @@ fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<()
         }
     }
     Ok(())
+}
+
+/// Append an integer value to the builder, converting to string if the builder expects Utf8.
+///
+/// Some BAM files encode character tags (SAM type 'A') as integer types ('c', 'C', etc.)
+/// in the binary format. When the schema expects Utf8 (from the tag registry defining the
+/// tag as type 'A'), but noodles decodes the value as Int8/UInt8, we convert the byte to
+/// its ASCII character representation.
+fn append_int_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    value: i32,
+) -> Result<(), ArrowError> {
+    if matches!(expected_type, DataType::Utf8) {
+        // Integer stored as character code - convert to ASCII char
+        if let Some(ch) = char::from_u32(value as u32) {
+            builder.append_string(&ch.to_string())
+        } else {
+            builder.append_string(&value.to_string())
+        }
+    } else {
+        builder.append_int(value)
+    }
 }
 
 /// Convert tag builders to Arrow arrays
