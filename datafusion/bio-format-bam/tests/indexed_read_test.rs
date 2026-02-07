@@ -14,6 +14,8 @@ use datafusion_bio_format_bam::table_provider::BamTableProvider;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use datafusion::prelude::SessionConfig;
+
 /// Helper: execute a SQL query and return total row count across all batches.
 async fn count_rows(ctx: &SessionContext, sql: &str) -> u64 {
     let df = ctx.sql(sql).await.expect("SQL execution failed");
@@ -240,6 +242,51 @@ async fn test_bam_indexed_vs_full_scan_correctness() -> datafusion::error::Resul
         "Indexed chr1 count ({}) should equal manual count from full scan ({})",
         indexed_count, manual_count
     );
+
+    Ok(())
+}
+
+/// Create a session context with custom target_partitions.
+async fn setup_bam_ctx_with_partitions(
+    target_partitions: usize,
+) -> datafusion::error::Result<SessionContext> {
+    let config = SessionConfig::new().with_target_partitions(target_partitions);
+    let ctx = SessionContext::new_with_config(config);
+    let provider = BamTableProvider::new(
+        "tests/multi_chrom.bam".to_string(),
+        None,
+        None,
+        true, // zero-based coordinates
+        None,
+    )
+    .await?;
+    ctx.register_table("bam", Arc::new(provider))?;
+    Ok(ctx)
+}
+
+/// Test: row count is invariant across different target_partitions values.
+/// This catches data loss bugs where sub-region splitting drops unmapped reads
+/// or position-boundary deduplication is too aggressive.
+#[tokio::test]
+async fn test_bam_count_invariance_across_partitions() -> datafusion::error::Result<()> {
+    let partition_targets = [1, 2, 3, 4, 8];
+    let mut counts: Vec<(usize, u64)> = Vec::new();
+
+    for target in partition_targets {
+        let ctx = setup_bam_ctx_with_partitions(target).await?;
+        let count = count_rows(&ctx, "SELECT chrom FROM bam").await;
+        counts.push((target, count));
+    }
+
+    // All counts should be identical
+    let expected = counts[0].1;
+    for (target, count) in &counts {
+        assert_eq!(
+            *count, expected,
+            "Count at target_partitions={} is {} but expected {} (from target={})",
+            target, count, expected, counts[0].0
+        );
+    }
 
     Ok(())
 }

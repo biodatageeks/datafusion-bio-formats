@@ -9,6 +9,7 @@ use noodles_bam::Record;
 use noodles_bam::io::Reader;
 use noodles_bgzf::r#async::io::Reader as AsyncBgzfReader;
 use noodles_bgzf::io::MultithreadedReader;
+use noodles_csi::binning_index::ReferenceSequence as BinningRefSeq;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::header::ReferenceSequences;
@@ -330,6 +331,7 @@ pub fn estimate_sizes_from_bai(
                     region: r.clone(),
                     estimated_bytes: 1,
                     contig_length: None,
+                    unmapped_count: 0,
                 })
                 .collect();
         }
@@ -367,10 +369,22 @@ pub fn estimate_sizes_from_bai(
                 .and_then(|idx| reference_lengths.get(idx).copied())
                 .filter(|&len| len > 0);
 
+            // Extract unmapped read count from BAI metadata pseudobin
+            let unmapped_count = ref_idx
+                .and_then(|idx| {
+                    index
+                        .reference_sequences()
+                        .get(idx)
+                        .and_then(|ref_seq| ref_seq.metadata())
+                        .map(|meta| meta.unmapped_record_count())
+                })
+                .unwrap_or(0);
+
             RegionSizeEstimate {
                 region: region.clone(),
                 estimated_bytes,
                 contig_length,
+                unmapped_count,
             }
         })
         .collect()

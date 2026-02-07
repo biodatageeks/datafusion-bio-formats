@@ -731,6 +731,7 @@ pub fn estimate_sizes_from_tbi(
                     region: r.clone(),
                     estimated_bytes: 1,
                     contig_length: None,
+                    unmapped_count: 0,
                 })
                 .collect();
         }
@@ -772,6 +773,7 @@ pub fn estimate_sizes_from_tbi(
                 region: region.clone(),
                 estimated_bytes,
                 contig_length,
+                unmapped_count: 0,
             }
         })
         .collect()

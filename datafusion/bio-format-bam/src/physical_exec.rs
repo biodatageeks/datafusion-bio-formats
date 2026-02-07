@@ -24,6 +24,8 @@ use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
+use noodles_bam as bam;
+use noodles_csi::binning_index::ReferenceSequence as BinningRefSeq;
 use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
@@ -869,6 +871,97 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
         .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
 }
 
+/// Read unmapped records for a specific reference sequence via direct BGZF seek.
+///
+/// Uses BAI metadata's `end_position()` to seek past all mapped records for this reference,
+/// then reads forward collecting only unmapped records (those with a matching
+/// reference_sequence_id but no alignment_start).
+fn read_unmapped_tail(
+    file_path: &str,
+    index_path: &str,
+    chrom: &str,
+    reference_names: &[String],
+) -> Result<Vec<bam::Record>, DataFusionError> {
+    let index = bam::bai::fs::read(index_path).map_err(|e| {
+        DataFusionError::Execution(format!("Failed to read BAI for unmapped tail: {}", e))
+    })?;
+
+    let ref_idx = reference_names
+        .iter()
+        .position(|n| n == chrom)
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!("Reference '{}' not found in BAM header", chrom))
+        })?;
+
+    let ref_seq = index.reference_sequences().get(ref_idx).ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "Reference index {} not found in BAI index",
+            ref_idx
+        ))
+    })?;
+
+    // Get metadata end_position — this is where mapped data ends for this reference
+    let seek_pos = ref_seq
+        .metadata()
+        .map(|meta| meta.end_position())
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "No metadata in BAI for reference '{}' — cannot locate unmapped section",
+                chrom
+            ))
+        })?;
+
+    // Open a separate BGZF reader and seek to the unmapped section
+    let mut reader = bam::io::indexed_reader::Builder::default()
+        .set_index(index)
+        .build_from_path(file_path)
+        .map_err(|e| DataFusionError::Execution(format!("Failed to open BAM file: {}", e)))?;
+    let _header = reader
+        .read_header()
+        .map_err(|e| DataFusionError::Execution(format!("Failed to read BAM header: {}", e)))?;
+
+    // Seek to the metadata end_position (past all mapped records for this reference)
+    reader
+        .get_mut()
+        .seek(seek_pos)
+        .map_err(|e| DataFusionError::Execution(format!("BGZF seek failed: {}", e)))?;
+
+    let mut record = bam::Record::default();
+    let mut unmapped_records = Vec::new();
+
+    loop {
+        match reader.read_record(&mut record) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                // Check reference_sequence_id matches
+                match record.reference_sequence_id() {
+                    Some(Ok(id)) if id == ref_idx => {}
+                    _ => break, // Left this reference or no reference — done
+                }
+                // Only collect unmapped records (no alignment position)
+                if record.alignment_start().is_none() {
+                    unmapped_records.push(record.clone());
+                }
+                // Skip mapped records that may appear right after the seek point
+            }
+            Err(e) => {
+                return Err(DataFusionError::Execution(format!(
+                    "Error reading unmapped BAM records: {}",
+                    e
+                )));
+            }
+        }
+    }
+
+    debug!(
+        "Read {} unmapped records for {} via direct seek",
+        unmapped_records.len(),
+        chrom
+    );
+
+    Ok(unmapped_records)
+}
+
 /// Get a streaming RecordBatch stream from an indexed BAM file for one or more regions.
 ///
 /// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
@@ -921,6 +1014,131 @@ async fn get_indexed_stream(
             let mut total_records = 0usize;
 
             for region in &regions {
+                // Handle unmapped tail regions via direct BGZF seek
+                if region.unmapped_tail {
+                    let unmapped_records =
+                        read_unmapped_tail(&file_path, &index_path, &region.chrom, &names)?;
+
+                    for record in unmapped_records {
+                        let chrom_name = Some(region.chrom.clone());
+                        let start_val: Option<u32> = None;
+                        let end_val: Option<u32> = None;
+                        let mq = record.mapping_quality().map(|q| q.get() as u32);
+
+                        // Apply residual filters
+                        if !residual_filters.is_empty() {
+                            let fields = BamRecordFields {
+                                chrom: chrom_name.clone(),
+                                start: start_val,
+                                end: end_val,
+                                mapping_quality: mq,
+                                flags: record.flags().bits() as u32,
+                            };
+                            if !evaluate_record_filters(&fields, &residual_filters) {
+                                continue;
+                            }
+                        }
+
+                        match record.name() {
+                            Some(read_name) => name.push(Some(read_name.to_string())),
+                            _ => name.push(None),
+                        };
+
+                        chrom.push(chrom_name);
+                        start.push(start_val);
+                        end.push(end_val);
+                        mapping_quality.push(mq);
+
+                        seq_buf.clear();
+                        seq_buf.extend(record.sequence().iter().map(char::from));
+                        seq_builder.append_value(&seq_buf);
+
+                        qual_buf.clear();
+                        qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
+                        qual_builder.append_value(&qual_buf);
+
+                        flag.push(record.flags().bits() as u32);
+                        format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
+                        cigar.push(cigar_buf.clone());
+
+                        let mate_chrom_name =
+                            get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
+                        mate_chrom.push(mate_chrom_name);
+
+                        match record.mate_alignment_start() {
+                            Some(mate_start_pos) => {
+                                let pos = mate_start_pos
+                                    .map_err(|e| {
+                                        DataFusionError::Execution(format!(
+                                            "BAM mate pos error: {}",
+                                            e
+                                        ))
+                                    })?
+                                    .get() as u32;
+                                mate_start.push(Some(if coordinate_system_zero_based {
+                                    pos - 1
+                                } else {
+                                    pos
+                                }));
+                            }
+                            _ => mate_start.push(None),
+                        };
+
+                        load_tags(&record, &mut tag_builders)
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+
+                        total_records += 1;
+
+                        if total_records % batch_size == 0 {
+                            let tag_arrays =
+                                if num_tag_fields > 0 {
+                                    Some(builders_to_arrays(&mut tag_builders.2).map_err(|e| {
+                                        DataFusionError::ArrowError(Box::new(e), None)
+                                    })?)
+                                } else {
+                                    None
+                                };
+                            let batch = build_record_batch(
+                                Arc::clone(&schema),
+                                RecordFields {
+                                    name: &name,
+                                    chrom: &chrom,
+                                    start: &start,
+                                    end: &end,
+                                    flag: &flag,
+                                    cigar: &cigar,
+                                    mapping_quality: &mapping_quality,
+                                    mate_chrom: &mate_chrom,
+                                    mate_start: &mate_start,
+                                    sequence: Arc::new(seq_builder.finish()),
+                                    quality_scores: Arc::new(qual_builder.finish()),
+                                },
+                                tag_arrays.as_ref(),
+                                projection.clone(),
+                            )?;
+
+                            loop {
+                                match tx.try_send(Ok(batch.clone())) {
+                                    Ok(()) => break,
+                                    Err(e) if e.is_disconnected() => return Ok(()),
+                                    Err(_) => std::thread::yield_now(),
+                                }
+                            }
+
+                            name.clear();
+                            chrom.clear();
+                            start.clear();
+                            end.clear();
+                            flag.clear();
+                            cigar.clear();
+                            mapping_quality.clear();
+                            mate_chrom.clear();
+                            mate_start.clear();
+                        }
+                    }
+                    continue; // Done with this unmapped_tail region
+                }
+
                 // Sub-region bounds for deduplication (1-based, from partition balancer)
                 let region_start_1based = region.start.map(|s| s as u32);
                 let region_end_1based = region.end.map(|e| e as u32);

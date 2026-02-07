@@ -15,6 +15,10 @@ pub struct GenomicRegion {
     pub start: Option<u64>,
     /// 1-based inclusive end position (None = to end of chromosome)
     pub end: Option<u64>,
+    /// If true, this region represents only the unmapped reads for this chromosome
+    /// (reads with a reference_sequence_id but no alignment position).
+    /// These reads are not covered by BAI bin queries and must be read via direct seek.
+    pub unmapped_tail: bool,
 }
 
 /// Result of analyzing DataFusion filter expressions for genomic region information.
@@ -73,6 +77,7 @@ pub fn extract_genomic_regions(
                 chrom,
                 start: start_lower,
                 end: end_upper,
+                unmapped_tail: false,
             })
             .collect()
     };
@@ -96,6 +101,7 @@ pub fn build_full_scan_regions(reference_names: &[String]) -> Vec<GenomicRegion>
             chrom: name.clone(),
             start: None,
             end: None,
+            unmapped_tail: false,
         })
         .collect()
 }

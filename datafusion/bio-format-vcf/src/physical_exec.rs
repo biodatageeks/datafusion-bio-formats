@@ -1004,6 +1004,11 @@ async fn get_indexed_vcf_stream(
             let mut total_records = 0usize;
 
             for region in &regions {
+                // Skip unmapped_tail regions — not applicable to VCF
+                if region.unmapped_tail {
+                    continue;
+                }
+
                 // Sub-region bounds for deduplication (1-based, from partition balancer)
                 let region_start_1based = region.start.map(|s| s as u32);
                 let region_end_1based = region.end.map(|e| e as u32);

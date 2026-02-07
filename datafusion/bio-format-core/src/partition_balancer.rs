@@ -19,6 +19,10 @@ pub struct RegionSizeEstimate {
     pub estimated_bytes: u64,
     /// Length of the contig in base pairs (if known). Used for sub-region splitting.
     pub contig_length: Option<u64>,
+    /// Number of unmapped reads for this reference (from BAI metadata pseudobin).
+    /// Unmapped reads have a reference_sequence_id but no alignment position.
+    /// They are NOT returned by ranged BAI queries and require a separate seek.
+    pub unmapped_count: u64,
 }
 
 /// One partition's assignment: one or more regions to be processed sequentially.
@@ -34,8 +38,10 @@ pub struct PartitionAssignment {
 ///
 /// # Algorithm
 ///
-/// 1. **Split large regions**: If a region's `estimated_bytes` exceeds 1.5x the ideal
-///    per-partition share AND `contig_length` is known, split it into equal-bp sub-regions.
+/// 1. **Proportional splitting**: If a region's `estimated_bytes` exceeds the ideal
+///    per-partition share AND `contig_length` is known, split it into `ceil(bytes/ideal)`
+///    equal-bp sub-regions. If the region has unmapped reads (from BAI metadata),
+///    an additional `unmapped_tail` region is emitted for direct-seek reading.
 /// 2. **Greedy bin-packing**: Sort regions by `estimated_bytes` descending. Assign each
 ///    to the bin with the smallest current total.
 ///
@@ -65,25 +71,23 @@ pub fn balance_partitions(
 
     let total_bytes: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
 
-    // Step 1: Split large regions if beneficial
+    // Step 1: Proportional splitting — split any region that exceeds its fair share
     let ideal_per_partition = if total_bytes > 0 {
         total_bytes / target as u64
     } else {
         0
     };
-    let split_threshold = ideal_per_partition.saturating_mul(3) / 2; // 1.5x
 
     let mut expanded: Vec<RegionSizeEstimate> = Vec::with_capacity(estimates.len());
     for est in estimates {
-        if split_threshold > 0
-            && est.estimated_bytes > split_threshold
+        if ideal_per_partition > 0
+            && est.estimated_bytes > ideal_per_partition
             && est.contig_length.is_some()
         {
             let contig_len = est.contig_length.unwrap();
-            // Split to ideal_per_partition-sized pieces (not split_threshold-sized).
-            // The threshold gates WHETHER to split; the ideal size controls HOW MANY splits.
+            // Proportional: each chromosome gets ceil(bytes/ideal) sub-regions
             let num_splits = est.estimated_bytes.div_ceil(ideal_per_partition) as usize;
-            let num_splits = num_splits.min(target).max(2); // at least 2, at most target_partitions
+            let num_splits = num_splits.max(2); // at least 2 splits
             let bp_per_split = contig_len / num_splits as u64;
             let bytes_per_split = est.estimated_bytes / num_splits as u64;
 
@@ -105,9 +109,26 @@ pub fn balance_partitions(
                         chrom: est.region.chrom.clone(),
                         start: Some(sub_start),
                         end: Some(sub_end),
+                        unmapped_tail: false,
                     },
                     estimated_bytes: bytes_per_split,
                     contig_length: None, // sub-regions are not further splittable
+                    unmapped_count: 0,
+                });
+            }
+
+            // Emit unmapped tail if BAI metadata confirms unmapped reads exist
+            if est.unmapped_count > 0 {
+                expanded.push(RegionSizeEstimate {
+                    region: GenomicRegion {
+                        chrom: est.region.chrom.clone(),
+                        start: None,
+                        end: None,
+                        unmapped_tail: true,
+                    },
+                    estimated_bytes: 1, // minimal weight for bin-packing
+                    contig_length: None,
+                    unmapped_count: 0,
                 });
             }
         } else {
@@ -181,6 +202,7 @@ mod tests {
             chrom: chrom.to_string(),
             start: None,
             end: None,
+            unmapped_tail: false,
         }
     }
 
@@ -189,6 +211,7 @@ mod tests {
             region: region(chrom),
             estimated_bytes: bytes,
             contig_length: contig_len,
+            unmapped_count: 0,
         }
     }
 
@@ -413,6 +436,102 @@ mod tests {
             "Partitions too imbalanced: max={} min={}",
             max_bytes,
             min_bytes
+        );
+    }
+
+    fn estimate_with_unmapped(
+        chrom: &str,
+        bytes: u64,
+        contig_len: Option<u64>,
+        unmapped: u64,
+    ) -> RegionSizeEstimate {
+        RegionSizeEstimate {
+            region: region(chrom),
+            estimated_bytes: bytes,
+            contig_length: contig_len,
+            unmapped_count: unmapped,
+        }
+    }
+
+    #[test]
+    fn test_unmapped_tail_emitted_when_unmapped_count_nonzero() {
+        // chr1 is large and has unmapped reads; chr2 is small with no unmapped
+        let estimates = vec![
+            estimate_with_unmapped("chr1", 200, Some(249_000_000), 1000),
+            estimate_with_unmapped("chr2", 10, None, 0),
+        ];
+        let result = balance_partitions(estimates, 4);
+
+        // Collect all regions
+        let all_regions: Vec<&GenomicRegion> =
+            result.iter().flat_map(|b| b.regions.iter()).collect();
+
+        // There should be an unmapped_tail region for chr1
+        let unmapped_tails: Vec<&&GenomicRegion> =
+            all_regions.iter().filter(|r| r.unmapped_tail).collect();
+        assert_eq!(
+            unmapped_tails.len(),
+            1,
+            "Expected exactly 1 unmapped_tail region"
+        );
+        assert_eq!(unmapped_tails[0].chrom, "chr1");
+        assert!(unmapped_tails[0].start.is_none());
+        assert!(unmapped_tails[0].end.is_none());
+
+        // No unmapped_tail for chr2 (unmapped_count = 0)
+        let chr2_unmapped: Vec<&&GenomicRegion> = all_regions
+            .iter()
+            .filter(|r| r.chrom == "chr2" && r.unmapped_tail)
+            .collect();
+        assert!(chr2_unmapped.is_empty());
+    }
+
+    #[test]
+    fn test_no_unmapped_tail_when_no_split() {
+        // chrM is small relative to ideal (total=200, target=4, ideal=50, chrM=5 < 50)
+        // so it won't be split and no unmapped_tail should be emitted
+        // (unmapped reads are already captured by the whole-chromosome query)
+        let estimates = vec![
+            estimate_with_unmapped("chr1", 100, Some(249_000_000), 500),
+            estimate_with_unmapped("chr2", 95, Some(243_000_000), 300),
+            estimate_with_unmapped("chrM", 5, Some(16_569), 100),
+        ];
+        let result = balance_partitions(estimates, 4);
+
+        let all_regions: Vec<&GenomicRegion> =
+            result.iter().flat_map(|b| b.regions.iter()).collect();
+        let chrm_unmapped: Vec<&&GenomicRegion> = all_regions
+            .iter()
+            .filter(|r| r.chrom == "chrM" && r.unmapped_tail)
+            .collect();
+        assert!(
+            chrm_unmapped.is_empty(),
+            "Should not emit unmapped_tail for unsplit regions (chrM)"
+        );
+    }
+
+    #[test]
+    fn test_proportional_splitting_no_threshold() {
+        // With the old 1.5x threshold, chr1 at 1.44x ideal would NOT be split.
+        // With proportional splitting, chr1 at 1.44x (> 1.0x) SHOULD be split.
+        //
+        // total = 249 + 243 + 198 + 60 = 750
+        // target = 4 → ideal = 187.5
+        // chr1 (249) > ideal → should be split into ceil(249/187) = 2 pieces
+        let estimates = vec![
+            estimate("chr1", 249, Some(249_000_000)),
+            estimate("chr2", 243, Some(243_000_000)),
+            estimate("chr3", 198, Some(198_000_000)),
+            estimate("chrX", 60, Some(155_000_000)),
+        ];
+        let result = balance_partitions(estimates, 4);
+
+        // All three large chromosomes should be split, giving more sub-regions
+        let total_regions: usize = result.iter().map(|b| b.regions.len()).sum();
+        assert!(
+            total_regions > 4,
+            "Proportional splitting should produce > 4 sub-regions, got {}",
+            total_regions
         );
     }
 }

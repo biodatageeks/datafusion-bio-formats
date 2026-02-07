@@ -931,6 +931,14 @@ async fn get_indexed_stream(
             let mut total_records = 0usize;
 
             for region in &regions {
+                // Skip unmapped_tail regions — CRAM index doesn't support direct
+                // unmapped seek. No unmapped_tail regions should be emitted for CRAM
+                // since estimate_sizes_from_crai sets unmapped_count: 0.
+                if region.unmapped_tail {
+                    debug!("Skipping unmapped_tail region for CRAM (not supported)");
+                    continue;
+                }
+
                 // Sub-region bounds for deduplication (1-based, from partition balancer)
                 let region_start_1based = region.start.map(|s| s as u32);
                 let region_end_1based = region.end.map(|e| e as u32);
