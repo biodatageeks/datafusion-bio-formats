@@ -23,6 +23,12 @@ pub struct RegionSizeEstimate {
     /// Unmapped reads have a reference_sequence_id but no alignment position.
     /// They are NOT returned by ranged BAI queries and require a separate seek.
     pub unmapped_count: u64,
+    /// Sorted 1-based start positions of non-empty leaf bins from the index.
+    /// Used for data-aware split positioning: splits are placed proportionally
+    /// to where actual data exists rather than proportionally to base pairs.
+    pub nonempty_bin_positions: Vec<u64>,
+    /// Base pairs per leaf bin (16384 for BAI/TBI, 0 = no bin data available).
+    pub leaf_bin_span: u64,
 }
 
 /// One partition's assignment: one or more regions to be processed sequentially.
@@ -175,12 +181,34 @@ pub fn balance_partitions(
                 budget = budget.saturating_sub(remaining);
                 remaining = 0;
             } else {
-                // Split: take budget's worth of base pairs from this chromosome
+                // Split: take budget's worth from this chromosome
                 was_split = true;
-                let bp_to_take = (remaining_bp as u128 * budget as u128 / remaining as u128) as u64;
-                // Clamp: at least 1bp, leave at least 1bp for next partition
-                let bp_to_take = bp_to_take.clamp(1, remaining_bp - 1);
-                let sub_end = pos + bp_to_take - 1;
+
+                let sub_end = if !est.nonempty_bin_positions.is_empty() && est.leaf_bin_span > 0 {
+                    // Data-aware: split at the position of the k-th non-empty bin
+                    let range_start = est.nonempty_bin_positions.partition_point(|&p| p < pos);
+                    let range_end = est
+                        .nonempty_bin_positions
+                        .partition_point(|&p| p <= eff_end);
+                    let bins_in_range = range_end - range_start;
+
+                    if bins_in_range > 1 {
+                        let bins_to_take =
+                            (bins_in_range as u128 * budget as u128 / remaining as u128) as usize;
+                        let bins_to_take = bins_to_take.clamp(1, bins_in_range - 1);
+                        let target_idx = range_start + bins_to_take - 1;
+                        let bin_start = est.nonempty_bin_positions[target_idx];
+                        (bin_start + est.leaf_bin_span - 1).min(eff_end - 1)
+                    } else {
+                        // <=1 bin: fall back to bp-proportional
+                        let bp = (remaining_bp as u128 * budget as u128 / remaining as u128) as u64;
+                        pos + bp.clamp(1, remaining_bp - 1) - 1
+                    }
+                } else {
+                    // No bin data: original bp-proportional logic
+                    let bp = (remaining_bp as u128 * budget as u128 / remaining as u128) as u64;
+                    pos + bp.clamp(1, remaining_bp - 1) - 1
+                };
 
                 debug!(
                     "Splitting {} at bp {} (budget={}, remaining={})",
@@ -268,6 +296,8 @@ mod tests {
             estimated_bytes: bytes,
             contig_length: contig_len,
             unmapped_count: 0,
+            nonempty_bin_positions: Vec::new(),
+            leaf_bin_span: 0,
         }
     }
 
@@ -555,6 +585,8 @@ mod tests {
             estimated_bytes: bytes,
             contig_length: contig_len,
             unmapped_count: unmapped,
+            nonempty_bin_positions: Vec::new(),
+            leaf_bin_span: 0,
         }
     }
 
@@ -681,6 +713,155 @@ mod tests {
                 result_total, total,
                 "Total bytes not preserved for target={}: {} vs {}",
                 target, result_total, total
+            );
+        }
+    }
+
+    fn estimate_with_bins(
+        chrom: &str,
+        bytes: u64,
+        contig_len: Option<u64>,
+        bin_positions: Vec<u64>,
+        leaf_bin_span: u64,
+    ) -> RegionSizeEstimate {
+        RegionSizeEstimate {
+            region: region(chrom),
+            estimated_bytes: bytes,
+            contig_length: contig_len,
+            unmapped_count: 0,
+            nonempty_bin_positions: bin_positions,
+            leaf_bin_span,
+        }
+    }
+
+    #[test]
+    fn test_bin_aware_split_concentrates_on_data() {
+        // All data is in the first 10% of chr1 (bins at positions 1..~25M of a 249M contig).
+        // With bp-proportional splitting, sub-regions would span the full 249M evenly.
+        // With bin-aware splitting, sub-regions should cluster in the first ~25M.
+        let span: u64 = 16384;
+        // 100 bins in the first 25M (positions 1, 16385, 32769, ...)
+        let bins: Vec<u64> = (0..100).map(|i| i * span + 1).collect();
+
+        let estimates = vec![estimate_with_bins(
+            "chr1",
+            1000,
+            Some(249_000_000),
+            bins,
+            span,
+        )];
+        let result = balance_partitions(estimates, 4);
+
+        assert_eq!(result.len(), 4);
+
+        // All intermediate split ends should be within the data region (< 2M)
+        let all_regions: Vec<&GenomicRegion> =
+            result.iter().flat_map(|b| b.regions.iter()).collect();
+        for region in &all_regions[..all_regions.len() - 1] {
+            if let Some(end) = region.end {
+                assert!(
+                    end < 2_000_000,
+                    "Split end {} should be near data (< 2M), not spread across full contig",
+                    end
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_bin_aware_split_preserves_total_bytes() {
+        let span: u64 = 16384;
+        let bins: Vec<u64> = (0..200).map(|i| i * span + 1).collect();
+
+        for target in [2, 4, 8] {
+            let estimates = vec![estimate_with_bins(
+                "chr1",
+                500,
+                Some(249_000_000),
+                bins.clone(),
+                span,
+            )];
+            let total: u64 = estimates.iter().map(|e| e.estimated_bytes).sum();
+            let result = balance_partitions(estimates, target);
+            let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
+            assert_eq!(
+                result_total, total,
+                "Bin-aware: total bytes not preserved for target={}: {} vs {}",
+                target, result_total, total
+            );
+        }
+    }
+
+    #[test]
+    fn test_bin_aware_fallback_when_no_bins() {
+        // Empty bin positions → should behave identically to bp-proportional
+        let with_bins = estimate_with_bins("chr1", 200, Some(249_000_000), Vec::new(), 0);
+        let without_bins = estimate("chr1", 200, Some(249_000_000));
+
+        let result_bins = balance_partitions(vec![with_bins], 4);
+        let result_no_bins = balance_partitions(vec![without_bins], 4);
+
+        assert_eq!(result_bins.len(), result_no_bins.len());
+        for (a, b) in result_bins.iter().zip(result_no_bins.iter()) {
+            assert_eq!(a.total_estimated_bytes, b.total_estimated_bytes);
+            assert_eq!(a.regions.len(), b.regions.len());
+            for (ra, rb) in a.regions.iter().zip(b.regions.iter()) {
+                assert_eq!(ra.start, rb.start);
+                assert_eq!(ra.end, rb.end);
+            }
+        }
+    }
+
+    #[test]
+    fn test_bin_aware_sparse_wes_pattern() {
+        // Simulate WES: exonic regions scattered across a large chromosome.
+        // 3 clusters of bins at positions ~10M, ~50M, ~200M
+        let span: u64 = 16384;
+        let mut bins = Vec::new();
+        // Cluster 1: 40 bins near 10M
+        for i in 0..40 {
+            bins.push(10_000_000 + i * span);
+        }
+        // Cluster 2: 30 bins near 50M
+        for i in 0..30 {
+            bins.push(50_000_000 + i * span);
+        }
+        // Cluster 3: 30 bins near 200M
+        for i in 0..30 {
+            bins.push(200_000_000 + i * span);
+        }
+        bins.sort_unstable();
+
+        let estimates = vec![estimate_with_bins(
+            "chr1",
+            600,
+            Some(249_000_000),
+            bins,
+            span,
+        )];
+        let result = balance_partitions(estimates, 4);
+
+        assert_eq!(result.len(), 4);
+
+        // Total bytes must be preserved
+        let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
+        assert_eq!(result_total, 600);
+
+        // Split points should be near bin cluster boundaries, not evenly spaced
+        let all_regions: Vec<&GenomicRegion> =
+            result.iter().flat_map(|b| b.regions.iter()).collect();
+        let split_ends: Vec<u64> = all_regions.iter().filter_map(|r| r.end).collect();
+
+        // With 100 bins split into 4 partitions (~25 bins each):
+        // splits should be within cluster regions, not at 62M, 124M, 187M (bp-proportional)
+        for &end in &split_ends {
+            let near_cluster = (end >= 10_000_000 && end <= 11_000_000)
+                || (end >= 50_000_000 && end <= 51_000_000)
+                || (end >= 200_000_000 && end <= 201_000_000);
+            assert!(
+                near_cluster,
+                "Split at {} should be near a data cluster, not in empty genomic space",
+                end
             );
         }
     }

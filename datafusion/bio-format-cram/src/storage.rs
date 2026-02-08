@@ -517,6 +517,8 @@ pub fn estimate_sizes_from_crai(
                     estimated_bytes: 1,
                     contig_length: None,
                     unmapped_count: 0,
+                    nonempty_bin_positions: Vec::new(),
+                    leaf_bin_span: 0,
                 })
                 .collect();
         }
@@ -551,6 +553,8 @@ pub fn estimate_sizes_from_crai(
                 estimated_bytes,
                 contig_length,
                 unmapped_count: 0,
+                nonempty_bin_positions: Vec::new(),
+                leaf_bin_span: 0,
             }
         })
         .collect()

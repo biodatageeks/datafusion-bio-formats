@@ -332,6 +332,8 @@ pub fn estimate_sizes_from_bai(
                     estimated_bytes: 1,
                     contig_length: None,
                     unmapped_count: 0,
+                    nonempty_bin_positions: Vec::new(),
+                    leaf_bin_span: 0,
                 })
                 .collect();
         }
@@ -380,11 +382,33 @@ pub fn estimate_sizes_from_bai(
                 })
                 .unwrap_or(0);
 
+            // Collect non-empty leaf bin positions for data-aware splitting.
+            // BAI leaf bins are level-5 bins (IDs 4681..=37448), each covering 16384 bp.
+            const BAI_LEAF_FIRST: usize = 4681;
+            const BAI_LEAF_LAST: usize = 37448;
+            const BAI_LEAF_SPAN: u64 = 16384;
+
+            let mut nonempty_bin_positions: Vec<u64> = ref_idx
+                .and_then(|idx| index.reference_sequences().get(idx))
+                .map(|ref_seq| {
+                    ref_seq
+                        .bins()
+                        .keys()
+                        .copied()
+                        .filter(|&bin_id| bin_id >= BAI_LEAF_FIRST && bin_id <= BAI_LEAF_LAST)
+                        .map(|bin_id| ((bin_id - BAI_LEAF_FIRST) as u64) * BAI_LEAF_SPAN + 1)
+                        .collect()
+                })
+                .unwrap_or_default();
+            nonempty_bin_positions.sort_unstable();
+
             RegionSizeEstimate {
                 region: region.clone(),
                 estimated_bytes,
                 contig_length,
                 unmapped_count,
+                nonempty_bin_positions,
+                leaf_bin_span: BAI_LEAF_SPAN,
             }
         })
         .collect()

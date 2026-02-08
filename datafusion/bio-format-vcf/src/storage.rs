@@ -732,6 +732,8 @@ pub fn estimate_sizes_from_tbi(
                     estimated_bytes: 1,
                     contig_length: None,
                     unmapped_count: 0,
+                    nonempty_bin_positions: Vec::new(),
+                    leaf_bin_span: 0,
                 })
                 .collect();
         }
@@ -769,11 +771,33 @@ pub fn estimate_sizes_from_tbi(
                 .and_then(|idx| contig_lengths.get(idx).copied())
                 .filter(|&len| len > 0);
 
+            // Collect non-empty leaf bin positions for data-aware splitting.
+            // TBI uses the same binning scheme as BAI (min_shift=14, depth=5).
+            const TBI_LEAF_FIRST: usize = 4681;
+            const TBI_LEAF_LAST: usize = 37448;
+            const TBI_LEAF_SPAN: u64 = 16384;
+
+            let mut nonempty_bin_positions: Vec<u64> = ref_idx
+                .and_then(|idx| index.reference_sequences().get(idx))
+                .map(|ref_seq| {
+                    ref_seq
+                        .bins()
+                        .keys()
+                        .copied()
+                        .filter(|&bin_id| bin_id >= TBI_LEAF_FIRST && bin_id <= TBI_LEAF_LAST)
+                        .map(|bin_id| ((bin_id - TBI_LEAF_FIRST) as u64) * TBI_LEAF_SPAN + 1)
+                        .collect()
+                })
+                .unwrap_or_default();
+            nonempty_bin_positions.sort_unstable();
+
             RegionSizeEstimate {
                 region: region.clone(),
                 estimated_bytes,
                 contig_length,
                 unmapped_count: 0,
+                nonempty_bin_positions,
+                leaf_bin_span: TBI_LEAF_SPAN,
             }
         })
         .collect()
