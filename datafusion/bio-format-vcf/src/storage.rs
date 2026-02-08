@@ -767,10 +767,6 @@ pub fn estimate_sizes_from_tbi(
                 })
                 .unwrap_or(1);
 
-            let contig_length = ref_idx
-                .and_then(|idx| contig_lengths.get(idx).copied())
-                .filter(|&len| len > 0);
-
             // Collect non-empty leaf bin positions for data-aware splitting.
             // TBI uses the same binning scheme as BAI (min_shift=14, depth=5).
             const TBI_LEAF_FIRST: usize = 4681;
@@ -790,6 +786,56 @@ pub fn estimate_sizes_from_tbi(
                 })
                 .unwrap_or_default();
             nonempty_bin_positions.sort_unstable();
+
+            let contig_length = ref_idx
+                .and_then(|idx| contig_lengths.get(idx).copied())
+                .filter(|&len| len > 0)
+                .or_else(|| {
+                    // First try leaf bins (finest granularity).
+                    nonempty_bin_positions
+                        .last()
+                        .map(|&max_pos| max_pos + TBI_LEAF_SPAN - 1)
+                })
+                .or_else(|| {
+                    // Fall back to any bin level to infer length when only
+                    // higher-level bins are populated (common for small
+                    // coordinate ranges that don't reach leaf bins).
+                    // BAI binning levels: offsets [0, 1, 9, 73, 585, 4681]
+                    // with spans [2^29, 2^26, 2^23, 2^20, 2^17, 2^14].
+                    const LEVEL_OFFSETS: [(usize, u64); 6] = [
+                        (0, 1 << 29),
+                        (1, 1 << 26),
+                        (9, 1 << 23),
+                        (73, 1 << 20),
+                        (585, 1 << 17),
+                        (4681, 1 << 14),
+                    ];
+                    ref_idx
+                        .and_then(|idx| index.reference_sequences().get(idx))
+                        .and_then(|ref_seq| {
+                            ref_seq
+                                .bins()
+                                .keys()
+                                .copied()
+                                .filter_map(|bin_id| {
+                                    LEVEL_OFFSETS.iter().rev().find_map(|&(offset, span)| {
+                                        if bin_id >= offset
+                                            && bin_id
+                                                < LEVEL_OFFSETS
+                                                    .iter()
+                                                    .find(|&&(o, _)| o > offset)
+                                                    .map_or(37449, |&(o, _)| o)
+                                        {
+                                            let idx_in_level = (bin_id - offset) as u64;
+                                            Some((idx_in_level + 1) * span)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                                .max()
+                        })
+                });
 
             RegionSizeEstimate {
                 region: region.clone(),
@@ -835,5 +881,95 @@ impl RecordFieldAccessor for VcfRecordFields {
 
     fn get_f64_field(&self, _name: &str) -> Option<f64> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion_bio_format_core::genomic_filter::GenomicRegion;
+    use noodles_csi::binning_index::BinningIndex;
+
+    fn test_tbi_path() -> String {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        format!("{manifest}/tests/multi_chrom.vcf.gz.tbi")
+    }
+
+    /// Read contig names from the TBI header (same as production code does).
+    fn read_tbi_contig_names(tbi_path: &str) -> Vec<String> {
+        let index = noodles_tabix::fs::read(tbi_path).expect("failed to read TBI");
+        index
+            .header()
+            .map(|h| {
+                h.reference_sequence_names()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn vcf_regions(contig_names: &[String]) -> Vec<GenomicRegion> {
+        contig_names
+            .iter()
+            .map(|name| GenomicRegion {
+                chrom: name.clone(),
+                start: None,
+                end: None,
+                unmapped_tail: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tbi_infers_contig_length_when_header_omits_it() {
+        let tbi_path = test_tbi_path();
+        let contig_names = read_tbi_contig_names(&tbi_path);
+        assert!(!contig_names.is_empty(), "TBI should have contig names");
+        let regions = vcf_regions(&contig_names);
+
+        let estimates = estimate_sizes_from_tbi(&tbi_path, &regions, &contig_names, &[]);
+
+        assert_eq!(estimates.len(), contig_names.len());
+        for est in &estimates {
+            assert!(
+                est.contig_length.is_some(),
+                "contig_length should be inferred from TBI for {}",
+                est.region.chrom
+            );
+            let len = est.contig_length.unwrap();
+            assert!(
+                len > 10_000,
+                "inferred contig length for {} should be > 10000 bp, got {}",
+                est.region.chrom,
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn tbi_header_length_takes_priority() {
+        let tbi_path = test_tbi_path();
+        let contig_names = read_tbi_contig_names(&tbi_path);
+        assert!(!contig_names.is_empty(), "TBI should have contig names");
+        let regions = vcf_regions(&contig_names);
+        let contig_lengths: Vec<u64> = contig_names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| 999 - i as u64)
+            .collect();
+
+        let estimates =
+            estimate_sizes_from_tbi(&tbi_path, &regions, &contig_names, &contig_lengths);
+
+        assert_eq!(estimates.len(), contig_names.len());
+        for (i, est) in estimates.iter().enumerate() {
+            assert_eq!(
+                est.contig_length,
+                Some(contig_lengths[i]),
+                "header length should take priority for {}",
+                est.region.chrom
+            );
+        }
     }
 }
