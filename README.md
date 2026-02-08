@@ -81,7 +81,7 @@ async fn main() -> datafusion::error::Result<()> {
 
 ```rust
 use datafusion::prelude::*;
-use datafusion_bio_format_vcf::bgzf_parallel_reader::BgzfVcfTableProvider;
+use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -89,7 +89,14 @@ async fn main() -> datafusion::error::Result<()> {
     let ctx = SessionContext::new();
 
     // Register a VCF file
-    let table = BgzfVcfTableProvider::try_new("data/variants.vcf.gz", None).await?;
+    let table = VcfTableProvider::new(
+        "data/variants.vcf.gz".to_string(),
+        Some(vec!["AF".to_string()]),  // INFO fields to include
+        None,   // FORMAT fields
+        None,   // thread_num
+        None,   // object_storage_options
+        true,   // coordinate_system_zero_based
+    )?;
     ctx.register_table("variants", Arc::new(table))?;
 
     // Query variants
