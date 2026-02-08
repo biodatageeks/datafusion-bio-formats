@@ -1,0 +1,7 @@
+{
+  "ref": "feat/index-based-predicate-pushdown",
+  "ref_type": "branch",
+  "commit_sha": "d8b0313c8ad9c8bb8a033ca923b0c722d3871a1a",
+  "timestamp": "2026-02-08T16:10:00Z",
+  "benchmark_mode": "fast"
+}
