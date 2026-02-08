@@ -1,4 +1,4 @@
-use crate::physical_exec::FastqExec;
+use crate::physical_exec::{FastqExec, FastqPartitionStrategy, detect_local_strategy};
 use crate::write_exec::FastqWriteExec;
 use crate::writer::FastqCompressionType;
 use async_trait::async_trait;
@@ -12,7 +12,9 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::object_storage::{
+    ObjectStorageOptions, StorageType, get_storage_type,
+};
 use log::debug;
 use std::any::Any;
 use std::sync::Arc;
@@ -33,11 +35,17 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
 ///
 /// This provider enables SQL queries on FASTQ files (both compressed and uncompressed).
 /// It supports local files and cloud storage (S3, GCS, Azure) via object storage options.
+///
+/// For local files, the provider automatically detects the best read strategy:
+/// - BGZF-compressed files with a GZI index are read in parallel partitions
+/// - Uncompressed files are split into byte-range partitions for parallel reads
+/// - GZIP-compressed files are read sequentially (single partition)
+///
+/// Parallelism is controlled by DataFusion's `SessionConfig::target_partitions()`.
 #[derive(Clone, Debug)]
 pub struct FastqTableProvider {
     file_path: String,
     schema: SchemaRef,
-    thread_num: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
 }
 
@@ -47,7 +55,6 @@ impl FastqTableProvider {
     /// # Arguments
     ///
     /// * `file_path` - Path to the FASTQ file (local or cloud storage URL)
-    /// * `thread_num` - Optional number of threads for parallel reading (BGZF files only)
     /// * `object_storage_options` - Optional configuration for cloud storage access
     ///
     /// # Errors
@@ -55,14 +62,12 @@ impl FastqTableProvider {
     /// Returns an error if the schema cannot be determined
     pub fn new(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
         let schema = determine_schema()?;
         Ok(Self {
             file_path,
             schema,
-            thread_num,
             object_storage_options,
         })
     }
@@ -72,7 +77,6 @@ impl FastqTableProvider {
 impl TableProvider for FastqTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
-        // todo!()
     }
 
     fn schema(&self) -> SchemaRef {
@@ -81,22 +85,49 @@ impl TableProvider for FastqTableProvider {
 
     fn table_type(&self) -> TableType {
         TableType::Base
-        // todo!()
     }
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         debug!("FastqTableProvider::scan");
 
-        fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
+        // Determine partition strategy based on file type and location
+        let store_type = get_storage_type(self.file_path.clone());
+        let target_partitions = state.config().target_partitions();
+
+        let strategy = if matches!(store_type, StorageType::LOCAL) {
+            detect_local_strategy(&self.file_path, target_partitions).map_err(|e| {
+                datafusion::common::DataFusionError::Execution(format!(
+                    "Failed to detect FASTQ partition strategy: {}",
+                    e
+                ))
+            })?
+        } else {
+            FastqPartitionStrategy::Sequential
+        };
+
+        // For empty projections (e.g. COUNT(*)), the thread+channel strategies (Bgzf/ByteRange)
+        // produce zero-column batches with row count, so they need a zero-field schema.
+        // The Sequential strategy uses the stream-based path which needs a dummy Null column.
+        let uses_threaded_path = !matches!(strategy, FastqPartitionStrategy::Sequential);
+
+        fn project_schema(
+            schema: &SchemaRef,
+            projection: Option<&Vec<usize>>,
+            uses_threaded_path: bool,
+        ) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
+                    if uses_threaded_path {
+                        Arc::new(Schema::empty())
+                    } else {
+                        Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
+                    }
                 }
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
@@ -107,12 +138,18 @@ impl TableProvider for FastqTableProvider {
             }
         }
 
-        let schema = project_schema(&self.schema, projection);
+        let schema = project_schema(&self.schema, projection, uses_threaded_path);
+
+        let num_partitions = match &strategy {
+            FastqPartitionStrategy::Bgzf { partitions, .. } => partitions.len(),
+            FastqPartitionStrategy::ByteRange { partitions } => partitions.len(),
+            FastqPartitionStrategy::Sequential => 1,
+        };
 
         Ok(Arc::new(FastqExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
-                Partitioning::UnknownPartitioning(1),
+                Partitioning::UnknownPartitioning(num_partitions),
                 EmissionType::Final,
                 Boundedness::Bounded,
             ),
@@ -120,7 +157,7 @@ impl TableProvider for FastqTableProvider {
             schema: schema.clone(),
             projection: projection.cloned(),
             limit,
-            thread_num: self.thread_num,
+            strategy,
             object_storage_options: self.object_storage_options.clone(),
         }))
     }

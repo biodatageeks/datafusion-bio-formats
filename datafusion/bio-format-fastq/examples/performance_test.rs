@@ -1,6 +1,6 @@
-//! performance_test.rs - A performance testing example for BgzfFastqTableProvider.
+//! performance_test.rs - A performance testing example for FastqTableProvider.
 //!
-//! This example demonstrates how to use the `BgzfFastqTableProvider` to run a
+//! This example demonstrates how to use the `FastqTableProvider` to run a
 //! parallelized query on a BGZF-compressed FASTQ file and measures the time
 //! it takes to complete.
 //!
@@ -28,7 +28,7 @@ use std::env;
 use std::time::Instant;
 
 use datafusion::prelude::*;
-use datafusion_bio_format_fastq::BgzfFastqTableProvider;
+use datafusion_bio_format_fastq::FastqTableProvider;
 
 #[tokio::main]
 async fn main() -> datafusion::common::Result<()> {
@@ -44,12 +44,12 @@ async fn main() -> datafusion::common::Result<()> {
 
     println!("Using file: {}", file_path);
 
-    // Create a SessionContext
+    // Create a SessionContext with 16 target partitions for parallel reading
     let config = SessionConfig::new().with_target_partitions(16);
     let ctx = SessionContext::new_with_config(config);
 
     // Create and register the table provider
-    let provider = BgzfFastqTableProvider::try_new(file_path)?;
+    let provider = FastqTableProvider::new(file_path.to_string(), None)?;
     ctx.register_table("fastq", std::sync::Arc::new(provider))?;
 
     // Execute a query and measure the time
@@ -58,19 +58,6 @@ async fn main() -> datafusion::common::Result<()> {
     let batches = df.collect().await?;
     println!("{}", batches.len());
     let elapsed = start_time.elapsed();
-
-    // Print the results
-    // if let Some(batch) = batches.first() {
-    //     if let Some(array) = batch
-    //         .column(0)
-    //         .as_any()
-    //         .downcast_ref::<datafusion::arrow::array::Int64Array>()
-    //     {
-    //         if !array.is_empty() {
-    //             println!("Record count: {}", array.value(0));
-    //         }
-    //     }
-    // }
 
     println!("Query executed in: {:?}", elapsed);
 

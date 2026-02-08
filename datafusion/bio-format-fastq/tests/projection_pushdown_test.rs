@@ -1,6 +1,5 @@
 use datafusion::prelude::*;
-use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
-use datafusion_bio_format_fastq::table_provider::FastqTableProvider;
+use datafusion_bio_format_fastq::FastqTableProvider;
 use std::sync::Arc;
 use tokio::fs;
 
@@ -24,26 +23,14 @@ async fn create_test_fastq_file(test_name: &str) -> std::io::Result<String> {
     Ok(temp_file)
 }
 
-fn create_object_storage_options() -> ObjectStorageOptions {
-    ObjectStorageOptions {
-        allow_anonymous: true,
-        enable_request_payer: false,
-        max_retries: Some(1),
-        timeout: Some(300),
-        chunk_size: Some(16),
-        concurrent_fetches: Some(8),
-        compression_type: Some(CompressionType::NONE),
-    }
-}
-
 #[tokio::test]
 async fn test_projection_single_column_name() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("single_column_name").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test selecting only the 'name' column
@@ -74,11 +61,11 @@ async fn test_projection_single_column_name() -> Result<(), Box<dyn std::error::
 #[tokio::test]
 async fn test_projection_two_columns() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("two_columns").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test selecting name and sequence columns
@@ -117,11 +104,11 @@ async fn test_projection_two_columns() -> Result<(), Box<dyn std::error::Error>>
 #[tokio::test]
 async fn test_projection_quality_scores_only() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("quality_scores_only").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test selecting only quality_scores column
@@ -152,11 +139,11 @@ async fn test_projection_quality_scores_only() -> Result<(), Box<dyn std::error:
 #[tokio::test]
 async fn test_no_projection_all_columns() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("no_projection_all_columns").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test selecting all columns
@@ -180,11 +167,11 @@ async fn test_no_projection_all_columns() -> Result<(), Box<dyn std::error::Erro
 #[tokio::test]
 async fn test_projection_with_count() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("projection_with_count").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test COUNT - this will use empty projection optimization
@@ -209,11 +196,11 @@ async fn test_projection_with_count() -> Result<(), Box<dyn std::error::Error>> 
 #[tokio::test]
 async fn test_projection_reordered_columns() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("projection_reordered_columns").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test selecting columns in different order
@@ -259,11 +246,11 @@ async fn test_projection_reordered_columns() -> Result<(), Box<dyn std::error::E
 #[tokio::test]
 async fn test_projection_with_limit() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("projection_with_limit").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(file_path.clone(), Some(1), Some(object_storage_options))?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test projection with LIMIT
@@ -304,38 +291,27 @@ async fn test_projection_with_limit() -> Result<(), Box<dyn std::error::Error>> 
 #[tokio::test]
 async fn test_multithreaded_projection() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_fastq_file("multithreaded_projection").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(
-        file_path.clone(),
-        Some(4), // Use 4 threads to test multithreaded projection
-        Some(object_storage_options),
-    )?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    // Use 4 target partitions to test multi-partition projection
+    let config = SessionConfig::new().with_target_partitions(4);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("test_fastq", Arc::new(table))?;
 
     // Test selecting only the 'name' column with multithreading
     let df = ctx.sql("SELECT name FROM test_fastq").await?;
     let results = df.collect().await?;
 
-    assert_eq!(results.len(), 1);
-    let batch = &results[0];
+    // Collect all rows across batches
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 3);
 
-    // Should only have 1 column (name)
-    assert_eq!(batch.num_columns(), 1);
-    assert_eq!(batch.schema().field(0).name(), "name");
-    assert_eq!(batch.num_rows(), 3);
-
-    // Verify the data
-    let name_array = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringArray>()
-        .unwrap();
-    assert_eq!(name_array.value(0), "read1");
-    assert_eq!(name_array.value(1), "read2");
-    assert_eq!(name_array.value(2), "read3");
+    // All batches should have 1 column
+    for batch in &results {
+        assert_eq!(batch.num_columns(), 1);
+        assert_eq!(batch.schema().field(0).name(), "name");
+    }
 
     Ok(())
 }

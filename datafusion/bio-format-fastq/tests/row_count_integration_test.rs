@@ -1,5 +1,5 @@
 use datafusion::prelude::*;
-use datafusion_bio_format_fastq::BgzfFastqTableProvider;
+use datafusion_bio_format_fastq::FastqTableProvider;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -9,11 +9,9 @@ async fn test_bgzf_fastq_table_provider_row_count() {
         let ctx = SessionContext::new_with_config(config);
 
         // Construct the path to the data file relative to the crate's manifest directory.
-        // This is the robust way to locate test data.
         let file_path = format!("{}/data/sample.fastq.bgz", env!("CARGO_MANIFEST_DIR"));
 
-        let provider =
-            BgzfFastqTableProvider::try_new(&file_path).expect("Failed to create provider");
+        let provider = FastqTableProvider::new(file_path, None).expect("Failed to create provider");
         ctx.register_table("fastq", Arc::new(provider))
             .expect("Failed to register table");
 
