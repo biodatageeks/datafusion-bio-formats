@@ -232,9 +232,14 @@ impl TableProvider for GffTableProvider {
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         debug!(
-            "GffTableProvider::scan with projection: {:?}, filters: {:?}",
-            projection, filters
+            "GffTableProvider::scan - {} filters received, index={}, contig_names={:?}",
+            filters.len(),
+            self.index_path.is_some(),
+            self.contig_names
         );
+        for (i, f) in filters.iter().enumerate() {
+            debug!("  filter[{}]: {:?}", i, f);
+        }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
@@ -284,10 +289,22 @@ impl TableProvider for GffTableProvider {
             let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
 
             let regions = if !analysis.regions.is_empty() {
+                debug!(
+                    "GFF scan: using {} filter-derived region(s)",
+                    analysis.regions.len()
+                );
+                for r in &analysis.regions {
+                    debug!("  region: {}:{:?}-{:?}", r.chrom, r.start, r.end);
+                }
                 analysis.regions
             } else if !self.contig_names.is_empty() {
+                debug!(
+                    "GFF scan: no genomic filters pushed down, using full-scan on {} contig(s)",
+                    self.contig_names.len()
+                );
                 build_full_scan_regions(&self.contig_names)
             } else {
+                debug!("GFF scan: no index regions available, falling back to sequential scan");
                 Vec::new()
             };
 

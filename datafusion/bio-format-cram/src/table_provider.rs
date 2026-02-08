@@ -558,7 +558,15 @@ impl TableProvider for CramTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        debug!("CramTableProvider::scan");
+        debug!(
+            "CramTableProvider::scan - {} filters received, index={}, reference_names={:?}",
+            filters.len(),
+            self.index_path.is_some(),
+            self.reference_names
+        );
+        for (i, f) in filters.iter().enumerate() {
+            debug!("  filter[{}]: {:?}", i, f);
+        }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
@@ -588,12 +596,22 @@ impl TableProvider for CramTableProvider {
             let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
 
             let regions = if !analysis.regions.is_empty() {
-                // Use extracted regions from filters
+                debug!(
+                    "CRAM scan: using {} filter-derived region(s)",
+                    analysis.regions.len()
+                );
+                for r in &analysis.regions {
+                    debug!("  region: {}:{:?}-{:?}", r.chrom, r.start, r.end);
+                }
                 analysis.regions
             } else if !self.reference_names.is_empty() {
-                // Full scan: partition by chromosome for parallel reading
+                debug!(
+                    "CRAM scan: no genomic filters pushed down, using full-scan on {} reference(s)",
+                    self.reference_names.len()
+                );
                 build_full_scan_regions(&self.reference_names)
             } else {
+                debug!("CRAM scan: no index regions available, falling back to sequential scan");
                 Vec::new()
             };
 
