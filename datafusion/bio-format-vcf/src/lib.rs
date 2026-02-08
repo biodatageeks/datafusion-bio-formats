@@ -38,7 +38,6 @@
 //!     "data/variants.vcf.gz".to_string(),
 //!     None,   // INFO fields (None = all)
 //!     None,   // FORMAT fields
-//!     None,   // thread_num
 //!     None,   // object_storage_options
 //!     true,   // coordinate_system_zero_based
 //! )?;

@@ -9,14 +9,8 @@ async fn main() -> datafusion::error::Result<()> {
     let infos = None;
     // Create a new context with the default configuration
     let ctx = SessionContext::new();
-    let table_provider = VcfTableProvider::new(
-        path.clone(),
-        infos,
-        None,
-        Some(1),
-        Some(Default::default()),
-        true,
-    )?;
+    let table_provider =
+        VcfTableProvider::new(path.clone(), infos, None, Some(Default::default()), true)?;
     ctx.register_table("vcf_table", Arc::new(table_provider))
         .expect("Failed to register table");
 

@@ -40,7 +40,6 @@ async fn setup_vcf_ctx() -> datafusion::error::Result<SessionContext> {
         None,
         None,
         None,
-        None,
         true,
     )?;
     ctx.register_table("vcf", Arc::new(provider))?;

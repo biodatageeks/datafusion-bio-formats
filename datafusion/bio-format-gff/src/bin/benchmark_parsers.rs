@@ -14,7 +14,6 @@ async fn benchmark_parser(
     // Create reader (still needs to be async to set up sync readers internally)
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4, // thread count for BGZF
         ObjectStorageOptions::default(),
         parser_type,
     )

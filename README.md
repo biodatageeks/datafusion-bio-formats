@@ -93,7 +93,6 @@ async fn main() -> datafusion::error::Result<()> {
         "data/variants.vcf.gz".to_string(),
         Some(vec!["AF".to_string()]),  // INFO fields to include
         None,   // FORMAT fields
-        None,   // thread_num
         None,   // object_storage_options
         true,   // coordinate_system_zero_based
     )?;

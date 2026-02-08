@@ -97,7 +97,6 @@ async fn benchmark_eager_allocation(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )
@@ -135,7 +134,6 @@ async fn benchmark_lazy_allocation(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )

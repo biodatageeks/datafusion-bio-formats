@@ -63,7 +63,6 @@ async fn benchmark_with_arrow_building(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )
@@ -116,7 +115,6 @@ async fn benchmark_without_arrow_building(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )

@@ -13,7 +13,6 @@ async fn benchmark_raw_parser(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         parser_type,
     )

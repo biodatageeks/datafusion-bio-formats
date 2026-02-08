@@ -251,7 +251,6 @@ async fn get_local_vcf(
     file_path: String,
     schema_ref: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
@@ -273,10 +272,8 @@ async fn get_local_vcf(
     let mut batch_num = 0;
     let schema = Arc::clone(&schema_ref);
     let file_path = file_path.clone();
-    let thread_num = thread_num.unwrap_or(1);
     let mut reader = VcfLocalReader::new(
         file_path.clone(),
-        thread_num,
         object_storage_options.unwrap_or_default(),
     )
     .await;
@@ -755,7 +752,6 @@ async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
@@ -775,7 +771,6 @@ async fn get_stream(
                 file_path.clone(),
                 schema.clone(),
                 batch_size,
-                thread_num,
                 info_fields,
                 format_fields,
                 sample_names,
@@ -815,7 +810,6 @@ pub struct VcfExec {
     pub(crate) sample_names: Vec<String>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
-    pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     pub(crate) coordinate_system_zero_based: bool,
@@ -911,7 +905,6 @@ impl ExecutionPlan for VcfExec {
             self.file_path.clone(),
             schema.clone(),
             batch_size,
-            self.thread_num,
             self.info_fields.clone(),
             self.format_fields.clone(),
             self.sample_names.clone(),

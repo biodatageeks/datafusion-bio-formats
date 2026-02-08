@@ -9,7 +9,6 @@ async fn test_bam_without_tags() {
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
         None,
-        None,
         true,
         None, // No tags
     )
@@ -34,7 +33,6 @@ async fn test_bam_with_specified_tags() {
     // Test that specifying tags adds them to the schema
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
-        None,
         None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
@@ -71,7 +69,6 @@ async fn test_query_with_tag_projection() {
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
         None,
-        None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
     )
@@ -102,7 +99,6 @@ async fn test_query_without_tag_projection() {
     // Test that queries without tag projection work correctly
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
-        None,
         None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
@@ -135,7 +131,6 @@ async fn test_count_query() {
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
         None,
-        None,
         true,
         Some(vec!["NM".to_string()]),
     )
@@ -157,7 +152,6 @@ async fn test_unknown_tag_accepted() {
     // Test that unknown tags are accepted and treated as Utf8 by default
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
-        None,
         None,
         true,
         Some(vec!["UNKNOWN_TAG".to_string()]),
@@ -198,7 +192,6 @@ async fn test_multiple_tags() {
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
         None,
-        None,
         true,
         Some(vec![
             "NM".to_string(),
@@ -227,15 +220,10 @@ async fn test_multiple_tags() {
 #[tokio::test]
 async fn test_empty_tag_list() {
     // Test that Some(vec![]) behaves like None (no tags)
-    let provider = BamTableProvider::new(
-        "tests/rev_reads.bam".to_string(),
-        None,
-        None,
-        true,
-        Some(vec![]),
-    )
-    .await
-    .unwrap();
+    let provider =
+        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, Some(vec![]))
+            .await
+            .unwrap();
 
     let ctx = SessionContext::new();
     ctx.register_table("bam", Arc::new(provider)).unwrap();
@@ -265,7 +253,6 @@ async fn test_read_all_13_tags() {
 
     let provider = BamTableProvider::new(
         "tests/bam_with_tags.bam".to_string(),
-        None,
         None,
         true, // 0-based coordinates
         Some(tag_fields),
@@ -314,7 +301,6 @@ async fn test_xt_tag_character_values() {
     // The XT tag values should be ASCII characters like 'S', 'V', 'W'.
     let provider = BamTableProvider::new(
         "tests/bam_with_tags.bam".to_string(),
-        None,
         None,
         true,
         Some(vec!["XT".to_string()]),
@@ -373,7 +359,6 @@ async fn test_integer_tags_from_int8_encoding() {
     let provider = BamTableProvider::new(
         "tests/bam_with_tags.bam".to_string(),
         None,
-        None,
         true,
         Some(vec!["NM".to_string(), "MQ".to_string(), "UQ".to_string()]),
     )
@@ -419,7 +404,6 @@ async fn test_nullable_tags_with_mixed_presence() {
     // In the test file: XT is in ~5 reads, XN is in ~2 reads, OC is in ~2 reads.
     let provider = BamTableProvider::new(
         "tests/bam_with_tags.bam".to_string(),
-        None,
         None,
         true,
         Some(vec![
@@ -519,7 +503,7 @@ async fn test_nullable_tags_with_mixed_presence() {
 async fn test_describe_discovers_tags() {
     use datafusion::prelude::*;
 
-    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None)
+    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None)
         .await
         .unwrap();
 
@@ -574,7 +558,7 @@ async fn test_describe_discovers_tags() {
 async fn test_describe_with_display() {
     use datafusion::prelude::*;
 
-    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None)
+    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None)
         .await
         .unwrap();
 
@@ -591,7 +575,7 @@ async fn test_describe_method_signature() {
     // Test that describe method exists with correct signature
     use datafusion::prelude::*;
 
-    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, None, true, None)
+    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None)
         .await
         .unwrap();
 

@@ -106,7 +106,6 @@ pub struct GffTableProvider {
     file_path: String,
     attr_fields: Option<Vec<String>>,
     schema: SchemaRef,
-    thread_num: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
@@ -127,14 +126,12 @@ impl GffTableProvider {
     ///
     /// * `file_path` - Path to the GFF file
     /// * `attr_fields` - Optional list of attribute fields to include
-    /// * `thread_num` - Optional number of threads for parallel reading
     /// * `object_storage_options` - Optional cloud storage configuration
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
     pub fn new(
         file_path: String,
         attr_fields: Option<Vec<String>>,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
@@ -171,7 +168,6 @@ impl GffTableProvider {
             file_path,
             attr_fields, // Store original Python-provided fields for execution
             schema,      // Pre-constructed based on request
-            thread_num,
             object_storage_options,
             coordinate_system_zero_based,
             index_path,
@@ -348,7 +344,6 @@ impl TableProvider for GffTableProvider {
                     projection: projection.cloned(),
                     filters: pushable_filters,
                     limit,
-                    thread_num: self.thread_num,
                     object_storage_options: self.object_storage_options.clone(),
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
                     partition_assignments: Some(assignments),
@@ -372,7 +367,6 @@ impl TableProvider for GffTableProvider {
             projection: projection.cloned(),
             filters: pushable_filters,
             limit,
-            thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             partition_assignments: None,

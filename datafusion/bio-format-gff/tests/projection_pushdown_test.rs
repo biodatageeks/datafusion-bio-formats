@@ -41,7 +41,6 @@ async fn test_gff_projection_single_column_chrom() -> Result<(), Box<dyn std::er
     let table = GffTableProvider::new(
         file_path.clone(),
         None, // No specific attribute fields
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -85,13 +84,7 @@ async fn test_gff_projection_position_columns() -> Result<(), Box<dyn std::error
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -146,13 +139,7 @@ async fn test_gff_projection_feature_data() -> Result<(), Box<dyn std::error::Er
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -208,7 +195,6 @@ async fn test_gff_projection_with_score_and_phase() -> Result<(), Box<dyn std::e
     let table = GffTableProvider::new(
         file_path.clone(),
         None, // No specific attributes, test core fields
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -251,13 +237,7 @@ async fn test_gff_no_projection_all_columns() -> Result<(), Box<dyn std::error::
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -293,13 +273,7 @@ async fn test_gff_projection_with_count() -> Result<(), Box<dyn std::error::Erro
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -334,13 +308,7 @@ async fn test_gff_projection_reordered_columns() -> Result<(), Box<dyn std::erro
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -402,13 +370,7 @@ async fn test_gff_projection_with_limit() -> Result<(), Box<dyn std::error::Erro
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -464,13 +426,7 @@ async fn test_gff_multithreaded_projection() -> Result<(), Box<dyn std::error::E
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(4), // Use 4 threads
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -523,13 +479,7 @@ async fn test_gff_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("gff_table", Arc::new(table))?;
@@ -586,13 +536,7 @@ async fn test_gff_select_position_columns_bug() -> Result<(), Box<dyn std::error
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table = GffTableProvider::new(
-        file_path.clone(),
-        None,
-        Some(1),
-        Some(object_storage_options),
-        true,
-    )?;
+    let table = GffTableProvider::new(file_path.clone(), None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("gff_table", Arc::new(table))?;

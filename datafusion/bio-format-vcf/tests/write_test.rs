@@ -55,7 +55,6 @@ fn create_read_provider(
         path.to_string(),
         info_fields,
         format_fields,
-        None, // thread_num
         None, // object_storage_options
         true, // coordinate_system_zero_based
     )
@@ -327,7 +326,6 @@ async fn test_schema_field_metadata_preserved() {
         input_path.clone(),
         Some(vec!["DP".to_string(), "AF".to_string()]),
         Some(vec!["GT".to_string()]),
-        None,
         None,
         true,
     )

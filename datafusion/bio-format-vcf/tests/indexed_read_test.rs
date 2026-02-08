@@ -48,7 +48,6 @@ async fn setup_vcf_ctx() -> datafusion::error::Result<SessionContext> {
         "tests/multi_chrom.vcf.gz".to_string(),
         None, // info_fields
         None, // format_fields
-        None, // thread_num
         None, // object_storage_options
         true, // zero-based coordinates
     )?;

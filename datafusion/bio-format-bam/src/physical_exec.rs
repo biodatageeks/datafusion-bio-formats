@@ -39,7 +39,6 @@ pub struct BamExec {
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
-    pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     pub(crate) coordinate_system_zero_based: bool,
@@ -133,7 +132,6 @@ impl ExecutionPlan for BamExec {
             self.file_path.clone(),
             schema.clone(),
             batch_size,
-            self.thread_num,
             self.projection.clone(),
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
@@ -551,7 +549,7 @@ async fn get_remote_bam_stream(
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
-    let mut reader = BamReader::new(file_path.clone(), None, object_storage_options).await;
+    let mut reader = BamReader::new(file_path.clone(), object_storage_options).await;
     let stream = process_bam_records_impl!(
         reader,
         schema,
@@ -567,13 +565,12 @@ async fn get_local_bam(
     file_path: String,
     schema: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    let mut reader = BamReader::new(file_path.clone(), thread_num, None).await;
+    let mut reader = BamReader::new(file_path.clone(), None).await;
     let stream = process_bam_records_impl!(
         reader,
         schema,
@@ -789,12 +786,10 @@ async fn get_local_sam(
     Ok(stream)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -824,7 +819,6 @@ async fn get_stream(
                     file_path.clone(),
                     schema.clone(),
                     batch_size,
-                    thread_num,
                     projection,
                     coordinate_system_zero_based,
                     tag_fields,

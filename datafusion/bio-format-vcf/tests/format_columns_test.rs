@@ -73,7 +73,6 @@ async fn test_format_schema_with_multiple_samples() -> Result<(), Box<dyn std::e
         file_path.clone(),
         None, // No INFO fields
         Some(vec!["GT".to_string(), "DP".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -101,7 +100,6 @@ async fn test_format_genotype_parsing() -> Result<(), Box<dyn std::error::Error>
         file_path.clone(),
         None,
         Some(vec!["GT".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -159,7 +157,6 @@ async fn test_format_dp_field() -> Result<(), Box<dyn std::error::Error>> {
         file_path.clone(),
         None,
         Some(vec!["DP".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -213,7 +210,6 @@ async fn test_format_missing_values() -> Result<(), Box<dyn std::error::Error>> 
         file_path.clone(),
         None,
         Some(vec!["GT".to_string(), "DP".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -271,7 +267,6 @@ async fn test_format_projection_single_sample_field() -> Result<(), Box<dyn std:
         file_path.clone(),
         None,
         Some(vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -308,7 +303,6 @@ async fn test_format_with_info_fields() -> Result<(), Box<dyn std::error::Error>
         file_path.clone(),
         Some(vec!["DP".to_string()]),                   // INFO DP
         Some(vec!["GT".to_string(), "DP".to_string()]), // FORMAT GT and DP
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -365,7 +359,6 @@ async fn test_format_single_sample_vcf() -> Result<(), Box<dyn std::error::Error
         file_path.clone(),
         None,
         Some(vec!["GT".to_string(), "DP".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -424,7 +417,6 @@ async fn test_format_select_star() -> Result<(), Box<dyn std::error::Error>> {
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         Some(vec!["GT".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -457,7 +449,6 @@ async fn test_format_count_aggregation() -> Result<(), Box<dyn std::error::Error
         file_path.clone(),
         None,
         Some(vec!["GT".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -493,7 +484,6 @@ async fn test_format_special_sample_names() -> Result<(), Box<dyn std::error::Er
         file_path.clone(),
         None,
         Some(vec!["GT".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -562,7 +552,6 @@ async fn test_format_fields_none_includes_all() -> Result<(), Box<dyn std::error
         file_path.clone(),
         None, // No INFO fields
         None, // None = all FORMAT fields from header
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -648,7 +637,6 @@ async fn test_format_array_preserves_nulls() -> Result<(), Box<dyn std::error::E
         file_path.clone(),
         None,
         Some(vec!["GT".to_string(), "AD".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -749,7 +737,6 @@ async fn test_format_column_naming_single_vs_multi_sample() -> Result<(), Box<dy
         single_file.clone(),
         None,
         Some(vec!["GT".to_string(), "DP".to_string()]),
-        Some(1),
         Some(object_storage_options.clone()),
         true,
     )?;
@@ -783,7 +770,6 @@ async fn test_format_column_naming_single_vs_multi_sample() -> Result<(), Box<dy
         multi_file.clone(),
         None,
         Some(vec!["GT".to_string(), "DP".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;

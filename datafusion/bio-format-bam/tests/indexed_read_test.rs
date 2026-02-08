@@ -48,7 +48,6 @@ async fn setup_bam_ctx() -> datafusion::error::Result<SessionContext> {
     let ctx = SessionContext::new();
     let provider = BamTableProvider::new(
         "tests/multi_chrom.bam".to_string(),
-        None, // thread_num
         None, // object_storage_options
         true, // zero-based coordinates
         None, // tag_fields
@@ -254,7 +253,6 @@ async fn setup_bam_ctx_with_partitions(
     let ctx = SessionContext::new_with_config(config);
     let provider = BamTableProvider::new(
         "tests/multi_chrom.bam".to_string(),
-        None,
         None,
         true, // zero-based coordinates
         None,

@@ -13,7 +13,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Discovering schema from first 100 records...\n");
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
-        Some(4),
         None,
         true, // 0-based coordinates
         None, // No pre-specified tags

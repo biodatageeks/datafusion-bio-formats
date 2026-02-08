@@ -106,7 +106,6 @@ pub async fn get_remote_vcf_reader(
 /// # Arguments
 ///
 /// * `file_path` - Path to the local VCF file
-/// * `thread_num` - Number of worker threads for parallel decompression
 ///
 /// # Returns
 ///
@@ -117,19 +116,10 @@ pub async fn get_remote_vcf_reader(
 /// Returns an error if the file cannot be opened
 pub fn get_local_vcf_bgzf_reader(
     file_path: String,
-    thread_num: usize,
 ) -> Result<Reader<MultithreadedReader<File>>, Error> {
-    debug!(
-        "Reading VCF file from local storage with {} threads",
-        thread_num
-    );
+    debug!("Reading VCF file from local storage");
     File::open(file_path)
-        .map(|f| {
-            noodles_bgzf::MultithreadedReader::with_worker_count(
-                NonZero::new(thread_num).unwrap(),
-                f,
-            )
-        })
+        .map(|f| noodles_bgzf::MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
         .map(vcf::io::Reader::new)
 }
 
@@ -191,7 +181,6 @@ pub async fn get_local_vcf_reader(
 /// # Arguments
 ///
 /// * `file_path` - Path to the local VCF file
-/// * `thread_num` - Number of worker threads for BGZF decompression
 /// * `object_storage_options` - Configuration for compression detection
 ///
 /// # Returns
@@ -203,7 +192,6 @@ pub async fn get_local_vcf_reader(
 /// Returns an error if the file cannot be read or the header is invalid
 pub async fn get_local_vcf_header(
     file_path: String,
-    thread_num: usize,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<vcf::Header, Error> {
     let compression_type = get_compression_type(
@@ -215,7 +203,7 @@ pub async fn get_local_vcf_header(
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let header = match compression_type {
         CompressionType::BGZF => {
-            let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num)?;
+            let mut reader = get_local_vcf_bgzf_reader(file_path)?;
             reader.read_header()?
         }
         CompressionType::GZIP => {
@@ -299,7 +287,7 @@ pub async fn get_header(
     let storage_type = get_storage_type(file_path.clone());
     let opts = object_storage_options.unwrap_or_default();
     let header = match storage_type {
-        StorageType::LOCAL => get_local_vcf_header(file_path, 1, opts.clone()).await?,
+        StorageType::LOCAL => get_local_vcf_header(file_path, opts.clone()).await?,
         _ => get_remote_vcf_header(file_path, opts.clone()).await?,
     };
     Ok(header)
@@ -435,17 +423,12 @@ impl VcfLocalReader {
     /// # Arguments
     ///
     /// * `file_path` - Path to the local VCF file
-    /// * `thread_num` - Number of worker threads for BGZF decompression
     /// * `object_storage_options` - Configuration for compression detection
     ///
     /// # Returns
     ///
     /// A `VcfLocalReader` instance with the appropriate variant for the detected compression
-    pub async fn new(
-        file_path: String,
-        thread_num: usize,
-        object_storage_options: ObjectStorageOptions,
-    ) -> Self {
+    pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
         let compression_type = get_compression_type(
             file_path.clone(),
             object_storage_options.clone().compression_type,
@@ -455,7 +438,7 @@ impl VcfLocalReader {
         .unwrap_or(CompressionType::NONE);
         match compression_type {
             CompressionType::BGZF => {
-                let reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
+                let reader = get_local_vcf_bgzf_reader(file_path).unwrap();
                 VcfLocalReader::BGZF(reader)
             }
             CompressionType::GZIP => {
@@ -583,7 +566,6 @@ impl VcfReader {
     /// # Arguments
     ///
     /// * `file_path` - Path to the VCF file (local path or cloud URI)
-    /// * `thread_num` - Optional number of worker threads for BGZF decompression
     /// * `object_storage_options` - Optional configuration for cloud storage and compression
     ///
     /// # Returns
@@ -591,7 +573,6 @@ impl VcfReader {
     /// A `VcfReader` instance configured for the detected storage and compression type
     pub async fn new(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> Self {
         let storage_type = get_storage_type(file_path.clone());
@@ -601,9 +582,7 @@ impl VcfReader {
         );
         let opts = object_storage_options.unwrap_or_default();
         match storage_type {
-            StorageType::LOCAL => VcfReader::Local(
-                VcfLocalReader::new(file_path, thread_num.unwrap_or(1), opts).await,
-            ),
+            StorageType::LOCAL => VcfReader::Local(VcfLocalReader::new(file_path, opts).await),
             _ => VcfReader::Remote(VcfRemoteReader::new(file_path, opts).await),
         }
     }

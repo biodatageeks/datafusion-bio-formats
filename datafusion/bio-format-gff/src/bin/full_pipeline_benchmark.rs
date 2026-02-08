@@ -49,7 +49,6 @@ async fn benchmark_full_attribute_processing(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )
@@ -94,7 +93,6 @@ async fn benchmark_minimal_processing(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )

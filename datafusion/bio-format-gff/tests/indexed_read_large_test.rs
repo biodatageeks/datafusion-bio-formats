@@ -39,7 +39,6 @@ async fn setup_gff_ctx() -> datafusion::error::Result<SessionContext> {
         "tests/multi_chrom_large.gff3.gz".to_string(),
         None,
         None,
-        None,
         true,
     )?;
     ctx.register_table("gff", Arc::new(provider))?;

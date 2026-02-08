@@ -108,7 +108,6 @@ async fn benchmark_regular_keys(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )
@@ -146,7 +145,6 @@ async fn benchmark_interned_keys(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )

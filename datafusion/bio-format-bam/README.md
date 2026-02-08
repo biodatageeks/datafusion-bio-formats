@@ -52,7 +52,6 @@ You can include additional BAM alignment tags as columns by specifying them when
 ```rust
 let table = BamTableProvider::new(
     "data/alignments.bam".to_string(),
-    Some(4),  // threads
     None,     // storage options
     true,     // 0-based coordinates
     Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),  // tags
@@ -84,7 +83,6 @@ async fn main() -> datafusion::error::Result<()> {
     // Register a BAM file as a table (no tags)
     let table = BamTableProvider::new(
         "data/alignments.bam".to_string(),
-        Some(4),  // 4 threads for decompression
         None,     // No cloud storage options
         true,     // Use 0-based coordinates
         None,     // No optional tags
@@ -118,7 +116,6 @@ async fn main() -> datafusion::error::Result<()> {
     // Register a BAM file with alignment tags
     let table = BamTableProvider::new(
         "data/alignments.bam".to_string(),
-        Some(4),
         None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
@@ -166,7 +163,6 @@ async fn main() -> datafusion::error::Result<()> {
     // Register input BAM file
     let input_table = BamTableProvider::new(
         "input.bam".to_string(),
-        None,
         None,
         true,  // 0-based coordinates
         None,  // no tags

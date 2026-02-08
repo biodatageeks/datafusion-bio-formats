@@ -511,19 +511,15 @@ pub fn get_local_gff_gz_sync_reader(
 ///
 /// # Arguments
 /// * `file_path` - Path to the local GFF file
-/// * `thread_num` - Number of threads to use for decompression
 ///
 /// # Returns
 /// A synchronous GFF reader configured for BGZF-compressed files with parallel decompression
 pub fn get_local_gff_bgzf_sync_reader(
     file_path: String,
-    thread_num: usize,
 ) -> Result<gff::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
     let file = std::fs::File::open(file_path)?;
-    let reader = bgzf::MultithreadedReader::with_worker_count(
-        std::num::NonZero::new(thread_num).unwrap(),
-        file,
-    );
+    let reader =
+        bgzf::MultithreadedReader::with_worker_count(std::num::NonZero::new(1).unwrap(), file);
     Ok(gff::io::Reader::new(reader))
 }
 
@@ -634,30 +630,21 @@ impl GffLocalReader {
     ///
     /// # Arguments
     /// * `file_path` - Path to the local GFF file
-    /// * `thread_num` - Number of threads for BGZF decompression
     /// * `object_storage_options` - Storage configuration (unused for local files)
     ///
     /// # Returns
     /// A configured GffLocalReader using the default parser type (Fast)
     pub async fn new(
         file_path: String,
-        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
-        Self::new_with_parser(
-            file_path,
-            thread_num,
-            object_storage_options,
-            GffParserType::default(),
-        )
-        .await
+        Self::new_with_parser(file_path, object_storage_options, GffParserType::default()).await
     }
 
     /// Creates a new local GFF reader with explicit parser type selection
     ///
     /// # Arguments
     /// * `file_path` - Path to the local GFF file
-    /// * `thread_num` - Number of threads for BGZF decompression
     /// * `object_storage_options` - Storage configuration (unused for local files)
     /// * `parser_type` - Parser type to use (Standard, Fast, or SIMD)
     ///
@@ -665,7 +652,6 @@ impl GffLocalReader {
     /// A configured GffLocalReader with the specified parser type
     pub async fn new_with_parser(
         file_path: String,
-        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
         parser_type: GffParserType,
     ) -> Result<Self, Error> {
@@ -694,15 +680,15 @@ impl GffLocalReader {
 
             // BGZF variants - using sync readers with multithreading
             (CompressionType::BGZF, GffParserType::Standard) => {
-                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path)?;
                 Ok(GffLocalReader::BGZF(reader))
             }
             (CompressionType::BGZF, GffParserType::Fast) => {
-                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path)?;
                 Ok(GffLocalReader::BgzfFast(reader))
             }
             (CompressionType::BGZF, GffParserType::Simd) => {
-                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path)?;
                 Ok(GffLocalReader::BgzfSimd(reader))
             }
 

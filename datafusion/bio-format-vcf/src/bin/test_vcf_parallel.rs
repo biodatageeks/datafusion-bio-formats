@@ -41,11 +41,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "nonexistent.vcf.bgz".to_string(),
                 None,
                 None,
-                Some(4),
                 Some(ObjectStorageOptions::default()),
                 true, // Use 0-based coordinates (default)
             ) {
-                Ok(_) => println!("✓ VcfTableProvider created successfully with 4 threads"),
+                Ok(_) => println!("✓ VcfTableProvider created successfully"),
                 Err(e) => println!("✗ Error creating VcfTableProvider: {}", e),
             }
 
@@ -64,7 +63,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_path.clone(),
         None, // No specific info fields
         None, // No specific format fields
-        None, // Auto-detect threads
         Some(ObjectStorageOptions::default()),
         true, // Use 0-based coordinates (default)
     )?;
@@ -89,10 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("Time with auto threads: {:?}", duration);
 
-    // Test 2: Explicit thread counts
-    let thread_counts = vec![1, 2, 4];
-    for thread_count in thread_counts {
-        println!("\n=== Test with {} threads ===", thread_count);
+    // Test 2: Additional read test
+    {
+        println!("\n=== Test 2: Additional read ===");
         let start_time = Instant::now();
 
         let ctx = SessionContext::new();
@@ -100,7 +97,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             file_path.clone(),
             None,
             None,
-            Some(thread_count),
             Some(ObjectStorageOptions::default()),
             true, // Use 0-based coordinates (default)
         )?;
@@ -114,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _results = df.collect().await?;
         let duration = start_time.elapsed();
 
-        println!("Time with {} threads: {:?}", thread_count, duration);
+        println!("Time: {:?}", duration);
     }
 
     println!("\nParallel BGZF VCF reading tests completed successfully!");

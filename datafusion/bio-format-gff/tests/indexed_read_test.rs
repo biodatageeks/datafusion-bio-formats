@@ -47,7 +47,6 @@ async fn setup_gff_ctx() -> datafusion::error::Result<SessionContext> {
     let provider = GffTableProvider::new(
         "tests/multi_chrom.gff3.gz".to_string(),
         None, // attr_fields
-        None, // thread_num
         None, // object_storage_options
         true, // zero-based coordinates
     )?;

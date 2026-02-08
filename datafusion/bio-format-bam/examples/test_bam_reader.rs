@@ -16,7 +16,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let table = BamTableProvider::new(
         file_path.clone(),
-        Some(1),
         Some(object_storage_options),
         true,
         None, // No tag fields

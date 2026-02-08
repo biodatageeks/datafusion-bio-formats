@@ -46,17 +46,15 @@ pub async fn get_remote_bam_reader(
 /// # Arguments
 ///
 /// * `file_path` - Path to the local BAM file
-/// * `thread_num` - Number of threads to use for BGZF decompression
 ///
 /// # Returns
 ///
 /// A local BAM reader with multithreaded BGZF decompression capability
 pub async fn get_local_bam_reader(
     file_path: String,
-    thread_num: usize,
 ) -> Result<Reader<MultithreadedReader<File>>, Error> {
     File::open(file_path)
-        .map(|f| MultithreadedReader::with_worker_count(NonZero::new(thread_num).unwrap(), f))
+        .map(|f| MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
         .map(bam::io::Reader::from)
 }
 
@@ -79,7 +77,6 @@ impl BamReader {
     /// # Arguments
     ///
     /// * `file_path` - Path to the BAM file (local or remote URL)
-    /// * `thread_num` - Optional number of threads for local BGZF decompression
     /// * `object_storage_options` - Optional cloud storage configuration
     ///
     /// # Returns
@@ -87,14 +84,12 @@ impl BamReader {
     /// A BamReader variant appropriate for the storage type detected from the file path
     pub async fn new(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> Self {
         let storage_type = get_storage_type(file_path.clone());
         match storage_type {
             StorageType::LOCAL => {
-                let thread_num = thread_num.unwrap_or(1);
-                let reader = get_local_bam_reader(file_path, thread_num).await.unwrap();
+                let reader = get_local_bam_reader(file_path).await.unwrap();
                 BamReader::Local(reader)
             }
             StorageType::AZBLOB | StorageType::GCS | StorageType::S3 => {

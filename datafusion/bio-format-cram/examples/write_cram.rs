@@ -97,7 +97,6 @@ async fn main() -> datafusion::error::Result<()> {
 
     let bam_input = BamTableProvider::try_new_with_inferred_schema(
         "input.bam".to_string(),
-        None,      // thread_num
         None,      // object storage options
         true,      // 0-based coordinates
         None,      // tag_fields (None to discover all)

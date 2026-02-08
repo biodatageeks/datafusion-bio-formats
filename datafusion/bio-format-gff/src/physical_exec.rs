@@ -35,7 +35,6 @@ pub struct GffExec {
     pub(crate) filters: Vec<Expr>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
-    pub(crate) thread_num: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     pub(crate) coordinate_system_zero_based: bool,
@@ -128,7 +127,6 @@ impl ExecutionPlan for GffExec {
             self.attr_fields.clone(),
             schema.clone(),
             batch_size,
-            self.thread_num,
             self.projection.clone(),
             self.filters.clone(),
             self.object_storage_options.clone(),
@@ -686,7 +684,6 @@ async fn get_local_gff(
     attr_fields: Option<Vec<String>>,
     schema: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
@@ -747,13 +744,7 @@ async fn get_local_gff(
     // let mut count: usize = 0;
     let mut batch_num = 0;
     let file_path = file_path.clone();
-    let thread_num = thread_num.unwrap_or(1);
-    let reader = GffLocalReader::new(
-        file_path.clone(),
-        thread_num,
-        object_storage_options.unwrap(),
-    )
-    .await?;
+    let reader = GffLocalReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
 
     // Convert to sync iterator for better performance
     let sync_iter = reader.into_sync_iterator();
@@ -1127,7 +1118,6 @@ async fn get_stream(
     attr_fields: Option<Vec<String>>,
     schema_ref: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     filters: Vec<Expr>,
     object_storage_options: Option<ObjectStorageOptions>,
@@ -1146,7 +1136,6 @@ async fn get_stream(
                 attr_fields.clone(),
                 schema.clone(),
                 batch_size,
-                thread_num,
                 projection,
                 filters,
                 object_storage_options,

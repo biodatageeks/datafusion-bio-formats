@@ -51,7 +51,6 @@ async fn test_info_projection_single_info_field() -> Result<(), Box<dyn std::err
             "DP".to_string(),
         ]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -118,7 +117,6 @@ async fn test_info_projection_multiple_info_fields() -> Result<(), Box<dyn std::
             "DP".to_string(),
         ]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -183,7 +181,6 @@ async fn test_info_projection_mixed_core_and_info() -> Result<(), Box<dyn std::e
         file_path.clone(),
         Some(vec!["AC".to_string(), "AF".to_string(), "AN".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -272,7 +269,6 @@ async fn test_info_projection_no_info_fields_queried() -> Result<(), Box<dyn std
             "DP".to_string(),
         ]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -346,7 +342,6 @@ async fn test_info_projection_all_info_fields() -> Result<(), Box<dyn std::error
             "DP".to_string(),
         ]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -437,7 +432,6 @@ async fn test_info_projection_with_count_aggregation() -> Result<(), Box<dyn std
             "DP".to_string(),
         ]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -479,7 +473,6 @@ async fn test_info_projection_with_limit() -> Result<(), Box<dyn std::error::Err
         file_path.clone(),
         Some(vec!["AC".to_string(), "AF".to_string(), "AN".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -547,7 +540,6 @@ async fn test_info_projection_no_projection_all_fields() -> Result<(), Box<dyn s
         file_path.clone(),
         Some(vec!["AC".to_string(), "AF".to_string(), "AN".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;

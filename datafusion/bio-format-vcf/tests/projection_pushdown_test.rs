@@ -42,7 +42,6 @@ async fn test_vcf_projection_single_column_chrom() -> Result<(), Box<dyn std::er
         file_path.clone(),
         Some(vec!["DP".to_string()]), // Add DP info field
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -84,7 +83,6 @@ async fn test_vcf_projection_position_columns() -> Result<(), Box<dyn std::error
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -144,7 +142,6 @@ async fn test_vcf_projection_variant_data() -> Result<(), Box<dyn std::error::Er
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -230,7 +227,6 @@ async fn test_vcf_projection_info_fields() -> Result<(), Box<dyn std::error::Err
         file_path.clone(),
         Some(vec!["DP".to_string(), "AF".to_string()]), // Include both DP and AF
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -282,7 +278,6 @@ async fn test_vcf_no_projection_all_columns() -> Result<(), Box<dyn std::error::
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -322,7 +317,6 @@ async fn test_vcf_projection_with_count() -> Result<(), Box<dyn std::error::Erro
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -358,7 +352,6 @@ async fn test_vcf_projection_reordered_columns() -> Result<(), Box<dyn std::erro
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -422,7 +415,6 @@ async fn test_vcf_projection_with_limit() -> Result<(), Box<dyn std::error::Erro
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -474,7 +466,6 @@ async fn test_vcf_multithreaded_projection() -> Result<(), Box<dyn std::error::E
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(4), // Use 4 threads
         Some(object_storage_options),
         true,
     )?;
@@ -524,7 +515,6 @@ async fn test_vcf_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -588,7 +578,6 @@ async fn test_vcf_select_position_columns_bug() -> Result<(), Box<dyn std::error
         file_path.clone(),
         Some(vec!["DP".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;

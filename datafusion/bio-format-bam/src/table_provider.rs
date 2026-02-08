@@ -92,7 +92,6 @@ fn determine_schema(
 /// the actual types used in the file.
 async fn determine_schema_from_file(
     file_path: String,
-    thread_num: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
@@ -131,12 +130,7 @@ async fn determine_schema_from_file(
         let reader = SamReader::new(file_path.clone());
         extract_header_metadata(reader.get_header())
     } else {
-        let mut reader = BamReader::new(
-            file_path.clone(),
-            thread_num,
-            object_storage_options.clone(),
-        )
-        .await;
+        let mut reader = BamReader::new(file_path.clone(), object_storage_options.clone()).await;
         let header = reader.read_header().await;
         extract_header_metadata(&header)
     };
@@ -220,7 +214,7 @@ async fn determine_schema_from_file(
             let records = reader.read_records();
             discover_tags_from_stream(records, tags, sample_size).await
         } else {
-            let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
+            let mut reader = BamReader::new(file_path, object_storage_options).await;
             let _header = reader.read_header().await;
             let records = reader.read_records().await;
             discover_tags_from_stream(records, tags, sample_size).await
@@ -297,8 +291,6 @@ pub struct BamTableProvider {
     file_path: String,
     /// Arrow schema for the BAM records
     schema: SchemaRef,
-    /// Number of threads to use for BGZF decompression
-    thread_num: Option<usize>,
     /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -321,7 +313,6 @@ impl BamTableProvider {
     /// # Arguments
     ///
     /// * `file_path` - Path to the BAM file (local or remote URL)
-    /// * `thread_num` - Optional number of threads for BGZF decompression
     /// * `object_storage_options` - Optional configuration for cloud storage access
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
@@ -349,7 +340,6 @@ impl BamTableProvider {
     /// // Basic usage without tags
     /// let provider = BamTableProvider::new(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),  // Use 4 threads
     ///     None,     // No cloud storage
     ///     true,     // Use 0-based coordinates (default)
     ///     None,     // No tag fields
@@ -358,7 +348,6 @@ impl BamTableProvider {
     /// // With alignment tags
     /// let provider_with_tags = BamTableProvider::new(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),
     ///     None,
     ///     true,
     ///     Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
@@ -368,7 +357,6 @@ impl BamTableProvider {
     /// ```
     pub async fn new(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
@@ -410,12 +398,8 @@ impl BamTableProvider {
         } else {
             // For remote BAM files, use async reader
             use crate::storage::BamReader;
-            let mut reader = BamReader::new(
-                file_path.clone(),
-                thread_num,
-                object_storage_options.clone(),
-            )
-            .await;
+            let mut reader =
+                BamReader::new(file_path.clone(), object_storage_options.clone()).await;
             let header = reader.read_header().await;
             extract_header_metadata(&header)
         };
@@ -447,7 +431,6 @@ impl BamTableProvider {
         Ok(Self {
             file_path,
             schema,
-            thread_num,
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
@@ -467,7 +450,6 @@ impl BamTableProvider {
     /// # Arguments
     ///
     /// * `file_path` - Path to the BAM file (local or remote URL)
-    /// * `thread_num` - Optional number of threads for BGZF decompression
     /// * `object_storage_options` - Optional configuration for cloud storage access
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
@@ -487,7 +469,6 @@ impl BamTableProvider {
     /// // Create provider with inferred schema
     /// let provider = BamTableProvider::try_new_with_inferred_schema(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),
     ///     None,
     ///     true,
     ///     Some(vec!["XS".to_string(), "XT".to_string()]),
@@ -498,7 +479,6 @@ impl BamTableProvider {
     /// ```
     pub async fn try_new_with_inferred_schema(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
@@ -510,7 +490,6 @@ impl BamTableProvider {
         let sample_size = sample_size.unwrap_or(100);
         let schema = determine_schema_from_file(
             file_path.clone(),
-            thread_num,
             object_storage_options.clone(),
             &tag_fields,
             coordinate_system_zero_based,
@@ -538,7 +517,6 @@ impl BamTableProvider {
         Ok(Self {
             file_path,
             schema,
-            thread_num,
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
@@ -577,7 +555,6 @@ impl BamTableProvider {
         Self {
             file_path: output_path,
             schema,
-            thread_num: None,
             object_storage_options: None,
             coordinate_system_zero_based,
             tag_fields,
@@ -619,7 +596,6 @@ impl BamTableProvider {
     /// let ctx = SessionContext::new();
     /// let provider = BamTableProvider::new(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),
     ///     None,
     ///     true,
     ///     None,
@@ -687,12 +663,8 @@ impl BamTableProvider {
             let records = reader.read_records();
             discover_all_tags(records, sample_size).await
         } else {
-            let mut reader = BamReader::new(
-                self.file_path.clone(),
-                self.thread_num,
-                self.object_storage_options.clone(),
-            )
-            .await;
+            let mut reader =
+                BamReader::new(self.file_path.clone(), self.object_storage_options.clone()).await;
             let _header = reader.read_header().await;
             let records = reader.read_records().await;
             discover_all_tags(records, sample_size).await
@@ -975,7 +947,6 @@ impl TableProvider for BamTableProvider {
                     schema: schema.clone(),
                     projection: projection.cloned(),
                     limit,
-                    thread_num: self.thread_num,
                     object_storage_options: self.object_storage_options.clone(),
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
                     tag_fields: self.tag_fields.clone(),
@@ -998,7 +969,6 @@ impl TableProvider for BamTableProvider {
             schema: schema.clone(),
             projection: projection.cloned(),
             limit,
-            thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             tag_fields: self.tag_fields.clone(),

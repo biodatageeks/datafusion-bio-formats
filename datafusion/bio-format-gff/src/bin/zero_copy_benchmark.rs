@@ -116,7 +116,6 @@ async fn benchmark_old_url_decoding(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )
@@ -154,7 +153,6 @@ async fn benchmark_new_zero_copy(
 
     let reader = GffLocalReader::new_with_parser(
         file_path.to_string(),
-        4,
         ObjectStorageOptions::default(),
         GffParserType::Fast,
     )
