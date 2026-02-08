@@ -204,6 +204,7 @@ pub fn balance_partitions(
                     let bins_in_range = range_end - range_start;
 
                     if bins_in_range > 1 {
+                        // budget <= remaining (checked above), so result <= bins_in_range (usize)
                         let bins_to_take =
                             (bins_in_range as u128 * budget as u128 / remaining as u128) as usize;
                         let bins_to_take = bins_to_take.clamp(1, bins_in_range - 1);

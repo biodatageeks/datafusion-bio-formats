@@ -226,10 +226,9 @@ fn collect_genomic_constraints(
                                         );
                                     }
                                     Operator::Lt => {
-                                        *end_upper = Some(
-                                            end_upper
-                                                .map_or(val_1based - 1, |v| v.min(val_1based - 1)),
-                                        );
+                                        let upper = val_1based.saturating_sub(1);
+                                        *end_upper =
+                                            Some(end_upper.map_or(upper, |v| v.min(upper)));
                                     }
                                     Operator::LtEq => {
                                         *end_upper = Some(

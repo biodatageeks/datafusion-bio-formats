@@ -3,6 +3,7 @@
 //! Locates companion index files (BAI, CSI, CRAI, TBI) for genomic data files,
 //! following standard naming conventions used by samtools/htslib.
 
+use log::debug;
 use std::path::Path;
 
 /// Supported index file formats.
@@ -29,7 +30,12 @@ pub enum IndexFormat {
 /// - GFF: `{path}.tbi`, `{path}.csi`
 pub fn discover_index_path(data_file: &str, format: IndexFormat) -> Option<String> {
     let candidates = get_index_candidates(data_file, format);
-    candidates.into_iter().find(|path| Path::new(path).exists())
+    let result = candidates.into_iter().find(|path| Path::new(path).exists());
+    match &result {
+        Some(path) => debug!("Discovered {:?} index for {}: {}", format, data_file, path),
+        None => debug!("No {:?} index found for {}", format, data_file),
+    }
+    result
 }
 
 /// Get a list of candidate index file paths for a given data file and format.
