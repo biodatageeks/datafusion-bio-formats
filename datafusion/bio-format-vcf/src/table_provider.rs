@@ -373,6 +373,44 @@ impl VcfTableProvider {
             None
         };
 
+        // When the VCF header lacks ##contig lines but a TBI index exists,
+        // fall back to the TBI header for contig names so that indexed
+        // partitioning can still split across multiple cores.
+        let (contig_names, contig_lengths) = if contig_names.is_empty() {
+            if let Some(ref idx_path) = index_path {
+                match noodles_tabix::fs::read(idx_path) {
+                    Ok(index) => {
+                        use noodles_csi::binning_index::BinningIndex;
+                        let names: Vec<String> = index
+                            .header()
+                            .map(|h| {
+                                h.reference_sequence_names()
+                                    .iter()
+                                    .map(|n| n.to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !names.is_empty() {
+                            debug!(
+                                "VCF header lacks ##contig lines; inferred {} contigs from TBI index",
+                                names.len()
+                            );
+                        }
+                        let lengths = vec![0u64; names.len()];
+                        (names, lengths)
+                    }
+                    Err(e) => {
+                        debug!("Failed to read TBI for contig name fallback: {}", e);
+                        (contig_names, contig_lengths)
+                    }
+                }
+            } else {
+                (contig_names, contig_lengths)
+            }
+        } else {
+            (contig_names, contig_lengths)
+        };
+
         Ok(Self {
             file_path,
             info_fields,
