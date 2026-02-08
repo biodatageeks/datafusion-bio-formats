@@ -117,6 +117,7 @@ pub fn balance_partitions(
         regions: Vec::new(),
         total_estimated_bytes: 0,
     });
+    let mut zero_est_counts: Vec<usize> = vec![0; 1];
     let mut budget: u64 = budget_for(0);
 
     for est in &estimates {
@@ -135,9 +136,18 @@ pub fn balance_partitions(
         // 0-byte regions still need to be assigned (they may have data
         // despite having 0 estimated bytes — e.g., when all contigs share
         // a single BGZF block and the compressed offset range is 0).
+        // Distribute to the partition with the fewest regions to prevent
+        // alt contigs, decoys, and unplaced scaffolds from piling onto
+        // the last partition and creating tail latency.
         if remaining == 0 {
-            let p = partitions.last_mut().unwrap();
-            p.regions.push(est.region.clone());
+            let min_idx = partitions
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, p)| p.regions.len())
+                .map(|(i, _)| i)
+                .unwrap();
+            partitions[min_idx].regions.push(est.region.clone());
+            zero_est_counts[min_idx] += 1;
             continue;
         }
 
@@ -149,6 +159,7 @@ pub fn balance_partitions(
                     regions: Vec::new(),
                     total_estimated_bytes: 0,
                 });
+                zero_est_counts.push(0);
                 budget = budget_for(new_idx);
             }
 
@@ -234,6 +245,7 @@ pub fn balance_partitions(
                         regions: Vec::new(),
                         total_estimated_bytes: 0,
                     });
+                    zero_est_counts.push(0);
                     budget = budget_for(new_idx);
                 } else {
                     budget = 0; // is_last will handle on next iteration
@@ -259,17 +271,21 @@ pub fn balance_partitions(
     // Remove empty partitions
     partitions.retain(|p| !p.regions.is_empty());
 
+    let total_zero_est: usize = zero_est_counts.iter().sum();
     debug!(
-        "Balanced {} regions into {} partitions (target: {})",
+        "Balanced {} regions ({} zero-est) into {} partitions (target: {})",
         partitions.iter().map(|b| b.regions.len()).sum::<usize>(),
+        total_zero_est,
         partitions.len(),
         target
     );
     for (i, bin) in partitions.iter().enumerate() {
+        let zero_ct = zero_est_counts.get(i).copied().unwrap_or(0);
         debug!(
-            "  Partition {}: {} regions, ~{} estimated bytes",
+            "  Partition {}: {} regions ({} zero-est), ~{} estimated bytes",
             i,
             bin.regions.len(),
+            zero_ct,
             bin.total_estimated_bytes
         );
     }
@@ -864,5 +880,141 @@ mod tests {
                 end
             );
         }
+    }
+
+    #[test]
+    fn test_zero_estimate_regions_distributed_evenly() {
+        // Simulate human genome: 24 chromosomes with data + 60 zero-estimate alt/decoy contigs.
+        // With target=8, zero-estimate regions should be spread across partitions,
+        // not piled onto the last one.
+        let mut estimates = vec![
+            estimate("chr1", 249, Some(249_000_000)),
+            estimate("chr2", 243, Some(243_000_000)),
+            estimate("chr3", 198, Some(198_000_000)),
+            estimate("chr4", 191, Some(191_000_000)),
+            estimate("chr5", 181, Some(181_000_000)),
+            estimate("chr6", 171, Some(171_000_000)),
+            estimate("chr7", 159, Some(159_000_000)),
+            estimate("chr8", 146, Some(146_000_000)),
+            estimate("chr9", 141, Some(141_000_000)),
+            estimate("chr10", 136, Some(136_000_000)),
+            estimate("chr11", 135, Some(135_000_000)),
+            estimate("chr12", 134, Some(134_000_000)),
+            estimate("chr13", 115, Some(115_000_000)),
+            estimate("chr14", 107, Some(107_000_000)),
+            estimate("chr15", 102, Some(102_000_000)),
+            estimate("chr16", 90, Some(90_000_000)),
+            estimate("chr17", 84, Some(84_000_000)),
+            estimate("chr18", 80, Some(80_000_000)),
+            estimate("chr19", 59, Some(59_000_000)),
+            estimate("chr20", 64, Some(64_000_000)),
+            estimate("chr21", 47, Some(47_000_000)),
+            estimate("chr22", 51, Some(51_000_000)),
+            estimate("chrX", 155, Some(155_000_000)),
+            estimate("chrY", 57, Some(57_000_000)),
+        ];
+        // Add 60 zero-estimate alt/decoy contigs (like chrUn_*, chr*_random, HLA-*)
+        for i in 0..60 {
+            estimates.push(estimate(&format!("alt_contig_{}", i), 0, None));
+        }
+
+        let result = balance_partitions(estimates, 8);
+
+        // All regions must be present
+        let total_regions: usize = result.iter().map(|b| b.regions.len()).sum();
+        assert!(
+            total_regions >= 84,
+            "Expected at least 84 regions (24 chroms + 60 alts), got {}",
+            total_regions
+        );
+
+        // Total estimated bytes preserved
+        let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
+        assert_eq!(result_total, 3095); // sum of all chromosome bytes
+
+        // Count zero-estimate regions per partition
+        let zero_est_per_partition: Vec<usize> = result
+            .iter()
+            .map(|p| {
+                p.regions
+                    .iter()
+                    .filter(|r| r.chrom.starts_with("alt_contig_"))
+                    .count()
+            })
+            .collect();
+
+        let max_zero = *zero_est_per_partition.iter().max().unwrap();
+        // With 60 zero-est regions across 8 partitions, ideal is ~8 each.
+        // Allow up to 15 (< 2x ideal share) to account for uneven data-region counts.
+        assert!(
+            max_zero <= 15,
+            "Max zero-est regions on one partition = {}, expected <= 15. Distribution: {:?}",
+            max_zero,
+            zero_est_per_partition
+        );
+
+        // No partition should have 0 zero-estimate regions (all should get some)
+        let min_zero = *zero_est_per_partition.iter().min().unwrap();
+        assert!(
+            min_zero >= 1,
+            "Every partition should get at least 1 zero-est region. Distribution: {:?}",
+            zero_est_per_partition
+        );
+    }
+
+    #[test]
+    fn test_zero_estimate_not_all_on_last_partition() {
+        // 3 data regions + 20 zero-estimate scaffolds, target=4.
+        // Before the fix, all 20 would land on the last partition.
+        let mut estimates = vec![
+            estimate("chr1", 100, Some(249_000_000)),
+            estimate("chr2", 80, Some(243_000_000)),
+            estimate("chr3", 60, Some(198_000_000)),
+        ];
+        for i in 0..20 {
+            estimates.push(estimate(&format!("scaffold_{}", i), 0, None));
+        }
+
+        let result = balance_partitions(estimates, 4);
+
+        // All regions present
+        let total_regions: usize = result.iter().map(|b| b.regions.len()).sum();
+        assert!(
+            total_regions >= 23,
+            "Expected at least 23 regions, got {}",
+            total_regions
+        );
+
+        // Total bytes preserved
+        let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
+        assert_eq!(result_total, 240);
+
+        // Count scaffolds per partition
+        let scaffold_per_partition: Vec<usize> = result
+            .iter()
+            .map(|p| {
+                p.regions
+                    .iter()
+                    .filter(|r| r.chrom.starts_with("scaffold_"))
+                    .count()
+            })
+            .collect();
+
+        // No single partition should have all 20 scaffolds
+        let max_scaffolds = *scaffold_per_partition.iter().max().unwrap();
+        assert!(
+            max_scaffolds < 20,
+            "One partition got all {} scaffolds — not distributed! {:?}",
+            max_scaffolds,
+            scaffold_per_partition
+        );
+
+        // With 20 scaffolds across 4 partitions, max should be <= 8 (generous threshold)
+        assert!(
+            max_scaffolds <= 8,
+            "Max scaffolds on one partition = {}, expected <= 8. Distribution: {:?}",
+            max_scaffolds,
+            scaffold_per_partition
+        );
     }
 }
