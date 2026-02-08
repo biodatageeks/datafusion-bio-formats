@@ -3837,6 +3837,30 @@
       "is_latest_tag": true
     },
     {
+      "id": "v0.1.1@9903f9b583c1cfb79409e70947bec08ad086b1ea@linux",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-08T20:50:18Z",
+      "runner": "linux",
+      "runner_label": "Linux AMD64",
+      "path": "tags/v0.1.1/linux",
+      "commit_sha": "9903f9b583c1cfb79409e70947bec08ad086b1ea",
+      "is_latest_tag": true
+    },
+    {
+      "id": "v0.1.1@9903f9b583c1cfb79409e70947bec08ad086b1ea@macos",
+      "label": "v0.1.1",
+      "ref": "v0.1.1",
+      "ref_type": "tag",
+      "timestamp": "2026-02-08T20:50:18Z",
+      "runner": "macos",
+      "runner_label": "macOS ARM64",
+      "path": "tags/v0.1.1/macos",
+      "commit_sha": "9903f9b583c1cfb79409e70947bec08ad086b1ea",
+      "is_latest_tag": true
+    },
+    {
       "id": "v0.1.1@9b36c6ceed3eda982193e8106b070cadbaa1fd2f@linux",
       "label": "v0.1.1",
       "ref": "v0.1.1",
@@ -5136,6 +5160,6 @@
   "tags": [
     "v0.1.1"
   ],
-  "last_updated": "2026-02-08T19:48:40Z",
+  "last_updated": "2026-02-08T20:50:18Z",
   "latest_tag": "v0.1.1"
 }
