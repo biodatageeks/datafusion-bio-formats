@@ -1,3 +1,4 @@
+use datafusion::arrow::array::Array;
 use datafusion::prelude::*;
 use datafusion_bio_format_bam::table_provider::BamTableProvider;
 use std::sync::Arc;
@@ -244,6 +245,273 @@ async fn test_empty_tag_list() {
 
     // Should have 11 core fields only
     assert_eq!(schema.fields().len(), 11);
+}
+
+/// All 13 tags present in the bam_with_tags.bam test file
+const ALL_TAGS: [&str; 13] = [
+    "E2", "MD", "MQ", "NM", "OC", "OP", "OQ", "PG", "RG", "UQ", "XN", "XT", "ZQ",
+];
+
+#[tokio::test]
+async fn test_read_all_13_tags() {
+    // Tests reading all 13 tags from a real BAM file extracted from NA12878 WES data.
+    // This file contains 14 reads with a variety of tags including:
+    // - Integer tags stored as Int8 in BAM binary (MQ, NM, UQ, XN, XT)
+    // - String tags (E2, MD, OC, OQ, PG, RG, ZQ)
+    // - XT tag that is defined as type 'A' (character) in SAM spec but encoded as 'c' (Int8) in BAM
+    // - OP tag stored as Int32
+    // - ZQ tag not in standard registry (defaults to Utf8)
+    let tag_fields: Vec<String> = ALL_TAGS.iter().map(|s| s.to_string()).collect();
+
+    let provider = BamTableProvider::new(
+        "tests/bam_with_tags.bam".to_string(),
+        None,
+        None,
+        true, // 0-based coordinates
+        Some(tag_fields),
+    )
+    .await
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+
+    // Verify schema: 11 core + 13 tags = 24 fields
+    let df = ctx.table("bam").await.unwrap();
+    let schema = df.schema();
+    assert_eq!(schema.fields().len(), 24);
+
+    // Verify all tag fields are in schema with expected types
+    use datafusion::arrow::datatypes::DataType;
+    let nm_field = schema.field_with_name(None, "NM").unwrap();
+    assert_eq!(nm_field.data_type(), &DataType::Int32);
+    let md_field = schema.field_with_name(None, "MD").unwrap();
+    assert_eq!(md_field.data_type(), &DataType::Utf8);
+    let xt_field = schema.field_with_name(None, "XT").unwrap();
+    assert_eq!(xt_field.data_type(), &DataType::Utf8); // SAM type 'A' -> Utf8
+    let mq_field = schema.field_with_name(None, "MQ").unwrap();
+    assert_eq!(mq_field.data_type(), &DataType::Int32);
+    let rg_field = schema.field_with_name(None, "RG").unwrap();
+    assert_eq!(rg_field.data_type(), &DataType::Utf8);
+    let op_field = schema.field_with_name(None, "OP").unwrap();
+    assert_eq!(op_field.data_type(), &DataType::Int32);
+
+    // Read all records and verify no errors (the main bug was type mismatch causing errors)
+    let df = ctx
+        .sql("SELECT name, chrom, start, \"NM\", \"MD\", \"MQ\", \"XT\", \"RG\", \"PG\", \"UQ\", \"OQ\", \"E2\", \"OC\", \"OP\", \"XN\", \"ZQ\" FROM bam")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 14, "Should have 14 reads");
+}
+
+#[tokio::test]
+async fn test_xt_tag_character_values() {
+    // Specifically tests that the XT tag (SAM type 'A' / character) is correctly
+    // read even when the BAM binary encodes it as Int8 instead of Character.
+    // The XT tag values should be ASCII characters like 'S', 'V', 'W'.
+    let provider = BamTableProvider::new(
+        "tests/bam_with_tags.bam".to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["XT".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+
+    // Query only records that have XT
+    let df = ctx
+        .sql("SELECT name, \"XT\" FROM bam WHERE \"XT\" IS NOT NULL")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+
+    use datafusion::arrow::array::StringArray;
+    let mut xt_values: Vec<String> = Vec::new();
+    for batch in &results {
+        let xt_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..xt_col.len() {
+            if !xt_col.is_null(i) {
+                xt_values.push(xt_col.value(i).to_string());
+            }
+        }
+    }
+
+    // Should have XT values (reads with XT in the test file)
+    assert!(!xt_values.is_empty(), "Should find reads with XT tag");
+
+    // All XT values should be single ASCII characters
+    for val in &xt_values {
+        assert_eq!(
+            val.len(),
+            1,
+            "XT value '{}' should be single character",
+            val
+        );
+        assert!(
+            val.chars().next().unwrap().is_ascii(),
+            "XT value '{}' should be ASCII",
+            val,
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_integer_tags_from_int8_encoding() {
+    // Tests that integer tags encoded as Int8 in BAM binary (NM, MQ, UQ) are
+    // correctly read into Int32 Arrow columns.
+    let provider = BamTableProvider::new(
+        "tests/bam_with_tags.bam".to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["NM".to_string(), "MQ".to_string(), "UQ".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+
+    let df = ctx
+        .sql("SELECT \"NM\", \"MQ\", \"UQ\" FROM bam WHERE \"NM\" IS NOT NULL")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+
+    use datafusion::arrow::array::Int32Array;
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert!(total_rows > 0, "Should have reads with NM tag");
+
+    // Verify values are reasonable
+    for batch in &results {
+        let nm_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..nm_col.len() {
+            if !nm_col.is_null(i) {
+                let nm = nm_col.value(i);
+                assert!(
+                    nm >= 0 && nm < 100,
+                    "NM={} should be a small non-negative integer",
+                    nm
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_nullable_tags_with_mixed_presence() {
+    // Tests that tags which are only present in some reads produce correct NULL values.
+    // In the test file: XT is in ~5 reads, XN is in ~2 reads, OC is in ~2 reads.
+    let provider = BamTableProvider::new(
+        "tests/bam_with_tags.bam".to_string(),
+        None,
+        None,
+        true,
+        Some(vec![
+            "NM".to_string(),
+            "XT".to_string(),
+            "XN".to_string(),
+            "OC".to_string(),
+        ]),
+    )
+    .await
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+
+    let df = ctx
+        .sql("SELECT \"NM\", \"XT\", \"XN\", \"OC\" FROM bam")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 14);
+
+    // Count non-null values for each tag
+    use datafusion::arrow::array::{Array, Int32Array, StringArray};
+    let mut nm_count = 0;
+    let mut xt_count = 0;
+    let mut xn_count = 0;
+    let mut oc_count = 0;
+    for batch in &results {
+        let nm_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let xt_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let xn_col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        let oc_col = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+
+        for i in 0..batch.num_rows() {
+            if !nm_col.is_null(i) {
+                nm_count += 1;
+            }
+            if !xt_col.is_null(i) {
+                xt_count += 1;
+            }
+            if !xn_col.is_null(i) {
+                xn_count += 1;
+            }
+            if !oc_col.is_null(i) {
+                oc_count += 1;
+            }
+        }
+    }
+
+    // NM is present in most reads (12 of 14 mapped reads have it)
+    assert!(
+        nm_count >= 10,
+        "NM should be present in most reads, got {}",
+        nm_count
+    );
+    // XT is present in fewer reads (5 of 14)
+    assert!(
+        xt_count >= 3 && xt_count < 14,
+        "XT should be present in some reads, got {}",
+        xt_count
+    );
+    // XN is rare (2 of 14)
+    assert!(
+        xn_count >= 1 && xn_count <= 5,
+        "XN should be present in few reads, got {}",
+        xn_count
+    );
+    // OC is rare (2 of 14)
+    assert!(
+        oc_count >= 1 && oc_count <= 5,
+        "OC should be present in few reads, got {}",
+        oc_count
+    );
 }
 
 #[tokio::test]

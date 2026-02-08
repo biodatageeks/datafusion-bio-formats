@@ -1,20 +1,24 @@
-use crate::storage::CramReader;
+use crate::storage::{CramReader, CramRecordFields, IndexedCramReader};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{ArrayRef, RecordBatch};
+use datafusion::arrow::array::{ArrayRef, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::error::ArrowError;
+use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::alignment_utils::{
-    RecordFields, build_record_batch, cigar_op_to_string,
+    RecordFields, build_record_batch, format_cigar_ops,
     get_chrom_by_seq_id_cram as get_chrom_by_seq_id,
 };
 use datafusion_bio_format_core::calculated_tags::{calculate_md_tag, calculate_nm_tag};
+use datafusion_bio_format_core::genomic_filter::GenomicRegion;
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
+use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
+use datafusion_bio_format_core::record_filter::evaluate_record_filters;
 use datafusion_bio_format_core::table_utils::OptionalField;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 
@@ -40,6 +44,12 @@ pub struct CramExec {
     pub(crate) coordinate_system_zero_based: bool,
     /// Optional list of CRAM alignment tags to include as columns
     pub(crate) tag_fields: Option<Vec<String>>,
+    /// Partition assignments for index-based reading (None = full scan)
+    pub(crate) partition_assignments: Option<Vec<PartitionAssignment>>,
+    /// Path to the index file (CRAI)
+    pub(crate) index_path: Option<String>,
+    /// Residual filters for record-level evaluation
+    pub(crate) residual_filters: Vec<datafusion::logical_expr::Expr>,
 }
 
 impl Debug for CramExec {
@@ -80,13 +90,46 @@ impl ExecutionPlan for CramExec {
 
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        debug!("CramExec::execute");
+        debug!("CramExec::execute partition={}", partition);
         debug!("Projection: {:?}", self.projection);
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
+
+        // Use indexed reading when partition assignments and index are available
+        if let (Some(assignments), Some(index_path)) =
+            (&self.partition_assignments, &self.index_path)
+        {
+            if partition < assignments.len() {
+                let regions = assignments[partition].regions.clone();
+                let file_path = self.file_path.clone();
+                let index_path = index_path.clone();
+                let reference_path = self.reference_path.clone();
+                let projection = self.projection.clone();
+                let coord_zero_based = self.coordinate_system_zero_based;
+                let tag_fields = self.tag_fields.clone();
+                let residual_filters = self.residual_filters.clone();
+
+                let fut = get_indexed_stream(
+                    file_path,
+                    index_path,
+                    reference_path,
+                    regions,
+                    schema.clone(),
+                    batch_size,
+                    projection,
+                    coord_zero_based,
+                    tag_fields,
+                    residual_filters,
+                );
+                let stream = futures::stream::once(fut).try_flatten();
+                return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
+            }
+        }
+
+        // Fallback: full scan (original path)
         let fut = get_stream(
             self.file_path.clone(),
             schema.clone(),
@@ -190,23 +233,35 @@ fn load_tags<R: Record>(
             }
         }
 
+        let expected_type = &tag_builders.1[i]; // Expected Arrow type from schema
+
         match tag_result {
             Some(Ok(value)) => match value {
-                Value::Int8(v) => builder.append_int(v as i32)?,
-                Value::UInt8(v) => builder.append_int(v as i32)?,
-                Value::Int16(v) => builder.append_int(v as i32)?,
-                Value::UInt16(v) => builder.append_int(v as i32)?,
-                Value::Int32(v) => builder.append_int(v)?,
-                Value::UInt32(v) => builder.append_int(v as i32)?,
-                Value::Float(f) => builder.append_float(f)?,
+                Value::Int8(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::UInt8(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::Int16(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::UInt16(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::Int32(v) => append_int_value(builder, expected_type, v)?,
+                Value::UInt32(v) => append_int_value(builder, expected_type, v as i32)?,
+                Value::Float(f) => {
+                    if matches!(expected_type, DataType::Utf8) {
+                        builder.append_string(&f.to_string())?
+                    } else {
+                        builder.append_float(f)?
+                    }
+                }
                 Value::String(s) => match std::str::from_utf8(s.as_ref()) {
                     Ok(string) => builder.append_string(string)?,
                     Err(_) => builder.append_null()?,
                 },
                 Value::Character(c) => {
-                    // Convert u8 to char, not to its numeric string representation
-                    let ch = char::from(c);
-                    builder.append_string(&ch.to_string())?
+                    if matches!(expected_type, DataType::Int32) {
+                        builder.append_int(c as i32)?
+                    } else {
+                        // Convert u8 to char, not to its numeric string representation
+                        let ch = char::from(c);
+                        builder.append_string(&ch.to_string())?
+                    }
                 }
                 Value::Hex(h) => {
                     let hex_str = hex::encode::<&[u8]>(h.as_ref());
@@ -290,6 +345,27 @@ fn load_tags<R: Record>(
     Ok(())
 }
 
+/// Append an integer value to the builder, converting to string if the builder expects Utf8.
+///
+/// Some BAM/CRAM files encode character tags (SAM type 'A') as integer types ('c', 'C', etc.)
+/// in the binary format. When the schema expects Utf8 but noodles decodes the value as an
+/// integer, we convert the byte to its ASCII character representation.
+fn append_int_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    value: i32,
+) -> Result<(), ArrowError> {
+    if matches!(expected_type, DataType::Utf8) {
+        if let Some(ch) = char::from_u32(value as u32) {
+            builder.append_string(&ch.to_string())
+        } else {
+            builder.append_string(&value.to_string())
+        }
+    } else {
+        builder.append_int(value)
+    }
+}
+
 fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, ArrowError> {
     builders.iter_mut().map(|b| b.finish()).collect()
 }
@@ -322,14 +398,17 @@ async fn get_remote_cram_stream(
         let mut cigar : Vec<String> = Vec::with_capacity(batch_size);
         let mut mate_chrom : Vec<Option<String>> = Vec::with_capacity(batch_size);
         let mut mate_start : Vec<Option<u32>> = Vec::with_capacity(batch_size);
-        let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
-        let mut sequence : Vec<String> = Vec::with_capacity(batch_size);
+        let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
+        let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
 
         // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
+        let mut cigar_buf = String::new();
+        let mut seq_buf = String::new();
+        let mut qual_buf = String::new();
         let mut record_num = 0;
         let mut batch_num = 0;
 
@@ -392,18 +471,16 @@ async fn get_remote_cram_stream(
                     mapping_quality.push(None);
                 }
             };
-           let seq_string = record.sequence().as_ref().iter()
-               .map(|base| char::from(*base))
-               .collect();
-            sequence.push(seq_string);
-            quality_scores.push(record.quality_scores().as_ref().iter()
-                .map(|score| char::from(*score+33))
-                .collect::<String>());
+            seq_buf.clear();
+            seq_buf.extend(record.sequence().as_ref().iter().map(|base| char::from(*base)));
+            seq_builder.append_value(&seq_buf);
+            qual_buf.clear();
+            qual_buf.extend(record.quality_scores().as_ref().iter().map(|score| char::from(*score + 33)));
+            qual_builder.append_value(&qual_buf);
 
             flag.push(record.flags().bits() as u32);
-            cigar.push(record.cigar().as_ref().iter()
-                .map(|op| cigar_op_to_string(*op))
-                .collect::<Vec<String>>().join(""));
+            format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+            cigar.push(cigar_buf.clone());
             let chrom_name = get_chrom_by_seq_id(
                 record.mate_reference_sequence_id(),
                 &names,
@@ -463,8 +540,8 @@ async fn get_remote_cram_stream(
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,
-                        sequence: &sequence,
-                        quality_scores: &quality_scores,
+                        sequence: Arc::new(seq_builder.finish()),
+                        quality_scores: Arc::new(qual_builder.finish()),
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
@@ -482,8 +559,6 @@ async fn get_remote_cram_stream(
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
-                sequence.clear();
-                quality_scores.clear();
             }
         }
         // If there are remaining records that don't fill a complete batch,
@@ -506,8 +581,8 @@ async fn get_remote_cram_stream(
                     mapping_quality: &mapping_quality,
                     mate_chrom: &mate_chrom,
                     mate_start: &mate_start,
-                    sequence: &sequence,
-                    quality_scores: &quality_scores,
+                    sequence: Arc::new(seq_builder.finish()),
+                    quality_scores: Arc::new(qual_builder.finish()),
                 },
                 tag_arrays.as_ref(),
                 projection.clone(),
@@ -539,8 +614,8 @@ async fn get_local_cram(
     let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
     let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
     let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-    let mut quality_scores: Vec<String> = Vec::with_capacity(batch_size);
-    let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
+    let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
+    let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
 
     // Initialize tag builders
     let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -552,6 +627,9 @@ async fn get_local_cram(
     );
     let num_tag_fields = tag_builders.0.len();
 
+    let mut cigar_buf = String::new();
+    let mut seq_buf = String::new();
+    let mut qual_buf = String::new();
     let mut batch_num = 0;
     let file_path = file_path.clone();
     let mut reader = CramReader::new(file_path.clone(), reference_path, None).await;
@@ -573,9 +651,8 @@ async fn get_local_cram(
 
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
-            let seq_string = record.sequence().as_ref().iter()
-                   .map(|base| char::from(*base))
-                   .collect();
+            seq_buf.clear();
+            seq_buf.extend(record.sequence().as_ref().iter().map(|base| char::from(*base)));
             let chrom_name = get_chrom_by_seq_id(
                 record.reference_sequence_id(),
                 &names,
@@ -611,10 +688,10 @@ async fn get_local_cram(
                     end.push(None);
                 }
             };
-            sequence.push(seq_string);
-            quality_scores.push(record.quality_scores().as_ref().iter()
-                .map(|score| char::from(*score+33))
-                .collect::<String>());
+            seq_builder.append_value(&seq_buf);
+            qual_buf.clear();
+            qual_buf.extend(record.quality_scores().as_ref().iter().map(|score| char::from(*score + 33)));
+            qual_builder.append_value(&qual_buf);
 
             match record.mapping_quality() {
                 Some(mapping_quality_value) => {
@@ -625,9 +702,8 @@ async fn get_local_cram(
                 }
             };
             flag.push(record.flags().bits() as u32);
-            cigar.push(record.cigar().as_ref().iter()
-                .map(|op| cigar_op_to_string(*op))
-                .collect::<Vec<String>>().join(""));
+            format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+            cigar.push(cigar_buf.clone());
              let chrom_name = get_chrom_by_seq_id(
                 record.mate_reference_sequence_id(),
                 &names,
@@ -687,8 +763,8 @@ async fn get_local_cram(
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,
-                        sequence: &sequence,
-                        quality_scores: &quality_scores,
+                        sequence: Arc::new(seq_builder.finish()),
+                        quality_scores: Arc::new(qual_builder.finish()),
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
@@ -706,8 +782,6 @@ async fn get_local_cram(
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
-                sequence.clear();
-                quality_scores.clear();
             }
         }
         // If there are remaining records that don't fill a complete batch,
@@ -730,8 +804,8 @@ async fn get_local_cram(
                     mapping_quality: &mapping_quality,
                     mate_chrom: &mate_chrom,
                     mate_start: &mate_start,
-                    sequence: &sequence,
-                    quality_scores: &quality_scores,
+                    sequence: Arc::new(seq_builder.finish()),
+                    quality_scores: Arc::new(qual_builder.finish()),
                 },
                 tag_arrays.as_ref(),
                 projection.clone(),
@@ -787,4 +861,310 @@ async fn get_stream(
         }
         _ => unimplemented!("Unsupported storage type: {:?}", store_type),
     }
+}
+
+/// Build a noodles Region from a GenomicRegion.
+fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, DataFusionError> {
+    let region_str = match (region.start, region.end) {
+        (Some(start), Some(end)) => format!("{}:{}-{}", region.chrom, start, end),
+        (Some(start), None) => format!("{}:{}", region.chrom, start),
+        (None, Some(end)) => format!("{}:1-{}", region.chrom, end),
+        (None, None) => region.chrom.clone(),
+    };
+
+    region_str
+        .parse::<noodles_core::Region>()
+        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
+}
+
+/// Get a streaming RecordBatch stream from an indexed CRAM file for one or more regions.
+///
+/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
+/// Each partition processes its assigned regions sequentially, keeping only ~3 batches
+/// in memory at a time (constant memory regardless of data volume).
+#[allow(clippy::too_many_arguments)]
+async fn get_indexed_stream(
+    file_path: String,
+    index_path: String,
+    reference_path: Option<String>,
+    regions: Vec<GenomicRegion>,
+    schema_ref: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    coordinate_system_zero_based: bool,
+    tag_fields: Option<Vec<String>>,
+    residual_filters: Vec<datafusion::logical_expr::Expr>,
+) -> datafusion::error::Result<SendableRecordBatchStream> {
+    let schema = schema_ref.clone();
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
+
+    std::thread::spawn(move || {
+        let read_and_send = || -> Result<(), DataFusionError> {
+            let mut indexed_reader =
+                IndexedCramReader::new(&file_path, &index_path, reference_path.as_deref())
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!("Failed to open indexed CRAM: {}", e))
+                    })?;
+
+            let names = indexed_reader.reference_names();
+
+            // Initialize accumulators
+            let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+            let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+            let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+            let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
+            let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
+            let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+            let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
+            let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
+
+            let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
+            let num_tag_fields = tag_builders.0.len();
+
+            let mut cigar_buf = String::new();
+            let mut seq_buf = String::new();
+            let mut qual_buf = String::new();
+            let mut total_records = 0usize;
+
+            for region in &regions {
+                // Skip unmapped_tail regions — CRAM index doesn't support direct
+                // unmapped seek. No unmapped_tail regions should be emitted for CRAM
+                // since estimate_sizes_from_crai sets unmapped_count: 0.
+                if region.unmapped_tail {
+                    debug!("Skipping unmapped_tail region for CRAM (not supported)");
+                    continue;
+                }
+
+                // Sub-region bounds for deduplication (1-based, from partition balancer)
+                let region_start_1based = region.start.map(|s| s as u32);
+                let region_end_1based = region.end.map(|e| e as u32);
+
+                let noodles_region = build_noodles_region(region)?;
+                let records = indexed_reader.query(&noodles_region).map_err(|e| {
+                    DataFusionError::Execution(format!("CRAM region query failed: {}", e))
+                })?;
+
+                for result in records {
+                    let record = result.map_err(|e| {
+                        DataFusionError::Execution(format!("CRAM record read error: {}", e))
+                    })?;
+
+                    let chrom_name = get_chrom_by_seq_id(record.reference_sequence_id(), &names);
+
+                    // CRAM RecordBuf: positions are returned directly (no io::Result wrapper)
+                    let start_val = match record.alignment_start() {
+                        Some(start_pos) => {
+                            let pos = usize::from(start_pos) as u32;
+                            Some(if coordinate_system_zero_based {
+                                pos - 1
+                            } else {
+                                pos
+                            })
+                        }
+                        None => None,
+                    };
+
+                    // Skip records outside the sub-region bounds (index bins may return
+                    // overlapping records at sub-region boundaries)
+                    if let Some(pos_1based) = start_val.map(|s| {
+                        if coordinate_system_zero_based {
+                            s + 1
+                        } else {
+                            s
+                        }
+                    }) {
+                        if let Some(rs) = region_start_1based {
+                            if pos_1based < rs {
+                                continue;
+                            }
+                        }
+                        if let Some(re) = region_end_1based {
+                            if pos_1based > re {
+                                continue;
+                            }
+                        }
+                    }
+
+                    let end_val = record
+                        .alignment_end()
+                        .map(|end_pos| usize::from(end_pos) as u32);
+
+                    let mq = record.mapping_quality().map(|q| u8::from(q) as u32);
+
+                    // Apply residual filters
+                    if !residual_filters.is_empty() {
+                        let fields = CramRecordFields {
+                            chrom: chrom_name.clone(),
+                            start: start_val,
+                            end: end_val,
+                            mapping_quality: mq,
+                            flags: record.flags().bits() as u32,
+                        };
+                        if !evaluate_record_filters(&fields, &residual_filters) {
+                            continue;
+                        }
+                    }
+
+                    match record.name() {
+                        Some(read_name) => name.push(Some(read_name.to_string())),
+                        _ => name.push(None),
+                    };
+
+                    chrom.push(chrom_name);
+                    start.push(start_val);
+                    end.push(end_val);
+                    mapping_quality.push(mq);
+
+                    seq_buf.clear();
+                    seq_buf.extend(
+                        record
+                            .sequence()
+                            .as_ref()
+                            .iter()
+                            .map(|base| char::from(*base)),
+                    );
+                    seq_builder.append_value(&seq_buf);
+
+                    qual_buf.clear();
+                    qual_buf.extend(
+                        record
+                            .quality_scores()
+                            .as_ref()
+                            .iter()
+                            .map(|score| char::from(*score + 33)),
+                    );
+                    qual_builder.append_value(&qual_buf);
+
+                    flag.push(record.flags().bits() as u32);
+                    format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+                    cigar.push(cigar_buf.clone());
+
+                    let mate_chrom_name =
+                        get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
+                    mate_chrom.push(mate_chrom_name);
+
+                    match record.mate_alignment_start() {
+                        Some(mate_start_pos) => {
+                            let pos = usize::from(mate_start_pos) as u32;
+                            mate_start.push(Some(if coordinate_system_zero_based {
+                                pos - 1
+                            } else {
+                                pos
+                            }));
+                        }
+                        _ => mate_start.push(None),
+                    };
+
+                    // Load tag values (no reference-based tag calculation in indexed path for now)
+                    load_tags(&record, &mut tag_builders, None)
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+
+                    total_records += 1;
+
+                    if total_records % batch_size == 0 {
+                        let tag_arrays = if num_tag_fields > 0 {
+                            Some(
+                                builders_to_arrays(&mut tag_builders.2)
+                                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                            )
+                        } else {
+                            None
+                        };
+                        let batch = build_record_batch(
+                            Arc::clone(&schema),
+                            RecordFields {
+                                name: &name,
+                                chrom: &chrom,
+                                start: &start,
+                                end: &end,
+                                flag: &flag,
+                                cigar: &cigar,
+                                mapping_quality: &mapping_quality,
+                                mate_chrom: &mate_chrom,
+                                mate_start: &mate_start,
+                                sequence: Arc::new(seq_builder.finish()),
+                                quality_scores: Arc::new(qual_builder.finish()),
+                            },
+                            tag_arrays.as_ref(),
+                            projection.clone(),
+                        )?;
+
+                        // Send batch with backpressure
+                        loop {
+                            match tx.try_send(Ok(batch.clone())) {
+                                Ok(()) => break,
+                                Err(e) if e.is_disconnected() => return Ok(()),
+                                Err(_) => std::thread::yield_now(),
+                            }
+                        }
+
+                        name.clear();
+                        chrom.clear();
+                        start.clear();
+                        end.clear();
+                        flag.clear();
+                        cigar.clear();
+                        mapping_quality.clear();
+                        mate_chrom.clear();
+                        mate_start.clear();
+                    }
+                }
+            }
+
+            // Remaining records
+            if !name.is_empty() {
+                let tag_arrays = if num_tag_fields > 0 {
+                    Some(
+                        builders_to_arrays(&mut tag_builders.2)
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                    )
+                } else {
+                    None
+                };
+                let batch = build_record_batch(
+                    Arc::clone(&schema),
+                    RecordFields {
+                        name: &name,
+                        chrom: &chrom,
+                        start: &start,
+                        end: &end,
+                        flag: &flag,
+                        cigar: &cigar,
+                        mapping_quality: &mapping_quality,
+                        mate_chrom: &mate_chrom,
+                        mate_start: &mate_start,
+                        sequence: Arc::new(seq_builder.finish()),
+                        quality_scores: Arc::new(qual_builder.finish()),
+                    },
+                    tag_arrays.as_ref(),
+                    projection.clone(),
+                )?;
+                loop {
+                    match tx.try_send(Ok(batch.clone())) {
+                        Ok(()) => break,
+                        Err(e) if e.is_disconnected() => break,
+                        Err(_) => std::thread::yield_now(),
+                    }
+                }
+            }
+
+            debug!(
+                "Indexed CRAM scan: {} records for {} regions",
+                total_records,
+                regions.len()
+            );
+            Ok(())
+        };
+        if let Err(e) = read_and_send() {
+            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
+        }
+    });
+
+    // Stream batches from the channel
+    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+    Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
