@@ -390,7 +390,7 @@ pub fn estimate_sizes_from_bai(
                         .bins()
                         .keys()
                         .copied()
-                        .filter(|&bin_id| bin_id >= BAI_LEAF_FIRST && bin_id <= BAI_LEAF_LAST)
+                        .filter(|&bin_id| (BAI_LEAF_FIRST..=BAI_LEAF_LAST).contains(&bin_id))
                         .map(|bin_id| ((bin_id - BAI_LEAF_FIRST) as u64) * BAI_LEAF_SPAN + 1)
                         .collect()
                 })

@@ -872,9 +872,9 @@ mod tests {
         // With 100 bins split into 4 partitions (~25 bins each):
         // splits should be within cluster regions, not at 62M, 124M, 187M (bp-proportional)
         for &end in &split_ends {
-            let near_cluster = (end >= 10_000_000 && end <= 11_000_000)
-                || (end >= 50_000_000 && end <= 51_000_000)
-                || (end >= 200_000_000 && end <= 201_000_000);
+            let near_cluster = (10_000_000..=11_000_000).contains(&end)
+                || (50_000_000..=51_000_000).contains(&end)
+                || (200_000_000..=201_000_000).contains(&end);
             assert!(
                 near_cluster,
                 "Split at {} should be near a data cluster, not in empty genomic space",

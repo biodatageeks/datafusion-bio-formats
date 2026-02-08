@@ -759,7 +759,7 @@ pub fn estimate_sizes_from_tbi(
                         .bins()
                         .keys()
                         .copied()
-                        .filter(|&bin_id| bin_id >= TBI_LEAF_FIRST && bin_id <= TBI_LEAF_LAST)
+                        .filter(|&bin_id| (TBI_LEAF_FIRST..=TBI_LEAF_LAST).contains(&bin_id))
                         .map(|bin_id| ((bin_id - TBI_LEAF_FIRST) as u64) * TBI_LEAF_SPAN + 1)
                         .collect()
                 })

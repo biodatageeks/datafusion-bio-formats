@@ -389,7 +389,7 @@ async fn test_integer_tags_from_int8_encoding() {
             if !nm_col.is_null(i) {
                 let nm = nm_col.value(i);
                 assert!(
-                    nm >= 0 && nm < 100,
+                    (0..100).contains(&nm),
                     "NM={} should be a small non-negative integer",
                     nm
                 );
@@ -480,19 +480,19 @@ async fn test_nullable_tags_with_mixed_presence() {
     );
     // XT is present in fewer reads (5 of 14)
     assert!(
-        xt_count >= 3 && xt_count < 14,
+        (3..14).contains(&xt_count),
         "XT should be present in some reads, got {}",
         xt_count
     );
     // XN is rare (2 of 14)
     assert!(
-        xn_count >= 1 && xn_count <= 5,
+        (1..=5).contains(&xn_count),
         "XN should be present in few reads, got {}",
         xn_count
     );
     // OC is rare (2 of 14)
     assert!(
-        oc_count >= 1 && oc_count <= 5,
+        (1..=5).contains(&oc_count),
         "OC should be present in few reads, got {}",
         oc_count
     );
