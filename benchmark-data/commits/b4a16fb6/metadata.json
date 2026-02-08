@@ -1,0 +1,7 @@
+{
+  "ref": "refactor/unify-fastq-table-provider",
+  "ref_type": "branch",
+  "commit_sha": "b4a16fb6b068d558d91fd621befcd694cda7af2e",
+  "timestamp": "2026-02-08T22:14:57Z",
+  "benchmark_mode": "fast"
+}
