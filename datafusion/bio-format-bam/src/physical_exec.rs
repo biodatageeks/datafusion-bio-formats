@@ -25,7 +25,6 @@ use datafusion_bio_format_core::tag_registry::get_known_tags;
 use futures_util::{StreamExt, TryStreamExt};
 use log::debug;
 use noodles_bam as bam;
-use noodles_csi::binning_index::ReferenceSequence as BinningRefSeq;
 use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
@@ -873,9 +872,9 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
 /// Read unmapped records for a specific reference sequence via direct BGZF seek.
 ///
-/// Uses BAI metadata's `end_position()` to seek past all mapped records for this reference,
-/// then reads forward collecting only unmapped records (those with a matching
-/// reference_sequence_id but no alignment_start).
+/// Computes the end of mapped data by finding the max `chunk.end()` across all BAI bins
+/// for this reference, then seeks there and reads forward collecting only unmapped records
+/// (those with a matching reference_sequence_id but no alignment_start).
 fn read_unmapped_tail(
     file_path: &str,
     index_path: &str,
@@ -900,13 +899,20 @@ fn read_unmapped_tail(
         ))
     })?;
 
-    // Get metadata end_position — this is where mapped data ends for this reference
+    // Find the end of mapped data by computing the max chunk.end() across all bins.
+    // This is more reliable than metadata().end_position(), which some indexers
+    // (e.g., samtools) update for ALL records including unmapped — causing a seek
+    // past the unmapped section. Bins only contain mapped records, so max(chunk.end())
+    // is guaranteed to be the end of mapped data.
     let seek_pos = ref_seq
-        .metadata()
-        .map(|meta| meta.end_position())
+        .bins()
+        .values()
+        .flat_map(|bin| bin.chunks())
+        .map(|chunk| chunk.end())
+        .max()
         .ok_or_else(|| {
             DataFusionError::Execution(format!(
-                "No metadata in BAI for reference '{}' — cannot locate unmapped section",
+                "No bins found in BAI for reference '{}' — cannot locate unmapped section",
                 chrom
             ))
         })?;
@@ -920,7 +926,7 @@ fn read_unmapped_tail(
         .read_header()
         .map_err(|e| DataFusionError::Execution(format!("Failed to read BAM header: {}", e)))?;
 
-    // Seek to the metadata end_position (past all mapped records for this reference)
+    // Seek to the end of mapped data (max chunk.end() from BAI bins)
     reader
         .get_mut()
         .seek(seek_pos)
@@ -1344,7 +1350,13 @@ async fn get_indexed_stream(
                     tag_arrays.as_ref(),
                     projection.clone(),
                 )?;
-                let _ = tx.try_send(Ok(batch));
+                loop {
+                    match tx.try_send(Ok(batch.clone())) {
+                        Ok(()) => break,
+                        Err(e) if e.is_disconnected() => break,
+                        Err(_) => std::thread::yield_now(),
+                    }
+                }
             }
 
             debug!(

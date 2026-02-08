@@ -157,11 +157,13 @@ pub fn balance_partitions(
 
             if remaining <= budget || is_last || !splittable {
                 // Take all remaining bytes: fits in budget, last partition, or can't split
+                // Use end=None for the last sub-region to avoid capping at contig_length —
+                // reads beyond contig_length (if any) would be lost otherwise.
                 let region = if can_split && pos <= eff_end && was_split {
                     GenomicRegion {
                         chrom: est.region.chrom.clone(),
                         start: Some(pos),
-                        end: Some(eff_end),
+                        end: None,
                         unmapped_tail: false,
                     }
                 } else {
@@ -458,14 +460,24 @@ mod tests {
                 target,
                 result.len()
             );
-            // All sub-regions should be chr1
-            for bin in &result {
-                for region in &bin.regions {
-                    assert_eq!(region.chrom, "chr1");
-                    assert!(region.start.is_some(), "Sub-regions should have start");
-                    assert!(region.end.is_some(), "Sub-regions should have end");
-                }
+            // All sub-regions should be chr1 with a start position
+            let all_regions: Vec<&GenomicRegion> =
+                result.iter().flat_map(|b| b.regions.iter()).collect();
+            for region in &all_regions {
+                assert_eq!(region.chrom, "chr1");
+                assert!(region.start.is_some(), "Sub-regions should have start");
             }
+            // Intermediate sub-regions should have end; last sub-region has end=None
+            for region in &all_regions[..all_regions.len() - 1] {
+                assert!(
+                    region.end.is_some(),
+                    "Intermediate sub-regions should have end"
+                );
+            }
+            assert!(
+                all_regions.last().unwrap().end.is_none(),
+                "Last sub-region should have end=None (open-ended)"
+            );
         }
     }
 

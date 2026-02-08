@@ -1469,7 +1469,13 @@ async fn get_indexed_gff_stream(
                         needs_phase,
                         remaining,
                     )?;
-                    let _ = tx.try_send(Ok(batch));
+                    loop {
+                        match tx.try_send(Ok(batch.clone())) {
+                            Ok(()) => break,
+                            Err(e) if e.is_disconnected() => break,
+                            Err(_) => std::thread::yield_now(),
+                        }
+                    }
                 }
             }
 
