@@ -43,7 +43,6 @@ async fn test_attribute_projection_single_attribute() -> Result<(), Box<dyn std:
     let table = GffTableProvider::new(
         file_path.clone(),
         Some(vec!["ID".to_string(), "Name".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -90,7 +89,6 @@ async fn test_attribute_projection_multiple_attributes() -> Result<(), Box<dyn s
             "Name".to_string(),
             "Parent".to_string(),
         ]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -135,7 +133,6 @@ async fn test_attribute_projection_mixed_core_and_attributes()
             "Name".to_string(),
             "Note".to_string(),
         ]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -187,7 +184,6 @@ async fn test_attribute_projection_no_attributes_queried() -> Result<(), Box<dyn
     let table = GffTableProvider::new(
         file_path.clone(),
         Some(vec!["ID".to_string(), "Name".to_string()]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -224,7 +220,6 @@ async fn test_attribute_projection_all_attributes() -> Result<(), Box<dyn std::e
             "Note".to_string(),
             "Alias".to_string(),
         ]),
-        Some(1),
         Some(object_storage_options),
         true,
     )?;

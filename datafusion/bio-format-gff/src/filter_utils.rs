@@ -1,22 +1,67 @@
 use crate::storage::GffRecordTrait;
-use datafusion::arrow::datatypes::{DataType, Schema};
+use datafusion::arrow::datatypes::Schema;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Between, Expr, Operator, expr::InList};
+use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use std::sync::Arc;
 
+/// Check if a filter expression can be pushed down for GFF records.
+///
+/// Delegates to the shared `can_push_down_record_filter()` for standard schema fields
+/// (chrom, start, end, type, source, score, strand, phase), and additionally supports
+/// GFF-specific attribute column filtering.
 pub fn can_push_down_filter(expr: &Expr, schema: &Arc<Schema>) -> bool {
+    // First try the shared record filter logic (handles standard schema fields)
+    if can_push_down_record_filter(expr, schema) {
+        return true;
+    }
+
+    // GFF-specific: check attribute columns not in the standard schema
+    // Attribute columns (index >= 8) are dynamically added and always Utf8/nullable
     match expr {
-        // AND expressions: expr1 AND expr2 (handle this first to avoid pattern conflict)
         Expr::BinaryExpr(binary_expr) if matches!(binary_expr.op, Operator::And) => {
             can_push_down_filter(&binary_expr.left, schema)
                 && can_push_down_filter(&binary_expr.right, schema)
         }
-        // Other binary expressions: column op literal
-        Expr::BinaryExpr(binary_expr) => can_push_down_binary_expr(binary_expr, schema),
-        Expr::Between(between_expr) => can_push_down_between_expr(between_expr, schema),
-        Expr::InList(in_list_expr) => can_push_down_in_list_expr(in_list_expr, schema),
+        Expr::BinaryExpr(binary_expr) => can_push_down_gff_attribute_expr(binary_expr),
+        Expr::InList(in_list_expr) => can_push_down_gff_attribute_in_list(in_list_expr),
         _ => false,
     }
+}
+
+/// Check if a binary expression references a GFF attribute column (not a standard field).
+fn can_push_down_gff_attribute_expr(binary_expr: &datafusion::logical_expr::BinaryExpr) -> bool {
+    if let Expr::Column(column) = &*binary_expr.left {
+        let field_name = &column.name;
+        // Standard GFF fields are handled by can_push_down_record_filter
+        // This handles attribute columns (any column not in the 8 standard fields)
+        let is_standard = matches!(
+            field_name.as_str(),
+            "chrom" | "start" | "end" | "type" | "source" | "score" | "strand" | "phase"
+        );
+        if !is_standard && matches!(&*binary_expr.right, Expr::Literal(_, _)) {
+            return matches!(binary_expr.op, Operator::Eq | Operator::NotEq);
+        }
+    }
+    false
+}
+
+/// Check if an IN LIST expression references a GFF attribute column.
+fn can_push_down_gff_attribute_in_list(in_list_expr: &InList) -> bool {
+    if let Expr::Column(column) = &*in_list_expr.expr {
+        let field_name = &column.name;
+        let is_standard = matches!(
+            field_name.as_str(),
+            "chrom" | "start" | "end" | "type" | "source" | "score" | "strand" | "phase"
+        );
+        if !is_standard {
+            return in_list_expr
+                .list
+                .iter()
+                .all(|expr| matches!(expr, Expr::Literal(_, _)));
+        }
+    }
+    false
 }
 
 /// Evaluates filter expressions against a GFF record.
@@ -299,76 +344,4 @@ fn extract_attribute_value(field_name: &str, attributes_str: &str) -> Option<Str
         }
     }
     None
-}
-
-fn can_push_down_binary_expr(
-    binary_expr: &datafusion::logical_expr::BinaryExpr,
-    schema: &Arc<Schema>,
-) -> bool {
-    use datafusion::logical_expr::Operator;
-
-    // Check if left side is a column reference
-    if let Expr::Column(column) = &*binary_expr.left {
-        let field_name = &column.name;
-
-        // Check if the column exists in schema
-        if let Ok(field) = schema.field_with_name(field_name) {
-            // Check if right side is a literal
-            if matches!(&*binary_expr.right, Expr::Literal(_, _)) {
-                return match field.data_type() {
-                    // String columns: support =, !=
-                    DataType::Utf8 => matches!(binary_expr.op, Operator::Eq | Operator::NotEq),
-                    // Numeric columns: support =, !=, <, <=, >, >=
-                    DataType::UInt32 | DataType::Float32 => matches!(
-                        binary_expr.op,
-                        Operator::Eq
-                            | Operator::NotEq
-                            | Operator::Lt
-                            | Operator::LtEq
-                            | Operator::Gt
-                            | Operator::GtEq
-                    ),
-                    _ => false,
-                };
-            }
-        }
-    }
-    false
-}
-
-fn can_push_down_between_expr(between_expr: &Between, schema: &Arc<Schema>) -> bool {
-    if let Expr::Column(column) = &*between_expr.expr {
-        let field_name = &column.name;
-
-        if let Ok(field) = schema.field_with_name(field_name) {
-            // BETWEEN only makes sense for numeric columns
-            if matches!(field.data_type(), DataType::UInt32 | DataType::Float32) {
-                // Check if both bounds are literals
-                return matches!(&*between_expr.low, Expr::Literal(_, _))
-                    && matches!(&*between_expr.high, Expr::Literal(_, _));
-            }
-        }
-    }
-    false
-}
-
-fn can_push_down_in_list_expr(in_list_expr: &InList, schema: &Arc<Schema>) -> bool {
-    if let Expr::Column(column) = &*in_list_expr.expr {
-        let field_name = &column.name;
-
-        if let Ok(field) = schema.field_with_name(field_name) {
-            // IN lists work for string and numeric columns
-            if matches!(
-                field.data_type(),
-                DataType::Utf8 | DataType::UInt32 | DataType::Float32
-            ) {
-                // Check if all list items are literals
-                return in_list_expr
-                    .list
-                    .iter()
-                    .all(|expr| matches!(expr, Expr::Literal(_, _)));
-            }
-        }
-    }
-    false
 }

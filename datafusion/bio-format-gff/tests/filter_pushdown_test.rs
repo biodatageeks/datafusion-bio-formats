@@ -45,8 +45,7 @@ async fn test_supports_filters_pushdown_string_equals() -> Result<(), Box<dyn st
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     // Test string column equality filter
     let filter_expr = col("chrom").eq(lit("chr1"));
@@ -67,8 +66,7 @@ async fn test_supports_filters_pushdown_numeric_range() -> Result<(), Box<dyn st
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     // Test numeric range filter
     let filter_expr = col("start").gt(lit(1500u32));
@@ -89,8 +87,7 @@ async fn test_supports_filters_pushdown_between() -> Result<(), Box<dyn std::err
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     // Test BETWEEN filter
     let filter_expr = Expr::Between(Between {
@@ -116,8 +113,7 @@ async fn test_supports_filters_pushdown_in_list() -> Result<(), Box<dyn std::err
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     // Test IN list filter
     let filter_expr = Expr::InList(InList {
@@ -142,8 +138,7 @@ async fn test_supports_filters_pushdown_unsupported() -> Result<(), Box<dyn std:
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     // Test unsupported filter (function call)
     let filter_expr = Expr::IsNull(Box::new(col("chrom")));
@@ -164,8 +159,7 @@ async fn test_supports_filters_pushdown_and_expression() -> Result<(), Box<dyn s
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     // Test AND expression with two pushable filters
     let filter_expr = col("chrom")
@@ -188,8 +182,7 @@ async fn test_filter_pushdown_string_equality() -> Result<(), Box<dyn std::error
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -227,8 +220,7 @@ async fn test_filter_pushdown_numeric_range() -> Result<(), Box<dyn std::error::
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -268,8 +260,7 @@ async fn test_filter_pushdown_between() -> Result<(), Box<dyn std::error::Error>
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -311,8 +302,7 @@ async fn test_filter_pushdown_in_list() -> Result<(), Box<dyn std::error::Error>
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -354,8 +344,7 @@ async fn test_filter_pushdown_multiple_conditions() -> Result<(), Box<dyn std::e
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -403,8 +392,7 @@ async fn test_filter_pushdown_score_field() -> Result<(), Box<dyn std::error::Er
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -445,8 +433,7 @@ async fn test_filter_pushdown_strand_field() -> Result<(), Box<dyn std::error::E
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -480,8 +467,7 @@ async fn test_filter_pushdown_no_results() -> Result<(), Box<dyn std::error::Err
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -511,8 +497,7 @@ async fn test_filter_pushdown_with_projection_optimization()
     let file_path = create_test_gff_file().await?;
     let object_storage_options = create_object_storage_options();
 
-    let table =
-        GffTableProvider::new(file_path, None, Some(1), Some(object_storage_options), true)?;
+    let table = GffTableProvider::new(file_path, None, Some(object_storage_options), true)?;
 
     let ctx = SessionContext::new();
     ctx.register_table("test_gff", Arc::new(table))?;
@@ -553,7 +538,6 @@ async fn test_filter_pushdown_attribute_fields() -> Result<(), Box<dyn std::erro
     let table = GffTableProvider::new(
         file_path,
         Some(vec!["ID".to_string(), "Name".to_string()]), // Request specific attributes
-        Some(1),
         Some(object_storage_options),
         true, // Use 0-based coordinates (default)
     )?;

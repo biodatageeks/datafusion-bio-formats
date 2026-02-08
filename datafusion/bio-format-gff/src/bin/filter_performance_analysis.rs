@@ -81,7 +81,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let table = GffTableProvider::new(
         file_path.to_string(),
         None,
-        Some(4), // Use 4 threads
         Some(object_storage_options),
         true, // Use 0-based coordinates (default)
     )?;

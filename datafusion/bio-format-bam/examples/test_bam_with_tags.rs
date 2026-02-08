@@ -7,7 +7,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create BAM table with NM, MD, AS tags
     let table = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
-        Some(4), // 4 threads
         None,
         true, // 0-based coordinates
         Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),

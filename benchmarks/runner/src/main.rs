@@ -211,22 +211,16 @@ async fn register_table(
         "gff" => {
             let storage_options = ObjectStorageOptions::default();
             use datafusion_bio_format_gff::table_provider::GffTableProvider;
-            let provider = GffTableProvider::new(
-                file_path.to_string(),
-                None,
-                None,
-                Some(storage_options),
-                true,
-            )
-            .context("Failed to create GFF table provider")?;
+            let provider =
+                GffTableProvider::new(file_path.to_string(), None, Some(storage_options), true)
+                    .context("Failed to create GFF table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register GFF table")?;
         }
         "vcf" => {
             use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
-            let provider =
-                VcfTableProvider::new(file_path.to_string(), None, None, None, None, true)
-                    .context("Failed to create VCF table provider")?;
+            let provider = VcfTableProvider::new(file_path.to_string(), None, None, None, true)
+                .context("Failed to create VCF table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register VCF table")?;
         }
@@ -239,7 +233,7 @@ async fn register_table(
         }
         "bam" => {
             use datafusion_bio_format_bam::table_provider::BamTableProvider;
-            let provider = BamTableProvider::new(file_path.to_string(), None, None, true, None)
+            let provider = BamTableProvider::new(file_path.to_string(), None, true, None)
                 .await
                 .context("Failed to create BAM table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))

@@ -13,19 +13,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or_else(|| "/tmp/gencode.v38.annotation.gff3.gz".to_string());
 
-    // Optional: threads via env or default 4
-    let threads: usize = env::var("GFF_THREADS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4);
-
     let object_storage_options = ObjectStorageOptions::default();
 
     // Register table
     let table = GffTableProvider::new(
         file_path.clone(),
         None, // SELECT * mode (nested attributes)
-        Some(threads),
         Some(object_storage_options),
         true, // Use 0-based coordinates (default)
     )?;
@@ -43,7 +36,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batches_count = batches.len();
 
     println!("File: {}", file_path);
-    println!("Threads: {}", threads);
     println!("Batches: {}", batches_count);
     println!("Rows: {}", rows);
     println!("Elapsed: {:?}", elapsed);

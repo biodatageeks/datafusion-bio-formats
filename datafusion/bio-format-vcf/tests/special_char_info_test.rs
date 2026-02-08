@@ -38,7 +38,6 @@ async fn test_special_info_fields() -> Result<(), Box<dyn std::error::Error>> {
         file_path.clone(),
         Some(vec!["HGMD-PUBLIC_20204".to_string()]),
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;

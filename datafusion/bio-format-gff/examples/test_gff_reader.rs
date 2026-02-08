@@ -22,7 +22,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_path.clone(),
         // None,
         Some(vec!["ID".to_string()]),
-        Some(1),
         None,
         true, // Use 0-based coordinates (default)
     )

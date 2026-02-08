@@ -156,9 +156,11 @@ impl GffRecordTrait for UnifiedGffRecord {
         }
     }
 }
+use noodles_csi::BinningIndex;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufReader, Error};
+use std::path::Path;
 use tokio_util::io::StreamReader;
 
 /// Parser type selection for GFF processing
@@ -509,19 +511,15 @@ pub fn get_local_gff_gz_sync_reader(
 ///
 /// # Arguments
 /// * `file_path` - Path to the local GFF file
-/// * `thread_num` - Number of threads to use for decompression
 ///
 /// # Returns
 /// A synchronous GFF reader configured for BGZF-compressed files with parallel decompression
 pub fn get_local_gff_bgzf_sync_reader(
     file_path: String,
-    thread_num: usize,
 ) -> Result<gff::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
     let file = std::fs::File::open(file_path)?;
-    let reader = bgzf::MultithreadedReader::with_worker_count(
-        std::num::NonZero::new(thread_num).unwrap(),
-        file,
-    );
+    let reader =
+        bgzf::MultithreadedReader::with_worker_count(std::num::NonZero::new(1).unwrap(), file);
     Ok(gff::io::Reader::new(reader))
 }
 
@@ -632,30 +630,21 @@ impl GffLocalReader {
     ///
     /// # Arguments
     /// * `file_path` - Path to the local GFF file
-    /// * `thread_num` - Number of threads for BGZF decompression
     /// * `object_storage_options` - Storage configuration (unused for local files)
     ///
     /// # Returns
     /// A configured GffLocalReader using the default parser type (Fast)
     pub async fn new(
         file_path: String,
-        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
-        Self::new_with_parser(
-            file_path,
-            thread_num,
-            object_storage_options,
-            GffParserType::default(),
-        )
-        .await
+        Self::new_with_parser(file_path, object_storage_options, GffParserType::default()).await
     }
 
     /// Creates a new local GFF reader with explicit parser type selection
     ///
     /// # Arguments
     /// * `file_path` - Path to the local GFF file
-    /// * `thread_num` - Number of threads for BGZF decompression
     /// * `object_storage_options` - Storage configuration (unused for local files)
     /// * `parser_type` - Parser type to use (Standard, Fast, or SIMD)
     ///
@@ -663,7 +652,6 @@ impl GffLocalReader {
     /// A configured GffLocalReader with the specified parser type
     pub async fn new_with_parser(
         file_path: String,
-        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
         parser_type: GffParserType,
     ) -> Result<Self, Error> {
@@ -692,15 +680,15 @@ impl GffLocalReader {
 
             // BGZF variants - using sync readers with multithreading
             (CompressionType::BGZF, GffParserType::Standard) => {
-                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path)?;
                 Ok(GffLocalReader::BGZF(reader))
             }
             (CompressionType::BGZF, GffParserType::Fast) => {
-                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path)?;
                 Ok(GffLocalReader::BgzfFast(reader))
             }
             (CompressionType::BGZF, GffParserType::Simd) => {
-                let reader = get_local_gff_bgzf_sync_reader(file_path, thread_num)?;
+                let reader = get_local_gff_bgzf_sync_reader(file_path)?;
                 Ok(GffLocalReader::BgzfSimd(reader))
             }
 
@@ -917,6 +905,312 @@ impl GffLocalReader {
             GffLocalReader::PlainSimd(_) => {
                 unimplemented!("get_attributes not yet implemented for SIMD parsers")
             }
+        }
+    }
+}
+
+/// Estimate compressed byte sizes per region from a TBI (tabix) index.
+///
+/// Reads the tabix index and estimates the compressed byte range for each genomic region
+/// by examining the chunks in each reference's bins using VirtualPosition offsets.
+///
+/// # Arguments
+/// * `index_path` - Path to the TBI/CSI index file
+/// * `regions` - Genomic regions to estimate sizes for
+/// * `contig_names` - Contig names from the index header (in order)
+/// * `contig_lengths` - Optional contig lengths (GFF typically lacks these)
+pub fn estimate_sizes_from_tbi(
+    index_path: &str,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    contig_names: &[String],
+    contig_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+
+    let index = match noodles_tabix::fs::read(index_path) {
+        Ok(idx) => idx,
+        Err(e) => {
+            log::debug!("Failed to read TBI index for size estimation: {}", e);
+            return regions
+                .iter()
+                .map(|r| RegionSizeEstimate {
+                    region: r.clone(),
+                    estimated_bytes: 1,
+                    contig_length: None,
+                    unmapped_count: 0,
+                    nonempty_bin_positions: Vec::new(),
+                    leaf_bin_span: 0,
+                })
+                .collect();
+        }
+    };
+
+    let contig_name_to_idx: std::collections::HashMap<&str, usize> = contig_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    regions
+        .iter()
+        .map(|region| {
+            let ref_idx = contig_name_to_idx.get(region.chrom.as_str()).copied();
+            let estimated_bytes = ref_idx
+                .and_then(|idx| {
+                    index.reference_sequences().get(idx).map(|ref_seq| {
+                        let mut min_offset = u64::MAX;
+                        let mut max_offset = 0u64;
+                        for (_bin_id, bin) in ref_seq.bins() {
+                            for chunk in bin.chunks() {
+                                let start = chunk.start().compressed();
+                                let end = chunk.end().compressed();
+                                min_offset = min_offset.min(start);
+                                max_offset = max_offset.max(end);
+                            }
+                        }
+                        max_offset.saturating_sub(min_offset)
+                    })
+                })
+                .unwrap_or(1);
+
+            // Collect non-empty leaf bin positions for data-aware splitting.
+            // TBI uses the same binning scheme as BAI (min_shift=14, depth=5).
+            const TBI_LEAF_FIRST: usize = 4681;
+            const TBI_LEAF_LAST: usize = 37448;
+            const TBI_LEAF_SPAN: u64 = 16384;
+
+            let mut nonempty_bin_positions: Vec<u64> = ref_idx
+                .and_then(|idx| index.reference_sequences().get(idx))
+                .map(|ref_seq| {
+                    ref_seq
+                        .bins()
+                        .keys()
+                        .copied()
+                        .filter(|&bin_id| (TBI_LEAF_FIRST..=TBI_LEAF_LAST).contains(&bin_id))
+                        .map(|bin_id| ((bin_id - TBI_LEAF_FIRST) as u64) * TBI_LEAF_SPAN + 1)
+                        .collect()
+                })
+                .unwrap_or_default();
+            nonempty_bin_positions.sort_unstable();
+
+            let contig_length = ref_idx
+                .and_then(|idx| contig_lengths.get(idx).copied())
+                .filter(|&len| len > 0)
+                .or_else(|| {
+                    // First try leaf bins (finest granularity).
+                    nonempty_bin_positions
+                        .last()
+                        .map(|&max_pos| max_pos + TBI_LEAF_SPAN - 1)
+                })
+                .or_else(|| {
+                    // Fall back to any bin level to infer length when only
+                    // higher-level bins are populated (common for GFF with
+                    // small coordinate ranges).
+                    // BAI binning levels: offsets [0, 1, 9, 73, 585, 4681]
+                    // with spans [2^29, 2^26, 2^23, 2^20, 2^17, 2^14].
+                    const LEVEL_OFFSETS: [(usize, u64); 6] = [
+                        (0, 1 << 29),
+                        (1, 1 << 26),
+                        (9, 1 << 23),
+                        (73, 1 << 20),
+                        (585, 1 << 17),
+                        (4681, 1 << 14),
+                    ];
+                    ref_idx
+                        .and_then(|idx| index.reference_sequences().get(idx))
+                        .and_then(|ref_seq| {
+                            ref_seq
+                                .bins()
+                                .keys()
+                                .copied()
+                                .filter_map(|bin_id| {
+                                    LEVEL_OFFSETS.iter().rev().find_map(|&(offset, span)| {
+                                        if bin_id >= offset
+                                            && bin_id
+                                                < LEVEL_OFFSETS
+                                                    .iter()
+                                                    .find(|&&(o, _)| o > offset)
+                                                    .map_or(37449, |&(o, _)| o)
+                                        {
+                                            let idx_in_level = (bin_id - offset) as u64;
+                                            Some((idx_in_level + 1) * span)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                                .max()
+                        })
+                });
+
+            RegionSizeEstimate {
+                region: region.clone(),
+                estimated_bytes,
+                contig_length,
+                unmapped_count: 0,
+                nonempty_bin_positions,
+                leaf_bin_span: TBI_LEAF_SPAN,
+            }
+        })
+        .collect()
+}
+
+/// A local indexed GFF reader for region-based queries.
+///
+/// Uses noodles' tabix `IndexedReader::Builder` to support random-access queries on
+/// BGZF-compressed, tabix-indexed GFF files. This is used when an index file (.tbi/.csi)
+/// is available and genomic region filters are present.
+pub struct IndexedGffReader {
+    reader:
+        noodles_csi::io::IndexedReader<noodles_bgzf_gff::io::Reader<File>, noodles_tabix::Index>,
+    contig_names: Vec<String>,
+}
+
+impl IndexedGffReader {
+    /// Creates a new indexed GFF reader.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the BGZF-compressed GFF file (.gff3.gz)
+    /// * `index_path` - Path to the TBI or CSI index file
+    pub fn new(file_path: &str, index_path: &str) -> Result<Self, std::io::Error> {
+        let index = noodles_tabix::fs::read(index_path)?;
+
+        // Extract contig names from the index header
+        let contig_names = index
+            .header()
+            .map(|h| {
+                h.reference_sequence_names()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let reader = noodles_tabix::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(Path::new(file_path))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+        Ok(Self {
+            reader,
+            contig_names,
+        })
+    }
+
+    /// Returns the contig names from the tabix index header.
+    pub fn contig_names(&self) -> &[String] {
+        &self.contig_names
+    }
+
+    /// Query records overlapping a genomic region.
+    ///
+    /// Returns an iterator over raw indexed records. Each record can be accessed
+    /// as a string reference via `.as_ref()` to get the raw GFF line.
+    pub fn query<'a>(
+        &'a mut self,
+        region: &'a noodles_core::Region,
+    ) -> Result<
+        impl Iterator<Item = Result<noodles_csi::io::indexed_records::Record, std::io::Error>> + 'a,
+        std::io::Error,
+    > {
+        self.reader.query(region)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion_bio_format_core::genomic_filter::GenomicRegion;
+    use noodles_csi::binning_index::BinningIndex;
+
+    fn test_tbi_path() -> String {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        format!("{manifest}/tests/multi_chrom_large.gff3.gz.tbi")
+    }
+
+    /// Read contig names from the TBI header (same as production code does).
+    fn read_tbi_contig_names(tbi_path: &str) -> Vec<String> {
+        let index = noodles_tabix::fs::read(tbi_path).expect("failed to read TBI");
+        index
+            .header()
+            .map(|h| {
+                h.reference_sequence_names()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn gff_regions(contig_names: &[String]) -> Vec<GenomicRegion> {
+        contig_names
+            .iter()
+            .map(|name| GenomicRegion {
+                chrom: name.clone(),
+                start: None,
+                end: None,
+                unmapped_tail: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tbi_infers_contig_length_when_header_omits_it() {
+        let tbi_path = test_tbi_path();
+        let contig_names = read_tbi_contig_names(&tbi_path);
+        assert!(!contig_names.is_empty(), "TBI should have contig names");
+        let regions = gff_regions(&contig_names);
+
+        let estimates = estimate_sizes_from_tbi(&tbi_path, &regions, &contig_names, &[]);
+
+        assert_eq!(estimates.len(), contig_names.len());
+
+        // Contigs with data in the index should get inferred lengths
+        // (from leaf bins or higher-level bins).
+        let inferred: Vec<_> = estimates.iter().filter(|e| e.estimated_bytes > 0).collect();
+        assert!(
+            !inferred.is_empty(),
+            "at least one contig should have data in the index"
+        );
+        for est in &inferred {
+            assert!(
+                est.contig_length.is_some(),
+                "contig_length should be inferred from TBI for {}",
+                est.region.chrom
+            );
+            let len = est.contig_length.unwrap();
+            assert!(
+                len > 10_000,
+                "inferred contig length for {} should be > 10000 bp, got {}",
+                est.region.chrom,
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn tbi_header_length_takes_priority() {
+        let tbi_path = test_tbi_path();
+        let contig_names = read_tbi_contig_names(&tbi_path);
+        assert!(!contig_names.is_empty(), "TBI should have contig names");
+        let regions = gff_regions(&contig_names);
+        let contig_lengths: Vec<u64> = contig_names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| 999 - i as u64)
+            .collect();
+
+        let estimates =
+            estimate_sizes_from_tbi(&tbi_path, &regions, &contig_names, &contig_lengths);
+
+        assert_eq!(estimates.len(), contig_names.len());
+        for (i, est) in estimates.iter().enumerate() {
+            assert_eq!(
+                est.contig_length,
+                Some(contig_lengths[i]),
+                "header length should take priority for {}",
+                est.region.chrom
+            );
         }
     }
 }

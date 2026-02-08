@@ -23,20 +23,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("💾 File size: {:.2} MB", file_size_mb);
     println!();
 
-    let thread_counts = vec![1, 2, 4];
-
-    for &thread_count in &thread_counts {
-        println!("🔄 Testing regular VCF with {} thread(s)...", thread_count);
+    {
+        println!("🔄 Testing regular VCF reading...");
 
         // Create session
         let ctx = SessionContext::new();
 
-        // Create regular VCF table provider with MultithreadedReader
+        // Create regular VCF table provider
         let table_provider = VcfTableProvider::new(
             vcf_file.to_string(),
-            None,               // No specific info fields
-            None,               // No specific format fields
-            Some(thread_count), // Thread count for MultithreadedReader
+            None, // No specific info fields
+            None, // No specific format fields
             Some(ObjectStorageOptions::default()),
             true, // Use 0-based coordinates (default)
         )?;

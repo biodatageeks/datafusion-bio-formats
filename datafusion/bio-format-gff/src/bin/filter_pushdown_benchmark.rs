@@ -62,8 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create table provider
     let table = GffTableProvider::new(
         file_path.to_string(),
-        None,    // No specific attribute fields for core benchmarks
-        Some(4), // Use 4 threads for parallel processing
+        None, // No specific attribute fields for core benchmarks
         Some(object_storage_options),
         true, // Use 0-based coordinates (default)
     )?;

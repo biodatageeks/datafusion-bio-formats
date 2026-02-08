@@ -1,11 +1,13 @@
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_remote_stream, get_storage_type,
 };
+use datafusion_bio_format_core::record_filter::RecordFieldAccessor;
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
 use noodles_cram as cram;
 use noodles_cram::io::Reader;
 use noodles_fasta as fasta;
+use noodles_sam as sam;
 use noodles_sam::Header;
 use noodles_sam::alignment::RecordBuf;
 use noodles_sam::header::ReferenceSequences;
@@ -426,5 +428,178 @@ fn load_all_references_impl(
             // Embedded references and no-reference cases don't support preloading
             None
         }
+    }
+}
+
+/// A local indexed CRAM reader for region-based queries.
+///
+/// Uses noodles' `IndexedReader::Builder` to support random-access queries using CRAI indexes.
+/// This is used when an index file is available and genomic region filters are present.
+pub struct IndexedCramReader {
+    reader: cram::io::IndexedReader<File>,
+    header: sam::Header,
+}
+
+impl IndexedCramReader {
+    /// Creates a new indexed CRAM reader.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the CRAM file
+    /// * `index_path` - Path to the CRAI index file
+    /// * `reference_path` - Optional path to FASTA reference file
+    pub fn new(
+        file_path: &str,
+        index_path: &str,
+        reference_path: Option<&str>,
+    ) -> Result<Self, io::Error> {
+        let index = cram::crai::fs::read(index_path)?;
+
+        let mut builder = cram::io::indexed_reader::Builder::default().set_index(index);
+
+        // Set reference sequence repository if provided
+        if let Some(ref_path) = reference_path {
+            if let ReferenceSequenceRepository::External(repo) =
+                ReferenceSequenceRepository::from_fasta_path(ref_path)?
+            {
+                builder = builder.set_reference_sequence_repository(repo);
+            }
+        }
+
+        let mut reader = builder
+            .build_from_path(file_path)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let header = reader.read_header()?;
+        Ok(Self { reader, header })
+    }
+
+    /// Returns a reference to the SAM header.
+    pub fn header(&self) -> &sam::Header {
+        &self.header
+    }
+
+    /// Returns reference sequence names from the header.
+    pub fn reference_names(&self) -> Vec<String> {
+        self.header
+            .reference_sequences()
+            .keys()
+            .map(|k| k.to_string())
+            .collect()
+    }
+
+    /// Query records overlapping a genomic region.
+    ///
+    /// Returns an iterator of CRAM records overlapping the specified region.
+    pub fn query(
+        &mut self,
+        region: &noodles_core::Region,
+    ) -> Result<impl Iterator<Item = Result<RecordBuf, io::Error>> + '_, io::Error> {
+        self.reader.query(&self.header, region)
+    }
+}
+
+/// Estimate compressed byte sizes per region from a CRAI index.
+pub fn estimate_sizes_from_crai(
+    index_path: &str,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    reference_names: &[String],
+    reference_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+
+    let records = match cram::crai::fs::read(index_path) {
+        Ok(recs) => recs,
+        Err(e) => {
+            log::debug!("Failed to read CRAI index for size estimation: {}", e);
+            return regions
+                .iter()
+                .map(|r| RegionSizeEstimate {
+                    region: r.clone(),
+                    estimated_bytes: 1,
+                    contig_length: None,
+                    unmapped_count: 0,
+                    nonempty_bin_positions: Vec::new(),
+                    leaf_bin_span: 0,
+                })
+                .collect();
+        }
+    };
+
+    // Group slice lengths by reference sequence id
+    let mut bytes_by_ref: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
+    for record in &records {
+        if let Some(ref_id) = record.reference_sequence_id() {
+            *bytes_by_ref.entry(ref_id).or_insert(0) += record.slice_length();
+        }
+    }
+
+    let ref_name_to_idx: std::collections::HashMap<&str, usize> = reference_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    regions
+        .iter()
+        .map(|region| {
+            let ref_idx = ref_name_to_idx.get(region.chrom.as_str()).copied();
+            let estimated_bytes = ref_idx
+                .and_then(|idx| bytes_by_ref.get(&idx).copied())
+                .unwrap_or(1);
+            let contig_length = ref_idx
+                .and_then(|idx| reference_lengths.get(idx).copied())
+                .filter(|&len| len > 0);
+            RegionSizeEstimate {
+                region: region.clone(),
+                estimated_bytes,
+                contig_length,
+                unmapped_count: 0,
+                nonempty_bin_positions: Vec::new(),
+                leaf_bin_span: 0,
+            }
+        })
+        .collect()
+}
+
+/// Record field accessor for CRAM records, used for record-level filter evaluation.
+///
+/// This struct holds pre-extracted field values from a CRAM record
+/// for efficient access during filter evaluation.
+pub struct CramRecordFields {
+    /// Chromosome name
+    pub chrom: Option<String>,
+    /// Start position (in the output coordinate system)
+    pub start: Option<u32>,
+    /// End position (in the output coordinate system)
+    pub end: Option<u32>,
+    /// Mapping quality
+    pub mapping_quality: Option<u32>,
+    /// SAM flags
+    pub flags: u32,
+}
+
+impl RecordFieldAccessor for CramRecordFields {
+    fn get_string_field(&self, name: &str) -> Option<String> {
+        match name {
+            "chrom" => self.chrom.clone(),
+            _ => None,
+        }
+    }
+
+    fn get_u32_field(&self, name: &str) -> Option<u32> {
+        match name {
+            "start" => self.start,
+            "end" => self.end,
+            "mapping_quality" => self.mapping_quality,
+            "flags" => Some(self.flags),
+            _ => None,
+        }
+    }
+
+    fn get_f32_field(&self, _name: &str) -> Option<f32> {
+        None
+    }
+
+    fn get_f64_field(&self, _name: &str) -> Option<f64> {
+        None
     }
 }

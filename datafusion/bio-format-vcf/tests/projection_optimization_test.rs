@@ -78,7 +78,6 @@ async fn test_projection_optimization_core_fields_only() -> Result<(), Box<dyn s
         vcf_path,
         all_info_fields, // ALL fields registered
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -141,7 +140,6 @@ async fn test_projection_optimization_with_info_fields() -> Result<(), Box<dyn s
         vcf_path,
         all_info_fields, // ALL fields registered initially
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;
@@ -204,7 +202,6 @@ async fn test_count_optimization() -> Result<(), Box<dyn std::error::Error>> {
         vcf_path,
         all_info_fields, // ALL fields registered
         None,
-        Some(1),
         Some(object_storage_options),
         true,
     )?;

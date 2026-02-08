@@ -61,8 +61,16 @@ pub use metadata::{
 pub mod alignment_utils;
 /// Calculated tags (MD, NM) for alignment records
 pub mod calculated_tags;
+/// Genomic filter extraction from SQL expressions for index-based queries
+pub mod genomic_filter;
+/// Index file discovery utilities for BAI/CSI/CRAI/TBI
+pub mod index_utils;
 /// Object storage integration for cloud and local file access
 pub mod object_storage;
+/// Balanced partition assignment for indexed genomic reads
+pub mod partition_balancer;
+/// Shared record-level filter evaluation for all formats
+pub mod record_filter;
 /// Table utilities for building DataFusion table providers
 pub mod table_utils;
 /// Tag registry for BAM/CRAM alignment tags

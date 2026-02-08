@@ -12,14 +12,14 @@ readme = "README.md"
 [dependencies]
 datafusion.workspace = true
 opendal.workspace = true
-noodles-bgzf = { git = "https://github.com/biodatageeks/noodles.git", rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac" }
+noodles-bgzf = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b" }
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 datafusion-bio-format-core = {path = "../bio-format-core"}
 futures.workspace = true
 futures-util.workspace = true
-noodles-bam = { git = "https://github.com/biodatageeks/noodles.git", rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac", features = ["async"] }
+noodles-bam = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b", features = ["async"] }
 noodles-sam.workspace = true
 async-stream = "0.3.6"
 log = "0.4.27"
@@ -27,7 +27,8 @@ async-trait = "0.1.88"
 hex = "0.4"
 serde.workspace = true
 serde_json.workspace = true
-noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "01b804b25f90d3173ca1171a115ffacad5dc27ac" }
+noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b" }
+noodles-csi = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b" }
 
 [dev-dependencies]
 tempfile = "3.10"
@@ -43,3 +44,7 @@ path = "./examples/test_bam_with_tags.rs"
 [[example]]
 name = "describe_bam_schema"
 path = "./examples/describe_bam_schema.rs"
+
+[[example]]
+name = "benchmark_read"
+path = "./examples/benchmark_read.rs"

@@ -18,7 +18,6 @@ async fn main() -> datafusion::error::Result<()> {
     let input_path = "test_data/sample.bam";
     let input_table = BamTableProvider::new(
         input_path.to_string(),
-        None, // thread_num
         None, // object storage options
         true, // 0-based coordinates
         None, // tag fields
@@ -73,7 +72,6 @@ async fn main() -> datafusion::error::Result<()> {
     // Register SAM input
     let sam_input = BamTableProvider::new(
         "input.sam".to_string(),
-        None, // thread_num
         None, // object storage options
         true, // 0-based coordinates
         None, // tag fields

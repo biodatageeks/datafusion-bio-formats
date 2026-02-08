@@ -27,14 +27,20 @@
 //!
 //! ```rust,no_run
 //! use datafusion::prelude::*;
-//! use datafusion_bio_format_vcf::bgzf_parallel_reader::BgzfVcfTableProvider;
+//! use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 //! use std::sync::Arc;
 //!
 //! # async fn example() -> datafusion::error::Result<()> {
 //! let ctx = SessionContext::new();
 //!
 //! // Register a VCF file as a table
-//! let table = BgzfVcfTableProvider::try_new("data/variants.vcf.gz")?;
+//! let table = VcfTableProvider::new(
+//!     "data/variants.vcf.gz".to_string(),
+//!     None,   // INFO fields (None = all)
+//!     None,   // FORMAT fields
+//!     None,   // object_storage_options
+//!     true,   // coordinate_system_zero_based
+//! )?;
 //! ctx.register_table("variants", Arc::new(table))?;
 //!
 //! // Query with SQL
@@ -58,12 +64,6 @@
 
 extern crate core;
 
-/// Parallel BGZF VCF reader implementation.
-///
-/// This module provides an optimized table provider for reading BGZF-compressed VCF files
-/// with parallel execution using BGZF block partition boundaries. It's designed for high-performance
-/// querying of large genomic variant datasets.
-pub mod bgzf_parallel_reader;
 /// VCF header builder for constructing VCF headers from Arrow schemas.
 pub mod header_builder;
 /// Physical execution plan implementation for VCF queries.

@@ -22,7 +22,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a GFF file as a table
-//! let table = GffTableProvider::new("data/annotations.gff3".to_string(), None, None, None, true)?;
+//! let table = GffTableProvider::new("data/annotations.gff3".to_string(), None, None, true)?;
 //! ctx.register_table("annotations", Arc::new(table))?;
 //!
 //! // Query with SQL
@@ -33,13 +33,6 @@
 //! ```
 
 #![warn(missing_docs)]
-
-/// Parallel BGZF-compressed GFF file reader with filter pushdown support
-///
-/// This module provides efficient parallel reading of BGZF-compressed GFF files with
-/// integration with Apache DataFusion's filter pushdown optimization, enabling efficient
-/// predicate-based filtering during execution.
-pub mod bgzf_parallel_reader;
 
 /// Filter expression evaluation and pushdown support
 mod filter_utils;

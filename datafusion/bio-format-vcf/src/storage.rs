@@ -7,6 +7,7 @@ use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_remote_stream,
     get_remote_stream_bgzf_async, get_remote_stream_gz_async, get_storage_type,
 };
+use datafusion_bio_format_core::record_filter::RecordFieldAccessor;
 use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
@@ -105,7 +106,6 @@ pub async fn get_remote_vcf_reader(
 /// # Arguments
 ///
 /// * `file_path` - Path to the local VCF file
-/// * `thread_num` - Number of worker threads for parallel decompression
 ///
 /// # Returns
 ///
@@ -116,19 +116,10 @@ pub async fn get_remote_vcf_reader(
 /// Returns an error if the file cannot be opened
 pub fn get_local_vcf_bgzf_reader(
     file_path: String,
-    thread_num: usize,
 ) -> Result<Reader<MultithreadedReader<File>>, Error> {
-    debug!(
-        "Reading VCF file from local storage with {} threads",
-        thread_num
-    );
+    debug!("Reading VCF file from local storage");
     File::open(file_path)
-        .map(|f| {
-            noodles_bgzf::MultithreadedReader::with_worker_count(
-                NonZero::new(thread_num).unwrap(),
-                f,
-            )
-        })
+        .map(|f| noodles_bgzf::MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
         .map(vcf::io::Reader::new)
 }
 
@@ -190,7 +181,6 @@ pub async fn get_local_vcf_reader(
 /// # Arguments
 ///
 /// * `file_path` - Path to the local VCF file
-/// * `thread_num` - Number of worker threads for BGZF decompression
 /// * `object_storage_options` - Configuration for compression detection
 ///
 /// # Returns
@@ -202,7 +192,6 @@ pub async fn get_local_vcf_reader(
 /// Returns an error if the file cannot be read or the header is invalid
 pub async fn get_local_vcf_header(
     file_path: String,
-    thread_num: usize,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<vcf::Header, Error> {
     let compression_type = get_compression_type(
@@ -214,7 +203,7 @@ pub async fn get_local_vcf_header(
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let header = match compression_type {
         CompressionType::BGZF => {
-            let mut reader = get_local_vcf_bgzf_reader(file_path, thread_num)?;
+            let mut reader = get_local_vcf_bgzf_reader(file_path)?;
             reader.read_header()?
         }
         CompressionType::GZIP => {
@@ -298,7 +287,7 @@ pub async fn get_header(
     let storage_type = get_storage_type(file_path.clone());
     let opts = object_storage_options.unwrap_or_default();
     let header = match storage_type {
-        StorageType::LOCAL => get_local_vcf_header(file_path, 1, opts.clone()).await?,
+        StorageType::LOCAL => get_local_vcf_header(file_path, opts.clone()).await?,
         _ => get_remote_vcf_header(file_path, opts.clone()).await?,
     };
     Ok(header)
@@ -434,17 +423,12 @@ impl VcfLocalReader {
     /// # Arguments
     ///
     /// * `file_path` - Path to the local VCF file
-    /// * `thread_num` - Number of worker threads for BGZF decompression
     /// * `object_storage_options` - Configuration for compression detection
     ///
     /// # Returns
     ///
     /// A `VcfLocalReader` instance with the appropriate variant for the detected compression
-    pub async fn new(
-        file_path: String,
-        thread_num: usize,
-        object_storage_options: ObjectStorageOptions,
-    ) -> Self {
+    pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
         let compression_type = get_compression_type(
             file_path.clone(),
             object_storage_options.clone().compression_type,
@@ -454,7 +438,7 @@ impl VcfLocalReader {
         .unwrap_or(CompressionType::NONE);
         match compression_type {
             CompressionType::BGZF => {
-                let reader = get_local_vcf_bgzf_reader(file_path, thread_num).unwrap();
+                let reader = get_local_vcf_bgzf_reader(file_path).unwrap();
                 VcfLocalReader::BGZF(reader)
             }
             CompressionType::GZIP => {
@@ -582,7 +566,6 @@ impl VcfReader {
     /// # Arguments
     ///
     /// * `file_path` - Path to the VCF file (local path or cloud URI)
-    /// * `thread_num` - Optional number of worker threads for BGZF decompression
     /// * `object_storage_options` - Optional configuration for cloud storage and compression
     ///
     /// # Returns
@@ -590,7 +573,6 @@ impl VcfReader {
     /// A `VcfReader` instance configured for the detected storage and compression type
     pub async fn new(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> Self {
         let storage_type = get_storage_type(file_path.clone());
@@ -600,9 +582,7 @@ impl VcfReader {
         );
         let opts = object_storage_options.unwrap_or_default();
         match storage_type {
-            StorageType::LOCAL => VcfReader::Local(
-                VcfLocalReader::new(file_path, thread_num.unwrap_or(1), opts).await,
-            ),
+            StorageType::LOCAL => VcfReader::Local(VcfLocalReader::new(file_path, opts).await),
             _ => VcfReader::Remote(VcfRemoteReader::new(file_path, opts).await),
         }
     }
@@ -648,6 +628,327 @@ impl VcfReader {
         match self {
             VcfReader::Local(reader) => reader.read_records(),
             VcfReader::Remote(reader) => reader.read_records().await,
+        }
+    }
+}
+
+/// A local indexed VCF reader for region-based queries.
+///
+/// Uses noodles' `IndexedReader::Builder` to support random-access queries using TBI/CSI indexes.
+/// This is used when an index file is available and genomic region filters are present.
+pub struct IndexedVcfReader {
+    reader: vcf::io::IndexedReader<noodles_bgzf_vcf::io::Reader<File>>,
+    header: vcf::Header,
+}
+
+impl IndexedVcfReader {
+    /// Creates a new indexed VCF reader.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the BGZF-compressed VCF file (.vcf.gz)
+    /// * `index_path` - Path to the TBI or CSI index file
+    pub fn new(file_path: &str, index_path: &str) -> Result<Self, std::io::Error> {
+        let index = noodles_tabix::fs::read(index_path)?;
+        let mut reader = vcf::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(file_path)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let header = reader.read_header()?;
+        Ok(Self { reader, header })
+    }
+
+    /// Returns a reference to the VCF header.
+    pub fn header(&self) -> &vcf::Header {
+        &self.header
+    }
+
+    /// Returns contig names from the header.
+    pub fn contig_names(&self) -> Vec<String> {
+        self.header
+            .contigs()
+            .keys()
+            .map(|k| k.to_string())
+            .collect()
+    }
+
+    /// Query records overlapping a genomic region.
+    pub fn query(
+        &mut self,
+        region: &noodles_core::Region,
+    ) -> Result<impl Iterator<Item = Result<Record, std::io::Error>> + '_, std::io::Error> {
+        self.reader.query(&self.header, region)
+    }
+}
+
+/// Estimate compressed byte sizes per region from a TBI (tabix) index.
+///
+/// For each region, this reads the tabix index and finds the min/max compressed
+/// byte offsets across all bins for the corresponding reference sequence. The
+/// difference gives a rough estimate of how many compressed bytes that region spans.
+///
+/// # Arguments
+///
+/// * `index_path` - Path to the TBI index file
+/// * `regions` - Genomic regions to estimate sizes for
+/// * `contig_names` - Contig names from the VCF header (in order)
+/// * `contig_lengths` - Contig lengths from the VCF header (for sub-region splitting)
+pub fn estimate_sizes_from_tbi(
+    index_path: &str,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    contig_names: &[String],
+    contig_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+
+    let index = match noodles_tabix::fs::read(index_path) {
+        Ok(idx) => idx,
+        Err(e) => {
+            log::debug!("Failed to read TBI index for size estimation: {}", e);
+            return regions
+                .iter()
+                .map(|r| RegionSizeEstimate {
+                    region: r.clone(),
+                    estimated_bytes: 1,
+                    contig_length: None,
+                    unmapped_count: 0,
+                    nonempty_bin_positions: Vec::new(),
+                    leaf_bin_span: 0,
+                })
+                .collect();
+        }
+    };
+
+    let contig_name_to_idx: std::collections::HashMap<&str, usize> = contig_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    regions
+        .iter()
+        .map(|region| {
+            let ref_idx = contig_name_to_idx.get(region.chrom.as_str()).copied();
+            let estimated_bytes = ref_idx
+                .and_then(|idx| {
+                    index.reference_sequences().get(idx).map(|ref_seq| {
+                        let mut min_offset = u64::MAX;
+                        let mut max_offset = 0u64;
+                        for (_bin_id, bin) in ref_seq.bins() {
+                            for chunk in bin.chunks() {
+                                let start = chunk.start().compressed();
+                                let end = chunk.end().compressed();
+                                min_offset = min_offset.min(start);
+                                max_offset = max_offset.max(end);
+                            }
+                        }
+                        max_offset.saturating_sub(min_offset)
+                    })
+                })
+                .unwrap_or(1);
+
+            // Collect non-empty leaf bin positions for data-aware splitting.
+            // TBI uses the same binning scheme as BAI (min_shift=14, depth=5).
+            const TBI_LEAF_FIRST: usize = 4681;
+            const TBI_LEAF_LAST: usize = 37448;
+            const TBI_LEAF_SPAN: u64 = 16384;
+
+            let mut nonempty_bin_positions: Vec<u64> = ref_idx
+                .and_then(|idx| index.reference_sequences().get(idx))
+                .map(|ref_seq| {
+                    ref_seq
+                        .bins()
+                        .keys()
+                        .copied()
+                        .filter(|&bin_id| (TBI_LEAF_FIRST..=TBI_LEAF_LAST).contains(&bin_id))
+                        .map(|bin_id| ((bin_id - TBI_LEAF_FIRST) as u64) * TBI_LEAF_SPAN + 1)
+                        .collect()
+                })
+                .unwrap_or_default();
+            nonempty_bin_positions.sort_unstable();
+
+            let contig_length = ref_idx
+                .and_then(|idx| contig_lengths.get(idx).copied())
+                .filter(|&len| len > 0)
+                .or_else(|| {
+                    // First try leaf bins (finest granularity).
+                    nonempty_bin_positions
+                        .last()
+                        .map(|&max_pos| max_pos + TBI_LEAF_SPAN - 1)
+                })
+                .or_else(|| {
+                    // Fall back to any bin level to infer length when only
+                    // higher-level bins are populated (common for small
+                    // coordinate ranges that don't reach leaf bins).
+                    // BAI binning levels: offsets [0, 1, 9, 73, 585, 4681]
+                    // with spans [2^29, 2^26, 2^23, 2^20, 2^17, 2^14].
+                    const LEVEL_OFFSETS: [(usize, u64); 6] = [
+                        (0, 1 << 29),
+                        (1, 1 << 26),
+                        (9, 1 << 23),
+                        (73, 1 << 20),
+                        (585, 1 << 17),
+                        (4681, 1 << 14),
+                    ];
+                    ref_idx
+                        .and_then(|idx| index.reference_sequences().get(idx))
+                        .and_then(|ref_seq| {
+                            ref_seq
+                                .bins()
+                                .keys()
+                                .copied()
+                                .filter_map(|bin_id| {
+                                    LEVEL_OFFSETS.iter().rev().find_map(|&(offset, span)| {
+                                        if bin_id >= offset
+                                            && bin_id
+                                                < LEVEL_OFFSETS
+                                                    .iter()
+                                                    .find(|&&(o, _)| o > offset)
+                                                    .map_or(37449, |&(o, _)| o)
+                                        {
+                                            let idx_in_level = (bin_id - offset) as u64;
+                                            Some((idx_in_level + 1) * span)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                                .max()
+                        })
+                });
+
+            RegionSizeEstimate {
+                region: region.clone(),
+                estimated_bytes,
+                contig_length,
+                unmapped_count: 0,
+                nonempty_bin_positions,
+                leaf_bin_span: TBI_LEAF_SPAN,
+            }
+        })
+        .collect()
+}
+
+/// Record field accessor for VCF records, used for record-level filter evaluation.
+pub struct VcfRecordFields {
+    /// Chromosome name
+    pub chrom: Option<String>,
+    /// Start position (in the output coordinate system)
+    pub start: Option<u32>,
+    /// End position (in the output coordinate system)
+    pub end: Option<u32>,
+}
+
+impl RecordFieldAccessor for VcfRecordFields {
+    fn get_string_field(&self, name: &str) -> Option<String> {
+        match name {
+            "chrom" => self.chrom.clone(),
+            _ => None,
+        }
+    }
+
+    fn get_u32_field(&self, name: &str) -> Option<u32> {
+        match name {
+            "start" => self.start,
+            "end" => self.end,
+            _ => None,
+        }
+    }
+
+    fn get_f32_field(&self, _name: &str) -> Option<f32> {
+        None
+    }
+
+    fn get_f64_field(&self, _name: &str) -> Option<f64> {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion_bio_format_core::genomic_filter::GenomicRegion;
+    use noodles_csi::binning_index::BinningIndex;
+
+    fn test_tbi_path() -> String {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        format!("{manifest}/tests/multi_chrom.vcf.gz.tbi")
+    }
+
+    /// Read contig names from the TBI header (same as production code does).
+    fn read_tbi_contig_names(tbi_path: &str) -> Vec<String> {
+        let index = noodles_tabix::fs::read(tbi_path).expect("failed to read TBI");
+        index
+            .header()
+            .map(|h| {
+                h.reference_sequence_names()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn vcf_regions(contig_names: &[String]) -> Vec<GenomicRegion> {
+        contig_names
+            .iter()
+            .map(|name| GenomicRegion {
+                chrom: name.clone(),
+                start: None,
+                end: None,
+                unmapped_tail: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tbi_infers_contig_length_when_header_omits_it() {
+        let tbi_path = test_tbi_path();
+        let contig_names = read_tbi_contig_names(&tbi_path);
+        assert!(!contig_names.is_empty(), "TBI should have contig names");
+        let regions = vcf_regions(&contig_names);
+
+        let estimates = estimate_sizes_from_tbi(&tbi_path, &regions, &contig_names, &[]);
+
+        assert_eq!(estimates.len(), contig_names.len());
+        for est in &estimates {
+            assert!(
+                est.contig_length.is_some(),
+                "contig_length should be inferred from TBI for {}",
+                est.region.chrom
+            );
+            let len = est.contig_length.unwrap();
+            assert!(
+                len > 10_000,
+                "inferred contig length for {} should be > 10000 bp, got {}",
+                est.region.chrom,
+                len
+            );
+        }
+    }
+
+    #[test]
+    fn tbi_header_length_takes_priority() {
+        let tbi_path = test_tbi_path();
+        let contig_names = read_tbi_contig_names(&tbi_path);
+        assert!(!contig_names.is_empty(), "TBI should have contig names");
+        let regions = vcf_regions(&contig_names);
+        let contig_lengths: Vec<u64> = contig_names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| 999 - i as u64)
+            .collect();
+
+        let estimates =
+            estimate_sizes_from_tbi(&tbi_path, &regions, &contig_names, &contig_lengths);
+
+        assert_eq!(estimates.len(), contig_names.len());
+        for (i, est) in estimates.iter().enumerate() {
+            assert_eq!(
+                est.contig_length,
+                Some(contig_lengths[i]),
+                "header length should take priority for {}",
+                est.region.chrom
+            );
         }
     }
 }

@@ -6,14 +6,20 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::DataFusionError;
 use datafusion::datasource::{MemTable, TableType};
-use datafusion::logical_expr::{Expr, dml::InsertOp};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
 use datafusion::prelude::DataFrame;
+use datafusion_bio_format_core::genomic_filter::{
+    build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
+};
+use datafusion_bio_format_core::index_utils::discover_bam_index;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::partition_balancer::balance_partitions;
+use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
     BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
@@ -86,7 +92,6 @@ fn determine_schema(
 /// the actual types used in the file.
 async fn determine_schema_from_file(
     file_path: String,
-    thread_num: Option<usize>,
     object_storage_options: Option<ObjectStorageOptions>,
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
@@ -125,12 +130,7 @@ async fn determine_schema_from_file(
         let reader = SamReader::new(file_path.clone());
         extract_header_metadata(reader.get_header())
     } else {
-        let mut reader = BamReader::new(
-            file_path.clone(),
-            thread_num,
-            object_storage_options.clone(),
-        )
-        .await;
+        let mut reader = BamReader::new(file_path.clone(), object_storage_options.clone()).await;
         let header = reader.read_header().await;
         extract_header_metadata(&header)
     };
@@ -214,7 +214,7 @@ async fn determine_schema_from_file(
             let records = reader.read_records();
             discover_tags_from_stream(records, tags, sample_size).await
         } else {
-            let mut reader = BamReader::new(file_path, thread_num, object_storage_options).await;
+            let mut reader = BamReader::new(file_path, object_storage_options).await;
             let _header = reader.read_header().await;
             let records = reader.read_records().await;
             discover_tags_from_stream(records, tags, sample_size).await
@@ -291,8 +291,6 @@ pub struct BamTableProvider {
     file_path: String,
     /// Arrow schema for the BAM records
     schema: SchemaRef,
-    /// Number of threads to use for BGZF decompression
-    thread_num: Option<usize>,
     /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -301,6 +299,12 @@ pub struct BamTableProvider {
     tag_fields: Option<Vec<String>>,
     /// Whether to sort records by coordinate (chrom ASC, start ASC) on write
     sort_on_write: bool,
+    /// Path to an index file (BAI/CSI). Auto-discovered if not provided.
+    index_path: Option<String>,
+    /// Reference sequence names from the file header (for partitioning full scans by chromosome)
+    reference_names: Vec<String>,
+    /// Reference sequence lengths from the file header (for balanced partitioning)
+    reference_lengths: Vec<u64>,
 }
 
 impl BamTableProvider {
@@ -309,7 +313,6 @@ impl BamTableProvider {
     /// # Arguments
     ///
     /// * `file_path` - Path to the BAM file (local or remote URL)
-    /// * `thread_num` - Optional number of threads for BGZF decompression
     /// * `object_storage_options` - Optional configuration for cloud storage access
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
@@ -337,7 +340,6 @@ impl BamTableProvider {
     /// // Basic usage without tags
     /// let provider = BamTableProvider::new(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),  // Use 4 threads
     ///     None,     // No cloud storage
     ///     true,     // Use 0-based coordinates (default)
     ///     None,     // No tag fields
@@ -346,7 +348,6 @@ impl BamTableProvider {
     /// // With alignment tags
     /// let provider_with_tags = BamTableProvider::new(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),
     ///     None,
     ///     true,
     ///     Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
@@ -356,7 +357,6 @@ impl BamTableProvider {
     /// ```
     pub async fn new(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
@@ -398,29 +398,46 @@ impl BamTableProvider {
         } else {
             // For remote BAM files, use async reader
             use crate::storage::BamReader;
-            let mut reader = BamReader::new(
-                file_path.clone(),
-                thread_num,
-                object_storage_options.clone(),
-            )
-            .await;
+            let mut reader =
+                BamReader::new(file_path.clone(), object_storage_options.clone()).await;
             let header = reader.read_header().await;
             extract_header_metadata(&header)
         };
+
+        // Extract reference sequence names and lengths for partitioning
+        let ref_seqs: Vec<datafusion_bio_format_core::ReferenceSequenceMetadata> = header_metadata
+            .get(datafusion_bio_format_core::BAM_REFERENCE_SEQUENCES_KEY)
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let reference_names: Vec<String> = ref_seqs.iter().map(|r| r.name.clone()).collect();
+        let reference_lengths: Vec<u64> = ref_seqs.iter().map(|r| r.length as u64).collect();
 
         let schema = determine_schema(
             &tag_fields,
             coordinate_system_zero_based,
             Some(header_metadata),
         )?;
+
+        // Auto-discover index file for local files
+        let index_path = if matches!(storage_type, StorageType::LOCAL) && !is_sam_file(&file_path) {
+            discover_bam_index(&file_path).map(|(path, fmt)| {
+                debug!("Discovered BAM index: {} (format: {:?})", path, fmt);
+                path
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             file_path,
             schema,
-            thread_num,
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write: false,
+            index_path,
+            reference_names,
+            reference_lengths,
         })
     }
 
@@ -433,7 +450,6 @@ impl BamTableProvider {
     /// # Arguments
     ///
     /// * `file_path` - Path to the BAM file (local or remote URL)
-    /// * `thread_num` - Optional number of threads for BGZF decompression
     /// * `object_storage_options` - Optional configuration for cloud storage access
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
@@ -453,7 +469,6 @@ impl BamTableProvider {
     /// // Create provider with inferred schema
     /// let provider = BamTableProvider::try_new_with_inferred_schema(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),
     ///     None,
     ///     true,
     ///     Some(vec!["XS".to_string(), "XT".to_string()]),
@@ -464,30 +479,51 @@ impl BamTableProvider {
     /// ```
     pub async fn try_new_with_inferred_schema(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
         sample_size: Option<usize>,
     ) -> datafusion::common::Result<Self> {
+        use crate::storage::is_sam_file;
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+
         let sample_size = sample_size.unwrap_or(100);
         let schema = determine_schema_from_file(
             file_path.clone(),
-            thread_num,
             object_storage_options.clone(),
             &tag_fields,
             coordinate_system_zero_based,
             sample_size,
         )
         .await?;
+
+        // Extract reference names and lengths from schema metadata
+        let ref_seqs: Vec<datafusion_bio_format_core::ReferenceSequenceMetadata> = schema
+            .metadata()
+            .get(datafusion_bio_format_core::BAM_REFERENCE_SEQUENCES_KEY)
+            .and_then(|json| serde_json::from_str(json).ok())
+            .unwrap_or_default();
+        let reference_names: Vec<String> = ref_seqs.iter().map(|r| r.name.clone()).collect();
+        let reference_lengths: Vec<u64> = ref_seqs.iter().map(|r| r.length as u64).collect();
+
+        // Auto-discover index file
+        let storage_type = get_storage_type(file_path.clone());
+        let index_path = if matches!(storage_type, StorageType::LOCAL) && !is_sam_file(&file_path) {
+            discover_bam_index(&file_path).map(|(path, _)| path)
+        } else {
+            None
+        };
+
         Ok(Self {
             file_path,
             schema,
-            thread_num,
             object_storage_options,
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write: false,
+            index_path,
+            reference_names,
+            reference_lengths,
         })
     }
 
@@ -519,11 +555,13 @@ impl BamTableProvider {
         Self {
             file_path: output_path,
             schema,
-            thread_num: None,
             object_storage_options: None,
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write,
+            index_path: None,
+            reference_names: Vec::new(),
+            reference_lengths: Vec::new(),
         }
     }
 
@@ -558,7 +596,6 @@ impl BamTableProvider {
     /// let ctx = SessionContext::new();
     /// let provider = BamTableProvider::new(
     ///     "data/alignments.bam".to_string(),
-    ///     Some(4),
     ///     None,
     ///     true,
     ///     None,
@@ -626,12 +663,8 @@ impl BamTableProvider {
             let records = reader.read_records();
             discover_all_tags(records, sample_size).await
         } else {
-            let mut reader = BamReader::new(
-                self.file_path.clone(),
-                self.thread_num,
-                self.object_storage_options.clone(),
-            )
-            .await;
+            let mut reader =
+                BamReader::new(self.file_path.clone(), self.object_storage_options.clone()).await;
             let _header = reader.read_header().await;
             let records = reader.read_records().await;
             discover_all_tags(records, sample_size).await
@@ -792,24 +825,52 @@ impl TableProvider for BamTableProvider {
         TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::common::Result<Vec<TableProviderFilterPushDown>> {
+        let pushdown_support = filters
+            .iter()
+            .map(|expr| {
+                // Genomic coordinate filters get Inexact when index is available
+                if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
+                    debug!("BAM filter can be pushed down (indexed): {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else if can_push_down_record_filter(expr, &self.schema) {
+                    debug!("BAM filter can be pushed down (record-level): {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    debug!("BAM filter cannot be pushed down: {:?}", expr);
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect();
+        Ok(pushdown_support)
+    }
+
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        debug!("BamTableProvider::scan");
+        debug!(
+            "BamTableProvider::scan - {} filters received, index={}, reference_names={:?}",
+            filters.len(),
+            self.index_path.is_some(),
+            self.reference_names
+        );
+        for (i, f) in filters.iter().enumerate() {
+            debug!("  filter[{}]: {:?}", i, f);
+        }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
-                Some(indices) if indices.is_empty() => {
-                    // For empty projections (COUNT(*)), use a dummy field with preserved metadata
-                    Arc::new(Schema::new_with_metadata(
-                        vec![Field::new("dummy", DataType::Null, true)],
-                        schema.metadata().clone(),
-                    ))
-                }
+                Some(indices) if indices.is_empty() => Arc::new(Schema::new_with_metadata(
+                    vec![Field::new("dummy", DataType::Null, true)],
+                    schema.metadata().clone(),
+                )),
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
                         indices.iter().map(|&i| schema.field(i).clone()).collect();
@@ -824,6 +885,79 @@ impl TableProvider for BamTableProvider {
 
         let schema = project_schema(&self.schema, projection);
 
+        // Determine regions and partitioning when index is available
+        if let Some(ref index_path) = self.index_path {
+            let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
+
+            let regions = if !analysis.regions.is_empty() {
+                debug!(
+                    "BAM scan: using {} filter-derived region(s)",
+                    analysis.regions.len()
+                );
+                for r in &analysis.regions {
+                    debug!("  region: {}:{:?}-{:?}", r.chrom, r.start, r.end);
+                }
+                analysis.regions
+            } else if !self.reference_names.is_empty() {
+                debug!(
+                    "BAM scan: no genomic filters pushed down, using full-scan on {} reference(s)",
+                    self.reference_names.len()
+                );
+                build_full_scan_regions(&self.reference_names)
+            } else {
+                debug!("BAM scan: no index regions available, falling back to sequential scan");
+                Vec::new()
+            };
+
+            if !regions.is_empty() {
+                // Use balanced partitioning with index size estimates
+                let target_partitions = state.config().target_partitions();
+                let estimates = crate::storage::estimate_sizes_from_bai(
+                    index_path,
+                    &regions,
+                    &self.reference_names,
+                    &self.reference_lengths,
+                );
+                let assignments = balance_partitions(estimates, target_partitions);
+                let num_partitions = assignments.len();
+
+                // Collect filters for record-level evaluation
+                let record_filters: Vec<Expr> = filters
+                    .iter()
+                    .filter(|expr| can_push_down_record_filter(expr, &self.schema))
+                    .cloned()
+                    .collect();
+
+                debug!(
+                    "BAM indexed scan: {} partitions (from {} regions, target {}), {} record-level filters",
+                    num_partitions,
+                    assignments.iter().map(|a| a.regions.len()).sum::<usize>(),
+                    target_partitions,
+                    record_filters.len()
+                );
+
+                return Ok(Arc::new(BamExec {
+                    cache: PlanProperties::new(
+                        EquivalenceProperties::new(schema.clone()),
+                        Partitioning::UnknownPartitioning(num_partitions),
+                        EmissionType::Final,
+                        Boundedness::Bounded,
+                    ),
+                    file_path: self.file_path.clone(),
+                    schema: schema.clone(),
+                    projection: projection.cloned(),
+                    limit,
+                    object_storage_options: self.object_storage_options.clone(),
+                    coordinate_system_zero_based: self.coordinate_system_zero_based,
+                    tag_fields: self.tag_fields.clone(),
+                    partition_assignments: Some(assignments),
+                    index_path: Some(index_path.clone()),
+                    residual_filters: record_filters,
+                }));
+            }
+        }
+
+        // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(BamExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
@@ -835,10 +969,12 @@ impl TableProvider for BamTableProvider {
             schema: schema.clone(),
             projection: projection.cloned(),
             limit,
-            thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             tag_fields: self.tag_fields.clone(),
+            partition_assignments: None,
+            index_path: None,
+            residual_filters: Vec::new(),
         }))
     }
 

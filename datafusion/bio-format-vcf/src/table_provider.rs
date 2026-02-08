@@ -4,12 +4,18 @@ use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use datafusion_bio_format_core::genomic_filter::{
+    build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
+};
+use datafusion_bio_format_core::index_utils::discover_vcf_index;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
     VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
     VCF_SAMPLE_NAMES_KEY, to_json_string,
 };
+use datafusion_bio_format_core::partition_balancer::balance_partitions;
+use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use std::collections::HashMap;
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -17,7 +23,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::Constraints;
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::{Expr, dml::InsertOp};
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -290,14 +296,18 @@ pub struct VcfTableProvider {
     format_fields: Option<Vec<String>>,
     /// Arrow schema representing the VCF table structure
     schema: SchemaRef,
-    /// Optional number of worker threads for BGZF decompression
-    thread_num: Option<usize>,
     /// Configuration for cloud storage access
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
     /// Sample names from the VCF header (used for FORMAT column naming)
     sample_names: Vec<String>,
+    /// Path to an index file (TBI/CSI). Auto-discovered if not provided.
+    index_path: Option<String>,
+    /// Contig names from the file header (for partitioning full scans by chromosome)
+    contig_names: Vec<String>,
+    /// Contig lengths from the file header (for balanced partitioning)
+    contig_lengths: Vec<u64>,
 }
 
 impl VcfTableProvider {
@@ -308,7 +318,6 @@ impl VcfTableProvider {
     /// * `file_path` - Path to the VCF file
     /// * `info_fields` - Optional list of INFO fields to include
     /// * `format_fields` - Optional list of FORMAT fields to include
-    /// * `thread_num` - Optional number of worker threads for BGZF decompression
     /// * `object_storage_options` - Configuration for cloud storage access
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
@@ -324,10 +333,11 @@ impl VcfTableProvider {
         file_path: String,
         info_fields: Option<Vec<String>>,
         format_fields: Option<Vec<String>>,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
+        use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+
         let (schema, sample_names) = block_on(determine_schema_from_header(
             &file_path,
             &info_fields,
@@ -335,15 +345,79 @@ impl VcfTableProvider {
             &object_storage_options,
             coordinate_system_zero_based,
         ))?;
+
+        // Extract contig names and lengths from schema metadata
+        let contig_metadata: Vec<ContigMetadata> = schema
+            .metadata()
+            .get(VCF_CONTIGS_KEY)
+            .and_then(|json| serde_json::from_str::<Vec<ContigMetadata>>(json).ok())
+            .unwrap_or_default();
+        let contig_names: Vec<String> = contig_metadata.iter().map(|c| c.id.clone()).collect();
+        let contig_lengths: Vec<u64> = contig_metadata
+            .iter()
+            .map(|c| c.length.unwrap_or(0))
+            .collect();
+
+        // Auto-discover index file for local BGZF-compressed files
+        let storage_type = get_storage_type(file_path.clone());
+        let index_path = if matches!(storage_type, StorageType::LOCAL) {
+            discover_vcf_index(&file_path).map(|(path, fmt)| {
+                debug!("Discovered VCF index: {} (format: {:?})", path, fmt);
+                path
+            })
+        } else {
+            None
+        };
+
+        // When the VCF header lacks ##contig lines but a TBI index exists,
+        // fall back to the TBI header for contig names so that indexed
+        // partitioning can still split across multiple cores.
+        let (contig_names, contig_lengths) = if contig_names.is_empty() {
+            if let Some(ref idx_path) = index_path {
+                match noodles_tabix::fs::read(idx_path) {
+                    Ok(index) => {
+                        use noodles_csi::binning_index::BinningIndex;
+                        let names: Vec<String> = index
+                            .header()
+                            .map(|h| {
+                                h.reference_sequence_names()
+                                    .iter()
+                                    .map(|n| n.to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !names.is_empty() {
+                            debug!(
+                                "VCF header lacks ##contig lines; inferred {} contigs from TBI index",
+                                names.len()
+                            );
+                        }
+                        let lengths = vec![0u64; names.len()];
+                        (names, lengths)
+                    }
+                    Err(e) => {
+                        debug!("Failed to read TBI for contig name fallback: {}", e);
+                        (contig_names, contig_lengths)
+                    }
+                }
+            } else {
+                (contig_names, contig_lengths)
+            }
+        } else {
+            (contig_names, contig_lengths)
+        };
+
         Ok(Self {
             file_path,
             info_fields,
             format_fields,
             schema,
-            thread_num,
             object_storage_options,
             coordinate_system_zero_based,
             sample_names,
+            index_path,
+            contig_names,
+            contig_lengths,
         })
     }
 
@@ -386,10 +460,12 @@ impl VcfTableProvider {
                 Some(format_fields)
             },
             schema,
-            thread_num: None,
             object_storage_options: None,
             coordinate_system_zero_based,
             sample_names,
+            index_path: None,
+            contig_names: Vec::new(),
+            contig_lengths: Vec::new(),
         }
     }
 }
@@ -410,14 +486,44 @@ impl TableProvider for VcfTableProvider {
         // todo!()
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> datafusion::common::Result<Vec<TableProviderFilterPushDown>> {
+        let pushdown_support = filters
+            .iter()
+            .map(|expr| {
+                if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
+                    debug!("VCF filter can be pushed down (indexed): {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else if can_push_down_record_filter(expr, &self.schema) {
+                    debug!("VCF filter can be pushed down (record-level): {:?}", expr);
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    debug!("VCF filter cannot be pushed down: {:?}", expr);
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect();
+        Ok(pushdown_support)
+    }
+
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        debug!("VcfTableProvider::scan");
+        debug!(
+            "VcfTableProvider::scan - {} filters received, index={}, contig_names={:?}",
+            filters.len(),
+            self.index_path.is_some(),
+            self.contig_names
+        );
+        for (i, f) in filters.iter().enumerate() {
+            debug!("  filter[{}]: {:?}", i, f);
+        }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
@@ -443,6 +549,82 @@ impl TableProvider for VcfTableProvider {
 
         let schema = project_schema(&self.schema, projection);
 
+        // Determine regions and partitioning when index is available
+        if let Some(ref index_path) = self.index_path {
+            let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
+
+            let regions = if !analysis.regions.is_empty() {
+                debug!(
+                    "VCF scan: using {} filter-derived region(s)",
+                    analysis.regions.len()
+                );
+                for r in &analysis.regions {
+                    debug!("  region: {}:{:?}-{:?}", r.chrom, r.start, r.end);
+                }
+                analysis.regions
+            } else if !self.contig_names.is_empty() {
+                // Full scan: partition by chromosome for parallel reading
+                debug!(
+                    "VCF scan: no genomic filters pushed down, using full-scan on {} contig(s)",
+                    self.contig_names.len()
+                );
+                build_full_scan_regions(&self.contig_names)
+            } else {
+                debug!("VCF scan: no index regions available, falling back to sequential scan");
+                Vec::new()
+            };
+
+            if !regions.is_empty() {
+                // Use balanced partitioning with index size estimates
+                let target_partitions = state.config().target_partitions();
+                let estimates = crate::storage::estimate_sizes_from_tbi(
+                    index_path,
+                    &regions,
+                    &self.contig_names,
+                    &self.contig_lengths,
+                );
+                let assignments = balance_partitions(estimates, target_partitions);
+                let num_partitions = assignments.len();
+
+                // Collect filters for record-level evaluation
+                let record_filters: Vec<Expr> = filters
+                    .iter()
+                    .filter(|expr| can_push_down_record_filter(expr, &self.schema))
+                    .cloned()
+                    .collect();
+
+                debug!(
+                    "VCF indexed scan: {} partitions (from {} regions, target {}), {} record-level filters",
+                    num_partitions,
+                    assignments.iter().map(|a| a.regions.len()).sum::<usize>(),
+                    target_partitions,
+                    record_filters.len()
+                );
+
+                return Ok(Arc::new(VcfExec {
+                    cache: PlanProperties::new(
+                        EquivalenceProperties::new(schema.clone()),
+                        Partitioning::UnknownPartitioning(num_partitions),
+                        EmissionType::Final,
+                        Boundedness::Bounded,
+                    ),
+                    file_path: self.file_path.clone(),
+                    schema: schema.clone(),
+                    info_fields: self.info_fields.clone(),
+                    format_fields: self.format_fields.clone(),
+                    sample_names: self.sample_names.clone(),
+                    projection: projection.cloned(),
+                    limit,
+                    object_storage_options: self.object_storage_options.clone(),
+                    coordinate_system_zero_based: self.coordinate_system_zero_based,
+                    partition_assignments: Some(assignments),
+                    index_path: Some(index_path.clone()),
+                    residual_filters: record_filters,
+                }));
+            }
+        }
+
+        // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(VcfExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
@@ -457,9 +639,11 @@ impl TableProvider for VcfTableProvider {
             sample_names: self.sample_names.clone(),
             projection: projection.cloned(),
             limit,
-            thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
+            partition_assignments: None,
+            index_path: None,
+            residual_filters: Vec::new(),
         }))
     }
 
