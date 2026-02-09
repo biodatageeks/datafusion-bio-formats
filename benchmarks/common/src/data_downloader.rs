@@ -1,4 +1,5 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::anyhow;
+use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::File;
