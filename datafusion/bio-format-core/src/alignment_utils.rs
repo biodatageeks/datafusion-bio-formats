@@ -3,9 +3,8 @@ use datafusion::arrow::array::{
     StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::error::DataFusionError;
-use log::debug;
 use noodles_sam::alignment::record::cigar::op::{Kind as OpKind, Op};
 use std::fmt::Write;
 use std::io;
@@ -127,11 +126,13 @@ pub struct RecordFields<'a> {
 /// * `fields` - Container with pointers to all core field vectors
 /// * `tag_arrays` - Optional vector of tag column arrays
 /// * `projection` - Optional column indices to include in output
+/// * `record_count` - Number of records in this batch (used for empty projection / null arrays)
 pub fn build_record_batch(
     schema: SchemaRef,
     fields: RecordFields,
     tag_arrays: Option<&Vec<ArrayRef>>,
     projection: Option<Vec<usize>>,
+    record_count: usize,
 ) -> datafusion::error::Result<RecordBatch> {
     let name = fields.name;
     let chrom = fields.chrom;
@@ -145,37 +146,42 @@ pub fn build_record_batch(
     let sequence_array = fields.sequence;
     let quality_scores_array = fields.quality_scores;
 
-    let name_array =
-        Arc::new(StringArray::from_iter(name.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
-    let chrom_array =
-        Arc::new(StringArray::from_iter(chrom.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
-    let start_array = Arc::new(UInt32Array::from_iter(start.iter().copied())) as Arc<dyn Array>;
-    let end_array = Arc::new(UInt32Array::from_iter(end.iter().copied())) as Arc<dyn Array>;
-    let flag_array =
-        Arc::new(UInt32Array::from_iter_values(flag.iter().copied())) as Arc<dyn Array>;
-    let cigar_array = Arc::new(StringArray::from_iter_values(
-        cigar.iter().map(|s| s.as_str()),
-    )) as Arc<dyn Array>;
-    let mapping_quality_array =
-        Arc::new(UInt32Array::from_iter(mapping_quality.iter().copied())) as Arc<dyn Array>;
-    let mate_chrom_array = Arc::new(StringArray::from_iter(
-        mate_chrom.iter().map(|s| s.as_deref()),
-    )) as Arc<dyn Array>;
-    let mate_start_array =
-        Arc::new(UInt32Array::from_iter(mate_start.iter().copied())) as Arc<dyn Array>;
+    // Helper closures for lazy array construction — each array is built only when needed
+    let make_name =
+        || Arc::new(StringArray::from_iter(name.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
+    let make_chrom =
+        || Arc::new(StringArray::from_iter(chrom.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
+    let make_start = || Arc::new(UInt32Array::from_iter(start.iter().copied())) as Arc<dyn Array>;
+    let make_end = || Arc::new(UInt32Array::from_iter(end.iter().copied())) as Arc<dyn Array>;
+    let make_flag =
+        || Arc::new(UInt32Array::from_iter_values(flag.iter().copied())) as Arc<dyn Array>;
+    let make_cigar = || {
+        Arc::new(StringArray::from_iter_values(
+            cigar.iter().map(|s| s.as_str()),
+        )) as Arc<dyn Array>
+    };
+    let make_mapq =
+        || Arc::new(UInt32Array::from_iter(mapping_quality.iter().copied())) as Arc<dyn Array>;
+    let make_mate_chrom = || {
+        Arc::new(StringArray::from_iter(
+            mate_chrom.iter().map(|s| s.as_deref()),
+        )) as Arc<dyn Array>
+    };
+    let make_mate_start =
+        || Arc::new(UInt32Array::from_iter(mate_start.iter().copied())) as Arc<dyn Array>;
 
     let arrays = match projection {
         None => {
             let mut arrays: Vec<Arc<dyn Array>> = vec![
-                name_array,
-                chrom_array,
-                start_array,
-                end_array,
-                flag_array,
-                cigar_array,
-                mapping_quality_array,
-                mate_chrom_array,
-                mate_start_array,
+                make_name(),
+                make_chrom(),
+                make_start(),
+                make_end(),
+                make_flag(),
+                make_cigar(),
+                make_mapq(),
+                make_mate_chrom(),
+                make_mate_start(),
                 sequence_array,
                 quality_scores_array,
             ];
@@ -186,22 +192,22 @@ pub fn build_record_batch(
             arrays
         }
         Some(proj_ids) => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(name.len());
+            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
             if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(name_array.len())) as Arc<dyn Array>);
+                // For empty projections (COUNT(*)), return an empty vector
+                // The schema should already be empty from the table provider
             } else {
                 for i in proj_ids.clone() {
                     match i {
-                        0 => arrays.push(name_array.clone()),
-                        1 => arrays.push(chrom_array.clone()),
-                        2 => arrays.push(start_array.clone()),
-                        3 => arrays.push(end_array.clone()),
-                        4 => arrays.push(flag_array.clone()),
-                        5 => arrays.push(cigar_array.clone()),
-                        6 => arrays.push(mapping_quality_array.clone()),
-                        7 => arrays.push(mate_chrom_array.clone()),
-                        8 => arrays.push(mate_start_array.clone()),
+                        0 => arrays.push(make_name()),
+                        1 => arrays.push(make_chrom()),
+                        2 => arrays.push(make_start()),
+                        3 => arrays.push(make_end()),
+                        4 => arrays.push(make_flag()),
+                        5 => arrays.push(make_cigar()),
+                        6 => arrays.push(make_mapq()),
+                        7 => arrays.push(make_mate_chrom()),
+                        8 => arrays.push(make_mate_start()),
                         9 => arrays.push(sequence_array.clone()),
                         10 => arrays.push(quality_scores_array.clone()),
                         _ => {
@@ -213,13 +219,12 @@ pub fn build_record_batch(
                                 } else {
                                     // Tag index out of bounds - create properly typed null array
                                     let field = &schema.fields()[i];
-                                    arrays
-                                        .push(new_null_array(field.data_type(), name_array.len()));
+                                    arrays.push(new_null_array(field.data_type(), record_count));
                                 }
                             } else {
                                 // No tag arrays provided - create properly typed null array
                                 let field = &schema.fields()[i];
-                                arrays.push(new_null_array(field.data_type(), name_array.len()));
+                                arrays.push(new_null_array(field.data_type(), record_count));
                             }
                         }
                     }
@@ -228,8 +233,15 @@ pub fn build_record_batch(
             arrays
         }
     };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    // For empty projections (COUNT(*)), we need to specify row count explicitly
+    if arrays.is_empty() {
+        let options = RecordBatchOptions::new().with_row_count(Some(record_count));
+        RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    } else {
+        RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    }
 }
 
 /// Convert a CIGAR operation to string representation

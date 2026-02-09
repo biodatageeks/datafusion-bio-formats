@@ -868,7 +868,7 @@ impl TableProvider for BamTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => Arc::new(Schema::new_with_metadata(
-                    vec![Field::new("dummy", DataType::Null, true)],
+                    Vec::<Field>::new(),
                     schema.metadata().clone(),
                 )),
                 Some(indices) => {

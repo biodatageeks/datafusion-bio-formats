@@ -13,7 +13,7 @@ use datafusion_bio_format_core::object_storage::{
 
 use futures::Future;
 use futures_util::{StreamExt, TryStreamExt};
-use log::debug;
+use log::{debug, info};
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -52,14 +52,28 @@ pub struct FastaExec {
 }
 
 impl Debug for FastaExec {
-    fn fmt(&self, _f: &mut Formatter<'_>) -> std::fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FastaExec")
+            .field("projection", &self.projection)
+            .finish()
     }
 }
 
 impl DisplayAs for FastaExec {
-    fn fmt_as(&self, _t: DisplayFormatType, _f: &mut Formatter) -> std::fmt::Result {
-        Ok(())
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+        let proj_str = match &self.projection {
+            Some(_) => {
+                let col_names: Vec<&str> = self
+                    .schema
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().as_str())
+                    .collect();
+                col_names.join(", ")
+            }
+            None => "*".to_string(),
+        };
+        write!(f, "FastaExec: projection=[{}]", proj_str)
     }
 }
 
@@ -89,11 +103,25 @@ impl ExecutionPlan for FastaExec {
 
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        debug!("FastaExec::execute");
-        debug!("Projection: {:?}", self.projection);
+        let proj_cols = match &self.projection {
+            Some(_) => self
+                .schema
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => "*".to_string(),
+        };
+        info!(
+            "{}: executing partition={} with projection=[{}]",
+            self.name(),
+            partition,
+            proj_cols
+        );
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
         let fut = get_stream(

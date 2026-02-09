@@ -75,6 +75,8 @@ pub mod record_filter;
 pub mod table_utils;
 /// Tag registry for BAM/CRAM alignment tags
 pub mod tag_registry;
+/// Shared test utilities for projection pushdown and execution plan analysis
+pub mod test_utils;
 
 #[cfg(test)]
 mod tests {

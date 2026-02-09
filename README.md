@@ -15,17 +15,18 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 |-------|-------------|-------------------|---------------------|----------------|---------------|--------|
 | **[datafusion-bio-format-core](datafusion/bio-format-core)** | Core utilities and object storage support | N/A | N/A | N/A | N/A | ✅ |
 | **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ✅ | ✅ (BGZF + uncompressed) | ✅ | ✅ |
-| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ✅ (TBI/CSI) | ❌ | ✅ (indexed) | ✅ | ✅ |
-| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ✅ (BAI/CSI) | ❌ | ✅ (indexed) | ✅ | ✅ |
+| **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ✅ (TBI/CSI) | ✅ | ✅ (indexed) | ✅ | ✅ |
+| **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM/SAM sequence alignments | ✅ (BAI/CSI) | ✅ | ✅ (indexed) | ✅ | ✅ |
 | **[datafusion-bio-format-bed](datafusion/bio-format-bed)** | BED genomic intervals | ❌ | ❌  | ❌ | ❌ | ✅ |
 | **[datafusion-bio-format-gff](datafusion/bio-format-gff)** | GFF genome annotations | ✅ | ✅ | ✅ (BGZF) | ❌ | ✅ |
 | **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ❌  | ❌ | ❌ | ✅ |
-| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ✅ (CRAI) | ❌  | ✅ (indexed) | ✅ | ✅ |
+| **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ✅ (CRAI) | ✅ | ✅ (indexed) | ✅ | ✅ |
 
 ## Features
 
 - **High Performance**: Index-based random access with balanced partitioning across genomic regions
 - **Predicate Pushdown**: SQL `WHERE` clauses on genomic coordinates use BAI/CRAI/TBI indexes to skip irrelevant data
+- **Projection Pushdown**: `SELECT` column lists are pushed down to the parser — only requested fields are extracted from each record, skipping expensive parsing of unreferenced columns
 - **Cloud Native**: Built-in support for GCS, S3, and Azure Blob Storage
 - **SQL Interface**: Query genomic data using familiar SQL syntax
 - **Constant Memory**: Streaming I/O with backpressure keeps memory usage constant regardless of file size
@@ -448,6 +449,56 @@ bcftools index -t sorted.vcf.gz          # creates sorted.vcf.gz.tbi
 (grep "^#" input.gff; grep -v "^#" input.gff | sort -k1,1 -k4,4n) | bgzip > sorted.gff.gz
 tabix -p gff sorted.gff.gz              # creates sorted.gff.gz.tbi
 ```
+
+## Projection Pushdown
+
+When a query selects only a subset of columns, the projection is pushed down to the record parser so that only the requested fields are extracted from each record. This avoids the cost of parsing, allocating, and converting fields that won't appear in the query output.
+
+### How It Works
+
+```
+SQL: SELECT chrom, start, mapping_quality FROM alignments
+
+┌──────────────────────────────────┐
+│  DataFusion optimizer            │
+│  projection = [1, 2, 6]         │  Only 3 of 11 columns needed
+└──────────┬───────────────────────┘
+           │
+┌──────────▼───────────────────────┐
+│  Physical exec (e.g. BamExec)    │
+│  needs_chrom = true              │  Computed from projection indices
+│  needs_start = true              │
+│  needs_mapq  = true              │
+│  needs_name  = false  ← skipped  │  No allocation, no parsing
+│  needs_cigar = false  ← skipped  │
+│  needs_seq   = false  ← skipped  │  Expensive fields avoided
+│  ...                             │
+└──────────┬───────────────────────┘
+           │
+┌──────────▼───────────────────────┐
+│  RecordBatch with 3 columns      │  Only projected arrays built
+└──────────────────────────────────┘
+```
+
+### Per-Format Support
+
+| Format | Level | Skipped When Not Projected |
+|--------|-------|---------------------------|
+| BAM/SAM | Field-level | All 11 core fields + auxiliary tags |
+| CRAM | Field-level | All 11 core fields + auxiliary tags |
+| VCF | Field-level | 8 core fields + INFO fields + FORMAT fields |
+| GFF | Field-level | 8 core fields + attribute parsing |
+| FASTQ | Field-level | All 4 fields (name, description, sequence, quality) |
+| BED | Batch-level | Projection applied after parsing |
+| FASTA | Batch-level | Projection applied after parsing |
+
+**Field-level** means the parser conditionally skips extraction per record — no allocation, no string conversion, no array construction for unrequested columns. This is especially beneficial for expensive fields like `sequence`, `quality_scores`, and `cigar`.
+
+**Batch-level** means all fields are still parsed but only the projected columns are included in the output `RecordBatch`.
+
+### Aggregate Query Support
+
+Empty projections (e.g., `SELECT COUNT(*) FROM table`) are handled correctly — zero-column `RecordBatch`es with accurate row counts are returned, allowing DataFusion to compute aggregates without reading any field data.
 
 ## Performance Benchmarks
 

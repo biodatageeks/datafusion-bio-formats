@@ -1,4 +1,5 @@
 use datafusion::prelude::*;
+use datafusion_bio_format_core::test_utils::{assert_plan_projection, find_leaf_exec};
 use datafusion_bio_format_fastq::FastqTableProvider;
 use std::sync::Arc;
 use tokio::fs;
@@ -313,5 +314,65 @@ async fn test_multithreaded_projection() -> Result<(), Box<dyn std::error::Error
         assert_eq!(batch.schema().field(0).name(), "name");
     }
 
+    Ok(())
+}
+
+// ── Plan analysis tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_fastq_plan_single_column_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_fastq_file("plan_single").await?;
+    let table = FastqTableProvider::new(file_path, None)?;
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT name FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    assert_plan_projection(&plan, "FastqExec", &["name"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fastq_plan_multi_column_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_fastq_file("plan_multi").await?;
+    let table = FastqTableProvider::new(file_path, None)?;
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT name, sequence FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    assert_plan_projection(&plan, "FastqExec", &["name", "sequence"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fastq_plan_no_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_fastq_file("plan_all").await?;
+    let table = FastqTableProvider::new(file_path, None)?;
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT * FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "FastqExec");
+    // 4 columns: name, description, sequence, quality_scores
+    assert_eq!(leaf.schema().fields().len(), 4);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_fastq_plan_multithreaded_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_fastq_file("plan_mt").await?;
+    let table = FastqTableProvider::new(file_path, None)?;
+    let config = SessionConfig::new().with_target_partitions(4);
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT sequence FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "FastqExec");
+    assert_eq!(leaf.schema().fields().len(), 1);
+    assert_eq!(leaf.schema().field(0).name(), "sequence");
     Ok(())
 }
