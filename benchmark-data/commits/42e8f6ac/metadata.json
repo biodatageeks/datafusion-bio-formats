@@ -1,6 +1,6 @@
 {
-  "ref": "v0.1.1",
-  "ref_type": "tag",
+  "ref": "feat/projection-pushdown-optimization",
+  "ref_type": "branch",
   "commit_sha": "42e8f6ac918a76606666c9eb48dc1a764f54d528",
   "timestamp": "2026-02-09T09:24:15Z",
   "benchmark_mode": "fast"
