@@ -1,5 +1,6 @@
 use datafusion::prelude::*;
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
+use datafusion_bio_format_core::test_utils::{assert_plan_projection, find_leaf_exec};
 use datafusion_bio_format_gff::table_provider::GffTableProvider;
 use std::sync::Arc;
 use tokio::fs;
@@ -589,5 +590,62 @@ async fn test_gff_select_position_columns_bug() -> Result<(), Box<dyn std::error
     );
     assert_eq!(batch2.num_columns(), 2);
 
+    Ok(())
+}
+
+// ── Plan analysis tests ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_gff_plan_single_column_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_gff_file().await?;
+    let table =
+        GffTableProvider::new(file_path, None, Some(create_object_storage_options()), true)?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT chrom FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    assert_plan_projection(&plan, "GffExec", &["chrom"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gff_plan_multi_column_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_gff_file().await?;
+    let table =
+        GffTableProvider::new(file_path, None, Some(create_object_storage_options()), true)?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT chrom, start, type FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    assert_plan_projection(&plan, "GffExec", &["chrom", "start", "type"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gff_plan_no_projection() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_gff_file().await?;
+    let table =
+        GffTableProvider::new(file_path, None, Some(create_object_storage_options()), true)?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT * FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "GffExec");
+    // 9 core columns (chrom, start, end, type, source, score, strand, phase, attributes)
+    assert_eq!(leaf.schema().fields().len(), 9);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gff_plan_with_attributes() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_gff_file().await?;
+    let table =
+        GffTableProvider::new(file_path, None, Some(create_object_storage_options()), true)?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT chrom, attributes FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    assert_plan_projection(&plan, "GffExec", &["chrom", "attributes"]);
     Ok(())
 }

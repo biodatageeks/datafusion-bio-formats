@@ -23,7 +23,7 @@ use datafusion_bio_format_core::table_utils::OptionalField;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures_util::{StreamExt, TryStreamExt};
-use log::debug;
+use log::{debug, info};
 use noodles_bam as bam;
 use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
@@ -53,14 +53,26 @@ pub struct BamExec {
 }
 
 impl Debug for BamExec {
-    fn fmt(&self, _f: &mut Formatter<'_>) -> std::fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BamExec")
+            .field("projection", &self.projection)
+            .finish()
     }
 }
 
 impl DisplayAs for BamExec {
-    fn fmt_as(&self, _t: DisplayFormatType, _f: &mut Formatter) -> std::fmt::Result {
-        Ok(())
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+        let proj_str = match &self.projection {
+            Some(indices) => {
+                let col_names: Vec<&str> = indices
+                    .iter()
+                    .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                    .collect();
+                col_names.join(", ")
+            }
+            None => "*".to_string(),
+        };
+        write!(f, "BamExec: projection=[{}]", proj_str)
     }
 }
 
@@ -93,8 +105,20 @@ impl ExecutionPlan for BamExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        debug!("BamExec::execute partition={}", partition);
-        debug!("Projection: {:?}", self.projection);
+        let proj_cols = match &self.projection {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => "*".to_string(),
+        };
+        info!(
+            "{}: executing partition={} with projection=[{}]",
+            self.name(),
+            partition,
+            proj_cols
+        );
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
 
@@ -346,18 +370,32 @@ fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, A
 macro_rules! process_bam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
-        // Create vectors for accumulating record data
-        let mut name: Vec<Option<String>> = Vec::with_capacity($batch_size);
-        let mut chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
-        let mut start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut end: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut flag: Vec<u32> = Vec::with_capacity($batch_size);
-        let mut cigar: Vec<String> = Vec::with_capacity($batch_size);
-        let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
-        let mut mate_start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut seq_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
-        let mut qual_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
+        // Determine which fields are needed based on projection
+        let needs_name = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
+        let needs_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
+        let needs_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
+        let needs_end = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
+        let needs_flags = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
+        let needs_cigar = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
+        let needs_mapq = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
+        let needs_mate_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
+        let needs_mate_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
+        let needs_sequence = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
+        let needs_quality = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
+        let needs_any_tag = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 11));
+
+        // Create vectors for accumulating record data (conditional capacity)
+        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut chrom: Vec<Option<String>> = if needs_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut mapping_quality: Vec<Option<u32>> = if needs_mapq { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
+        let mut qual_builder = if needs_quality { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
 
         // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -380,87 +418,111 @@ macro_rules! process_bam_records_impl {
             let record = result?;  // propagate errors if any
 
             // Extract record name
-            match record.name() {
-                Some(read_name) => {
-                    name.push(Some(read_name.to_string()));
-                },
-                _ => {
-                    name.push(None);
-                }
-            };
+            if needs_name {
+                match record.name() {
+                    Some(read_name) => {
+                        name.push(Some(read_name.to_string()));
+                    },
+                    _ => {
+                        name.push(None);
+                    }
+                };
+            }
 
             // Extract chromosome name
-            let chrom_name = get_chrom_by_seq_id(
-                record.reference_sequence_id(),
-                &names,
-            );
-            chrom.push(chrom_name);
+            if needs_chrom {
+                let chrom_name = get_chrom_by_seq_id(
+                    record.reference_sequence_id(),
+                    &names,
+                );
+                chrom.push(chrom_name);
+            }
 
             // Extract alignment start position
-            match record.alignment_start() {
-                Some(start_pos) => {
-                    // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                    let pos = start_pos?.get() as u32;
-                    start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
-                },
-                None => {
-                    start.push(None);
+            if needs_start {
+                match record.alignment_start() {
+                    Some(start_pos) => {
+                        // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
+                        let pos = start_pos?.get() as u32;
+                        start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                    },
+                    None => {
+                        start.push(None);
+                    }
                 }
             }
 
             // Extract alignment end position
-            match record.alignment_end() {
-                Some(end_pos) => {
-                    end.push(Some(end_pos?.get() as u32));
-                },
-                None => {
-                    end.push(None);
-                }
-            };
+            if needs_end {
+                match record.alignment_end() {
+                    Some(end_pos) => {
+                        end.push(Some(end_pos?.get() as u32));
+                    },
+                    None => {
+                        end.push(None);
+                    }
+                };
+            }
 
             // Extract mapping quality
-            match record.mapping_quality() {
-                Some(mapping_quality_value) => {
-                    mapping_quality.push(Some(mapping_quality_value.get() as u32));
-                },
-                _ => {
-                    mapping_quality.push(None);
-                }
-            };
+            if needs_mapq {
+                match record.mapping_quality() {
+                    Some(mapping_quality_value) => {
+                        mapping_quality.push(Some(mapping_quality_value.get() as u32));
+                    },
+                    _ => {
+                        mapping_quality.push(None);
+                    }
+                };
+            }
 
             // Extract sequence
-            seq_buf.clear();
-            seq_buf.extend(record.sequence().iter().map(char::from));
-            seq_builder.append_value(&seq_buf);
+            if needs_sequence {
+                seq_buf.clear();
+                seq_buf.extend(record.sequence().iter().map(char::from));
+                seq_builder.append_value(&seq_buf);
+            }
 
             // Extract quality scores
-            qual_buf.clear();
-            qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
-            qual_builder.append_value(&qual_buf);
+            if needs_quality {
+                qual_buf.clear();
+                qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
+                qual_builder.append_value(&qual_buf);
+            }
 
             // Extract flags and CIGAR
-            flag.push(record.flags().bits() as u32);
-            format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-            cigar.push(cigar_buf.clone());
+            if needs_flags {
+                flag.push(record.flags().bits() as u32);
+            }
+            if needs_cigar {
+                format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
+                cigar.push(cigar_buf.clone());
+            }
 
             // Extract mate information
-            let mate_chrom_name = get_chrom_by_seq_id(
-                record.mate_reference_sequence_id(),
-                &names,
-            );
-            mate_chrom.push(mate_chrom_name);
+            if needs_mate_chrom {
+                let mate_chrom_name = get_chrom_by_seq_id(
+                    record.mate_reference_sequence_id(),
+                    &names,
+                );
+                mate_chrom.push(mate_chrom_name);
+            }
 
-            match record.mate_alignment_start() {
-                Some(mate_start_pos) => {
-                    // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                    let pos = mate_start_pos?.get() as u32;
-                    mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
-                },
-                _ => mate_start.push(None),
-            };
+            if needs_mate_start {
+                match record.mate_alignment_start() {
+                    Some(mate_start_pos) => {
+                        // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
+                        let pos = mate_start_pos?.get() as u32;
+                        mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                    },
+                    _ => mate_start.push(None),
+                };
+            }
 
             // Load tag fields
-            load_tags(&record, &mut tag_builders)?;
+            if needs_any_tag {
+                load_tags(&record, &mut tag_builders)?;
+            }
 
             record_num += 1;
 
@@ -508,7 +570,7 @@ macro_rules! process_bam_records_impl {
         }
 
         // If there are remaining records that don't fill a complete batch, yield them as well
-        if !name.is_empty() {
+        if record_num > 0 && record_num % $batch_size != 0 {
             let tag_arrays = if num_tag_fields > 0 {
                 Some(builders_to_arrays(&mut tag_builders.2)?)
             } else {
@@ -591,17 +653,31 @@ async fn get_local_bam(
 macro_rules! process_sam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
-        let mut name: Vec<Option<String>> = Vec::with_capacity($batch_size);
-        let mut chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
-        let mut start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut end: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut flag: Vec<u32> = Vec::with_capacity($batch_size);
-        let mut cigar: Vec<String> = Vec::with_capacity($batch_size);
-        let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity($batch_size);
-        let mut mate_start: Vec<Option<u32>> = Vec::with_capacity($batch_size);
-        let mut seq_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
-        let mut qual_builder = StringBuilder::with_capacity($batch_size, $batch_size * 150);
+        // Determine which fields are needed based on projection
+        let needs_name = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
+        let needs_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
+        let needs_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
+        let needs_end = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
+        let needs_flags = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
+        let needs_cigar = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
+        let needs_mapq = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
+        let needs_mate_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
+        let needs_mate_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
+        let needs_sequence = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
+        let needs_quality = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
+        let needs_any_tag = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 11));
+
+        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut chrom: Vec<Option<String>> = if needs_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut mapping_quality: Vec<Option<u32>> = if needs_mapq { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
+        let mut qual_builder = if needs_quality { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
 
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
@@ -620,77 +696,101 @@ macro_rules! process_sam_records_impl {
         while let Some(result) = records.next().await {
             let record = result?;
 
-            match record.name() {
-                Some(read_name) => {
-                    name.push(Some(read_name.to_string()));
-                },
-                _ => {
-                    name.push(None);
-                }
-            };
+            if needs_name {
+                match record.name() {
+                    Some(read_name) => {
+                        name.push(Some(read_name.to_string()));
+                    },
+                    _ => {
+                        name.push(None);
+                    }
+                };
+            }
 
-            let chrom_name = get_chrom_by_seq_id_sam(
-                record.reference_sequence_id(),
-                &names,
-            );
-            chrom.push(chrom_name);
+            if needs_chrom {
+                let chrom_name = get_chrom_by_seq_id_sam(
+                    record.reference_sequence_id(),
+                    &names,
+                );
+                chrom.push(chrom_name);
+            }
 
-            match record.alignment_start() {
-                Some(start_pos) => {
-                    let pos = usize::from(start_pos) as u32;
-                    start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
-                },
-                None => {
-                    start.push(None);
+            if needs_start {
+                match record.alignment_start() {
+                    Some(start_pos) => {
+                        let pos = usize::from(start_pos) as u32;
+                        start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                    },
+                    None => {
+                        start.push(None);
+                    }
                 }
             }
 
-            match record.alignment_end() {
-                Some(end_pos) => {
-                    let pos = usize::from(end_pos) as u32;
-                    end.push(Some(pos));
-                },
-                None => {
-                    end.push(None);
-                }
-            };
+            if needs_end {
+                match record.alignment_end() {
+                    Some(end_pos) => {
+                        let pos = usize::from(end_pos) as u32;
+                        end.push(Some(pos));
+                    },
+                    None => {
+                        end.push(None);
+                    }
+                };
+            }
 
-            match record.mapping_quality() {
-                Some(mapping_quality_value) => {
-                    mapping_quality.push(Some(u8::from(mapping_quality_value) as u32));
-                },
-                _ => {
-                    mapping_quality.push(None);
-                }
-            };
+            if needs_mapq {
+                match record.mapping_quality() {
+                    Some(mapping_quality_value) => {
+                        mapping_quality.push(Some(u8::from(mapping_quality_value) as u32));
+                    },
+                    _ => {
+                        mapping_quality.push(None);
+                    }
+                };
+            }
 
-            seq_buf.clear();
-            seq_buf.extend(record.sequence().as_ref().iter().map(|b| char::from(*b)));
-            seq_builder.append_value(&seq_buf);
+            if needs_sequence {
+                seq_buf.clear();
+                seq_buf.extend(record.sequence().as_ref().iter().map(|b| char::from(*b)));
+                seq_builder.append_value(&seq_buf);
+            }
 
-            qual_buf.clear();
-            qual_buf.extend(record.quality_scores().as_ref().iter().map(|s| char::from(*s + 33)));
-            qual_builder.append_value(&qual_buf);
+            if needs_quality {
+                qual_buf.clear();
+                qual_buf.extend(record.quality_scores().as_ref().iter().map(|s| char::from(*s + 33)));
+                qual_builder.append_value(&qual_buf);
+            }
 
-            flag.push(record.flags().bits() as u32);
-            format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
-            cigar.push(cigar_buf.clone());
+            if needs_flags {
+                flag.push(record.flags().bits() as u32);
+            }
+            if needs_cigar {
+                format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+                cigar.push(cigar_buf.clone());
+            }
 
-            let mate_chrom_name = get_chrom_by_seq_id_sam(
-                record.mate_reference_sequence_id(),
-                &names,
-            );
-            mate_chrom.push(mate_chrom_name);
+            if needs_mate_chrom {
+                let mate_chrom_name = get_chrom_by_seq_id_sam(
+                    record.mate_reference_sequence_id(),
+                    &names,
+                );
+                mate_chrom.push(mate_chrom_name);
+            }
 
-            match record.mate_alignment_start() {
-                Some(mate_start_pos) => {
-                    let pos = usize::from(mate_start_pos) as u32;
-                    mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
-                },
-                _ => mate_start.push(None),
-            };
+            if needs_mate_start {
+                match record.mate_alignment_start() {
+                    Some(mate_start_pos) => {
+                        let pos = usize::from(mate_start_pos) as u32;
+                        mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                    },
+                    _ => mate_start.push(None),
+                };
+            }
 
-            load_tags(&record, &mut tag_builders)?;
+            if needs_any_tag {
+                load_tags(&record, &mut tag_builders)?;
+            }
 
             record_num += 1;
 
@@ -735,7 +835,7 @@ macro_rules! process_sam_records_impl {
             }
         }
 
-        if !name.is_empty() {
+        if record_num > 0 && record_num % $batch_size != 0 {
             let tag_arrays = if num_tag_fields > 0 {
                 Some(builders_to_arrays(&mut tag_builders.2)?)
             } else {

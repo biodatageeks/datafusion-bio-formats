@@ -14,7 +14,7 @@ use datafusion_bio_format_core::object_storage::{
 
 use futures::channel::mpsc;
 use futures_util::{StreamExt, TryStreamExt};
-use log::debug;
+use log::{debug, info};
 use noodles_bgzf::{IndexedReader, gzi};
 use noodles_fastq as fastq;
 use std::any::Any;
@@ -271,15 +271,24 @@ pub struct FastqExec {
 impl Debug for FastqExec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FastqExec")
-            .field("file_path", &self.file_path)
-            .field("strategy", &self.strategy)
+            .field("projection", &self.projection)
             .finish()
     }
 }
 
 impl DisplayAs for FastqExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "FastqExec: path={}", self.file_path)
+        let proj_str = match &self.projection {
+            Some(indices) => {
+                let col_names: Vec<&str> = indices
+                    .iter()
+                    .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                    .collect();
+                col_names.join(", ")
+            }
+            None => "*".to_string(),
+        };
+        write!(f, "FastqExec: projection=[{}]", proj_str)
     }
 }
 
@@ -312,8 +321,20 @@ impl ExecutionPlan for FastqExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        debug!("FastqExec::execute partition={}", partition);
-        debug!("Projection: {:?}", self.projection);
+        let proj_cols = match &self.projection {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => "*".to_string(),
+        };
+        info!(
+            "{}: executing partition={} with projection=[{}]",
+            self.name(),
+            partition,
+            proj_cols
+        );
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
 

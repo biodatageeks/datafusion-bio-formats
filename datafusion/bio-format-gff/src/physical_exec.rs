@@ -17,7 +17,7 @@ use datafusion_bio_format_core::{
     table_utils::{Attribute, OptionalField, builders_to_arrays},
 };
 use futures_util::{StreamExt, TryStreamExt};
-use log::debug;
+use log::{debug, info};
 use noodles_gff::feature::RecordBuf;
 use noodles_gff::feature::record::{Phase, Strand};
 use noodles_gff::feature::record_buf::attributes::field::Value;
@@ -47,14 +47,26 @@ pub struct GffExec {
 }
 
 impl Debug for GffExec {
-    fn fmt(&self, _f: &mut Formatter<'_>) -> std::fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GffExec")
+            .field("projection", &self.projection)
+            .finish()
     }
 }
 
 impl DisplayAs for GffExec {
-    fn fmt_as(&self, _t: DisplayFormatType, _f: &mut Formatter) -> std::fmt::Result {
-        Ok(())
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+        let proj_str = match &self.projection {
+            Some(indices) => {
+                let col_names: Vec<&str> = indices
+                    .iter()
+                    .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                    .collect();
+                col_names.join(", ")
+            }
+            None => "*".to_string(),
+        };
+        write!(f, "GffExec: projection=[{}]", proj_str)
     }
 }
 
@@ -87,8 +99,20 @@ impl ExecutionPlan for GffExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        debug!("GffExec::execute partition={}", partition);
-        debug!("Projection: {:?}", self.projection);
+        let proj_cols = match &self.projection {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => "*".to_string(),
+        };
+        info!(
+            "{}: executing partition={} with projection=[{}]",
+            self.name(),
+            partition,
+            proj_cols
+        );
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
 

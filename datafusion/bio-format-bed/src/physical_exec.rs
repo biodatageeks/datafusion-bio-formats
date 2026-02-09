@@ -11,7 +11,7 @@ use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
 use futures_util::{StreamExt, TryStreamExt};
-use log::debug;
+use log::{debug, info};
 
 use crate::table_provider::BEDFields;
 use std::any::Any;
@@ -46,21 +46,33 @@ pub struct BedExec {
 }
 
 impl Debug for BedExec {
-    fn fmt(&self, _f: &mut Formatter<'_>) -> std::fmt::Result {
-        Ok(())
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BedExec")
+            .field("projection", &self.projection)
+            .finish()
     }
 }
 
 impl DisplayAs for BedExec {
-    fn fmt_as(&self, _t: DisplayFormatType, _f: &mut Formatter) -> std::fmt::Result {
-        Ok(())
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
+        let proj_str = match &self.projection {
+            Some(indices) => {
+                let col_names: Vec<&str> = indices
+                    .iter()
+                    .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                    .collect();
+                col_names.join(", ")
+            }
+            None => "*".to_string(),
+        };
+        write!(f, "BedExec: projection=[{}]", proj_str)
     }
 }
 
 impl ExecutionPlan for BedExec {
     /// Returns the name of this execution plan
     fn name(&self) -> &str {
-        "GffExec"
+        "BedExec"
     }
 
     /// Returns `self` as `Any` for dynamic type casting
@@ -94,11 +106,23 @@ impl ExecutionPlan for BedExec {
     /// * `context` - Task execution context
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        debug!("BedExec::execute");
-        debug!("Projection: {:?}", self.projection);
+        let proj_cols = match &self.projection {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                .collect::<Vec<_>>()
+                .join(", "),
+            None => "*".to_string(),
+        };
+        info!(
+            "{}: executing partition={} with projection=[{}]",
+            self.name(),
+            partition,
+            proj_cols
+        );
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
         let fut = get_stream(
