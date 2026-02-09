@@ -63,10 +63,12 @@ impl Debug for BamExec {
 impl DisplayAs for BamExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> std::fmt::Result {
         let proj_str = match &self.projection {
-            Some(indices) => {
-                let col_names: Vec<&str> = indices
+            Some(_) => {
+                let col_names: Vec<&str> = self
+                    .schema
+                    .fields()
                     .iter()
-                    .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                    .map(|f| f.name().as_str())
                     .collect();
                 col_names.join(", ")
             }
