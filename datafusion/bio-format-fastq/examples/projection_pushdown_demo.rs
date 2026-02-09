@@ -1,6 +1,5 @@
 use datafusion::prelude::*;
-use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
-use datafusion_bio_format_fastq::table_provider::FastqTableProvider;
+use datafusion_bio_format_fastq::FastqTableProvider;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs;
@@ -43,41 +42,26 @@ async fn create_test_file(content: &str, filename: &str) -> std::io::Result<Stri
     Ok(file_path)
 }
 
-fn create_object_storage_options() -> ObjectStorageOptions {
-    ObjectStorageOptions {
-        allow_anonymous: true,
-        enable_request_payer: false,
-        max_retries: Some(1),
-        timeout: Some(300),
-        chunk_size: Some(16),
-        concurrent_fetches: Some(8),
-        compression_type: Some(CompressionType::NONE),
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🧬 FASTQ Projection Pushdown Performance Demo");
+    println!("FASTQ Projection Pushdown Performance Demo");
     println!("==============================================\n");
 
     // Create test file
-    println!("📁 Creating test FASTQ file with 5000 records...");
+    println!("Creating test FASTQ file with 5000 records...");
     let file_path = create_test_file(LARGE_SAMPLE_FASTQ, "large_test.fastq").await?;
-    let object_storage_options = create_object_storage_options();
 
-    let table = FastqTableProvider::new(
-        file_path.clone(),
-        Some(1), // Single thread for consistent timing
-        Some(object_storage_options),
-    )?;
+    let table = FastqTableProvider::new(file_path.clone(), None)?;
 
-    let ctx = SessionContext::new();
+    // Use 1 partition for consistent timing
+    let config = SessionConfig::new().with_target_partitions(1);
+    let ctx = SessionContext::new_with_config(config);
     ctx.register_table("fastq_data", Arc::new(table))?;
 
-    println!("✅ Test file created and table registered\n");
+    println!("Test file created and table registered\n");
 
     // Test 1: Query all columns (no projection pushdown benefit)
-    println!("🔍 Test 1: Querying ALL columns");
+    println!("Test 1: Querying ALL columns");
     let start = Instant::now();
     let df = ctx.sql("SELECT * FROM fastq_data LIMIT 100").await?;
     let results = df.collect().await?;
@@ -91,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Time: {:?}\n", all_columns_time);
 
     // Test 2: Query only name column (should benefit from projection pushdown)
-    println!("🚀 Test 2: Querying ONLY 'name' column (projection pushdown)");
+    println!("Test 2: Querying ONLY 'name' column (projection pushdown)");
     let start = Instant::now();
     let df = ctx.sql("SELECT name FROM fastq_data LIMIT 100").await?;
     let results = df.collect().await?;
@@ -106,10 +90,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Calculate speedup
     let speedup = all_columns_time.as_nanos() as f64 / name_only_time.as_nanos() as f64;
-    println!("   📈 Speedup: {:.2}x faster\n", speedup);
+    println!("   Speedup: {:.2}x faster\n", speedup);
 
     // Test 3: Query name and sequence (partial projection)
-    println!("🔍 Test 3: Querying 'name' and 'sequence' columns");
+    println!("Test 3: Querying 'name' and 'sequence' columns");
     let start = Instant::now();
     let df = ctx
         .sql("SELECT name, sequence FROM fastq_data LIMIT 100")
@@ -125,10 +109,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Time: {:?}", two_columns_time);
 
     let speedup = all_columns_time.as_nanos() as f64 / two_columns_time.as_nanos() as f64;
-    println!("   📈 Speedup vs all columns: {:.2}x faster\n", speedup);
+    println!("   Speedup vs all columns: {:.2}x faster\n", speedup);
 
     // Test 4: COUNT query (should skip all field parsing)
-    println!("⚡ Test 4: COUNT query (maximum optimization)");
+    println!("Test 4: COUNT query (maximum optimization)");
     let start = Instant::now();
     let df = ctx.sql("SELECT COUNT(name) FROM fastq_data").await?;
     let results = df.collect().await?;
@@ -146,10 +130,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Time: {:?}", count_time);
 
     let speedup = all_columns_time.as_nanos() as f64 / count_time.as_nanos() as f64;
-    println!("   📈 Speedup vs all columns: {:.2}x faster\n", speedup);
+    println!("   Speedup vs all columns: {:.2}x faster\n", speedup);
 
     // Test 5: Demonstrate projection with complex query
-    println!("🧮 Test 5: Complex query with projection");
+    println!("Test 5: Complex query with projection");
     let start = Instant::now();
     let df = ctx.sql("SELECT name, LENGTH(sequence) as seq_length FROM fastq_data WHERE LENGTH(name) > 10 LIMIT 50").await?;
     let results = df.collect().await?;
@@ -165,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Time: {:?}\n", complex_time);
 
     // Show sample data
-    println!("📊 Sample data from projection query:");
+    println!("Sample data from projection query:");
     let df = ctx
         .sql("SELECT name, sequence FROM fastq_data LIMIT 3")
         .await?;
@@ -196,12 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   No results to display");
     }
 
-    println!("\n🎉 Demo completed!");
-    println!("💡 Key benefits of projection pushdown:");
-    println!("   • Skips parsing unnecessary FASTQ fields");
-    println!("   • Reduces memory allocation and copying");
-    println!("   • Improves query performance, especially for selective queries");
-    println!("   • Works with both single-threaded and multi-threaded readers");
+    println!("\nDemo completed!");
 
     // Cleanup
     let _ = fs::remove_file(&file_path).await;

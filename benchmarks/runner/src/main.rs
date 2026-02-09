@@ -225,8 +225,8 @@ async fn register_table(
                 .context("Failed to register VCF table")?;
         }
         "fastq" => {
-            use datafusion_bio_format_fastq::BgzfFastqTableProvider;
-            let provider = BgzfFastqTableProvider::try_new(file_path.to_string())
+            use datafusion_bio_format_fastq::FastqTableProvider;
+            let provider = FastqTableProvider::new(file_path.to_string(), None)
                 .context("Failed to create FASTQ table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register FASTQ table")?;
