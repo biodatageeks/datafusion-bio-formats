@@ -29,13 +29,6 @@ on:
         required: false
         type: string
 
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - 'datafusion/**'
-      - 'benchmarks/**'
-      - '.github/workflows/benchmark.yml'
-
   push:
     tags:
       - 'v*.*.*'

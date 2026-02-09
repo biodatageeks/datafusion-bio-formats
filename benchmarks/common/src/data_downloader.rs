@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -49,18 +49,24 @@ impl DataDownloader {
         let output_path = self.cache_dir.join(&file.filename);
 
         if output_path.exists() && !force {
-            println!("✓ Using cached file: {}", output_path.display());
+            // Validate cached file is not a stale HTML page from a previous failed download
+            if let Err(e) = validate_not_html(&output_path, &file.filename) {
+                println!("✗ Cached file invalid ({}), re-downloading...", e);
+                // validate_not_html already removes the file on HTML detection
+            } else {
+                println!("✓ Using cached file: {}", output_path.display());
 
-            if let Some(expected_checksum) = &file.checksum {
-                let actual_checksum = calculate_sha256(&output_path)?;
-                if &actual_checksum != expected_checksum {
-                    println!("✗ Checksum mismatch, re-downloading...");
-                    std::fs::remove_file(&output_path)?;
+                if let Some(expected_checksum) = &file.checksum {
+                    let actual_checksum = calculate_sha256(&output_path)?;
+                    if &actual_checksum != expected_checksum {
+                        println!("✗ Checksum mismatch, re-downloading...");
+                        std::fs::remove_file(&output_path)?;
+                    } else {
+                        return Ok(output_path);
+                    }
                 } else {
                     return Ok(output_path);
                 }
-            } else {
-                return Ok(output_path);
             }
         }
 
@@ -74,6 +80,10 @@ impl DataDownloader {
             );
             self.download_with_confirmation(file, &output_path)?;
         }
+
+        // Verify the downloaded file is not an HTML page (Google Drive sometimes
+        // returns an HTML warning/quota page with HTTP 200 instead of the actual file)
+        validate_not_html(&output_path, &file.filename)?;
 
         // Verify checksum if provided
         if let Some(expected_checksum) = &file.checksum {
@@ -210,6 +220,39 @@ pub fn extract_drive_id(url: &str) -> Result<String> {
         "Could not extract Google Drive ID from URL: {}",
         url
     ))
+}
+
+/// Check that a downloaded file is not an HTML page.
+/// Google Drive sometimes returns HTTP 200 with an HTML warning or quota-exceeded
+/// page instead of the actual file content.
+fn validate_not_html(path: &Path, filename: &str) -> Result<()> {
+    let mut file = File::open(path)?;
+    let mut header = [0u8; 512];
+    let bytes_read = file.read(&mut header)?;
+    if bytes_read == 0 {
+        anyhow::bail!(
+            "Downloaded file '{}' is empty — Google Drive may have returned an error page",
+            filename
+        );
+    }
+
+    // Check for HTML markers in the first bytes
+    let header_str = String::from_utf8_lossy(&header[..bytes_read]);
+    let lower = header_str.to_lowercase();
+    if lower.contains("<!doctype html") || lower.contains("<html") {
+        // Remove the bogus file so it doesn't get cached
+        let _ = std::fs::remove_file(path);
+        anyhow::bail!(
+            "Downloaded file '{}' is an HTML page instead of the expected data file. \
+             This usually means the Google Drive download quota has been exceeded \
+             or the file requires manual authorization. \
+             Please download the file manually and place it at: {}",
+            filename,
+            path.display()
+        );
+    }
+
+    Ok(())
 }
 
 pub fn calculate_sha256(path: &Path) -> Result<String> {
