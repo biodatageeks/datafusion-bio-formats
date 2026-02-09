@@ -107,9 +107,11 @@ impl ExecutionPlan for FastaExec {
         context: Arc<TaskContext>,
     ) -> datafusion::common::Result<SendableRecordBatchStream> {
         let proj_cols = match &self.projection {
-            Some(indices) => indices
+            Some(_) => self
+                .schema
+                .fields()
                 .iter()
-                .filter_map(|&i| self.schema.fields().get(i).map(|f| f.name().as_str()))
+                .map(|f| f.name().as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
             None => "*".to_string(),
