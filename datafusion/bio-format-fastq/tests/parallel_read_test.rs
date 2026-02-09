@@ -3,6 +3,7 @@ use datafusion_bio_format_fastq::FastqTableProvider;
 use std::collections::HashSet;
 use std::io::Write;
 use std::sync::Arc;
+use tempfile::TempDir;
 
 /// Generate an uncompressed FASTQ file with `num_records` records.
 fn generate_test_fastq(path: &str, num_records: usize) {
@@ -157,18 +158,18 @@ async fn test_bgzf_parallel_with_limit() {
 
 #[tokio::test]
 async fn test_bgzf_no_gzi_falls_back_to_sequential() {
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test_no_gzi.fastq.bgz");
+
     // Copy the .bgz file to a temp location without the .gzi
     let src = format!("{}/data/sample.fastq.bgz", env!("CARGO_MANIFEST_DIR"));
-    let tmp_path = "/tmp/test_no_gzi.fastq.bgz".to_string();
     std::fs::copy(&src, &tmp_path).expect("Failed to copy test file");
-    // Make sure there's no .gzi file
-    let _ = std::fs::remove_file(format!("{}.gzi", tmp_path));
 
     let config = SessionConfig::new().with_target_partitions(4);
     let ctx = SessionContext::new_with_config(config);
 
-    let provider =
-        FastqTableProvider::new(tmp_path.clone(), None).expect("Failed to create provider");
+    let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+        .expect("Failed to create provider");
     ctx.register_table("fastq", Arc::new(provider))
         .expect("Failed to register table");
 
@@ -183,24 +184,22 @@ async fn test_bgzf_no_gzi_falls_back_to_sequential() {
         total_rows, 2000,
         "Sequential fallback should still read all 2000 rows"
     );
-
-    // Cleanup
-    let _ = std::fs::remove_file(&tmp_path);
 }
 
 // ---- Uncompressed parallel read tests ----
 
 #[tokio::test]
 async fn test_uncompressed_parallel_row_count() {
-    let tmp_path = "/tmp/test_uncomp_parallel_row_count.fastq";
-    generate_test_fastq(tmp_path, 500);
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test.fastq");
+    generate_test_fastq(tmp_path.to_str().unwrap(), 500);
 
     for partitions in 1..=8 {
         let config = SessionConfig::new().with_target_partitions(partitions);
         let ctx = SessionContext::new_with_config(config);
 
-        let provider =
-            FastqTableProvider::new(tmp_path.to_string(), None).expect("Failed to create provider");
+        let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+            .expect("Failed to create provider");
         ctx.register_table("fastq", Arc::new(provider))
             .expect("Failed to register table");
 
@@ -217,20 +216,19 @@ async fn test_uncompressed_parallel_row_count() {
             partitions, total_rows
         );
     }
-
-    let _ = std::fs::remove_file(tmp_path);
 }
 
 #[tokio::test]
 async fn test_uncompressed_parallel_data_integrity() {
-    let tmp_path = "/tmp/test_uncomp_parallel_data_integrity.fastq";
-    generate_test_fastq(tmp_path, 500);
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test.fastq");
+    generate_test_fastq(tmp_path.to_str().unwrap(), 500);
 
     let config = SessionConfig::new().with_target_partitions(4);
     let ctx = SessionContext::new_with_config(config);
 
-    let provider =
-        FastqTableProvider::new(tmp_path.to_string(), None).expect("Failed to create provider");
+    let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+        .expect("Failed to create provider");
     ctx.register_table("fastq", Arc::new(provider))
         .expect("Failed to register table");
 
@@ -262,20 +260,19 @@ async fn test_uncompressed_parallel_data_integrity() {
         "Expected 500 unique names, got {}",
         names.len()
     );
-
-    let _ = std::fs::remove_file(tmp_path);
 }
 
 #[tokio::test]
 async fn test_uncompressed_parallel_with_projection() {
-    let tmp_path = "/tmp/test_uncomp_parallel_projection.fastq";
-    generate_test_fastq(tmp_path, 500);
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test.fastq");
+    generate_test_fastq(tmp_path.to_str().unwrap(), 500);
 
     let config = SessionConfig::new().with_target_partitions(4);
     let ctx = SessionContext::new_with_config(config);
 
-    let provider =
-        FastqTableProvider::new(tmp_path.to_string(), None).expect("Failed to create provider");
+    let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+        .expect("Failed to create provider");
     ctx.register_table("fastq", Arc::new(provider))
         .expect("Failed to register table");
 
@@ -292,20 +289,19 @@ async fn test_uncompressed_parallel_with_projection() {
         assert_eq!(batch.num_columns(), 1);
         assert_eq!(batch.schema().field(0).name(), "sequence");
     }
-
-    let _ = std::fs::remove_file(tmp_path);
 }
 
 #[tokio::test]
 async fn test_uncompressed_parallel_with_limit() {
-    let tmp_path = "/tmp/test_uncomp_parallel_limit.fastq";
-    generate_test_fastq(tmp_path, 500);
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test.fastq");
+    generate_test_fastq(tmp_path.to_str().unwrap(), 500);
 
     let config = SessionConfig::new().with_target_partitions(4);
     let ctx = SessionContext::new_with_config(config);
 
-    let provider =
-        FastqTableProvider::new(tmp_path.to_string(), None).expect("Failed to create provider");
+    let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+        .expect("Failed to create provider");
     ctx.register_table("fastq", Arc::new(provider))
         .expect("Failed to register table");
 
@@ -321,20 +317,19 @@ async fn test_uncompressed_parallel_with_limit() {
         "Expected at most 10 rows, got {}",
         total_rows
     );
-
-    let _ = std::fs::remove_file(tmp_path);
 }
 
 #[tokio::test]
 async fn test_uncompressed_parallel_small_file() {
-    let tmp_path = "/tmp/test_uncomp_parallel_small.fastq";
-    generate_test_fastq(tmp_path, 3);
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test.fastq");
+    generate_test_fastq(tmp_path.to_str().unwrap(), 3);
 
     let config = SessionConfig::new().with_target_partitions(8);
     let ctx = SessionContext::new_with_config(config);
 
-    let provider =
-        FastqTableProvider::new(tmp_path.to_string(), None).expect("Failed to create provider");
+    let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+        .expect("Failed to create provider");
     ctx.register_table("fastq", Arc::new(provider))
         .expect("Failed to register table");
 
@@ -350,20 +345,19 @@ async fn test_uncompressed_parallel_small_file() {
         "Expected 3 rows for small file, got {}",
         total_rows
     );
-
-    let _ = std::fs::remove_file(tmp_path);
 }
 
 #[tokio::test]
 async fn test_uncompressed_parallel_single_record() {
-    let tmp_path = "/tmp/test_uncomp_parallel_single.fastq";
-    generate_test_fastq(tmp_path, 1);
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test.fastq");
+    generate_test_fastq(tmp_path.to_str().unwrap(), 1);
 
     let config = SessionConfig::new().with_target_partitions(4);
     let ctx = SessionContext::new_with_config(config);
 
-    let provider =
-        FastqTableProvider::new(tmp_path.to_string(), None).expect("Failed to create provider");
+    let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+        .expect("Failed to create provider");
     ctx.register_table("fastq", Arc::new(provider))
         .expect("Failed to register table");
 
@@ -375,8 +369,6 @@ async fn test_uncompressed_parallel_single_record() {
 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 1, "Expected exactly 1 row, got {}", total_rows);
-
-    let _ = std::fs::remove_file(tmp_path);
 }
 
 // ---- GZIP sequential fallback test ----
@@ -386,12 +378,13 @@ async fn test_gzip_reads_sequentially() {
     use datafusion_bio_format_fastq::FastqLocalWriter;
     use noodles_fastq::record::Definition;
 
-    let tmp_path = "/tmp/test_gzip_sequential.fastq.gz";
+    let tmp_dir = TempDir::new().unwrap();
+    let tmp_path = tmp_dir.path().join("test.fastq.gz");
     let num_records = 50;
 
     {
         let mut writer = FastqLocalWriter::with_compression(
-            tmp_path,
+            &tmp_path,
             datafusion_bio_format_fastq::FastqCompressionType::Gzip,
         )
         .expect("Failed to create writer");
@@ -409,8 +402,8 @@ async fn test_gzip_reads_sequentially() {
     let config = SessionConfig::new().with_target_partitions(4);
     let ctx = SessionContext::new_with_config(config);
 
-    let provider =
-        FastqTableProvider::new(tmp_path.to_string(), None).expect("Failed to create provider");
+    let provider = FastqTableProvider::new(tmp_path.to_str().unwrap().to_string(), None)
+        .expect("Failed to create provider");
     ctx.register_table("fastq", Arc::new(provider))
         .expect("Failed to register table");
 
@@ -426,6 +419,4 @@ async fn test_gzip_reads_sequentially() {
         "Expected {} rows from gzip file, got {}",
         num_records, total_rows
     );
-
-    let _ = std::fs::remove_file(tmp_path);
 }

@@ -103,8 +103,8 @@ impl TableProvider for FastqTableProvider {
         let strategy = if matches!(store_type, StorageType::LOCAL) {
             detect_local_strategy(&self.file_path, target_partitions).map_err(|e| {
                 datafusion::common::DataFusionError::Execution(format!(
-                    "Failed to detect FASTQ partition strategy: {}",
-                    e
+                    "Failed to detect FASTQ partition strategy for '{}': {}",
+                    self.file_path, e
                 ))
             })?
         } else {
