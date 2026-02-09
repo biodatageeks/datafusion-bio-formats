@@ -571,9 +571,9 @@ impl TableProvider for CramTableProvider {
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
                 Some(indices) if indices.is_empty() => {
-                    // For empty projections (COUNT(*)), use a dummy field with preserved metadata
+                    // For empty projections (COUNT(*)), return an empty schema with preserved metadata
                     Arc::new(Schema::new_with_metadata(
-                        vec![Field::new("dummy", DataType::Null, true)],
+                        Vec::<Field>::new(),
                         schema.metadata().clone(),
                     ))
                 }

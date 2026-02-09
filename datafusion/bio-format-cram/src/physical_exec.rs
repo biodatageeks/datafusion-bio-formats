@@ -607,6 +607,7 @@ async fn get_remote_cram_stream(
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
+                    batch_size,
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
@@ -648,6 +649,7 @@ async fn get_remote_cram_stream(
                 },
                 tag_arrays.as_ref(),
                 projection.clone(),
+                record_num % batch_size,
             )?;
             yield batch;
         }
@@ -936,6 +938,7 @@ async fn get_local_cram(
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
+                    batch_size,
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
@@ -977,6 +980,7 @@ async fn get_local_cram(
                 },
                 tag_arrays.as_ref(),
                 projection.clone(),
+                record_num % batch_size,
             )?;
             yield batch;
         }
@@ -1259,6 +1263,7 @@ async fn get_indexed_stream(
                             },
                             tag_arrays.as_ref(),
                             projection.clone(),
+                            name.len(),
                         )?;
 
                         // Send batch with backpressure
@@ -1310,6 +1315,7 @@ async fn get_indexed_stream(
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
+                    name.len(),
                 )?;
                 loop {
                     match tx.try_send(Ok(batch.clone())) {

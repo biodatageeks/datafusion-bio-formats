@@ -146,9 +146,7 @@ async fn test_bam_projection_with_count() -> Result<(), Box<dyn std::error::Erro
 #[tokio::test]
 async fn test_bam_count_star() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = setup_bam_ctx("t").await?;
-    // Use COUNT(name) instead of COUNT(*) to avoid DataFusion's aggregate-only
-    // optimization which sends an empty projection causing schema mismatch.
-    let df = ctx.sql("SELECT COUNT(name) FROM t").await?;
+    let df = ctx.sql("SELECT COUNT(*) FROM t").await?;
     let batches = df.collect().await?;
     let count = batches[0]
         .column(0)

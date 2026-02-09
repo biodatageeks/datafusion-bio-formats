@@ -551,6 +551,7 @@ macro_rules! process_bam_records_impl {
                     },
                     tag_arrays.as_ref(),
                     $projection.clone(),
+                    $batch_size,
                 )?;
                 batch_num += 1;
                 log::debug!("Batch number: {}", batch_num);
@@ -593,6 +594,7 @@ macro_rules! process_bam_records_impl {
                 },
                 tag_arrays.as_ref(),
                 $projection.clone(),
+                record_num % $batch_size,
             )?;
             yield batch;
         }
@@ -818,6 +820,7 @@ macro_rules! process_sam_records_impl {
                     },
                     tag_arrays.as_ref(),
                     $projection.clone(),
+                    $batch_size,
                 )?;
                 batch_num += 1;
                 log::debug!("Batch number: {}", batch_num);
@@ -858,6 +861,7 @@ macro_rules! process_sam_records_impl {
                 },
                 tag_arrays.as_ref(),
                 $projection.clone(),
+                record_num % $batch_size,
             )?;
             yield batch;
         }
@@ -1215,6 +1219,7 @@ async fn get_indexed_stream(
                                 },
                                 tag_arrays.as_ref(),
                                 projection.clone(),
+                                name.len(),
                             )?;
 
                             loop {
@@ -1392,6 +1397,7 @@ async fn get_indexed_stream(
                             },
                             tag_arrays.as_ref(),
                             projection.clone(),
+                            name.len(),
                         )?;
 
                         // Send batch with backpressure
@@ -1443,6 +1449,7 @@ async fn get_indexed_stream(
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
+                    name.len(),
                 )?;
                 loop {
                     match tx.try_send(Ok(batch.clone())) {

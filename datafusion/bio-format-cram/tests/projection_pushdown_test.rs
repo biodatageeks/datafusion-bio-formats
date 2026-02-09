@@ -136,9 +136,7 @@ async fn test_cram_projection_with_limit() -> Result<(), Box<dyn std::error::Err
 #[tokio::test]
 async fn test_cram_count_star() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = setup_cram_ctx("t").await?;
-    // Use COUNT(name) instead of COUNT(*) to avoid DataFusion's aggregate-only
-    // optimization which sends an empty projection causing schema mismatch.
-    let df = ctx.sql("SELECT COUNT(name) FROM t").await?;
+    let df = ctx.sql("SELECT COUNT(*) FROM t").await?;
     let batches = df.collect().await?;
     let count = batches[0]
         .column(0)

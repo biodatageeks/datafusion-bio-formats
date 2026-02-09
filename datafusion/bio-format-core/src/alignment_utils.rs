@@ -3,9 +3,8 @@ use datafusion::arrow::array::{
     StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::error::DataFusionError;
-use log::debug;
 use noodles_sam::alignment::record::cigar::op::{Kind as OpKind, Op};
 use std::fmt::Write;
 use std::io;
@@ -127,11 +126,13 @@ pub struct RecordFields<'a> {
 /// * `fields` - Container with pointers to all core field vectors
 /// * `tag_arrays` - Optional vector of tag column arrays
 /// * `projection` - Optional column indices to include in output
+/// * `record_count` - Number of records in this batch (used for empty projection / null arrays)
 pub fn build_record_batch(
     schema: SchemaRef,
     fields: RecordFields,
     tag_arrays: Option<&Vec<ArrayRef>>,
     projection: Option<Vec<usize>>,
+    record_count: usize,
 ) -> datafusion::error::Result<RecordBatch> {
     let name = fields.name;
     let chrom = fields.chrom;
@@ -169,9 +170,6 @@ pub fn build_record_batch(
     let make_mate_start =
         || Arc::new(UInt32Array::from_iter(mate_start.iter().copied())) as Arc<dyn Array>;
 
-    // Record count for null arrays (use name slice length as the canonical count)
-    let record_count = name.len();
-
     let arrays = match projection {
         None => {
             let mut arrays: Vec<Arc<dyn Array>> = vec![
@@ -196,8 +194,8 @@ pub fn build_record_batch(
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
             if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
+                // For empty projections (COUNT(*)), return an empty vector
+                // The schema should already be empty from the table provider
             } else {
                 for i in proj_ids.clone() {
                     match i {
@@ -235,8 +233,15 @@ pub fn build_record_batch(
             arrays
         }
     };
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    // For empty projections (COUNT(*)), we need to specify row count explicitly
+    if arrays.is_empty() {
+        let options = RecordBatchOptions::new().with_row_count(Some(record_count));
+        RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    } else {
+        RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    }
 }
 
 /// Convert a CIGAR operation to string representation
