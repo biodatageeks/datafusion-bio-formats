@@ -14,7 +14,7 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 | Crate | Description | Predicate Pushdown | Projection Pushdown | Multi-threaded | Write Support | Status |
 |-------|-------------|-------------------|---------------------|----------------|---------------|--------|
 | **[datafusion-bio-format-core](datafusion/bio-format-core)** | Core utilities and object storage support | N/A | N/A | N/A | N/A | ✅ |
-| **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ❌ |✅ (BGZF) | ✅ | ✅ |
+| **[datafusion-bio-format-fastq](datafusion/bio-format-fastq)** | FASTQ sequencing reads | ❌ | ✅ | ✅ (BGZF + uncompressed) | ✅ | ✅ |
 | **[datafusion-bio-format-vcf](datafusion/bio-format-vcf)** | VCF genetic variants | ✅ (TBI/CSI) | ❌ | ✅ (indexed) | ✅ | ✅ |
 | **[datafusion-bio-format-bam](datafusion/bio-format-bam)** | BAM sequence alignments | ✅ (BAI/CSI) | ❌ | ✅ (indexed) | ✅ | ✅ |
 | **[datafusion-bio-format-bed](datafusion/bio-format-bed)** | BED genomic intervals | ❌ | ❌  | ❌ | ❌ | ✅ |
@@ -53,7 +53,7 @@ datafusion-bio-format-bam = { git = "https://github.com/biodatageeks/datafusion-
 
 ```rust
 use datafusion::prelude::*;
-use datafusion_bio_format_fastq::BgzfFastqTableProvider;
+use datafusion_bio_format_fastq::FastqTableProvider;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -61,7 +61,9 @@ async fn main() -> datafusion::error::Result<()> {
     let ctx = SessionContext::new();
 
     // Register a FASTQ file as a table
-    let table = BgzfFastqTableProvider::try_new("data/sample.fastq.gz", None).await?;
+    // Parallelism is automatic: BGZF with GZI index and uncompressed files
+    // are read in parallel partitions; GZIP files are read sequentially.
+    let table = FastqTableProvider::new("data/sample.fastq.bgz".to_string(), None)?;
     ctx.register_table("sequences", Arc::new(table))?;
 
     // Query with SQL
@@ -113,16 +115,19 @@ async fn main() -> datafusion::error::Result<()> {
 ### Query from cloud storage
 
 ```rust
+use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+
 // Works with GCS, S3, Azure
-let table = BgzfFastqTableProvider::try_new(
-    "gs://my-bucket/sample.fastq.gz",
-    None
-).await?;
+let opts = ObjectStorageOptions { ... };
+let table = FastqTableProvider::new(
+    "gs://my-bucket/sample.fastq.gz".to_string(),
+    Some(opts),
+)?;
 ```
 
 ## Write Support
 
-FASTQ and VCF formats support writing DataFusion query results back to files using the `INSERT INTO` SQL syntax or the `insert_into()` API.
+BAM/SAM, CRAM, FASTQ, and VCF formats support writing DataFusion query results back to files using the `INSERT OVERWRITE` SQL syntax or the `insert_into()` API.
 
 ### Design
 
@@ -145,7 +150,7 @@ TableProvider.insert_into()
 
 ```rust
 use datafusion::prelude::*;
-use datafusion_bio_format_fastq::BgzfFastqTableProvider;
+use datafusion_bio_format_fastq::FastqTableProvider;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -153,16 +158,16 @@ async fn main() -> datafusion::error::Result<()> {
     let ctx = SessionContext::new();
 
     // Register source FASTQ
-    let source = BgzfFastqTableProvider::try_new("input.fastq.gz", None).await?;
+    let source = FastqTableProvider::new("input.fastq.gz".to_string(), None)?;
     ctx.register_table("source", Arc::new(source))?;
 
     // Register destination FASTQ (compression auto-detected from extension)
-    let dest = BgzfFastqTableProvider::try_new("output.fastq.bgz", None).await?;
+    let dest = FastqTableProvider::new("output.fastq.bgz".to_string(), None)?;
     ctx.register_table("dest", Arc::new(dest))?;
 
     // Filter and write to new file
     ctx.sql("
-        INSERT INTO dest
+        INSERT OVERWRITE dest
         SELECT name, description, sequence, quality_scores
         FROM source
         WHERE LENGTH(sequence) >= 100
@@ -203,7 +208,7 @@ async fn main() -> datafusion::error::Result<()> {
 
     // Filter variants and write
     ctx.sql("
-        INSERT INTO output
+        INSERT OVERWRITE output
         SELECT chrom, start, end, id, ref, alt, qual, filter, AF, DP
         FROM variants
         WHERE AF > 0.01 AND DP >= 10
