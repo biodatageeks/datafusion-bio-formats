@@ -10,7 +10,7 @@ fn test_file(name: &str) -> String {
 }
 
 async fn create_context(file: &str) -> SessionContext {
-    create_context_with_coord_system(file, true).await
+    create_context_with_coord_system(file, false).await
 }
 
 async fn create_context_with_coord_system(
@@ -169,6 +169,60 @@ async fn test_schema_columns() {
     assert_eq!(schema.field(4).name(), "pos2");
     assert_eq!(schema.field(5).name(), "strand1");
     assert_eq!(schema.field(6).name(), "strand2");
+}
+
+#[tokio::test]
+async fn test_zero_based_pos_values() {
+    // With coordinate_system_zero_based=true, file positions (1-based) are decremented by 1
+    let ctx = create_context_with_coord_system(&test_file("test_small.pairs"), true).await;
+    let df = ctx
+        .sql("SELECT pos1, pos2 FROM pairs WHERE \"readID\" = 'read1'")
+        .await
+        .unwrap();
+    let batches = df.collect().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 1);
+
+    let pos1_arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    let pos2_arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    // File has pos1=1000, pos2=5000 → 0-based: 999, 4999
+    assert_eq!(pos1_arr.value(0), 999);
+    assert_eq!(pos2_arr.value(0), 4999);
+}
+
+#[tokio::test]
+async fn test_one_based_pos_values() {
+    // With coordinate_system_zero_based=false, file positions are passed through as-is
+    let ctx = create_context_with_coord_system(&test_file("test_small.pairs"), false).await;
+    let df = ctx
+        .sql("SELECT pos1, pos2 FROM pairs WHERE \"readID\" = 'read1'")
+        .await
+        .unwrap();
+    let batches = df.collect().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 1);
+
+    let pos1_arr = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    let pos2_arr = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    // File has pos1=1000, pos2=5000 → 1-based: 1000, 5000
+    assert_eq!(pos1_arr.value(0), 1000);
+    assert_eq!(pos2_arr.value(0), 5000);
 }
 
 // ============================================================
@@ -509,4 +563,41 @@ async fn test_indexed_strand_filter() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     // chr1 rows with strand1='-': pos1=80000, pos1=120000, pos1=200000 = 3
     assert_eq!(total_rows, 3);
+}
+
+#[tokio::test]
+async fn test_indexed_zero_based_pos_values() {
+    // With coordinate_system_zero_based=true, file positions (1-based) are decremented by 1
+    let ctx = create_context_with_coord_system(&test_file("test_spec.pairs.gz"), true).await;
+    let df = ctx
+        .sql("SELECT chr1, pos1, pos2 FROM pairs WHERE chr1 = 'chrX' ORDER BY pos1")
+        .await
+        .unwrap();
+    let batches = df.collect().await.unwrap();
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6);
+
+    let mut all_pos1: Vec<u32> = Vec::new();
+    let mut all_pos2: Vec<u32> = Vec::new();
+    for batch in &batches {
+        let pos1_arr = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let pos2_arr = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            all_pos1.push(pos1_arr.value(i));
+            all_pos2.push(pos2_arr.value(i));
+        }
+    }
+
+    // File values: [15000, 45000, 80000, 120000, 180000, 250000] → 0-based: subtract 1
+    assert_eq!(all_pos1, vec![14999, 44999, 79999, 119999, 179999, 249999]);
+    // File values: [25000, 65000, 95000, 140000, 200000, 300000] → 0-based: subtract 1
+    assert_eq!(all_pos2, vec![24999, 64999, 94999, 139999, 199999, 299999]);
 }

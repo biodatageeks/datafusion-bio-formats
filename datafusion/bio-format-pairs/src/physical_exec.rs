@@ -322,7 +322,7 @@ async fn get_local_pairs_stream(
     projection: Option<Vec<usize>>,
     columns: Vec<String>,
     object_storage_options: Option<ObjectStorageOptions>,
-    _coordinate_system_zero_based: bool,
+    coordinate_system_zero_based: bool,
     limit: Option<usize>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let storage_type = get_storage_type(file_path.clone());
@@ -366,7 +366,13 @@ async fn get_local_pairs_stream(
             for (i, col) in columns.iter().enumerate() {
                 let raw = if i < fields.len() { fields[i] } else { "" };
                 match col.as_str() {
-                    "pos1" | "pos2" | "frag1" | "frag2" | "mapq1" | "mapq2" => {
+                    "pos1" | "pos2" => {
+                        let parsed = raw.parse::<u32>().ok().map(|v| {
+                            if coordinate_system_zero_based { v.saturating_sub(1) } else { v }
+                        });
+                        column_data[i].push(ColumnValue::UInt32(parsed));
+                    }
+                    "frag1" | "frag2" | "mapq1" | "mapq2" => {
                         column_data[i].push(ColumnValue::UInt32(raw.parse().ok()));
                     }
                     _ => {
@@ -428,7 +434,7 @@ async fn get_indexed_pairs_stream(
     batch_size: usize,
     projection: Option<Vec<usize>>,
     columns: Vec<String>,
-    _coordinate_system_zero_based: bool,
+    coord_zero_based: bool,
     residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     use datafusion::arrow::error::ArrowError;
@@ -524,7 +530,17 @@ async fn get_indexed_pairs_stream(
                         }
                         let raw = if i < fields.len() { fields[i] } else { "" };
                         match col.as_str() {
-                            "pos1" | "pos2" | "frag1" | "frag2" | "mapq1" | "mapq2" => {
+                            "pos1" | "pos2" => {
+                                let parsed = raw.parse::<u32>().ok().map(|v| {
+                                    if coord_zero_based {
+                                        v.saturating_sub(1)
+                                    } else {
+                                        v
+                                    }
+                                });
+                                u32_cols[i].push(parsed);
+                            }
+                            "frag1" | "frag2" | "mapq1" | "mapq2" => {
                                 u32_cols[i].push(raw.parse().ok());
                             }
                             _ => {
