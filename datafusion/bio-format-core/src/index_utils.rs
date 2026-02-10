@@ -15,7 +15,7 @@ pub enum IndexFormat {
     CSI,
     /// CRAM index (.crai) — supports CRAM files
     CRAI,
-    /// Tabix index (.tbi) — supports bgzipped VCF, GFF, BED
+    /// Tabix index (.tbi) — supports bgzipped VCF, GFF, BED, Pairs
     TBI,
 }
 
@@ -88,6 +88,27 @@ pub fn discover_vcf_index(data_file: &str) -> Option<(String, IndexFormat)> {
     }
     if let Some(path) = discover_index_path(data_file, IndexFormat::CSI) {
         return Some((path, IndexFormat::CSI));
+    }
+    None
+}
+
+/// Try to discover any available index for a bgzipped Pairs file.
+/// Tries TBI first, then CSI, then `.px2` (pairix index, treated as TBI-compatible).
+pub fn discover_pairs_index(data_file: &str) -> Option<(String, IndexFormat)> {
+    if let Some(path) = discover_index_path(data_file, IndexFormat::TBI) {
+        return Some((path, IndexFormat::TBI));
+    }
+    if let Some(path) = discover_index_path(data_file, IndexFormat::CSI) {
+        return Some((path, IndexFormat::CSI));
+    }
+    // Pairix (.px2) index is tabix-compatible
+    let px2_path = format!("{}.px2", data_file);
+    if Path::new(&px2_path).exists() {
+        debug!(
+            "Discovered pairix (.px2) index for {}: {}",
+            data_file, px2_path
+        );
+        return Some((px2_path, IndexFormat::TBI));
     }
     None
 }

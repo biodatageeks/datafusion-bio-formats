@@ -1,0 +1,38 @@
+[package]
+name = "datafusion-bio-format-pairs"
+version = "0.2.0"
+description = "Pairs (Hi-C) file format support for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[dependencies]
+datafusion.workspace = true
+opendal.workspace = true
+tokio-util.workspace = true
+noodles-bgzf.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+async-compression.workspace = true
+async-stream.workspace = true
+datafusion-bio-format-core = {path = "../bio-format-core"}
+futures.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+noodles-tabix = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
+noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
+noodles-csi = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
+noodles-bgzf-pairs = { package = "noodles-bgzf", git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
+flate2 = "1.0"
+log = "0.4.27"
+tracing = "0.1.40"
+
+[[example]]
+name = "test_pairs_reader"
+path = "./examples/test_pairs_reader.rs"

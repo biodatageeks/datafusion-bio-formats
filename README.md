@@ -21,6 +21,7 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 | **[datafusion-bio-format-gff](datafusion/bio-format-gff)** | GFF genome annotations | ✅ | ✅ | ✅ (BGZF) | ❌ | ✅ |
 | **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ❌  | ❌ | ❌ | ✅ |
 | **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ✅ (CRAI) | ✅ | ✅ (indexed) | ✅ | ✅ |
+| **[datafusion-bio-format-pairs](datafusion/bio-format-pairs)** | Pairs (Hi-C) chromatin contacts | ✅ (TBI/px2) | ✅ | ✅ (indexed) | ❌ | ✅ |
 
 ## Features
 
@@ -106,6 +107,38 @@ async fn main() -> datafusion::error::Result<()> {
         SELECT chrom, pos, ref, alt, info_af
         FROM variants
         WHERE chrom = 'chr1' AND info_af > 0.01
+    ").await?;
+
+    df.show().await?;
+    Ok(())
+}
+```
+
+### Query a Pairs (Hi-C) file
+
+```rust
+use datafusion::prelude::*;
+use datafusion_bio_format_pairs::table_provider::PairsTableProvider;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+
+    // Register a Pairs file (auto-discovers .tbi/.px2 index)
+    let table = PairsTableProvider::new(
+        "data/contacts.pairs.gz".to_string(),
+        None,   // object_storage_options
+        false,  // coordinate_system_zero_based (pairs uses 1-based)
+    )?;
+    ctx.register_table("contacts", Arc::new(table))?;
+
+    // Query Hi-C contacts — chr1 filter uses tabix index,
+    // chr2 filter is applied as a residual post-read filter
+    let df = ctx.sql("
+        SELECT chr1, pos1, chr2, pos2, strand1, strand2
+        FROM contacts
+        WHERE chr1 = 'chr1' AND chr2 = 'chr2'
     ").await?;
 
     df.show().await?;
@@ -265,7 +298,7 @@ For write-only operations (new output files), use `VcfTableProvider::new_for_wri
 
 ## Index-Based Range Queries
 
-BAM, CRAM, and VCF table providers support **index-based predicate pushdown** for efficient genomic region queries. When an index file is present alongside the data file, SQL filters on `chrom`, `start`, and `end` columns are translated into indexed random access, skipping irrelevant data entirely.
+BAM, CRAM, VCF, GFF, and Pairs table providers support **index-based predicate pushdown** for efficient genomic region queries. When an index file is present alongside the data file, SQL filters on genomic coordinate columns are translated into indexed random access, skipping irrelevant data entirely.
 
 ### Supported Index Formats
 
@@ -275,6 +308,7 @@ BAM, CRAM, and VCF table providers support **index-based predicate pushdown** fo
 | CRAM | CRAI | `sample.cram.crai` |
 | VCF (bgzf) | TBI, CSI | `sample.vcf.gz.tbi`, `sample.vcf.gz.csi` |
 | GFF (bgzf) | TBI, CSI | `sample.gff.gz.tbi`, `sample.gff.gz.csi` |
+| Pairs (bgzf) | TBI, CSI, px2 | `sample.pairs.gz.tbi`, `sample.pairs.gz.px2` |
 
 Index files are **auto-discovered** — place them alongside the data file and the table provider will find them automatically. No configuration needed.
 
@@ -361,6 +395,7 @@ WHERE chrom = 'chr1' AND start >= 1000000 AND mapping_quality >= 30;
 | CRAM | Always (from header) | Yes |
 | VCF | When header has `##contig=<...,length=N>` | Depends on file |
 | GFF | Typically not available | No |
+| Pairs | When header has `#chromsize:` lines | Depends on file |
 
 When an index exists, regions are distributed across `target_partitions` using a greedy bin-packing algorithm that estimates data volume from the index. This ensures balanced work distribution even when chromosomes have vastly different sizes (e.g., chr1 at ~249Mb vs chrY at ~57Mb).
 
@@ -387,6 +422,7 @@ When an index is available, the query engine uses a three-stage execution model:
 | CRAM | CRAI | Sum of `slice_length` per reference sequence (exact) |
 | VCF | TBI | Min/max compressed byte offsets from bin chunks |
 | GFF | TBI/CSI | Min/max compressed byte offsets from bin chunks |
+| Pairs | TBI | Min/max compressed byte offsets from bin chunks |
 
 **2. Balanced Partitioning** — A greedy bin-packing algorithm distributes regions across `target_partitions` bins:
 - Regions sorted by estimated size (descending)
@@ -448,6 +484,10 @@ bcftools index -t sorted.vcf.gz          # creates sorted.vcf.gz.tbi
 # GFF: sort, compress, and index
 (grep "^#" input.gff; grep -v "^#" input.gff | sort -k1,1 -k4,4n) | bgzip > sorted.gff.gz
 tabix -p gff sorted.gff.gz              # creates sorted.gff.gz.tbi
+
+# Pairs: sort, compress, and index (chr1=col2, pos1=col3)
+(grep "^#" input.pairs; grep -v "^#" input.pairs | sort -k2,2 -k3,3n) | bgzip > sorted.pairs.gz
+tabix -s 2 -b 3 -e 3 sorted.pairs.gz   # creates sorted.pairs.gz.tbi
 ```
 
 ## Projection Pushdown
@@ -490,6 +530,7 @@ SQL: SELECT chrom, start, mapping_quality FROM alignments
 | GFF | Field-level | 8 core fields + attribute parsing |
 | FASTQ | Field-level | All 4 fields (name, description, sequence, quality) |
 | BED | Batch-level | Projection applied after parsing |
+| Pairs | Batch-level | Projection applied after parsing |
 | FASTA | Batch-level | Projection applied after parsing |
 
 **Field-level** means the parser conditionally skips extraction per record — no allocation, no string conversion, no array construction for unrequested columns. This is especially beneficial for expensive fields like `sequence`, `quality_scores`, and `cigar`.
