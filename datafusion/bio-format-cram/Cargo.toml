@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-cram"
-version = "0.1.1"
+version = "0.2.0"
 description = "CRAM file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
