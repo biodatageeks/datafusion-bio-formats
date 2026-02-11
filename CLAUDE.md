@@ -23,7 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Rust workspace that provides bioinformatics file format support for Apache DataFusion. The project implements DataFusion table providers for various biological file formats including FASTQ, VCF, BAM, BED, GFF, and FASTA files. Each format is implemented as a separate crate in the `datafusion/` directory.
+This is a Rust workspace that provides bioinformatics file format support for Apache DataFusion. The project implements DataFusion table providers for various biological file formats including FASTQ, VCF, BAM, BED, GFF, FASTA, and Pairs files. Each format is implemented as a separate crate in the `datafusion/` directory.
 
 ## Common Development Commands
 
@@ -41,6 +41,7 @@ Each format has example files in `datafusion/bio-format-{format}/examples/`:
 - `cargo run --example performance_test --package datafusion-bio-format-fastq`
 - `cargo run --example write_bam --package datafusion-bio-format-bam` - BAM/SAM write examples
 - `cargo run --example write_cram --package datafusion-bio-format-cram` - CRAM write examples
+- `cargo run --example test_pairs_reader --package datafusion-bio-format-pairs` - Pairs reader example
 
 ### Testing Individual Crates
 - `cargo test --package datafusion-bio-format-fastq`
@@ -63,6 +64,7 @@ Each format has example files in `datafusion/bio-format-{format}/examples/`:
 - **bio-format-bed**: BED file format support
 - **bio-format-gff**: GFF file format support
 - **bio-format-fasta**: FASTA file format support
+- **bio-format-pairs**: Pairs file format support for Hi-C chromosome conformation capture data
 - **benchmarks/**: Performance benchmark framework
   - **benchmarks/common**: Shared benchmark infrastructure (harness, data downloader)
   - **benchmarks/runner**: Generic benchmark runner binary
