@@ -111,6 +111,28 @@ pub const GFF_DIRECTIVES_KEY: &str = "bio.gff.directives";
 pub const GFF_SEQUENCE_REGIONS_KEY: &str = "bio.gff.sequence_regions";
 
 // ============================================================================
+// Pairs-Specific Metadata Keys (Hi-C contact data)
+// ============================================================================
+
+/// Pairs format version (e.g., "1.0") from the `## pairs format` header line
+pub const PAIRS_FORMAT_VERSION_KEY: &str = "bio.pairs.format_version";
+
+/// Pairs sort order (e.g., "chr1-chr2-pos1-pos2") from the `#sorted:` header line
+pub const PAIRS_SORTED_KEY: &str = "bio.pairs.sorted";
+
+/// Pairs shape (e.g., "upper triangle") from the `#shape:` header line
+pub const PAIRS_SHAPE_KEY: &str = "bio.pairs.shape";
+
+/// Pairs genome assembly (e.g., "hg38") from the `#genome_assembly:` header line
+pub const PAIRS_GENOME_ASSEMBLY_KEY: &str = "bio.pairs.genome_assembly";
+
+/// Pairs chromosome sizes stored as JSON array of `{"name": "chr1", "length": 249250621}`
+pub const PAIRS_CHROMSIZES_KEY: &str = "bio.pairs.chromsizes";
+
+/// Pairs column names stored as JSON array of strings
+pub const PAIRS_COLUMNS_KEY: &str = "bio.pairs.columns";
+
+// ============================================================================
 // BED-Specific Metadata Keys (For Future Use)
 // ============================================================================
 

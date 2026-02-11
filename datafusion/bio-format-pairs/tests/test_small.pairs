@@ -1,0 +1,18 @@
+## pairs format v1.0
+#sorted: chr1-chr2-pos1-pos2
+#shape: upper triangle
+#genome_assembly: hg38
+#chromsize: chr1 249250621
+#chromsize: chr2 243199373
+#chromsize: chrX 155270560
+#columns: readID chr1 pos1 chr2 pos2 strand1 strand2
+read1	chr1	1000	chr1	5000	+	-
+read2	chr1	2000	chr2	3000	+	+
+read3	chr1	3000	chrX	7000	-	+
+read4	chr2	1500	chr2	8000	+	-
+read5	chr2	4000	chrX	2000	-	-
+read6	chrX	5000	chrX	9000	+	+
+read7	chr1	6000	chr2	1000	-	+
+read8	chr1	8000	chr1	9000	+	-
+read9	chr2	2000	chrX	4000	+	+
+read10	chrX	1000	chr1	3000	-	-
