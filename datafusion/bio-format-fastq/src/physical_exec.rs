@@ -1,9 +1,10 @@
 use crate::storage::{FastqLocalReader, FastqRemoteReader};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
+use datafusion::arrow::array::{Array, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
+use datafusion::arrow::record_batch::RecordBatchOptions;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -516,11 +517,16 @@ fn read_and_send_batches<R: BufRead>(
 
         let batch = RecordBatch::try_new(schema.clone(), arrays)?;
         let num_rows = batch.num_rows();
-        while let Err(e) = tx.try_send((Ok(batch.clone()), num_rows)) {
-            if e.is_disconnected() {
-                return Ok(());
+        let mut msg = (Ok(batch), num_rows);
+        loop {
+            match tx.try_send(msg) {
+                Ok(()) => break,
+                Err(e) if e.is_disconnected() => return Ok(()),
+                Err(e) => {
+                    msg = e.into_inner();
+                    thread::yield_now();
+                }
             }
-            std::thread::yield_now();
         }
     }
     Ok(())
@@ -653,6 +659,49 @@ fn execute_byte_range_partition(
     )))
 }
 
+/// Build a RecordBatch from optional StringBuilder columns.
+///
+/// Each builder corresponds to a FASTQ field (name=0, description=1, sequence=2,
+/// quality_scores=3). Builders are `Some` when the column is projected, `None` otherwise.
+/// `row_count` is used for empty-projection batches (COUNT(*) queries) where no arrays
+/// are produced but the batch must report the correct number of rows.
+fn build_batch_from_builders(
+    schema: &SchemaRef,
+    projection: &Option<Vec<usize>>,
+    names: &mut Option<StringBuilder>,
+    descriptions: &mut Option<StringBuilder>,
+    sequences: &mut Option<StringBuilder>,
+    quality_scores: &mut Option<StringBuilder>,
+    row_count: usize,
+) -> datafusion::error::Result<RecordBatch> {
+    let mut arrays: Vec<Arc<dyn Array>> = Vec::new();
+    if let Some(proj) = projection {
+        if proj.is_empty() {
+            let options = RecordBatchOptions::new().with_row_count(Some(row_count));
+            return Ok(RecordBatch::try_new_with_options(
+                schema.clone(),
+                vec![],
+                &options,
+            )?);
+        }
+        for &col_idx in proj {
+            match col_idx {
+                0 => arrays.push(Arc::new(names.as_mut().unwrap().finish())),
+                1 => arrays.push(Arc::new(descriptions.as_mut().unwrap().finish())),
+                2 => arrays.push(Arc::new(sequences.as_mut().unwrap().finish())),
+                3 => arrays.push(Arc::new(quality_scores.as_mut().unwrap().finish())),
+                _ => unreachable!(),
+            }
+        }
+    } else {
+        arrays.push(Arc::new(names.as_mut().unwrap().finish()));
+        arrays.push(Arc::new(descriptions.as_mut().unwrap().finish()));
+        arrays.push(Arc::new(sequences.as_mut().unwrap().finish()));
+        arrays.push(Arc::new(quality_scores.as_mut().unwrap().finish()));
+    }
+    Ok(RecordBatch::try_new(schema.clone(), arrays)?)
+}
+
 async fn get_remote_fastq_stream(
     file_path: String,
     schema: SchemaRef,
@@ -665,81 +714,61 @@ async fn get_remote_fastq_stream(
     let mut reader =
         FastqRemoteReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
 
-    let needs_name = projection.as_ref().is_none_or(|proj| proj.contains(&0));
-    let needs_description = projection.as_ref().is_none_or(|proj| proj.contains(&1));
-    let needs_sequence = projection.as_ref().is_none_or(|proj| proj.contains(&2));
-    let needs_quality_scores = projection.as_ref().is_none_or(|proj| proj.contains(&3));
-
     let stream = try_stream! {
-        let mut name: Vec<String> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut description: Vec<Option<String>> = if needs_description { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut sequence: Vec<String> = if needs_sequence { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut quality_scores: Vec<String> = if needs_quality_scores { Vec::with_capacity(batch_size) } else { Vec::new() };
-
-        let mut record_num = 0;
-        let mut batch_num = 0;
-
+        let proj_indices = projection.as_ref();
         let mut records = reader.read_records().await;
-        while let Some(result) = records.next().await {
-            let record = result?;
+        let mut record_num = 0usize;
+        let mut batch_num = 0usize;
 
-            if needs_name {
-                name.push(record.name().to_string());
-            }
-            if needs_description {
-                description.push(if record.description().is_empty() {
-                    None
-                } else {
-                    Some(record.description().to_string())
-                });
-            }
-            if needs_sequence {
-                sequence.push(std::str::from_utf8(record.sequence()).unwrap().to_string());
-            }
-            if needs_quality_scores {
-                quality_scores.push(std::str::from_utf8(record.quality_scores()).unwrap().to_string());
+        loop {
+            let mut names = proj_indices.is_none_or(|p| p.contains(&0)).then(StringBuilder::new);
+            let mut descriptions = proj_indices.is_none_or(|p| p.contains(&1)).then(StringBuilder::new);
+            let mut sequences = proj_indices.is_none_or(|p| p.contains(&2)).then(StringBuilder::new);
+            let mut quality_scores = proj_indices.is_none_or(|p| p.contains(&3)).then(StringBuilder::new);
+
+            let mut count = 0;
+            while count < batch_size {
+                match records.next().await {
+                    Some(Ok(record)) => {
+                        if let Some(b) = &mut names {
+                            b.append_value(std::str::from_utf8(record.name()).unwrap());
+                        }
+                        if let Some(b) = &mut descriptions {
+                            if record.description().is_empty() {
+                                b.append_null();
+                            } else {
+                                b.append_value(
+                                    std::str::from_utf8(record.description()).unwrap(),
+                                );
+                            }
+                        }
+                        if let Some(b) = &mut sequences {
+                            b.append_value(std::str::from_utf8(record.sequence()).unwrap());
+                        }
+                        if let Some(b) = &mut quality_scores {
+                            b.append_value(
+                                std::str::from_utf8(record.quality_scores()).unwrap(),
+                            );
+                        }
+                        count += 1;
+                        record_num += 1;
+                    }
+                    Some(Err(e)) => Err(DataFusionError::External(Box::new(e)))?,
+                    None => break,
+                }
             }
 
-            record_num += 1;
-            if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
-                let batch = build_record_batch_optimized(
-                    Arc::clone(&schema.clone()),
-                    &name,
-                    &description,
-                    &sequence,
-                    &quality_scores,
-                    projection.clone(),
-                    needs_name,
-                    needs_description,
-                    needs_sequence,
-                    needs_quality_scores,
-                    batch_size,
-                )?;
-                batch_num += 1;
-                debug!("Batch number: {}", batch_num);
-                yield batch;
-                name.clear();
-                description.clear();
-                sequence.clear();
-                quality_scores.clear();
+            if count == 0 {
+                break;
             }
-        }
-        if !name.is_empty() || !description.is_empty() || !sequence.is_empty() || !quality_scores.is_empty() || record_num > 0 {
-            let actual_size = if needs_name { name.len() } else if needs_description { description.len() } else if needs_sequence { sequence.len() } else if needs_quality_scores { quality_scores.len() } else { record_num % batch_size };
-            let batch = build_record_batch_optimized(
-                Arc::clone(&schema.clone()),
-                &name,
-                &description,
-                &sequence,
-                &quality_scores,
-                projection.clone(),
-                needs_name,
-                needs_description,
-                needs_sequence,
-                needs_quality_scores,
-                actual_size,
+
+            let batch = build_batch_from_builders(
+                &schema, &projection,
+                &mut names, &mut descriptions, &mut sequences, &mut quality_scores,
+                count,
             )?;
+            batch_num += 1;
+            debug!("Batch {}: {} records (total: {})", batch_num, count, record_num);
             yield batch;
         }
     };
@@ -754,222 +783,100 @@ async fn get_local_fastq(
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    let needs_name = projection.as_ref().is_none_or(|proj| proj.contains(&0));
-    let needs_description = projection.as_ref().is_none_or(|proj| proj.contains(&1));
-    let needs_sequence = projection.as_ref().is_none_or(|proj| proj.contains(&2));
-    let needs_quality_scores = projection.as_ref().is_none_or(|proj| proj.contains(&3));
-
-    let mut name: Vec<String> = if needs_name {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut description: Vec<Option<String>> = if needs_description {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut sequence: Vec<String> = if needs_sequence {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut quality_scores: Vec<String> = if needs_quality_scores {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
-    let mut batch_num = 0;
-    let file_path = file_path.clone();
-    let mut reader = FastqLocalReader::new(file_path.clone(), object_storage_options).await?;
-    let mut record_num = 0;
+    let mut reader = FastqLocalReader::new(file_path, object_storage_options).await?;
 
     let stream = try_stream! {
-
+        let proj_indices = projection.as_ref();
         let mut records = reader.read_records().await;
-        while let Some(result) = records.next().await {
-            let record = result?;
+        let mut record_num = 0usize;
+        let mut batch_num = 0usize;
 
-            if needs_name {
-                name.push(record.name().to_string());
-            }
-            if needs_description {
-                description.push(if record.description().is_empty() {
-                    None
-                } else {
-                    Some(record.description().to_string())
-                });
-            }
-            if needs_sequence {
-                sequence.push(std::str::from_utf8(record.sequence()).unwrap().to_string());
-            }
-            if needs_quality_scores {
-                quality_scores.push(std::str::from_utf8(record.quality_scores()).unwrap().to_string());
+        loop {
+            let mut names = proj_indices.is_none_or(|p| p.contains(&0)).then(StringBuilder::new);
+            let mut descriptions = proj_indices.is_none_or(|p| p.contains(&1)).then(StringBuilder::new);
+            let mut sequences = proj_indices.is_none_or(|p| p.contains(&2)).then(StringBuilder::new);
+            let mut quality_scores = proj_indices.is_none_or(|p| p.contains(&3)).then(StringBuilder::new);
+
+            let mut count = 0;
+            while count < batch_size {
+                match records.next().await {
+                    Some(Ok(record)) => {
+                        if let Some(b) = &mut names {
+                            b.append_value(std::str::from_utf8(record.name()).unwrap());
+                        }
+                        if let Some(b) = &mut descriptions {
+                            if record.description().is_empty() {
+                                b.append_null();
+                            } else {
+                                b.append_value(
+                                    std::str::from_utf8(record.description()).unwrap(),
+                                );
+                            }
+                        }
+                        if let Some(b) = &mut sequences {
+                            b.append_value(std::str::from_utf8(record.sequence()).unwrap());
+                        }
+                        if let Some(b) = &mut quality_scores {
+                            b.append_value(
+                                std::str::from_utf8(record.quality_scores()).unwrap(),
+                            );
+                        }
+                        count += 1;
+                        record_num += 1;
+                    }
+                    Some(Err(e)) => Err(DataFusionError::External(Box::new(e)))?,
+                    None => break,
+                }
             }
 
-            record_num += 1;
-            if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
-                let batch = build_record_batch_optimized(
-                    Arc::clone(&schema.clone()),
-                    &name,
-                    &description,
-                    &sequence,
-                    &quality_scores,
-                    projection.clone(),
-                    needs_name,
-                    needs_description,
-                    needs_sequence,
-                    needs_quality_scores,
-                    batch_size,
-                )?;
-                batch_num += 1;
-                debug!("Batch number: {}", batch_num);
-                yield batch;
-                name.clear();
-                description.clear();
-                sequence.clear();
-                quality_scores.clear();
+            if count == 0 {
+                break;
             }
-        }
-        if !name.is_empty() || !description.is_empty() || !sequence.is_empty() || !quality_scores.is_empty() || record_num > 0 {
-            let actual_size = if needs_name { name.len() } else if needs_description { description.len() } else if needs_sequence { sequence.len() } else if needs_quality_scores { quality_scores.len() } else { record_num % batch_size };
-            let batch = build_record_batch_optimized(
-                Arc::clone(&schema.clone()),
-                &name,
-                &description,
-                &sequence,
-                &quality_scores,
-                projection.clone(),
-                needs_name,
-                needs_description,
-                needs_sequence,
-                needs_quality_scores,
-                actual_size,
+
+            let batch = build_batch_from_builders(
+                &schema, &projection,
+                &mut names, &mut descriptions, &mut sequences, &mut quality_scores,
+                count,
             )?;
+            batch_num += 1;
+            debug!("Batch {}: {} records (total: {})", batch_num, count, record_num);
             yield batch;
         }
     };
     Ok(stream)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_record_batch_optimized(
-    schema: SchemaRef,
-    name: &[String],
-    description: &[Option<String>],
-    sequence: &[String],
-    quality_scores: &[String],
-    projection: Option<Vec<usize>>,
-    needs_name: bool,
-    needs_description: bool,
-    needs_sequence: bool,
-    needs_quality_scores: bool,
-    record_count: usize,
-) -> datafusion::error::Result<RecordBatch> {
-    let name_array = if needs_name {
-        Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
-    };
-
-    let description_array = if needs_description {
-        Arc::new({
-            let mut builder = StringBuilder::new();
-            for s in description {
-                builder.append_option(s.clone());
-            }
-            builder.finish()
-        }) as Arc<dyn Array>
-    } else {
-        Arc::new({
-            let mut builder = StringBuilder::new();
-            for _ in 0..record_count {
-                builder.append_null();
-            }
-            builder.finish()
-        }) as Arc<dyn Array>
-    };
-
-    let sequence_array = if needs_sequence {
-        Arc::new(StringArray::from(sequence.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
-    };
-
-    let quality_scores_array = if needs_quality_scores {
-        Arc::new(StringArray::from(quality_scores.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
-    };
-
-    let arrays = match projection {
-        None => {
-            vec![
-                name_array,
-                description_array,
-                sequence_array,
-                quality_scores_array,
-            ]
-        }
-        Some(proj_ids) => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
-            if proj_ids.is_empty() {
-                debug!("Empty projection creating a dummy field");
-                arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
-            } else {
-                for i in proj_ids {
-                    match i {
-                        0 => arrays.push(name_array.clone()),
-                        1 => arrays.push(description_array.clone()),
-                        2 => arrays.push(sequence_array.clone()),
-                        3 => arrays.push(quality_scores_array.clone()),
-                        _ => arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>),
-                    }
-                }
-            }
-            arrays
-        }
-    };
-
-    RecordBatch::try_new(schema, arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating optimized batch: {:?}", e)))
-}
-
 async fn get_stream(
     file_path: String,
-    schema_ref: SchemaRef,
+    schema: SchemaRef,
     batch_size: usize,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
-    let file_path = file_path.clone();
     let store_type = get_storage_type(file_path.clone());
-    let schema = schema_ref.clone();
 
     match store_type {
         StorageType::LOCAL => {
             let stream = get_local_fastq(
-                file_path.clone(),
+                file_path,
                 schema.clone(),
                 batch_size,
                 projection,
                 object_storage_options,
             )
             .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
         }
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
             let stream = get_remote_fastq_stream(
-                file_path.clone(),
+                file_path,
                 schema.clone(),
                 batch_size,
                 projection,
                 object_storage_options,
             )
             .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
         }
         _ => unimplemented!("Unsupported storage type: {:?}", store_type),
     }
