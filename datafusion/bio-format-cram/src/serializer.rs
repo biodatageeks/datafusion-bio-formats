@@ -59,6 +59,7 @@ pub fn batch_to_cram_records(
     let mate_starts = get_u32_column_by_name(batch, "mate_start")?;
     let sequences = get_string_column_by_name(batch, "sequence")?;
     let quality_scores = get_string_column_by_name(batch, "quality_scores")?;
+    let template_lengths = get_i32_column_by_name(batch, "template_length")?;
 
     // Build tag column map
     let tag_columns = build_tag_column_map(batch, tag_fields);
@@ -78,6 +79,7 @@ pub fn batch_to_cram_records(
             mate_starts,
             sequences,
             quality_scores,
+            template_lengths,
             &ref_map,
             batch,
             tag_fields,
@@ -104,6 +106,7 @@ fn build_single_record(
     mate_starts: &UInt32Array,
     sequences: &StringArray,
     quality_scores: &StringArray,
+    template_lengths: &Int32Array,
     ref_map: &HashMap<String, usize>,
     batch: &RecordBatch,
     tag_fields: &[String],
@@ -113,8 +116,8 @@ fn build_single_record(
     // Create a new mutable BAM record
     let mut record = RecordBuf::default();
 
-    // 1. QNAME (read name)
-    let name = if names.is_null(row) {
+    // 1. QNAME (read name) - "*" means unavailable; convert back to None for noodles
+    let name = if names.is_null(row) || names.value(row) == "*" {
         None
     } else {
         Some(names.value(row).as_bytes().to_vec().into())
@@ -151,12 +154,8 @@ fn build_single_record(
     };
     *record.alignment_start_mut() = alignment_start;
 
-    // 5. MAPQ (mapping quality)
-    let mapq = if mapping_qualities.is_null(row) {
-        sam::alignment::record::MappingQuality::new(255) // Unknown
-    } else {
-        sam::alignment::record::MappingQuality::new(mapping_qualities.value(row) as u8)
-    };
+    // 5. MAPQ (mapping quality) - non-nullable, 255 means unavailable per SAM spec
+    let mapq = sam::alignment::record::MappingQuality::new(mapping_qualities.value(row) as u8);
     *record.mapping_quality_mut() = mapq;
 
     // 6. CIGAR
@@ -193,8 +192,8 @@ fn build_single_record(
     };
     *record.mate_alignment_start_mut() = mate_alignment_start;
 
-    // 9. TLEN (template length) - not stored in our schema, default to 0
-    *record.template_length_mut() = 0;
+    // 9. TLEN (template length)
+    *record.template_length_mut() = template_lengths.value(row);
 
     // 10. SEQ (sequence)
     let seq_str = sequences.value(row);
@@ -436,6 +435,18 @@ fn get_u32_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a 
         .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' must be UInt32 type", name)))
 }
 
+/// Gets an i32 column from the batch by name
+fn get_i32_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
+    let idx = batch.schema().index_of(name).map_err(|_| {
+        DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
+    })?;
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' must be Int32 type", name)))
+}
+
 /// Builds a map from tag name to column index
 fn build_tag_column_map(batch: &RecordBatch, tag_fields: &[String]) -> HashMap<String, usize> {
     let mut map = HashMap::new();
@@ -522,6 +533,7 @@ mod tests {
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),
             Field::new("quality_scores", DataType::Utf8, false),
+            Field::new("template_length", DataType::Int32, false),
         ]));
 
         // Create test data
@@ -549,6 +561,7 @@ mod tests {
                 Arc::new(mate_starts),
                 Arc::new(sequences),
                 Arc::new(quality_scores),
+                Arc::new(Int32Array::from(vec![0i32])),
             ],
         )
         .unwrap();

@@ -21,8 +21,8 @@ async fn test_bam_without_tags() {
     let df = ctx.table("bam").await.unwrap();
     let schema = df.schema();
 
-    // Should have 11 core fields only
-    assert_eq!(schema.fields().len(), 11);
+    // Should have 12 core fields only
+    assert_eq!(schema.fields().len(), 12);
     assert!(schema.field_with_name(None, "name").is_ok());
     assert!(schema.field_with_name(None, "chrom").is_ok());
     assert!(schema.field_with_name(None, "start").is_ok());
@@ -46,8 +46,8 @@ async fn test_bam_with_specified_tags() {
     let df = ctx.table("bam").await.unwrap();
     let schema = df.schema();
 
-    // Should have 11 core fields + 2 tag fields = 13
-    assert_eq!(schema.fields().len(), 13);
+    // Should have 12 core fields + 2 tag fields = 14
+    assert_eq!(schema.fields().len(), 14);
 
     // Verify tag fields are present
     assert!(schema.field_with_name(None, "NM").is_ok());
@@ -165,8 +165,8 @@ async fn test_unknown_tag_accepted() {
     let df = ctx.table("bam").await.unwrap();
     let schema = df.schema();
 
-    // Should have 11 core + 1 unknown tag = 12 fields
-    assert_eq!(schema.fields().len(), 12);
+    // Should have 12 core + 1 unknown tag = 13 fields
+    assert_eq!(schema.fields().len(), 13);
 
     // Verify unknown tag field is present with Utf8 type
     let unknown_field = schema.field_with_name(None, "UNKNOWN_TAG").unwrap();
@@ -209,8 +209,8 @@ async fn test_multiple_tags() {
     let df = ctx.table("bam").await.unwrap();
     let schema = df.schema();
 
-    // Should have 11 core + 4 tag fields = 15
-    assert_eq!(schema.fields().len(), 15);
+    // Should have 12 core + 4 tag fields = 16
+    assert_eq!(schema.fields().len(), 16);
     assert!(schema.field_with_name(None, "NM").is_ok());
     assert!(schema.field_with_name(None, "MD").is_ok());
     assert!(schema.field_with_name(None, "AS").is_ok());
@@ -231,8 +231,8 @@ async fn test_empty_tag_list() {
     let df = ctx.table("bam").await.unwrap();
     let schema = df.schema();
 
-    // Should have 11 core fields only
-    assert_eq!(schema.fields().len(), 11);
+    // Should have 12 core fields only
+    assert_eq!(schema.fields().len(), 12);
 }
 
 /// All 13 tags present in the bam_with_tags.bam test file
@@ -263,10 +263,10 @@ async fn test_read_all_13_tags() {
     let ctx = SessionContext::new();
     ctx.register_table("bam", Arc::new(provider)).unwrap();
 
-    // Verify schema: 11 core + 13 tags = 24 fields
+    // Verify schema: 12 core + 13 tags = 25 fields
     let df = ctx.table("bam").await.unwrap();
     let schema = df.schema();
-    assert_eq!(schema.fields().len(), 24);
+    assert_eq!(schema.fields().len(), 25);
 
     // Verify all tag fields are in schema with expected types
     use datafusion::arrow::datatypes::DataType;

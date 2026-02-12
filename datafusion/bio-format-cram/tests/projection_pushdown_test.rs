@@ -52,7 +52,7 @@ async fn test_cram_plan_no_projection_select_star() -> Result<(), Box<dyn std::e
     let plan = df.create_physical_plan().await?;
     let leaf = find_leaf_exec(&plan);
     assert_eq!(leaf.name(), "CramExec");
-    assert_eq!(leaf.schema().fields().len(), 11);
+    assert_eq!(leaf.schema().fields().len(), 12);
     Ok(())
 }
 

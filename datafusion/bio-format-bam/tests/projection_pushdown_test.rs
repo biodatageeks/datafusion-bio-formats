@@ -45,8 +45,8 @@ async fn test_bam_plan_no_projection_select_star() -> Result<(), Box<dyn std::er
     let plan = df.create_physical_plan().await?;
     let leaf = find_leaf_exec(&plan);
     assert_eq!(leaf.name(), "BamExec");
-    // SELECT * should have all 11 core columns
-    assert_eq!(leaf.schema().fields().len(), 11);
+    // SELECT * should have all 12 core columns
+    assert_eq!(leaf.schema().fields().len(), 12);
     Ok(())
 }
 

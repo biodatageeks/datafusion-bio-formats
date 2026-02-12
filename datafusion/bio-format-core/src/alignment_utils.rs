@@ -1,6 +1,6 @@
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanBuilder, Float32Builder, Int32Builder, ListBuilder, NullArray,
-    StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array,
+    Array, ArrayRef, BooleanBuilder, Float32Builder, Int32Array, Int32Builder, ListBuilder,
+    NullArray, StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -104,8 +104,8 @@ pub struct RecordFields<'a> {
     pub flag: &'a [u32],
     /// CIGAR strings
     pub cigar: &'a [String],
-    /// Mapping quality scores
-    pub mapping_quality: &'a [Option<u32>],
+    /// Mapping quality scores (255 = unavailable per SAM spec, but always present)
+    pub mapping_quality: &'a [u32],
     /// Mate/next segment reference sequence names
     pub mate_chrom: &'a [Option<String>],
     /// Mate/next segment alignment start positions
@@ -114,6 +114,8 @@ pub struct RecordFields<'a> {
     pub sequence: ArrayRef,
     /// Base quality scores (pre-built Arrow array)
     pub quality_scores: ArrayRef,
+    /// Template length (TLEN)
+    pub template_length: &'a [i32],
 }
 
 /// Build a RecordBatch from alignment record fields
@@ -145,6 +147,7 @@ pub fn build_record_batch(
     let mate_start = fields.mate_start;
     let sequence_array = fields.sequence;
     let quality_scores_array = fields.quality_scores;
+    let template_length = fields.template_length;
 
     // Helper closures for lazy array construction — each array is built only when needed
     let make_name =
@@ -160,8 +163,11 @@ pub fn build_record_batch(
             cigar.iter().map(|s| s.as_str()),
         )) as Arc<dyn Array>
     };
-    let make_mapq =
-        || Arc::new(UInt32Array::from_iter(mapping_quality.iter().copied())) as Arc<dyn Array>;
+    let make_mapq = || {
+        Arc::new(UInt32Array::from_iter_values(
+            mapping_quality.iter().copied(),
+        )) as Arc<dyn Array>
+    };
     let make_mate_chrom = || {
         Arc::new(StringArray::from_iter(
             mate_chrom.iter().map(|s| s.as_deref()),
@@ -169,6 +175,11 @@ pub fn build_record_batch(
     };
     let make_mate_start =
         || Arc::new(UInt32Array::from_iter(mate_start.iter().copied())) as Arc<dyn Array>;
+    let make_tlen = || {
+        Arc::new(Int32Array::from_iter_values(
+            template_length.iter().copied(),
+        )) as Arc<dyn Array>
+    };
 
     let arrays = match projection {
         None => {
@@ -184,6 +195,7 @@ pub fn build_record_batch(
                 make_mate_start(),
                 sequence_array,
                 quality_scores_array,
+                make_tlen(),
             ];
             // Add tag arrays if present
             if let Some(tags) = tag_arrays {
@@ -210,9 +222,10 @@ pub fn build_record_batch(
                         8 => arrays.push(make_mate_start()),
                         9 => arrays.push(sequence_array.clone()),
                         10 => arrays.push(quality_scores_array.clone()),
+                        11 => arrays.push(make_tlen()),
                         _ => {
-                            // Tag fields start at index 11
-                            let tag_idx = i - 11;
+                            // Tag fields start at index 12
+                            let tag_idx = i - 12;
                             if let Some(tags) = tag_arrays {
                                 if tag_idx < tags.len() {
                                     arrays.push(tags[tag_idx].clone());
