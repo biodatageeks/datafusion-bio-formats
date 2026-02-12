@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Formatter, Write};
 use std::sync::Arc;
 
 use crate::storage::{IndexedVcfReader, VcfLocalReader, VcfRecordFields, VcfRemoteReader};
@@ -30,6 +30,24 @@ use noodles_vcf::variant::record::info::field::{Value, value::Array as ValueArra
 use noodles_vcf::variant::record::samples::series::value::genotype::Phasing;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases, Samples};
 use std::str;
+
+/// Joins an iterator of displayable items into a reusable buffer with a separator,
+/// avoiding intermediate Vec allocation.
+fn join_into<I, D>(buf: &mut String, iter: I, sep: char)
+where
+    I: Iterator<Item = D>,
+    D: std::fmt::Display,
+{
+    buf.clear();
+    let mut first = true;
+    for item in iter {
+        if !first {
+            buf.push(sep);
+        }
+        first = false;
+        let _ = write!(buf, "{}", item);
+    }
+}
 
 /// Constructs a DataFusion RecordBatch from VCF variant data.
 ///
@@ -74,17 +92,39 @@ pub fn build_record_batch(
     infos: Option<&Vec<Arc<dyn Array>>>,
     formats: Option<&Vec<Arc<dyn Array>>>,
     num_info_fields: usize,
-    projection: Option<Vec<usize>>,
+    projection: &Option<Vec<usize>>,
     record_count: usize,
 ) -> datafusion::error::Result<RecordBatch> {
-    let make_chrom = || Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>;
-    let make_start = || Arc::new(UInt32Array::from(poss.to_vec())) as Arc<dyn Array>;
-    let make_end = || Arc::new(UInt32Array::from(pose.to_vec())) as Arc<dyn Array>;
-    let make_id = || Arc::new(StringArray::from(ids.to_vec())) as Arc<dyn Array>;
-    let make_ref = || Arc::new(StringArray::from(refs.to_vec())) as Arc<dyn Array>;
-    let make_alt = || Arc::new(StringArray::from(alts.to_vec())) as Arc<dyn Array>;
-    let make_qual = || Arc::new(Float64Array::from(quals.to_vec())) as Arc<dyn Array>;
-    let make_filter = || Arc::new(StringArray::from(filters.to_vec())) as Arc<dyn Array>;
+    let make_chrom = || {
+        Arc::new(StringArray::from_iter_values(
+            chroms.iter().map(|s| s.as_str()),
+        )) as Arc<dyn Array>
+    };
+    let make_start =
+        || Arc::new(UInt32Array::from_iter_values(poss.iter().copied())) as Arc<dyn Array>;
+    let make_end =
+        || Arc::new(UInt32Array::from_iter_values(pose.iter().copied())) as Arc<dyn Array>;
+    let make_id = || {
+        Arc::new(StringArray::from_iter_values(
+            ids.iter().map(|s| s.as_str()),
+        )) as Arc<dyn Array>
+    };
+    let make_ref = || {
+        Arc::new(StringArray::from_iter_values(
+            refs.iter().map(|s| s.as_str()),
+        )) as Arc<dyn Array>
+    };
+    let make_alt = || {
+        Arc::new(StringArray::from_iter_values(
+            alts.iter().map(|s| s.as_str()),
+        )) as Arc<dyn Array>
+    };
+    let make_qual = || Arc::new(Float64Array::from_iter(quals.iter().copied())) as Arc<dyn Array>;
+    let make_filter = || {
+        Arc::new(StringArray::from_iter_values(
+            filters.iter().map(|s| s.as_str()),
+        )) as Arc<dyn Array>
+    };
 
     // Column index layout:
     // 0-7: core fields (chrom, start, end, id, ref, alt, qual, filter)
@@ -118,7 +158,7 @@ pub fn build_record_batch(
                 // For empty projections (COUNT(*)), return an empty vector
                 // The schema should already be empty from the table provider
             } else {
-                for i in proj_ids.clone() {
+                for &i in proj_ids {
                     match i {
                         0 => arrays.push(make_chrom()),
                         1 => arrays.push(make_start()),
@@ -160,7 +200,7 @@ pub fn build_record_batch(
 }
 
 fn load_infos(
-    record: Box<dyn Record>,
+    record: &dyn Record,
     header: &Header,
     info_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
@@ -257,6 +297,7 @@ async fn get_local_vcf(
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
+    residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     // let mut count: usize = 0;
@@ -361,25 +402,42 @@ async fn get_local_vcf(
         Vec::new()
     };
 
+    let has_residual_filters = !residual_filters.is_empty();
+
     let stream = try_stream! {
+        let mut join_buf = String::new();
 
         let mut records = reader.read_records();
         // let iter_start_time = Instant::now();
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
-            if needs_chrom { chroms.push(record.reference_sequence_name().to_string()); }
-            if needs_start {
-                // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                let start_pos = record.variant_start().unwrap()?.get() as u32;
-                poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
+
+            // Compute position fields needed for early filtering
+            let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
+            let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
+
+            // Apply residual filters early to skip records before accumulation
+            if has_residual_filters {
+                let end_val = get_variant_end(&record, &header);
+                let fields = VcfRecordFields {
+                    chrom: Some(record.reference_sequence_name().to_string()),
+                    start: Some(start_val),
+                    end: Some(end_val),
+                };
+                if !evaluate_record_filters(&fields, &residual_filters) {
+                    continue;
+                }
             }
+
+            if needs_chrom { chroms.push(record.reference_sequence_name().to_string()); }
+            if needs_start { poss.push(start_val); }
             if needs_end { pose.push(get_variant_end(&record, &header)); }
-            if needs_id { ids.push(record.ids().iter().map(|v| v.to_string()).collect::<Vec<String>>().join(";")); }
+            if needs_id { join_into(&mut join_buf, record.ids().iter(), ';'); ids.push(join_buf.clone()); }
             if needs_ref { refs.push(record.reference_bases().to_string()); }
-            if needs_alt { alts.push(record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join("|")); }
+            if needs_alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()), '|'); alts.push(join_buf.clone()); }
             if needs_qual { quals.push(record.quality_score().transpose()?.map(|v| v as f64)); }
-            if needs_filter { filters.push(record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join(";")); }
-            if needs_any_info { load_infos(Box::new(record.clone()), &header, &mut info_builders)?; }
+            if needs_filter { join_into(&mut join_buf, record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()), ';'); filters.push(join_buf.clone()); }
+            if needs_any_info { load_infos(&record, &header, &mut info_builders)?; }
             if has_format_fields && needs_any_format {
                 load_formats(&record, &header, &sample_names, &mut format_builders)?;
             }
@@ -398,7 +456,7 @@ async fn get_local_vcf(
                     None
                 };
                 let batch = build_record_batch(
-                    Arc::clone(&schema.clone()),
+                    schema.clone(),
                     &chroms,
                     &poss,
                     &pose,
@@ -410,7 +468,7 @@ async fn get_local_vcf(
                     info_arrays.as_ref(),
                     format_arrays.as_ref(),
                     num_info_fields,
-                    projection.clone(),
+                    &projection,
                     batch_size,
                 )?;
                 batch_num += 1;
@@ -442,7 +500,7 @@ async fn get_local_vcf(
                 None
             };
             let batch = build_record_batch(
-                Arc::clone(&schema.clone()),
+                schema.clone(),
                 &chroms,
                 &poss,
                 &pose,
@@ -454,7 +512,7 @@ async fn get_local_vcf(
                 info_arrays.as_ref(),
                 format_arrays.as_ref(),
                 num_info_fields,
-                projection.clone(),
+                &projection,
                 record_num % batch_size,
             )?;
             yield batch;
@@ -474,6 +532,7 @@ async fn get_remote_vcf_stream(
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
+    residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
@@ -532,6 +591,7 @@ async fn get_remote_vcf_stream(
     let needs_any_format = projection
         .as_ref()
         .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 + num_info_fields));
+    let has_residual_filters = !residual_filters.is_empty();
 
     let stream = try_stream! {
         // Create vectors for accumulating record data.
@@ -543,6 +603,7 @@ async fn get_remote_vcf_stream(
         let mut alts: Vec<String> = if needs_alt { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut quals: Vec<Option<f64>> = if needs_qual { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut filters: Vec<String> = if needs_filter { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut join_buf = String::new();
 
         debug!("Info fields: {:?}", info_builders);
 
@@ -555,19 +616,33 @@ async fn get_remote_vcf_stream(
         let mut records = reader.read_records().await;
         while let Some(result) = records.next().await {
             let record = result?;  // propagate errors if any
-            if needs_chrom { chroms.push(record.reference_sequence_name().to_string()); }
-            if needs_start {
-                // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
-                let start_pos = record.variant_start().unwrap()?.get() as u32;
-                poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
+
+            // Compute position fields needed for early filtering
+            let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
+            let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
+
+            // Apply residual filters early to skip records before accumulation
+            if has_residual_filters {
+                let end_val = get_variant_end(&record, &header);
+                let fields = VcfRecordFields {
+                    chrom: Some(record.reference_sequence_name().to_string()),
+                    start: Some(start_val),
+                    end: Some(end_val),
+                };
+                if !evaluate_record_filters(&fields, &residual_filters) {
+                    continue;
+                }
             }
+
+            if needs_chrom { chroms.push(record.reference_sequence_name().to_string()); }
+            if needs_start { poss.push(start_val); }
             if needs_end { pose.push(get_variant_end(&record, &header)); }
-            if needs_id { ids.push(record.ids().iter().map(|v| v.to_string()).collect::<Vec<String>>().join(";")); }
+            if needs_id { join_into(&mut join_buf, record.ids().iter(), ';'); ids.push(join_buf.clone()); }
             if needs_ref { refs.push(record.reference_bases().to_string()); }
-            if needs_alt { alts.push(record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join("|")); }
+            if needs_alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".").to_string()), '|'); alts.push(join_buf.clone()); }
             if needs_qual { quals.push(record.quality_score().transpose()?.map(|v| v as f64)); }
-            if needs_filter { filters.push(record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()).collect::<Vec<String>>().join(";")); }
-            if needs_any_info { load_infos(Box::new(record.clone()), &header, &mut info_builders)?; }
+            if needs_filter { join_into(&mut join_buf, record.filters().iter(&header).map(|v| v.unwrap_or(".").to_string()), ';'); filters.push(join_buf.clone()); }
+            if needs_any_info { load_infos(&record, &header, &mut info_builders)?; }
             if has_format_fields && needs_any_format {
                 load_formats(&record, &header, &sample_names, &mut format_builders)?;
             }
@@ -586,7 +661,7 @@ async fn get_remote_vcf_stream(
                     None
                 };
                 let batch = build_record_batch(
-                    Arc::clone(&schema.clone()),
+                    schema.clone(),
                     &chroms,
                     &poss,
                     &pose,
@@ -598,7 +673,7 @@ async fn get_remote_vcf_stream(
                     info_arrays.as_ref(),
                     format_arrays.as_ref(),
                     num_info_fields,
-                    projection.clone(),
+                    &projection,
                     batch_size,
                 )?;
                 batch_num += 1;
@@ -630,7 +705,7 @@ async fn get_remote_vcf_stream(
                 None
             };
             let batch = build_record_batch(
-                Arc::clone(&schema.clone()),
+                schema.clone(),
                 &chroms,
                 &poss,
                 &pose,
@@ -642,7 +717,7 @@ async fn get_remote_vcf_stream(
                 info_arrays.as_ref(),
                 format_arrays.as_ref(),
                 num_info_fields,
-                projection.clone(),
+                &projection,
                 record_num % batch_size,
             )?;
             yield batch;
@@ -881,6 +956,7 @@ async fn get_stream(
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
+    residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
 
@@ -900,6 +976,7 @@ async fn get_stream(
                 projection,
                 object_storage_options,
                 coordinate_system_zero_based,
+                residual_filters,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -915,6 +992,7 @@ async fn get_stream(
                 projection,
                 object_storage_options,
                 coordinate_system_zero_based,
+                residual_filters,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -1062,6 +1140,7 @@ impl ExecutionPlan for VcfExec {
             self.projection.clone(),
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
+            self.residual_filters.clone(),
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
@@ -1126,6 +1205,7 @@ async fn get_indexed_vcf_stream(
             let mut alts: Vec<String> = Vec::with_capacity(batch_size);
             let mut quals: Vec<Option<f64>> = Vec::with_capacity(batch_size);
             let mut filters: Vec<String> = Vec::with_capacity(batch_size);
+            let mut join_buf = String::new();
 
             // Initialize INFO builders
             let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
@@ -1213,23 +1293,18 @@ async fn get_indexed_vcf_stream(
                     chroms.push(record.reference_sequence_name().to_string());
                     poss.push(start_val);
                     pose.push(end_val);
-                    ids.push(
-                        record
-                            .ids()
-                            .iter()
-                            .map(|v| v.to_string())
-                            .collect::<Vec<String>>()
-                            .join(";"),
-                    );
+                    join_into(&mut join_buf, record.ids().iter(), ';');
+                    ids.push(join_buf.clone());
                     refs.push(record.reference_bases().to_string());
-                    alts.push(
+                    join_into(
+                        &mut join_buf,
                         record
                             .alternate_bases()
                             .iter()
-                            .map(|v| v.unwrap_or(".").to_string())
-                            .collect::<Vec<String>>()
-                            .join("|"),
+                            .map(|v| v.unwrap_or(".").to_string()),
+                        '|',
                     );
+                    alts.push(join_buf.clone());
                     quals.push(
                         record
                             .quality_score()
@@ -1239,16 +1314,17 @@ async fn get_indexed_vcf_stream(
                             })?
                             .map(|v| v as f64),
                     );
-                    filters.push(
+                    join_into(
+                        &mut join_buf,
                         record
                             .filters()
                             .iter(&header)
-                            .map(|v| v.unwrap_or(".").to_string())
-                            .collect::<Vec<String>>()
-                            .join(";"),
+                            .map(|v| v.unwrap_or(".").to_string()),
+                        ';',
                     );
+                    filters.push(join_buf.clone());
 
-                    load_infos(Box::new(record.clone()), &header, &mut info_builders)
+                    load_infos(&record, &header, &mut info_builders)
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     if has_format_fields {
                         load_formats(&record, &header, &sample_names, &mut format_builders)
@@ -1276,7 +1352,7 @@ async fn get_indexed_vcf_stream(
                             Some(&builders_to_arrays(&mut info_builders.2)),
                             format_arrays.as_ref(),
                             num_info_fields,
-                            projection.clone(),
+                            &projection,
                             chroms.len(),
                         )?;
 
@@ -1321,7 +1397,7 @@ async fn get_indexed_vcf_stream(
                     Some(&builders_to_arrays(&mut info_builders.2)),
                     format_arrays.as_ref(),
                     num_info_fields,
-                    projection.clone(),
+                    &projection,
                     chroms.len(),
                 )?;
                 loop {

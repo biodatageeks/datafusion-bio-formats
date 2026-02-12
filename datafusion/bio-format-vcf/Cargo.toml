@@ -17,7 +17,7 @@ opendal.workspace = true
 noodles-vcf = { git = "https://github.com/biodatageeks/noodles.git",rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c", features = ["async"] }
 noodles = { git = "https://github.com/biodatageeks/noodles.git",rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c", features = ["vcf", "bgzf"] }
 noodles-bgzf = { workspace = true }
-noodles-bgzf-vcf = { package = "noodles-bgzf", git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
+noodles-bgzf-vcf = { package = "noodles-bgzf", git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c", features = ["libdeflate"] }
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
