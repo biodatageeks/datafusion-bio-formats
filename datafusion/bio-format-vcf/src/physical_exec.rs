@@ -145,10 +145,10 @@ pub fn build_record_batch(
                 make_filter(),
             ];
             if let Some(info_arrays) = infos {
-                arrays.append(&mut info_arrays.clone());
+                arrays.extend_from_slice(info_arrays);
             }
             if let Some(format_arrays) = formats {
-                arrays.append(&mut format_arrays.clone());
+                arrays.extend_from_slice(format_arrays);
             }
             arrays
         }
@@ -248,7 +248,11 @@ fn load_infos(
                         builder.append_null()?;
                     }
                 }
-                _ => panic!("Unsupported value type"),
+                _ => {
+                    return Err(datafusion::arrow::error::ArrowError::InvalidArgumentError(
+                        format!("Unsupported INFO value type for field '{}'", name),
+                    ));
+                }
             },
 
             _ => {
@@ -405,7 +409,7 @@ async fn get_local_vcf(
     let has_residual_filters = !residual_filters.is_empty();
 
     let stream = try_stream! {
-        let mut join_buf = String::new();
+        let mut join_buf = String::with_capacity(64);
 
         let mut records = reader.read_records();
         // let iter_start_time = Instant::now();
@@ -603,7 +607,7 @@ async fn get_remote_vcf_stream(
         let mut alts: Vec<String> = if needs_alt { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut quals: Vec<Option<f64>> = if needs_qual { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut filters: Vec<String> = if needs_filter { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut join_buf = String::new();
+        let mut join_buf = String::with_capacity(64);
 
         debug!("Info fields: {:?}", info_builders);
 
@@ -1205,7 +1209,7 @@ async fn get_indexed_vcf_stream(
             let mut alts: Vec<String> = Vec::with_capacity(batch_size);
             let mut quals: Vec<Option<f64>> = Vec::with_capacity(batch_size);
             let mut filters: Vec<String> = Vec::with_capacity(batch_size);
-            let mut join_buf = String::new();
+            let mut join_buf = String::with_capacity(64);
 
             // Initialize INFO builders
             let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
