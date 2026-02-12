@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-vcf"
-version = "0.3.1"
+version = "0.4.0"
 description = "VCF file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
