@@ -39,11 +39,12 @@ fn determine_schema(
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false),
         Field::new("cigar", DataType::Utf8, false),
-        Field::new("mapping_quality", DataType::UInt32, true),
+        Field::new("mapping_quality", DataType::UInt32, false),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
     ];
 
     // Add tag fields if specified
@@ -455,11 +456,12 @@ impl CramTableProvider {
             ("end", "UInt32", true, "Alignment end position"),
             ("flags", "UInt32", false, "SAM flags"),
             ("cigar", "Utf8", false, "CIGAR string"),
-            ("mapping_quality", "UInt32", true, "Mapping quality"),
+            ("mapping_quality", "UInt32", false, "Mapping quality"),
             ("mate_chrom", "Utf8", true, "Mate chromosome"),
             ("mate_start", "UInt32", true, "Mate start position"),
             ("sequence", "Utf8", false, "Read sequence"),
             ("quality_scores", "Utf8", false, "Quality scores"),
+            ("template_length", "Int32", false, "Template length (TLEN)"),
         ];
 
         for (name, dtype, is_null, desc) in core_fields {

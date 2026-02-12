@@ -42,11 +42,12 @@ fn determine_schema(
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false), //FIXME:: optimize storage
         Field::new("cigar", DataType::Utf8, false),
-        Field::new("mapping_quality", DataType::UInt32, true),
+        Field::new("mapping_quality", DataType::UInt32, false),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
     ];
 
     // Add tag fields if specified
@@ -108,11 +109,12 @@ async fn determine_schema_from_file(
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false),
         Field::new("cigar", DataType::Utf8, false),
-        Field::new("mapping_quality", DataType::UInt32, true),
+        Field::new("mapping_quality", DataType::UInt32, false),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
     ];
 
     use crate::storage::{SamReader, is_sam_file};
@@ -317,7 +319,7 @@ impl BamTableProvider {
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
     /// * `tag_fields` - Optional list of BAM alignment tag names to include as columns.
-    ///   `None` = no tags included (only 11 core fields),
+    ///   `None` = no tags included (only 12 core fields),
     ///   `Some(vec!["NM", "MD", "AS"])` = include specified tags as columns
     ///
     /// # Returns
@@ -691,7 +693,7 @@ impl BamTableProvider {
             }
         }
 
-        // Add 11 core fields
+        // Add 12 core fields
         let core_fields = vec![
             (
                 "name",
@@ -707,7 +709,7 @@ impl BamTableProvider {
             (
                 "mapping_quality",
                 DataType::UInt32,
-                true,
+                false,
                 "Mapping quality (0-255)",
             ),
             (
@@ -723,6 +725,12 @@ impl BamTableProvider {
                 DataType::Utf8,
                 false,
                 "Base quality scores",
+            ),
+            (
+                "template_length",
+                DataType::Int32,
+                false,
+                "Template length (TLEN)",
             ),
         ];
 

@@ -427,7 +427,8 @@ async fn get_remote_cram_stream(
         let needs_mate_start = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
         let needs_sequence = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
         let needs_quality = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
-        let needs_any_tag = projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 11));
+        let needs_tlen = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
+        let needs_any_tag = projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
 
         // Create vectors for accumulating record data.
         let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
@@ -435,13 +436,14 @@ async fn get_remote_cram_stream(
         let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
 
-        let mut mapping_quality: Vec<Option<u32>> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut seq_builder = if needs_sequence { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
         let mut qual_builder = if needs_quality { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
+        let mut template_length: Vec<i32> = if needs_tlen { Vec::with_capacity(batch_size) } else { Vec::new() };
 
         // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -475,8 +477,8 @@ async fn get_remote_cram_stream(
                     Some(read_name) => {
                         name.push(Some(read_name.to_string()));
                     },
-                    _ => {
-                        name.push(None);
+                    None => {
+                        name.push(Some("*".to_string()));
                     }
                 };
             }
@@ -503,9 +505,6 @@ async fn get_remote_cram_stream(
                 match record.alignment_end() {
                     Some(end_pos) => {
                         let pos = usize::from(end_pos) as u32;
-                        // End position: noodles returns 1-based inclusive end
-                        // For 0-based half-open: keep as-is (1-based inclusive = 0-based exclusive)
-                        // For 1-based closed: use as-is
                         end.push(Some(pos));
                     },
                     None => {
@@ -516,12 +515,15 @@ async fn get_remote_cram_stream(
             if needs_mapq {
                 match record.mapping_quality() {
                     Some(mapping_quality_value) => {
-                        mapping_quality.push(Some(u8::from(mapping_quality_value) as u32));
+                        mapping_quality.push(u8::from(mapping_quality_value) as u32);
                     },
-                    _ => {
-                        mapping_quality.push(None);
+                    None => {
+                        mapping_quality.push(255u32);
                     }
                 };
+            }
+            if needs_tlen {
+                template_length.push(record.template_length());
             }
             if needs_sequence {
                 seq_buf.clear();
@@ -608,6 +610,7 @@ async fn get_remote_cram_stream(
                         mate_start: &mate_start,
                         sequence: Arc::new(seq_builder.finish()),
                         quality_scores: Arc::new(qual_builder.finish()),
+                        template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
@@ -626,6 +629,7 @@ async fn get_remote_cram_stream(
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
+                template_length.clear();
             }
         }
         // If there are remaining records that don't fill a complete batch,
@@ -650,6 +654,7 @@ async fn get_remote_cram_stream(
                     mate_start: &mate_start,
                     sequence: Arc::new(seq_builder.finish()),
                     quality_scores: Arc::new(qual_builder.finish()),
+                    template_length: &template_length,
                 },
                 tag_arrays.as_ref(),
                 projection.clone(),
@@ -706,9 +711,12 @@ async fn get_local_cram(
     let needs_quality = projection
         .as_ref()
         .is_none_or(|p: &Vec<usize>| p.contains(&10));
+    let needs_tlen = projection
+        .as_ref()
+        .is_none_or(|p: &Vec<usize>| p.contains(&11));
     let needs_any_tag = projection
         .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 11));
+        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
 
     let mut name: Vec<Option<String>> = if needs_name {
         Vec::with_capacity(batch_size)
@@ -731,7 +739,7 @@ async fn get_local_cram(
         Vec::new()
     };
 
-    let mut mapping_quality: Vec<Option<u32>> = if needs_mapq {
+    let mut mapping_quality: Vec<u32> = if needs_mapq {
         Vec::with_capacity(batch_size)
     } else {
         Vec::new()
@@ -765,6 +773,11 @@ async fn get_local_cram(
         StringBuilder::with_capacity(batch_size, batch_size * 150)
     } else {
         StringBuilder::new()
+    };
+    let mut template_length: Vec<i32> = if needs_tlen {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
     };
 
     // Initialize tag builders
@@ -806,8 +819,8 @@ async fn get_local_cram(
                     Some(read_name) => {
                         name.push(Some(read_name.to_string()));
                     },
-                    _ => {
-                        name.push(None);
+                    None => {
+                        name.push(Some("*".to_string()));
                     }
                 };
             }
@@ -858,12 +871,15 @@ async fn get_local_cram(
             if needs_mapq {
                 match record.mapping_quality() {
                     Some(mapping_quality_value) => {
-                        mapping_quality.push(Some(u8::from(mapping_quality_value) as u32));
+                        mapping_quality.push(u8::from(mapping_quality_value) as u32);
                     },
                     None => {
-                        mapping_quality.push(None);
+                        mapping_quality.push(255u32);
                     }
                 };
+            }
+            if needs_tlen {
+                template_length.push(record.template_length());
             }
             if needs_flags {
                 flag.push(record.flags().bits() as u32);
@@ -939,6 +955,7 @@ async fn get_local_cram(
                         mate_start: &mate_start,
                         sequence: Arc::new(seq_builder.finish()),
                         quality_scores: Arc::new(qual_builder.finish()),
+                        template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),
@@ -957,6 +974,7 @@ async fn get_local_cram(
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
+                template_length.clear();
             }
         }
         // If there are remaining records that don't fill a complete batch,
@@ -981,6 +999,7 @@ async fn get_local_cram(
                     mate_start: &mate_start,
                     sequence: Arc::new(seq_builder.finish()),
                     quality_scores: Arc::new(qual_builder.finish()),
+                    template_length: &template_length,
                 },
                 tag_arrays.as_ref(),
                 projection.clone(),
@@ -1089,13 +1108,14 @@ async fn get_indexed_stream(
             let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
             let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-            let mut mapping_quality: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+            let mut mapping_quality: Vec<u32> = Vec::with_capacity(batch_size);
             let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
             let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
             let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
             let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
             let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
+            let mut template_length: Vec<i32> = Vec::with_capacity(batch_size);
 
             let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
@@ -1169,7 +1189,10 @@ async fn get_indexed_stream(
                         .alignment_end()
                         .map(|end_pos| usize::from(end_pos) as u32);
 
-                    let mq = record.mapping_quality().map(|q| u8::from(q) as u32);
+                    let mq = record
+                        .mapping_quality()
+                        .map(|q| u8::from(q) as u32)
+                        .unwrap_or(255u32);
 
                     // Apply residual filters
                     if !residual_filters.is_empty() {
@@ -1177,7 +1200,7 @@ async fn get_indexed_stream(
                             chrom: chrom_name.clone(),
                             start: start_val,
                             end: end_val,
-                            mapping_quality: mq,
+                            mapping_quality: Some(mq),
                             flags: record.flags().bits() as u32,
                         };
                         if !evaluate_record_filters(&fields, &residual_filters) {
@@ -1187,13 +1210,14 @@ async fn get_indexed_stream(
 
                     match record.name() {
                         Some(read_name) => name.push(Some(read_name.to_string())),
-                        _ => name.push(None),
+                        None => name.push(Some("*".to_string())),
                     };
 
                     chrom.push(chrom_name);
                     start.push(start_val);
                     end.push(end_val);
                     mapping_quality.push(mq);
+                    template_length.push(record.template_length());
 
                     seq_buf.clear();
                     seq_buf.extend(
@@ -1264,6 +1288,7 @@ async fn get_indexed_stream(
                                 mate_start: &mate_start,
                                 sequence: Arc::new(seq_builder.finish()),
                                 quality_scores: Arc::new(qual_builder.finish()),
+                                template_length: &template_length,
                             },
                             tag_arrays.as_ref(),
                             projection.clone(),
@@ -1286,6 +1311,7 @@ async fn get_indexed_stream(
                         flag.clear();
                         cigar.clear();
                         mapping_quality.clear();
+                        template_length.clear();
                         mate_chrom.clear();
                         mate_start.clear();
                     }
@@ -1316,6 +1342,7 @@ async fn get_indexed_stream(
                         mate_start: &mate_start,
                         sequence: Arc::new(seq_builder.finish()),
                         quality_scores: Arc::new(qual_builder.finish()),
+                        template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
                     projection.clone(),

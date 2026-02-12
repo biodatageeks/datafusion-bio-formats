@@ -349,7 +349,7 @@ async fn write_cram_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{StringArray, UInt32Array};
+    use datafusion::arrow::array::{Int32Array, StringArray, UInt32Array};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::datasource::{MemTable, TableProvider};
     use datafusion::prelude::*;
@@ -370,6 +370,7 @@ mod tests {
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),
             Field::new("quality_scores", DataType::Utf8, false),
+            Field::new("template_length", DataType::Int32, false),
         ]));
 
         // Create test data with unmapped reads (no reference needed)
@@ -378,11 +379,12 @@ mod tests {
         let starts = UInt32Array::from(vec![Option::<u32>::None, Option::<u32>::None]);
         let flags = UInt32Array::from(vec![4u32, 4u32]); // 0x4 = unmapped
         let cigars = StringArray::from(vec!["*", "*"]);
-        let mapping_qualities = UInt32Array::from(vec![Option::<u32>::None, Option::<u32>::None]);
+        let mapping_qualities = UInt32Array::from(vec![0u32, 0u32]);
         let mate_chroms = StringArray::from(vec![Option::<&str>::None, Option::<&str>::None]);
         let mate_starts = UInt32Array::from(vec![Option::<u32>::None, Option::<u32>::None]);
         let sequences = StringArray::from(vec!["ACGTACGTAC", "TGCATGCATG"]);
         let quality_scores = StringArray::from(vec!["!!!!!!!!!!", "!!!!!!!!!!"]);
+        let template_lengths = Int32Array::from(vec![0i32, 0i32]);
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -397,6 +399,7 @@ mod tests {
                 Arc::new(mate_starts),
                 Arc::new(sequences),
                 Arc::new(quality_scores),
+                Arc::new(template_lengths),
             ],
         )
         .unwrap();

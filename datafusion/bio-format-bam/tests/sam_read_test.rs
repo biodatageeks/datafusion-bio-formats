@@ -3,7 +3,7 @@
 //! Tests verify that SAM files can be read correctly, including round-trip
 //! through write -> read cycles and format detection.
 
-use datafusion::arrow::array::{Int32Array, StringArray, UInt32Array};
+use datafusion::arrow::array::{Array, Int32Array, StringArray, UInt32Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
@@ -31,6 +31,7 @@ fn create_test_schema(tag_fields: &[(&str, DataType, &str, &str)]) -> Arc<Schema
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
     ];
 
     for (name, dtype, sam_type, desc) in tag_fields {
@@ -78,6 +79,7 @@ fn create_basic_test_batch(schema: Arc<Schema>) -> datafusion::arrow::array::Rec
                 "IIIIIIIIII",
                 "IIIIIIIIII",
             ])),
+            Arc::new(Int32Array::from(vec![150, -150, 0])),
         ],
     )
     .unwrap()
@@ -223,6 +225,7 @@ async fn test_sam_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
                 "IIIIIIIIII",
                 "IIIIIIIIII",
             ])),
+            Arc::new(Int32Array::from(vec![150, -150, 0])),
             Arc::new(Int32Array::from(vec![Some(2), Some(1), Some(0)])),
             Arc::new(StringArray::from(vec![
                 Some("10"),
@@ -330,6 +333,7 @@ async fn test_sam_schema_inference() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(UInt32Array::from(vec![None::<u32>, None])),
             Arc::new(StringArray::from(vec!["ACGTACGTAC", "ACGTACGTAC"])),
             Arc::new(StringArray::from(vec!["IIIIIIIIII", "IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![100, -100])),
             Arc::new(Int32Array::from(vec![Some(2), Some(1)])),
             Arc::new(StringArray::from(vec![Some("10"), Some("5^A4")])),
         ],
@@ -489,4 +493,224 @@ fn test_sam_format_detection() {
     assert!(!is_sam_file("data/file.sam.bai"));
     assert!(!is_sam_file("data/file.txt"));
     assert!(!is_sam_file("data/samfile.bam"));
+}
+
+/// Verify that MAPQ=255 is preserved through SAM round-trip (not converted to null).
+#[tokio::test]
+async fn test_mapq_255_preserved() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_mapq255.sam");
+
+    let schema = create_test_schema(&[]);
+    let batch = datafusion::arrow::array::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1", "read2", "read3"])),
+            Arc::new(StringArray::from(vec!["chr1", "chr1", "chr2"])),
+            Arc::new(UInt32Array::from(vec![100, 200, 300])),
+            Arc::new(UInt32Array::from(vec![0, 16, 0])),
+            Arc::new(StringArray::from(vec!["10M", "10M", "10M"])),
+            Arc::new(UInt32Array::from(vec![255, 60, 0])), // MAPQ 255, 60, 0
+            Arc::new(StringArray::from(vec![None::<&str>, None, None])),
+            Arc::new(UInt32Array::from(vec![None::<u32>, None, None])),
+            Arc::new(StringArray::from(vec![
+                "ACGTACGTAC",
+                "ACGTACGTAC",
+                "TTTTTTTTTT",
+            ])),
+            Arc::new(StringArray::from(vec![
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+            ])),
+            Arc::new(Int32Array::from(vec![0, 0, 0])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        None,
+        true,
+        false,
+    );
+    ctx.register_table("output_sam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_sam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Read back
+    let read_provider =
+        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    ctx.register_table("test_sam", Arc::new(read_provider))?;
+
+    let df = ctx
+        .sql("SELECT name, mapping_quality FROM test_sam ORDER BY name")
+        .await?;
+    let results = df.collect().await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    let mapq = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+
+    // MAPQ 255 must be preserved, not null
+    assert_eq!(mapq.value(0), 255); // read1
+    assert_eq!(mapq.value(1), 60); // read2
+    assert_eq!(mapq.value(2), 0); // read3
+    assert!(!mapq.is_null(0));
+    assert!(!mapq.is_null(1));
+    assert!(!mapq.is_null(2));
+
+    Ok(())
+}
+
+/// Verify that QNAME "*" is preserved through SAM round-trip (not converted to null).
+#[tokio::test]
+async fn test_name_star_preserved() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_star_name.sam");
+
+    let schema = create_test_schema(&[]);
+    let batch = datafusion::arrow::array::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1", "*"])),
+            Arc::new(StringArray::from(vec!["chr1", "chr1"])),
+            Arc::new(UInt32Array::from(vec![100, 200])),
+            Arc::new(UInt32Array::from(vec![0, 4])), // second is unmapped
+            Arc::new(StringArray::from(vec!["10M", "*"])),
+            Arc::new(UInt32Array::from(vec![60, 0])),
+            Arc::new(StringArray::from(vec![None::<&str>, None])),
+            Arc::new(UInt32Array::from(vec![None::<u32>, None])),
+            Arc::new(StringArray::from(vec!["ACGTACGTAC", "NNNNNNNNNN"])),
+            Arc::new(StringArray::from(vec!["IIIIIIIIII", "IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![0, 0])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        None,
+        true,
+        false,
+    );
+    ctx.register_table("output_sam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_sam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Read back
+    let read_provider =
+        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    ctx.register_table("test_sam", Arc::new(read_provider))?;
+
+    let df = ctx.sql("SELECT name FROM test_sam ORDER BY name").await?;
+    let results = df.collect().await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    let names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    // "*" name must be preserved as a string, not null
+    assert!(!names.is_null(0));
+    assert!(!names.is_null(1));
+    // One of them should be "*"
+    let values: Vec<&str> = (0..names.len()).map(|i| names.value(i)).collect();
+    assert!(values.contains(&"*"));
+    assert!(values.contains(&"read1"));
+
+    Ok(())
+}
+
+/// Verify that template_length (TLEN) is preserved through SAM round-trip.
+#[tokio::test]
+async fn test_template_length_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_tlen.sam");
+
+    let schema = create_test_schema(&[]);
+    let batch = datafusion::arrow::array::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1", "read2", "read3"])),
+            Arc::new(StringArray::from(vec!["chr1", "chr1", "chr2"])),
+            Arc::new(UInt32Array::from(vec![100, 200, 300])),
+            Arc::new(UInt32Array::from(vec![0, 16, 0])),
+            Arc::new(StringArray::from(vec!["10M", "10M", "10M"])),
+            Arc::new(UInt32Array::from(vec![60, 60, 60])),
+            Arc::new(StringArray::from(vec![Some("chr1"), Some("chr1"), None])),
+            Arc::new(UInt32Array::from(vec![Some(250u32), Some(50u32), None])),
+            Arc::new(StringArray::from(vec![
+                "ACGTACGTAC",
+                "ACGTACGTAC",
+                "TTTTTTTTTT",
+            ])),
+            Arc::new(StringArray::from(vec![
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+                "IIIIIIIIII",
+            ])),
+            Arc::new(Int32Array::from(vec![160, -160, 0])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        None,
+        true,
+        false,
+    );
+    ctx.register_table("output_sam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_sam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Read back
+    let read_provider =
+        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    ctx.register_table("test_sam", Arc::new(read_provider))?;
+
+    let df = ctx
+        .sql("SELECT name, template_length FROM test_sam ORDER BY name")
+        .await?;
+    let results = df.collect().await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    let tlen = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+
+    assert_eq!(tlen.value(0), 160); // read1
+    assert_eq!(tlen.value(1), -160); // read2
+    assert_eq!(tlen.value(2), 0); // read3
+
+    Ok(())
 }

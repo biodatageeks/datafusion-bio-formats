@@ -60,6 +60,7 @@ async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
         Field::new("NM", DataType::Int32, true).with_metadata(tag_nm_metadata),
         Field::new("MD", DataType::Utf8, true).with_metadata(tag_md_metadata),
         Field::new("AS", DataType::Int32, true).with_metadata(tag_as_metadata),
@@ -87,6 +88,7 @@ async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
                 "IIIIIIIIII",
                 "IIIIIIIIII",
             ])),
+            Arc::new(Int32Array::from(vec![0i32; 3])),
             // Tags
             Arc::new(Int32Array::from(vec![Some(2), Some(1), Some(0)])), // NM
             Arc::new(StringArray::from(vec![
@@ -207,6 +209,7 @@ async fn test_character_tags_round_trip() -> Result<(), Box<dyn std::error::Erro
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
         Field::new("XT", DataType::Utf8, true).with_metadata(tag_xt_metadata),
     ]));
 
@@ -224,6 +227,7 @@ async fn test_character_tags_round_trip() -> Result<(), Box<dyn std::error::Erro
             Arc::new(UInt32Array::from(vec![None::<u32>, None])),
             Arc::new(StringArray::from(vec!["ACGTACGTAC", "ACGTACGTAC"])),
             Arc::new(StringArray::from(vec!["IIIIIIIIII", "IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![0i32; 2])),
             Arc::new(StringArray::from(vec![Some("U"), Some("R")])), // XT character tag
         ],
     )?;
@@ -308,6 +312,7 @@ async fn test_integer_array_tags_round_trip() -> Result<(), Box<dyn std::error::
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
         Field::new(
             "ZB",
             DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
@@ -335,6 +340,7 @@ async fn test_integer_array_tags_round_trip() -> Result<(), Box<dyn std::error::
             Arc::new(UInt32Array::from(vec![None::<u32>, None])),
             Arc::new(StringArray::from(vec!["ACGTACGTAC", "ACGTACGTAC"])),
             Arc::new(StringArray::from(vec!["IIIIIIIIII", "IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![0i32; 2])),
             Arc::new(list_array),
         ],
     )?;
@@ -434,6 +440,7 @@ async fn test_byte_array_tags_round_trip() -> Result<(), Box<dyn std::error::Err
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
         Field::new(
             "ZC",
             DataType::List(Arc::new(Field::new("item", DataType::UInt8, true))),
@@ -461,6 +468,7 @@ async fn test_byte_array_tags_round_trip() -> Result<(), Box<dyn std::error::Err
             Arc::new(UInt32Array::from(vec![None::<u32>, None])),
             Arc::new(StringArray::from(vec!["ACGTACGTAC", "ACGTACGTAC"])),
             Arc::new(StringArray::from(vec!["IIIIIIIIII", "IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![0i32; 2])),
             Arc::new(list_array),
         ],
     )?;
@@ -557,6 +565,7 @@ async fn test_float_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> 
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
         Field::new("XS", DataType::Float32, true).with_metadata(tag_xs_metadata),
     ]));
 
@@ -574,6 +583,7 @@ async fn test_float_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> 
             Arc::new(UInt32Array::from(vec![None::<u32>, None])),
             Arc::new(StringArray::from(vec!["ACGTACGTAC", "ACGTACGTAC"])),
             Arc::new(StringArray::from(vec!["IIIIIIIIII", "IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![0i32; 2])),
             Arc::new(Float32Array::from(vec![Some(45.5), Some(38.2)])), // XS float tag
         ],
     )?;
@@ -649,6 +659,7 @@ async fn test_write_without_tags() -> Result<(), Box<dyn std::error::Error>> {
         Field::new("mate_start", DataType::UInt32, true),
         Field::new("sequence", DataType::Utf8, false),
         Field::new("quality_scores", DataType::Utf8, false),
+        Field::new("template_length", DataType::Int32, false),
     ]));
 
     let batch = RecordBatch::try_new(
@@ -664,6 +675,7 @@ async fn test_write_without_tags() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(UInt32Array::from(vec![None::<u32>])),
             Arc::new(StringArray::from(vec!["ACGTACGTAC"])),
             Arc::new(StringArray::from(vec!["IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![0i32; 1])),
         ],
     )?;
 
@@ -716,6 +728,7 @@ async fn test_sort_on_write_coordinate_order() -> Result<(), Box<dyn std::error:
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),
             Field::new("quality_scores", DataType::Utf8, false),
+            Field::new("template_length", DataType::Int32, false),
         ],
         schema_metadata,
     ));
@@ -742,6 +755,7 @@ async fn test_sort_on_write_coordinate_order() -> Result<(), Box<dyn std::error:
                 "IIIIIIIIII",
                 "IIIIIIIIII",
             ])),
+            Arc::new(Int32Array::from(vec![0i32; 3])),
         ],
     )?;
 
@@ -842,6 +856,7 @@ async fn test_sort_on_write_false_sets_unsorted() -> Result<(), Box<dyn std::err
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),
             Field::new("quality_scores", DataType::Utf8, false),
+            Field::new("template_length", DataType::Int32, false),
         ],
         schema_metadata,
     ));
@@ -859,6 +874,7 @@ async fn test_sort_on_write_false_sets_unsorted() -> Result<(), Box<dyn std::err
             Arc::new(UInt32Array::from(vec![None::<u32>])),
             Arc::new(StringArray::from(vec!["ACGTACGTAC"])),
             Arc::new(StringArray::from(vec!["IIIIIIIIII"])),
+            Arc::new(Int32Array::from(vec![0i32; 1])),
         ],
     )?;
 
