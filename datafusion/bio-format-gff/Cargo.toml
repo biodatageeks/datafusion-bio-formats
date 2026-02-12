@@ -30,7 +30,7 @@ noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7
 noodles-csi = { git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c" }
 noodles-bgzf-gff = { package = "noodles-bgzf", git = "https://github.com/biodatageeks/noodles.git", rev = "9b7b2c5b6531373918302d4c07410e583f1b5b5c", features = ["libdeflate"] }
 flate2 = "1.0"
-log = "0.4.27"
+log = "0.4.29"
 env_logger = "0.11.8"
 tracing = "0.1.40"
 
