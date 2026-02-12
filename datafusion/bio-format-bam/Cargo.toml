@@ -12,7 +12,7 @@ readme = "README.md"
 [dependencies]
 datafusion.workspace = true
 opendal.workspace = true
-noodles-bgzf = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b" }
+noodles-bgzf = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b", features = ["libdeflate"] }
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
