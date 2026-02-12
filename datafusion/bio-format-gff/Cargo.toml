@@ -32,7 +32,7 @@ noodles-bgzf-gff = { package = "noodles-bgzf", git = "https://github.com/biodata
 flate2 = "1.0"
 log = "0.4.27"
 env_logger = "0.11.8"
-tracing = "0.1.40"
+tracing = "0.1.44"
 
 [[example]]
 name = "test_gff_reader"
