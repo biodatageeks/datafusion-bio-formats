@@ -1,4 +1,6 @@
-use crate::storage::{BamReader, BamRecordFields, IndexedBamReader, SamReader, is_sam_file};
+use crate::storage::{
+    BamReader, BamRecordFields, IndexedBamReader, SamReader, is_sam_file, open_local_bam_sync,
+};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{ArrayRef, RecordBatch, StringBuilder};
@@ -639,25 +641,371 @@ async fn get_remote_bam_stream(
     Ok(stream)
 }
 
-async fn get_local_bam(
+/// Reads a local BAM file using a synchronous thread with buffer reuse.
+///
+/// Uses `read_record(&mut record)` to reuse a single record buffer across reads,
+/// avoiding per-record clone allocations. Sends batches via a bounded channel for
+/// backpressure.
+#[allow(clippy::too_many_arguments)]
+async fn get_local_bam_sync(
     file_path: String,
-    schema: SchemaRef,
+    schema_ref: SchemaRef,
     batch_size: usize,
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     tag_fields: Option<Vec<String>>,
-) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
-{
-    let mut reader = BamReader::new(file_path.clone(), None).await;
-    let stream = process_bam_records_impl!(
-        reader,
-        schema,
-        batch_size,
-        projection,
-        coordinate_system_zero_based,
-        tag_fields
-    );
-    Ok(stream)
+) -> datafusion::error::Result<SendableRecordBatchStream> {
+    let schema = schema_ref.clone();
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
+
+    std::thread::spawn(move || {
+        let read_and_send = || -> Result<(), DataFusionError> {
+            let (mut reader, header) = open_local_bam_sync(&file_path)
+                .map_err(|e| DataFusionError::Execution(format!("Failed to open BAM: {}", e)))?;
+
+            let ref_sequences = header.reference_sequences();
+            let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+
+            // Projection flags
+            let needs_name = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&0));
+            let needs_chrom = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&1));
+            let needs_start = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&2));
+            let needs_end = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&3));
+            let needs_flags = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&4));
+            let needs_cigar = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&5));
+            let needs_mapq = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&6));
+            let needs_mate_chrom = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&7));
+            let needs_mate_start = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&8));
+            let needs_sequence = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&9));
+            let needs_quality = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&10));
+            let needs_tlen = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&11));
+            let needs_any_tag = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
+
+            // Initialize accumulators
+            let mut name: Vec<Option<String>> = if needs_name {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut chrom: Vec<Option<String>> = if needs_chrom {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut start: Vec<Option<u32>> = if needs_start {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut end: Vec<Option<u32>> = if needs_end {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut mapping_quality: Vec<u32> = if needs_mapq {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut flag: Vec<u32> = if needs_flags {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut cigar: Vec<String> = if needs_cigar {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut mate_start: Vec<Option<u32>> = if needs_mate_start {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut seq_builder = if needs_sequence {
+                StringBuilder::with_capacity(batch_size, batch_size * 150)
+            } else {
+                StringBuilder::new()
+            };
+            let mut qual_builder = if needs_quality {
+                StringBuilder::with_capacity(batch_size, batch_size * 150)
+            } else {
+                StringBuilder::new()
+            };
+            let mut template_length: Vec<i32> = if needs_tlen {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+
+            let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
+            let num_tag_fields = tag_builders.0.len();
+
+            let mut cigar_buf = String::new();
+            let mut seq_buf = String::new();
+            let mut qual_buf = String::new();
+            let mut record = bam::Record::default();
+            let mut total_records = 0usize;
+
+            loop {
+                match reader.read_record(&mut record) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        if needs_name {
+                            match record.name() {
+                                Some(read_name) => name.push(Some(read_name.to_string())),
+                                None => name.push(Some("*".to_string())),
+                            };
+                        }
+
+                        if needs_chrom {
+                            let chrom_name =
+                                get_chrom_by_seq_id(record.reference_sequence_id(), &names);
+                            chrom.push(chrom_name);
+                        }
+
+                        if needs_start {
+                            match record.alignment_start() {
+                                Some(start_pos) => {
+                                    let pos = start_pos
+                                        .map_err(|e| {
+                                            DataFusionError::Execution(format!(
+                                                "BAM position error: {}",
+                                                e
+                                            ))
+                                        })?
+                                        .get() as u32;
+                                    start.push(Some(if coordinate_system_zero_based {
+                                        pos - 1
+                                    } else {
+                                        pos
+                                    }));
+                                }
+                                None => start.push(None),
+                            }
+                        }
+
+                        if needs_end {
+                            match record.alignment_end() {
+                                Some(end_pos) => {
+                                    end.push(Some(
+                                        end_pos
+                                            .map_err(|e| {
+                                                DataFusionError::Execution(format!(
+                                                    "BAM end pos error: {}",
+                                                    e
+                                                ))
+                                            })?
+                                            .get() as u32,
+                                    ));
+                                }
+                                None => end.push(None),
+                            };
+                        }
+
+                        if needs_mapq {
+                            match record.mapping_quality() {
+                                Some(mq) => mapping_quality.push(mq.get() as u32),
+                                None => mapping_quality.push(255u32),
+                            };
+                        }
+
+                        if needs_tlen {
+                            template_length.push(record.template_length());
+                        }
+
+                        if needs_sequence {
+                            seq_buf.clear();
+                            seq_buf.extend(record.sequence().iter().map(char::from));
+                            seq_builder.append_value(&seq_buf);
+                        }
+
+                        if needs_quality {
+                            qual_buf.clear();
+                            qual_buf
+                                .extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
+                            qual_builder.append_value(&qual_buf);
+                        }
+
+                        if needs_flags {
+                            flag.push(record.flags().bits() as u32);
+                        }
+                        if needs_cigar {
+                            format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
+                            cigar.push(cigar_buf.clone());
+                        }
+
+                        if needs_mate_chrom {
+                            let mate_chrom_name =
+                                get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
+                            mate_chrom.push(mate_chrom_name);
+                        }
+
+                        if needs_mate_start {
+                            match record.mate_alignment_start() {
+                                Some(mate_start_pos) => {
+                                    let pos = mate_start_pos
+                                        .map_err(|e| {
+                                            DataFusionError::Execution(format!(
+                                                "BAM mate pos error: {}",
+                                                e
+                                            ))
+                                        })?
+                                        .get() as u32;
+                                    mate_start.push(Some(if coordinate_system_zero_based {
+                                        pos - 1
+                                    } else {
+                                        pos
+                                    }));
+                                }
+                                _ => mate_start.push(None),
+                            };
+                        }
+
+                        if needs_any_tag {
+                            load_tags(&record, &mut tag_builders)
+                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                        }
+
+                        total_records += 1;
+
+                        if total_records % batch_size == 0 {
+                            let tag_arrays =
+                                if num_tag_fields > 0 {
+                                    Some(builders_to_arrays(&mut tag_builders.2).map_err(|e| {
+                                        DataFusionError::ArrowError(Box::new(e), None)
+                                    })?)
+                                } else {
+                                    None
+                                };
+                            let batch = build_record_batch(
+                                Arc::clone(&schema),
+                                RecordFields {
+                                    name: &name,
+                                    chrom: &chrom,
+                                    start: &start,
+                                    end: &end,
+                                    flag: &flag,
+                                    cigar: &cigar,
+                                    mapping_quality: &mapping_quality,
+                                    mate_chrom: &mate_chrom,
+                                    mate_start: &mate_start,
+                                    sequence: Arc::new(seq_builder.finish()),
+                                    quality_scores: Arc::new(qual_builder.finish()),
+                                    template_length: &template_length,
+                                },
+                                tag_arrays.as_ref(),
+                                projection.clone(),
+                                name.len(),
+                            )?;
+
+                            loop {
+                                match tx.try_send(Ok(batch.clone())) {
+                                    Ok(()) => break,
+                                    Err(e) if e.is_disconnected() => return Ok(()),
+                                    Err(_) => std::thread::yield_now(),
+                                }
+                            }
+
+                            name.clear();
+                            chrom.clear();
+                            start.clear();
+                            end.clear();
+                            flag.clear();
+                            cigar.clear();
+                            mapping_quality.clear();
+                            mate_chrom.clear();
+                            mate_start.clear();
+                            template_length.clear();
+                        }
+                    }
+                    Err(e) => {
+                        return Err(DataFusionError::Execution(format!("BAM read error: {}", e)));
+                    }
+                }
+            }
+
+            // Remaining records
+            if !name.is_empty() {
+                let tag_arrays = if num_tag_fields > 0 {
+                    Some(
+                        builders_to_arrays(&mut tag_builders.2)
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                    )
+                } else {
+                    None
+                };
+                let batch = build_record_batch(
+                    Arc::clone(&schema),
+                    RecordFields {
+                        name: &name,
+                        chrom: &chrom,
+                        start: &start,
+                        end: &end,
+                        flag: &flag,
+                        cigar: &cigar,
+                        mapping_quality: &mapping_quality,
+                        mate_chrom: &mate_chrom,
+                        mate_start: &mate_start,
+                        sequence: Arc::new(seq_builder.finish()),
+                        quality_scores: Arc::new(qual_builder.finish()),
+                        template_length: &template_length,
+                    },
+                    tag_arrays.as_ref(),
+                    projection.clone(),
+                    name.len(),
+                )?;
+                loop {
+                    match tx.try_send(Ok(batch.clone())) {
+                        Ok(()) => break,
+                        Err(e) if e.is_disconnected() => break,
+                        Err(_) => std::thread::yield_now(),
+                    }
+                }
+            }
+
+            debug!("Local BAM sync scan: {} records", total_records);
+            Ok(())
+        };
+        if let Err(e) = read_and_send() {
+            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
+        }
+    });
+
+    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+    Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
 
 /// Macro to generate the record processing logic for SAM readers.
@@ -942,16 +1290,15 @@ async fn get_stream(
                 .await?;
                 Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
             } else {
-                let stream = get_local_bam(
+                get_local_bam_sync(
                     file_path.clone(),
-                    schema.clone(),
+                    schema_ref,
                     batch_size,
                     projection,
                     coordinate_system_zero_based,
                     tag_fields,
                 )
-                .await?;
-                Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+                .await
             }
         }
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {

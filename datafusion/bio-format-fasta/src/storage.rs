@@ -312,3 +312,57 @@ impl FastaLocalReader {
         }
     }
 }
+
+/// Synchronous local FASTA reader for BGZF and uncompressed files.
+/// Used by the buffer-reuse read path to avoid per-record clone allocations.
+pub enum FastaSyncReader {
+    /// BGZF-compressed reader with multithreaded decompression.
+    Bgzf(fasta::io::Reader<bgzf::MultithreadedReader<std::fs::File>>),
+    /// Uncompressed reader with buffered I/O.
+    Plain(fasta::io::Reader<BufReader<File>>),
+}
+
+impl FastaSyncReader {
+    /// Reads a raw definition line into the buffer.
+    /// Returns 0 at EOF.
+    pub fn read_definition(&mut self, buf: &mut String) -> std::io::Result<usize> {
+        match self {
+            FastaSyncReader::Bgzf(r) => r.read_definition(buf),
+            FastaSyncReader::Plain(r) => r.read_definition(buf),
+        }
+    }
+
+    /// Reads a sequence into the buffer.
+    /// Returns the number of bases read.
+    pub fn read_sequence(&mut self, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+        match self {
+            FastaSyncReader::Bgzf(r) => r.read_sequence(buf),
+            FastaSyncReader::Plain(r) => r.read_sequence(buf),
+        }
+    }
+}
+
+/// Opens a local FASTA file synchronously with the given compression type.
+/// Supports BGZF and uncompressed formats for the buffer-reuse read path.
+pub fn open_local_fasta_sync(
+    file_path: &str,
+    compression_type: CompressionType,
+    thread_num: usize,
+) -> std::io::Result<FastaSyncReader> {
+    match compression_type {
+        CompressionType::BGZF => Ok(FastaSyncReader::Bgzf(get_local_fasta_bgzf_reader(
+            file_path.to_string(),
+            thread_num,
+        )?)),
+        CompressionType::NONE => Ok(FastaSyncReader::Plain(get_local_fasta_reader(
+            file_path.to_string(),
+        )?)),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "Sync FASTA reader does not support compression: {:?}",
+                compression_type
+            ),
+        )),
+    }
+}

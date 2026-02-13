@@ -154,6 +154,18 @@ impl BamReader {
     }
 }
 
+/// Opens a local BAM file synchronously and returns the reader + header.
+/// Used by the buffer-reuse read path to avoid per-record clone allocations.
+pub fn open_local_bam_sync(
+    file_path: &str,
+) -> Result<(Reader<MultithreadedReader<File>>, sam::Header), Error> {
+    let file = File::open(file_path)?;
+    let bgzf_reader = MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), file);
+    let mut reader = bam::io::Reader::from(bgzf_reader);
+    let header = reader.read_header()?;
+    Ok((reader, header))
+}
+
 /// Checks if a file path refers to a SAM file based on file extension.
 ///
 /// # Arguments

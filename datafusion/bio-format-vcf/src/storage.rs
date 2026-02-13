@@ -510,6 +510,62 @@ impl VcfLocalReader {
     }
 }
 
+/// Synchronous local VCF reader for BGZF and uncompressed files.
+/// Used by the buffer-reuse read path to avoid per-record clone allocations.
+pub enum VcfSyncReader {
+    /// BGZF-compressed reader with multithreaded decompression.
+    Bgzf(vcf::io::Reader<MultithreadedReader<File>>),
+    /// Uncompressed reader with buffered I/O.
+    Plain(vcf::io::Reader<std::io::BufReader<File>>),
+}
+
+impl VcfSyncReader {
+    /// Reads the VCF header.
+    pub fn read_header(&mut self) -> std::io::Result<Header> {
+        match self {
+            VcfSyncReader::Bgzf(r) => r.read_header(),
+            VcfSyncReader::Plain(r) => r.read_header(),
+        }
+    }
+
+    /// Reads the next VCF record into the provided buffer.
+    /// Returns 0 at EOF.
+    pub fn read_record(&mut self, record: &mut Record) -> std::io::Result<usize> {
+        match self {
+            VcfSyncReader::Bgzf(r) => r.read_record(record),
+            VcfSyncReader::Plain(r) => r.read_record(record),
+        }
+    }
+}
+
+/// Opens a local VCF file synchronously and returns the reader + header.
+/// Supports BGZF and uncompressed formats for the buffer-reuse read path.
+pub fn open_local_vcf_sync(
+    file_path: &str,
+    compression_type: CompressionType,
+) -> std::io::Result<(VcfSyncReader, Header)> {
+    let mut reader = match compression_type {
+        CompressionType::BGZF => {
+            VcfSyncReader::Bgzf(get_local_vcf_bgzf_reader(file_path.to_string())?)
+        }
+        CompressionType::NONE => {
+            let file = File::open(file_path)?;
+            VcfSyncReader::Plain(vcf::io::Reader::new(std::io::BufReader::new(file)))
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!(
+                    "Sync VCF reader does not support compression: {:?}",
+                    compression_type
+                ),
+            ));
+        }
+    };
+    let header = reader.read_header()?;
+    Ok((reader, header))
+}
+
 /// Extracts INFO field metadata from a VCF header into a RecordBatch.
 ///
 /// # Arguments

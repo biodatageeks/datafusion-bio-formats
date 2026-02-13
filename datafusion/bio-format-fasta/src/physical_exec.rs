@@ -1,4 +1,4 @@
-use crate::storage::{FastaLocalReader, FastaRemoteReader};
+use crate::storage::{FastaLocalReader, FastaRemoteReader, open_local_fasta_sync};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
@@ -8,7 +8,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
-    ObjectStorageOptions, StorageType, get_storage_type,
+    CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_storage_type,
 };
 
 use futures::Future;
@@ -280,6 +280,134 @@ async fn get_local_fasta(
     Ok(stream)
 }
 
+/// Reads a local FASTA file using a synchronous thread with buffer reuse.
+///
+/// Uses `read_record(&mut record)` to reuse a single record buffer across reads,
+/// avoiding per-record clone allocations. Sends batches via a bounded channel for
+/// backpressure. Falls back to the async `get_local_fasta` for GZIP compression.
+async fn get_local_fasta_sync(
+    file_path: String,
+    schema_ref: SchemaRef,
+    batch_size: usize,
+    thread_num: Option<usize>,
+    projection: Option<Vec<usize>>,
+    compression_type: CompressionType,
+) -> datafusion::error::Result<SendableRecordBatchStream> {
+    let schema = schema_ref.clone();
+    let (mut tx, rx) = futures::channel::mpsc::channel::<
+        Result<RecordBatch, datafusion::arrow::error::ArrowError>,
+    >(2);
+    let thread_count = thread_num.unwrap_or(1);
+
+    std::thread::spawn(move || {
+        let read_and_send = || -> Result<(), DataFusionError> {
+            let mut reader = open_local_fasta_sync(&file_path, compression_type, thread_count)
+                .map_err(|e| DataFusionError::Execution(format!("Failed to open FASTA: {}", e)))?;
+
+            let mut name: Vec<String> = Vec::with_capacity(batch_size);
+            let mut description: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
+
+            let mut def_buf = String::new();
+            let mut seq_buf = Vec::new();
+            let mut record_num = 0usize;
+
+            loop {
+                def_buf.clear();
+                match reader.read_definition(&mut def_buf) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        seq_buf.clear();
+                        reader.read_sequence(&mut seq_buf).map_err(|e| {
+                            DataFusionError::Execution(format!("FASTA sequence read error: {}", e))
+                        })?;
+
+                        let definition: noodles_fasta::record::Definition =
+                            def_buf.parse().map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "FASTA definition parse error: {}",
+                                    e
+                                ))
+                            })?;
+
+                        name.push(
+                            std::str::from_utf8(definition.name())
+                                .unwrap_or("")
+                                .to_string(),
+                        );
+                        description.push(
+                            definition
+                                .description()
+                                .map(|s| std::str::from_utf8(s).unwrap_or("").to_string()),
+                        );
+                        sequence.push(std::str::from_utf8(&seq_buf).unwrap_or("").to_string());
+
+                        record_num += 1;
+
+                        if record_num % batch_size == 0 {
+                            debug!("Record number: {}", record_num);
+                            let batch = build_record_batch(
+                                Arc::clone(&schema),
+                                &name,
+                                &description,
+                                &sequence,
+                                projection.clone(),
+                            )?;
+
+                            loop {
+                                match tx.try_send(Ok(batch.clone())) {
+                                    Ok(()) => break,
+                                    Err(e) if e.is_disconnected() => return Ok(()),
+                                    Err(_) => std::thread::yield_now(),
+                                }
+                            }
+
+                            name.clear();
+                            description.clear();
+                            sequence.clear();
+                        }
+                    }
+                    Err(e) => {
+                        return Err(DataFusionError::Execution(format!(
+                            "FASTA read error: {}",
+                            e
+                        )));
+                    }
+                }
+            }
+
+            // Remaining records
+            if !name.is_empty() {
+                let batch = build_record_batch(
+                    Arc::clone(&schema),
+                    &name,
+                    &description,
+                    &sequence,
+                    projection.clone(),
+                )?;
+                loop {
+                    match tx.try_send(Ok(batch.clone())) {
+                        Ok(()) => break,
+                        Err(e) if e.is_disconnected() => break,
+                        Err(_) => std::thread::yield_now(),
+                    }
+                }
+            }
+
+            debug!("Local FASTA sync scan: {} records", record_num);
+            Ok(())
+        };
+        if let Err(e) = read_and_send() {
+            let _ = tx.try_send(Err(datafusion::arrow::error::ArrowError::ExternalError(
+                Box::new(e),
+            )));
+        }
+    });
+
+    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+    Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+}
+
 fn build_record_batch(
     schema: SchemaRef,
     name: &[String],
@@ -340,16 +468,41 @@ async fn get_stream(
 
     match store_type {
         StorageType::LOCAL => {
-            let stream = get_local_fasta(
+            let opts = object_storage_options.clone().unwrap_or_default();
+            let compression_type = get_compression_type(
                 file_path.clone(),
-                schema.clone(),
-                batch_size,
-                thread_num,
-                projection,
-                object_storage_options,
+                opts.compression_type.clone(),
+                opts.clone(),
             )
-            .await?;
-            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            .await
+            .map_err(|e| {
+                DataFusionError::Execution(format!("Failed to detect compression: {}", e))
+            })?;
+
+            if matches!(compression_type, CompressionType::GZIP) {
+                // GZIP: fall back to the async stream-based reader
+                let stream = get_local_fasta(
+                    file_path.clone(),
+                    schema.clone(),
+                    batch_size,
+                    thread_num,
+                    projection,
+                    object_storage_options,
+                )
+                .await?;
+                Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+            } else {
+                // BGZF / PLAIN: sync thread with buffer reuse
+                get_local_fasta_sync(
+                    file_path.clone(),
+                    schema_ref,
+                    batch_size,
+                    thread_num,
+                    projection,
+                    compression_type,
+                )
+                .await
+            }
         }
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
             let stream = get_remote_fasta_stream(
