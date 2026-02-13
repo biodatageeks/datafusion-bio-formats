@@ -330,6 +330,7 @@ async fn get_local_vcf(
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    limit: Option<usize>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     // let mut count: usize = 0;
@@ -476,22 +477,29 @@ async fn get_local_vcf(
             let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
             let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
 
+            // Compute chrom and end once, reuse for filtering and accumulation
+            let chrom_str = if needs_chrom || has_residual_filters {
+                Some(record.reference_sequence_name().to_string())
+            } else { None };
+            let end_val = if needs_end || has_residual_filters {
+                Some(get_variant_end(&record, &header))
+            } else { None };
+
             // Apply residual filters early to skip records before accumulation
             if has_residual_filters {
-                let end_val = get_variant_end(&record, &header);
                 let fields = VcfRecordFields {
-                    chrom: Some(record.reference_sequence_name().to_string()),
+                    chrom: chrom_str.clone(),
                     start: Some(start_val),
-                    end: Some(end_val),
+                    end: end_val,
                 };
                 if !evaluate_record_filters(&fields, &residual_filters) {
                     continue;
                 }
             }
 
-            if needs_chrom { chroms.push(record.reference_sequence_name().to_string()); }
+            if needs_chrom { chroms.push(chrom_str.unwrap()); }
             if needs_start { poss.push(start_val); }
-            if needs_end { pose.push(get_variant_end(&record, &header)); }
+            if needs_end { pose.push(end_val.unwrap()); }
             if needs_id { join_into(&mut join_buf, record.ids().iter(), ';'); ids.push(join_buf.clone()); }
             if needs_ref { refs.push(record.reference_bases().to_string()); }
             if needs_alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); alts.push(join_buf.clone()); }
@@ -502,6 +510,12 @@ async fn get_local_vcf(
                 load_formats_single_pass(&record, &header, sample_count, &format_builders.2, &mut format_builders.3, &format_field_to_index, num_format_fields, &mut format_populated)?;
             }
             record_num += 1;
+
+            // Check limit — break early if reached
+            if limit.is_some_and(|lim| record_num >= lim) {
+                break;
+            }
+
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
@@ -598,6 +612,7 @@ async fn get_local_vcf_sync(
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
     compression_type: CompressionType,
+    limit: Option<usize>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let schema = schema_ref.clone();
     let (mut tx, rx) = futures::channel::mpsc::channel::<
@@ -751,13 +766,24 @@ async fn get_local_vcf_sync(
                             start_pos_1based
                         };
 
+                        // Compute chrom and end once, reuse for filtering and accumulation
+                        let chrom_str = if needs_chrom || has_residual_filters {
+                            Some(record.reference_sequence_name().to_string())
+                        } else {
+                            None
+                        };
+                        let end_val = if needs_end || has_residual_filters {
+                            Some(get_variant_end(&record, &header))
+                        } else {
+                            None
+                        };
+
                         // Apply residual filters early
                         if has_residual_filters {
-                            let end_val = get_variant_end(&record, &header);
                             let fields = VcfRecordFields {
-                                chrom: Some(record.reference_sequence_name().to_string()),
+                                chrom: chrom_str.clone(),
                                 start: Some(start_val),
-                                end: Some(end_val),
+                                end: end_val,
                             };
                             if !evaluate_record_filters(&fields, &residual_filters) {
                                 continue;
@@ -765,13 +791,13 @@ async fn get_local_vcf_sync(
                         }
 
                         if needs_chrom {
-                            chroms.push(record.reference_sequence_name().to_string());
+                            chroms.push(chrom_str.unwrap());
                         }
                         if needs_start {
                             poss.push(start_val);
                         }
                         if needs_end {
-                            pose.push(get_variant_end(&record, &header));
+                            pose.push(end_val.unwrap());
                         }
                         if needs_id {
                             join_into(&mut join_buf, record.ids().iter(), ';');
@@ -834,6 +860,11 @@ async fn get_local_vcf_sync(
 
                         record_num += 1;
 
+                        // Check limit — break early if reached
+                        if limit.is_some_and(|lim| record_num >= lim) {
+                            break;
+                        }
+
                         if record_num % batch_size == 0 {
                             debug!("Record number: {}", record_num);
                             let info_arrays = if needs_any_info {
@@ -863,11 +894,15 @@ async fn get_local_vcf_sync(
                                 batch_size,
                             )?;
 
+                            let mut pending = Ok(batch);
                             loop {
-                                match tx.try_send(Ok(batch.clone())) {
+                                match tx.try_send(pending) {
                                     Ok(()) => break,
                                     Err(e) if e.is_disconnected() => return Ok(()),
-                                    Err(_) => std::thread::yield_now(),
+                                    Err(e) => {
+                                        pending = e.into_inner();
+                                        std::thread::yield_now();
+                                    }
                                 }
                             }
 
@@ -915,11 +950,15 @@ async fn get_local_vcf_sync(
                     &projection,
                     record_num % batch_size,
                 )?;
+                let mut pending = Ok(batch);
                 loop {
-                    match tx.try_send(Ok(batch.clone())) {
+                    match tx.try_send(pending) {
                         Ok(()) => break,
                         Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
+                        Err(e) => {
+                            pending = e.into_inner();
+                            std::thread::yield_now();
+                        }
                     }
                 }
             }
@@ -950,6 +989,7 @@ async fn get_remote_vcf_stream(
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    limit: Option<usize>,
 ) -> datafusion::error::Result<
     AsyncStream<datafusion::error::Result<RecordBatch>, impl Future<Output = ()> + Sized>,
 > {
@@ -1066,22 +1106,29 @@ async fn get_remote_vcf_stream(
             let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
             let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
 
+            // Compute chrom and end once, reuse for filtering and accumulation
+            let chrom_str = if needs_chrom || has_residual_filters {
+                Some(record.reference_sequence_name().to_string())
+            } else { None };
+            let end_val = if needs_end || has_residual_filters {
+                Some(get_variant_end(&record, &header))
+            } else { None };
+
             // Apply residual filters early to skip records before accumulation
             if has_residual_filters {
-                let end_val = get_variant_end(&record, &header);
                 let fields = VcfRecordFields {
-                    chrom: Some(record.reference_sequence_name().to_string()),
+                    chrom: chrom_str.clone(),
                     start: Some(start_val),
-                    end: Some(end_val),
+                    end: end_val,
                 };
                 if !evaluate_record_filters(&fields, &residual_filters) {
                     continue;
                 }
             }
 
-            if needs_chrom { chroms.push(record.reference_sequence_name().to_string()); }
+            if needs_chrom { chroms.push(chrom_str.unwrap()); }
             if needs_start { poss.push(start_val); }
-            if needs_end { pose.push(get_variant_end(&record, &header)); }
+            if needs_end { pose.push(end_val.unwrap()); }
             if needs_id { join_into(&mut join_buf, record.ids().iter(), ';'); ids.push(join_buf.clone()); }
             if needs_ref { refs.push(record.reference_bases().to_string()); }
             if needs_alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); alts.push(join_buf.clone()); }
@@ -1092,6 +1139,12 @@ async fn get_remote_vcf_stream(
                 load_formats_single_pass(&record, &header, sample_count, &format_builders.2, &mut format_builders.3, &format_field_to_index, num_format_fields, &mut format_populated)?;
             }
             record_num += 1;
+
+            // Check limit — break early if reached
+            if limit.is_some_and(|lim| record_num >= lim) {
+                break;
+            }
+
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
@@ -1410,6 +1463,7 @@ async fn get_stream(
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    limit: Option<usize>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     // Open the BGZF-indexed VCF using IndexedReader.
 
@@ -1443,6 +1497,7 @@ async fn get_stream(
                     object_storage_options,
                     coordinate_system_zero_based,
                     residual_filters,
+                    limit,
                 )
                 .await?;
                 Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -1459,6 +1514,7 @@ async fn get_stream(
                     coordinate_system_zero_based,
                     residual_filters,
                     compression_type,
+                    limit,
                 )
                 .await
             }
@@ -1475,6 +1531,7 @@ async fn get_stream(
                 object_storage_options,
                 coordinate_system_zero_based,
                 residual_filters,
+                limit,
             )
             .await?;
             Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
@@ -1593,6 +1650,7 @@ impl ExecutionPlan for VcfExec {
                 let sample_names = self.sample_names.clone();
                 let residual_filters = self.residual_filters.clone();
 
+                let limit = self.limit;
                 let fut = get_indexed_vcf_stream(
                     file_path,
                     index_path,
@@ -1605,6 +1663,7 @@ impl ExecutionPlan for VcfExec {
                     format_fields,
                     sample_names,
                     residual_filters,
+                    limit,
                 );
                 let stream = futures::stream::once(fut).try_flatten();
                 return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
@@ -1623,6 +1682,7 @@ impl ExecutionPlan for VcfExec {
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
             self.residual_filters.clone(),
+            self.limit,
         );
         let stream = futures::stream::once(fut).try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
@@ -1661,6 +1721,7 @@ async fn get_indexed_vcf_stream(
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
     residual_filters: Vec<Expr>,
+    limit: Option<usize>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let schema = schema_ref.clone();
     let (mut tx, rx) = futures::channel::mpsc::channel::<
@@ -1677,17 +1738,6 @@ async fn get_indexed_vcf_stream(
             let header = indexed_reader.header().clone();
             let infos = header.infos();
             let formats = header.formats();
-
-            // Initialize accumulators
-            let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
-            let mut poss: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut pose: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut ids: Vec<String> = Vec::with_capacity(batch_size);
-            let mut refs: Vec<String> = Vec::with_capacity(batch_size);
-            let mut alts: Vec<String> = Vec::with_capacity(batch_size);
-            let mut quals: Vec<Option<f64>> = Vec::with_capacity(batch_size);
-            let mut filters: Vec<String> = Vec::with_capacity(batch_size);
-            let mut join_buf = String::with_capacity(64);
 
             // Initialize INFO builders
             let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
@@ -1732,9 +1782,86 @@ async fn get_indexed_vcf_stream(
             let mut format_populated = vec![false; num_format_fields];
             let sample_count = sample_names.len();
 
-            let mut total_records = 0usize;
+            // Projection flags
+            let needs_chrom = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&0));
+            let needs_start = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&1));
+            let needs_end = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&2));
+            let needs_id = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&3));
+            let needs_ref = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&4));
+            let needs_alt = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&5));
+            let needs_qual = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&6));
+            let needs_filter = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&7));
+            let needs_any_info = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 && i < 8 + num_info_fields));
+            let needs_any_format = projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 + num_info_fields));
+            let has_residual_filters = !residual_filters.is_empty();
 
-            for region in &regions {
+            // Initialize accumulators conditionally based on projection
+            let mut chroms: Vec<String> = if needs_chrom {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut poss: Vec<u32> = if needs_start {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut pose: Vec<u32> = if needs_end {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut ids: Vec<String> = if needs_id {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut refs: Vec<String> = if needs_ref {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut alts: Vec<String> = if needs_alt {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut quals: Vec<Option<f64>> = if needs_qual {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut filters: Vec<String> = if needs_filter {
+                Vec::with_capacity(batch_size)
+            } else {
+                Vec::new()
+            };
+            let mut join_buf = String::with_capacity(64);
+
+            let mut total_records = 0usize;
+            let mut batch_record_count = 0usize;
+
+            'regions: for region in &regions {
                 // Skip unmapped_tail regions — not applicable to VCF
                 if region.unmapped_tail {
                     continue;
@@ -1783,58 +1910,85 @@ async fn get_indexed_vcf_stream(
                         }
                     }
 
-                    let end_val = get_variant_end(&record, &header);
+                    // Compute chrom and end once, reuse for filtering and accumulation
+                    let chrom_str = if needs_chrom || has_residual_filters {
+                        Some(record.reference_sequence_name().to_string())
+                    } else {
+                        None
+                    };
+                    let end_val = if needs_end || has_residual_filters {
+                        Some(get_variant_end(&record, &header))
+                    } else {
+                        None
+                    };
 
                     // Apply residual filters
-                    if !residual_filters.is_empty() {
+                    if has_residual_filters {
                         let fields = VcfRecordFields {
-                            chrom: Some(record.reference_sequence_name().to_string()),
+                            chrom: chrom_str.clone(),
                             start: Some(start_val),
-                            end: Some(end_val),
+                            end: end_val,
                         };
                         if !evaluate_record_filters(&fields, &residual_filters) {
                             continue;
                         }
                     }
 
-                    chroms.push(record.reference_sequence_name().to_string());
-                    poss.push(start_val);
-                    pose.push(end_val);
-                    join_into(&mut join_buf, record.ids().iter(), ';');
-                    ids.push(join_buf.clone());
-                    refs.push(record.reference_bases().to_string());
-                    join_into(
-                        &mut join_buf,
-                        record.alternate_bases().iter().map(|v| v.unwrap_or(".")),
-                        '|',
-                    );
-                    alts.push(join_buf.clone());
-                    quals.push(
-                        record
-                            .quality_score()
-                            .transpose()
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!("VCF qual error: {}", e))
-                            })?
-                            .map(|v| v as f64),
-                    );
-                    join_into(
-                        &mut join_buf,
-                        record.filters().iter(&header).map(|v| v.unwrap_or(".")),
-                        ';',
-                    );
-                    filters.push(join_buf.clone());
-
-                    load_infos_single_pass(
-                        &record,
-                        &header,
-                        &info_builders.1,
-                        &mut info_builders.2,
-                        &info_name_to_index,
-                        &mut info_populated,
-                    )
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                    if has_format_fields {
+                    if needs_chrom {
+                        chroms.push(chrom_str.unwrap());
+                    }
+                    if needs_start {
+                        poss.push(start_val);
+                    }
+                    if needs_end {
+                        pose.push(end_val.unwrap());
+                    }
+                    if needs_id {
+                        join_into(&mut join_buf, record.ids().iter(), ';');
+                        ids.push(join_buf.clone());
+                    }
+                    if needs_ref {
+                        refs.push(record.reference_bases().to_string());
+                    }
+                    if needs_alt {
+                        join_into(
+                            &mut join_buf,
+                            record.alternate_bases().iter().map(|v| v.unwrap_or(".")),
+                            '|',
+                        );
+                        alts.push(join_buf.clone());
+                    }
+                    if needs_qual {
+                        quals.push(
+                            record
+                                .quality_score()
+                                .transpose()
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!("VCF qual error: {}", e))
+                                })?
+                                .map(|v| v as f64),
+                        );
+                    }
+                    if needs_filter {
+                        join_into(
+                            &mut join_buf,
+                            record.filters().iter(&header).map(|v| v.unwrap_or(".")),
+                            ';',
+                        );
+                        filters.push(join_buf.clone());
+                    }
+                    if needs_any_info {
+                        load_infos_single_pass(
+                            &record,
+                            &header,
+                            &info_builders.1,
+                            &mut info_builders.2,
+                            &info_name_to_index,
+                            &mut info_populated,
+                        )
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                    }
+                    if has_format_fields && needs_any_format {
                         load_formats_single_pass(
                             &record,
                             &header,
@@ -1849,9 +2003,20 @@ async fn get_indexed_vcf_stream(
                     }
 
                     total_records += 1;
+                    batch_record_count += 1;
 
-                    if total_records % batch_size == 0 {
-                        let format_arrays = if has_format_fields {
+                    // Check limit — break out of both loops if reached
+                    if limit.is_some_and(|lim| total_records >= lim) {
+                        break 'regions;
+                    }
+
+                    if batch_record_count == batch_size {
+                        let info_arrays = if needs_any_info {
+                            Some(builders_to_arrays(&mut info_builders.2))
+                        } else {
+                            None
+                        };
+                        let format_arrays = if has_format_fields && needs_any_format {
                             Some(builders_to_arrays(&mut format_builders.3))
                         } else {
                             None
@@ -1866,19 +2031,23 @@ async fn get_indexed_vcf_stream(
                             &alts,
                             &quals,
                             &filters,
-                            Some(&builders_to_arrays(&mut info_builders.2)),
+                            info_arrays.as_ref(),
                             format_arrays.as_ref(),
                             num_info_fields,
                             &projection,
-                            chroms.len(),
+                            batch_record_count,
                         )?;
 
                         // Send batch with backpressure
+                        let mut pending = Ok(batch);
                         loop {
-                            match tx.try_send(Ok(batch.clone())) {
+                            match tx.try_send(pending) {
                                 Ok(()) => break,
                                 Err(e) if e.is_disconnected() => return Ok(()),
-                                Err(_) => std::thread::yield_now(),
+                                Err(e) => {
+                                    pending = e.into_inner();
+                                    std::thread::yield_now();
+                                }
                             }
                         }
 
@@ -1890,13 +2059,19 @@ async fn get_indexed_vcf_stream(
                         alts.clear();
                         quals.clear();
                         filters.clear();
+                        batch_record_count = 0;
                     }
                 }
             }
 
             // Remaining records
-            if !chroms.is_empty() {
-                let format_arrays = if has_format_fields {
+            if batch_record_count > 0 {
+                let info_arrays = if needs_any_info {
+                    Some(builders_to_arrays(&mut info_builders.2))
+                } else {
+                    None
+                };
+                let format_arrays = if has_format_fields && needs_any_format {
                     Some(builders_to_arrays(&mut format_builders.3))
                 } else {
                     None
@@ -1911,17 +2086,21 @@ async fn get_indexed_vcf_stream(
                     &alts,
                     &quals,
                     &filters,
-                    Some(&builders_to_arrays(&mut info_builders.2)),
+                    info_arrays.as_ref(),
                     format_arrays.as_ref(),
                     num_info_fields,
                     &projection,
-                    chroms.len(),
+                    batch_record_count,
                 )?;
+                let mut pending = Ok(batch);
                 loop {
-                    match tx.try_send(Ok(batch.clone())) {
+                    match tx.try_send(pending) {
                         Ok(()) => break,
                         Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
+                        Err(e) => {
+                            pending = e.into_inner();
+                            std::thread::yield_now();
+                        }
                     }
                 }
             }
