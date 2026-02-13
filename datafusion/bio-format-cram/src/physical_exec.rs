@@ -9,8 +9,8 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::alignment_utils::{
-    RecordFields, build_record_batch, format_cigar_ops,
-    get_chrom_by_seq_id_cram as get_chrom_by_seq_id,
+    RecordFields, build_record_batch, chrom_name_by_idx, format_cigar_ops,
+    get_chrom_idx_cram as get_chrom_idx,
 };
 use datafusion_bio_format_core::calculated_tags::{calculate_md_tag, calculate_nm_tag};
 use datafusion_bio_format_core::genomic_filter::GenomicRegion;
@@ -432,14 +432,14 @@ async fn get_remote_cram_stream(
 
         // Create vectors for accumulating record data.
         let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut chrom: Vec<Option<String>> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut chrom: Vec<Option<&str>> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
 
         let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut seq_builder = if needs_sequence { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
         let mut qual_builder = if needs_quality { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
@@ -483,9 +483,8 @@ async fn get_remote_cram_stream(
                 };
             }
             if needs_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.reference_sequence_id()), &names,
                 );
                 chrom.push(chrom_name);
             }
@@ -544,9 +543,8 @@ async fn get_remote_cram_stream(
                 cigar.push(cigar_buf.clone());
             }
             if needs_mate_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.mate_reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.mate_reference_sequence_id()), &names,
                 );
                 mate_chrom.push(chrom_name);
             }
@@ -613,7 +611,7 @@ async fn get_remote_cram_stream(
                         template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
-                    projection.clone(),
+                    &projection,
                     batch_size,
                 )?;
                 batch_num += 1;
@@ -657,7 +655,7 @@ async fn get_remote_cram_stream(
                     template_length: &template_length,
                 },
                 tag_arrays.as_ref(),
-                projection.clone(),
+                &projection,
                 record_num % batch_size,
             )?;
             yield batch;
@@ -677,128 +675,48 @@ async fn get_local_cram(
     tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    // Determine which fields are needed based on projection
-    let needs_name = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&0));
-    let needs_chrom = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&1));
-    let needs_start = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&2));
-    let needs_end = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&3));
-    let needs_flags = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&4));
-    let needs_cigar = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&5));
-    let needs_mapq = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&6));
-    let needs_mate_chrom = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&7));
-    let needs_mate_start = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&8));
-    let needs_sequence = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&9));
-    let needs_quality = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&10));
-    let needs_tlen = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&11));
-    let needs_any_tag = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
-
-    let mut name: Vec<Option<String>> = if needs_name {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut chrom: Vec<Option<String>> = if needs_chrom {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut start: Vec<Option<u32>> = if needs_start {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut end: Vec<Option<u32>> = if needs_end {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
-    let mut mapping_quality: Vec<u32> = if needs_mapq {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut flag: Vec<u32> = if needs_flags {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut cigar: Vec<String> = if needs_cigar {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut mate_start: Vec<Option<u32>> = if needs_mate_start {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut seq_builder = if needs_sequence {
-        StringBuilder::with_capacity(batch_size, batch_size * 150)
-    } else {
-        StringBuilder::new()
-    };
-    let mut qual_builder = if needs_quality {
-        StringBuilder::with_capacity(batch_size, batch_size * 150)
-    } else {
-        StringBuilder::new()
-    };
-    let mut template_length: Vec<i32> = if needs_tlen {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
-    // Initialize tag builders
-    let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    set_tag_builders(
-        batch_size,
-        tag_fields.clone(),
-        schema.clone(),
-        &mut tag_builders,
-    );
-    let num_tag_fields = tag_builders.0.len();
-
-    let mut cigar_buf = String::new();
-    let mut seq_buf = String::new();
-    let mut qual_buf = String::new();
-    let mut batch_num = 0;
     let file_path = file_path.clone();
     let mut reader = CramReader::new(file_path.clone(), reference_path, None).await;
-    let mut record_num = 0;
 
     let stream = try_stream! {
+        // Determine which fields are needed based on projection
+        let needs_name = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
+        let needs_chrom = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
+        let needs_start = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
+        let needs_end = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
+        let needs_flags = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
+        let needs_cigar = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
+        let needs_mapq = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
+        let needs_mate_chrom = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
+        let needs_mate_start = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
+        let needs_sequence = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
+        let needs_quality = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
+        let needs_tlen = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
+        let needs_any_tag = projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
+
+        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut chrom: Vec<Option<&str>> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
+        let mut qual_builder = if needs_quality { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
+        let mut template_length: Vec<i32> = if needs_tlen { Vec::with_capacity(batch_size) } else { Vec::new() };
+
+        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
+        let num_tag_fields = tag_builders.0.len();
+
+        let mut cigar_buf = String::new();
+        let mut seq_buf = String::new();
+        let mut qual_buf = String::new();
+        let mut batch_num = 0;
+        let mut record_num = 0;
+
         let ref_sequences = reader.get_sequences();
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
 
@@ -825,9 +743,8 @@ async fn get_local_cram(
                 };
             }
             if needs_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.reference_sequence_id()), &names,
                 );
                 chrom.push(chrom_name);
             }
@@ -889,9 +806,8 @@ async fn get_local_cram(
                 cigar.push(cigar_buf.clone());
             }
             if needs_mate_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.mate_reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.mate_reference_sequence_id()), &names,
                 );
                 mate_chrom.push(chrom_name);
             }
@@ -958,7 +874,7 @@ async fn get_local_cram(
                         template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
-                    projection.clone(),
+                    &projection,
                     batch_size,
                 )?;
                 batch_num += 1;
@@ -1002,7 +918,7 @@ async fn get_local_cram(
                     template_length: &template_length,
                 },
                 tag_arrays.as_ref(),
-                projection.clone(),
+                &projection,
                 record_num % batch_size,
             )?;
             yield batch;
@@ -1105,13 +1021,13 @@ async fn get_indexed_stream(
 
             // Initialize accumulators
             let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
-            let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut chrom: Vec<Option<&str>> = Vec::with_capacity(batch_size);
             let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut mapping_quality: Vec<u32> = Vec::with_capacity(batch_size);
             let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
             let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
-            let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut mate_chrom: Vec<Option<&str>> = Vec::with_capacity(batch_size);
             let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
             let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
@@ -1149,7 +1065,8 @@ async fn get_indexed_stream(
                         DataFusionError::Execution(format!("CRAM record read error: {}", e))
                     })?;
 
-                    let chrom_name = get_chrom_by_seq_id(record.reference_sequence_id(), &names);
+                    let chrom_name =
+                        chrom_name_by_idx(get_chrom_idx(record.reference_sequence_id()), &names);
 
                     // CRAM RecordBuf: positions are returned directly (no io::Result wrapper)
                     let start_val = match record.alignment_start() {
@@ -1197,7 +1114,7 @@ async fn get_indexed_stream(
                     // Apply residual filters
                     if !residual_filters.is_empty() {
                         let fields = CramRecordFields {
-                            chrom: chrom_name.clone(),
+                            chrom: chrom_name.map(|s| s.to_string()),
                             start: start_val,
                             end: end_val,
                             mapping_quality: Some(mq),
@@ -1243,8 +1160,10 @@ async fn get_indexed_stream(
                     format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
                     cigar.push(cigar_buf.clone());
 
-                    let mate_chrom_name =
-                        get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
+                    let mate_chrom_name = chrom_name_by_idx(
+                        get_chrom_idx(record.mate_reference_sequence_id()),
+                        &names,
+                    );
                     mate_chrom.push(mate_chrom_name);
 
                     match record.mate_alignment_start() {
@@ -1291,7 +1210,7 @@ async fn get_indexed_stream(
                                 template_length: &template_length,
                             },
                             tag_arrays.as_ref(),
-                            projection.clone(),
+                            &projection,
                             name.len(),
                         )?;
 
@@ -1345,7 +1264,7 @@ async fn get_indexed_stream(
                         template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
-                    projection.clone(),
+                    &projection,
                     name.len(),
                 )?;
                 loop {

@@ -94,8 +94,8 @@ fn new_null_array(data_type: &DataType, length: usize) -> ArrayRef {
 pub struct RecordFields<'a> {
     /// Read/query template names
     pub name: &'a [Option<String>],
-    /// Reference sequence names (chromosomes)
-    pub chrom: &'a [Option<String>],
+    /// Reference sequence names (chromosomes) — borrowed from names array
+    pub chrom: &'a [Option<&'a str>],
     /// Alignment start positions
     pub start: &'a [Option<u32>],
     /// Alignment end positions
@@ -106,8 +106,8 @@ pub struct RecordFields<'a> {
     pub cigar: &'a [String],
     /// Mapping quality scores (255 = unavailable per SAM spec, but always present)
     pub mapping_quality: &'a [u32],
-    /// Mate/next segment reference sequence names
-    pub mate_chrom: &'a [Option<String>],
+    /// Mate/next segment reference sequence names — borrowed from names array
+    pub mate_chrom: &'a [Option<&'a str>],
     /// Mate/next segment alignment start positions
     pub mate_start: &'a [Option<u32>],
     /// Read sequences (pre-built Arrow array)
@@ -133,7 +133,7 @@ pub fn build_record_batch(
     schema: SchemaRef,
     fields: RecordFields,
     tag_arrays: Option<&Vec<ArrayRef>>,
-    projection: Option<Vec<usize>>,
+    projection: &Option<Vec<usize>>,
     record_count: usize,
 ) -> datafusion::error::Result<RecordBatch> {
     let name = fields.name;
@@ -152,8 +152,7 @@ pub fn build_record_batch(
     // Helper closures for lazy array construction — each array is built only when needed
     let make_name =
         || Arc::new(StringArray::from_iter(name.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
-    let make_chrom =
-        || Arc::new(StringArray::from_iter(chrom.iter().map(|s| s.as_deref()))) as Arc<dyn Array>;
+    let make_chrom = || Arc::new(StringArray::from_iter(chrom.iter().copied())) as Arc<dyn Array>;
     let make_start = || Arc::new(UInt32Array::from_iter(start.iter().copied())) as Arc<dyn Array>;
     let make_end = || Arc::new(UInt32Array::from_iter(end.iter().copied())) as Arc<dyn Array>;
     let make_flag =
@@ -168,11 +167,8 @@ pub fn build_record_batch(
             mapping_quality.iter().copied(),
         )) as Arc<dyn Array>
     };
-    let make_mate_chrom = || {
-        Arc::new(StringArray::from_iter(
-            mate_chrom.iter().map(|s| s.as_deref()),
-        )) as Arc<dyn Array>
-    };
+    let make_mate_chrom =
+        || Arc::new(StringArray::from_iter(mate_chrom.iter().copied())) as Arc<dyn Array>;
     let make_mate_start =
         || Arc::new(UInt32Array::from_iter(mate_start.iter().copied())) as Arc<dyn Array>;
     let make_tlen = || {
@@ -209,7 +205,7 @@ pub fn build_record_batch(
                 // For empty projections (COUNT(*)), return an empty vector
                 // The schema should already be empty from the table provider
             } else {
-                for i in proj_ids.clone() {
+                for &i in proj_ids.iter() {
                     match i {
                         0 => arrays.push(make_name()),
                         1 => arrays.push(make_chrom()),
@@ -314,37 +310,26 @@ pub fn format_cigar_ops_unwrap(ops: impl Iterator<Item = io::Result<Op>>, buf: &
     }
 }
 
-/// Get chromosome name from BAM reference sequence ID
+/// Get chromosome index from BAM reference sequence ID
 ///
-/// Returns the chromosome name exactly as it appears in the BAM header.
+/// Returns the index into the reference names array.
 /// BAM uses `io::Result<usize>` for reference sequence IDs.
-pub fn get_chrom_by_seq_id_bam(rid: Option<io::Result<usize>>, names: &[String]) -> Option<String> {
-    match rid {
-        Some(rid) => {
-            let idx = rid.unwrap();
-            let chrom_name = names
-                .get(idx)
-                .expect("reference_sequence_id() should be in bounds");
-            Some(chrom_name.to_string())
-        }
-        _ => None,
-    }
+pub fn get_chrom_idx_bam(rid: Option<io::Result<usize>>) -> Option<usize> {
+    rid.map(|rid| rid.unwrap())
 }
 
-/// Get chromosome name from CRAM reference sequence ID
+/// Get chromosome index from CRAM reference sequence ID
 ///
-/// Returns the chromosome name exactly as it appears in the CRAM header.
+/// Returns the index into the reference names array.
 /// CRAM uses `Option<usize>` directly for reference sequence IDs.
-pub fn get_chrom_by_seq_id_cram(rid: Option<usize>, names: &[String]) -> Option<String> {
-    match rid {
-        Some(rid) => {
-            let chrom_name = names
-                .get(rid)
-                .expect("reference_sequence_id() should be in bounds");
-            Some(chrom_name.to_string())
-        }
-        _ => None,
-    }
+pub fn get_chrom_idx_cram(rid: Option<usize>) -> Option<usize> {
+    rid
+}
+
+/// Look up a chromosome name by index in the names array.
+#[inline]
+pub fn chrom_name_by_idx(idx: Option<usize>, names: &[String]) -> Option<&str> {
+    idx.map(|i| names[i].as_str())
 }
 
 #[cfg(test)]
@@ -418,68 +403,68 @@ mod tests {
     }
 
     #[test]
-    fn test_get_chrom_by_seq_id_cram() {
+    fn test_get_chrom_idx_cram() {
         let names = vec!["chr1".to_string(), "chr2".to_string(), "chrM".to_string()];
 
         assert_eq!(
-            get_chrom_by_seq_id_cram(Some(0), &names),
-            Some("chr1".to_string())
+            chrom_name_by_idx(get_chrom_idx_cram(Some(0)), &names),
+            Some("chr1")
         );
         assert_eq!(
-            get_chrom_by_seq_id_cram(Some(2), &names),
-            Some("chrM".to_string())
+            chrom_name_by_idx(get_chrom_idx_cram(Some(2)), &names),
+            Some("chrM")
         );
-        assert_eq!(get_chrom_by_seq_id_cram(None, &names), None);
+        assert_eq!(chrom_name_by_idx(get_chrom_idx_cram(None), &names), None);
     }
 
     #[test]
-    fn test_get_chrom_by_seq_id_cram_preserves_original_names() {
+    fn test_get_chrom_idx_cram_preserves_original_names() {
         let names = vec!["1".to_string(), "X".to_string(), "MT".to_string()];
 
         assert_eq!(
-            get_chrom_by_seq_id_cram(Some(0), &names),
-            Some("1".to_string())
+            chrom_name_by_idx(get_chrom_idx_cram(Some(0)), &names),
+            Some("1")
         );
         assert_eq!(
-            get_chrom_by_seq_id_cram(Some(1), &names),
-            Some("X".to_string())
+            chrom_name_by_idx(get_chrom_idx_cram(Some(1)), &names),
+            Some("X")
         );
         assert_eq!(
-            get_chrom_by_seq_id_cram(Some(2), &names),
-            Some("MT".to_string())
+            chrom_name_by_idx(get_chrom_idx_cram(Some(2)), &names),
+            Some("MT")
         );
     }
 
     #[test]
-    fn test_get_chrom_by_seq_id_bam() {
+    fn test_get_chrom_idx_bam() {
         let names = vec!["chr1".to_string(), "chr2".to_string(), "chrM".to_string()];
 
         assert_eq!(
-            get_chrom_by_seq_id_bam(Some(Ok(0)), &names),
-            Some("chr1".to_string())
+            chrom_name_by_idx(get_chrom_idx_bam(Some(Ok(0))), &names),
+            Some("chr1")
         );
         assert_eq!(
-            get_chrom_by_seq_id_bam(Some(Ok(2)), &names),
-            Some("chrM".to_string())
+            chrom_name_by_idx(get_chrom_idx_bam(Some(Ok(2))), &names),
+            Some("chrM")
         );
-        assert_eq!(get_chrom_by_seq_id_bam(None, &names), None);
+        assert_eq!(chrom_name_by_idx(get_chrom_idx_bam(None), &names), None);
     }
 
     #[test]
-    fn test_get_chrom_by_seq_id_bam_preserves_original_names() {
+    fn test_get_chrom_idx_bam_preserves_original_names() {
         let names = vec!["1".to_string(), "X".to_string(), "MT".to_string()];
 
         assert_eq!(
-            get_chrom_by_seq_id_bam(Some(Ok(0)), &names),
-            Some("1".to_string())
+            chrom_name_by_idx(get_chrom_idx_bam(Some(Ok(0))), &names),
+            Some("1")
         );
         assert_eq!(
-            get_chrom_by_seq_id_bam(Some(Ok(1)), &names),
-            Some("X".to_string())
+            chrom_name_by_idx(get_chrom_idx_bam(Some(Ok(1))), &names),
+            Some("X")
         );
         assert_eq!(
-            get_chrom_by_seq_id_bam(Some(Ok(2)), &names),
-            Some("MT".to_string())
+            chrom_name_by_idx(get_chrom_idx_bam(Some(Ok(2))), &names),
+            Some("MT")
         );
     }
 }
