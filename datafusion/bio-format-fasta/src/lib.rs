@@ -21,7 +21,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a FASTA file as a table
-//! let table = FastaTableProvider::new("data/sequences.fasta".to_string(), None, None)?;
+//! let table = FastaTableProvider::new("data/sequences.fasta".to_string(), None)?;
 //! ctx.register_table("sequences", Arc::new(table))?;
 //!
 //! // Query with SQL

@@ -12,12 +12,11 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
 use log::info;
-use noodles_bgzf::{AsyncReader, MultithreadedReader};
+use noodles_bgzf::{AsyncReader, Reader as BgzfReader};
 use noodles_vcf as vcf;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::Error;
-use std::num::NonZero;
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio_util::io::StreamReader;
@@ -114,12 +113,10 @@ pub async fn get_remote_vcf_reader(
 /// # Errors
 ///
 /// Returns an error if the file cannot be opened
-pub fn get_local_vcf_bgzf_reader(
-    file_path: String,
-) -> Result<Reader<MultithreadedReader<File>>, Error> {
+pub fn get_local_vcf_bgzf_reader(file_path: String) -> Result<Reader<BgzfReader<File>>, Error> {
     debug!("Reading VCF file from local storage");
     File::open(file_path)
-        .map(|f| noodles_bgzf::MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
+        .map(BgzfReader::new)
         .map(vcf::io::Reader::new)
 }
 
@@ -409,8 +406,8 @@ impl VcfRemoteReader {
 /// This enum handles BGZF (multithreaded), GZIP, and uncompressed local VCF files.
 /// The appropriate variant is created based on the detected compression type.
 pub enum VcfLocalReader {
-    /// Reader for BGZF-compressed local VCF files with multithreading support.
-    BGZF(Reader<MultithreadedReader<File>>),
+    /// Reader for BGZF-compressed local VCF files.
+    BGZF(Reader<BgzfReader<File>>),
     /// Reader for GZIP-compressed local VCF files.
     GZIP(vcf::r#async::io::Reader<BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>>),
     /// Reader for uncompressed local VCF files.
@@ -513,8 +510,8 @@ impl VcfLocalReader {
 /// Synchronous local VCF reader for BGZF and uncompressed files.
 /// Used by the buffer-reuse read path to avoid per-record clone allocations.
 pub enum VcfSyncReader {
-    /// BGZF-compressed reader with multithreaded decompression.
-    Bgzf(vcf::io::Reader<MultithreadedReader<File>>),
+    /// BGZF-compressed reader.
+    Bgzf(vcf::io::Reader<BgzfReader<File>>),
     /// Uncompressed reader with buffered I/O.
     Plain(vcf::io::Reader<std::io::BufReader<File>>),
 }

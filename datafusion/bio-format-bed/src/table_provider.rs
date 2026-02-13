@@ -76,7 +76,6 @@ fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::R
 /// let table = BedTableProvider::new(
 ///     "data/genes.bed".to_string(),
 ///     BEDFields::BED4,
-///     Some(4),  // Use 4 threads for parallel reading
 ///     None,     // No cloud storage options
 ///     true,     // Use 0-based coordinates (default)
 /// )?;
@@ -91,8 +90,6 @@ pub struct BedTableProvider {
     bed_fields: BEDFields,
     /// Arrow schema for the table
     schema: SchemaRef,
-    /// Optional number of threads for parallel reading
-    thread_num: Option<usize>,
     /// Optional cloud storage configuration
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -106,7 +103,6 @@ impl BedTableProvider {
     ///
     /// * `file_path` - Path to the BED file (local filesystem or cloud storage URL)
     /// * `bed_fields` - BED format variant (BED3, BED4, BED5, BED6)
-    /// * `thread_num` - Optional number of threads for parallel BGZF decompression
     /// * `object_storage_options` - Optional cloud storage configuration for remote files
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
@@ -121,7 +117,6 @@ impl BedTableProvider {
     pub fn new(
         file_path: String,
         bed_fields: BEDFields,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
@@ -130,7 +125,6 @@ impl BedTableProvider {
             file_path,
             bed_fields,
             schema,
-            thread_num,
             object_storage_options,
             coordinate_system_zero_based,
         })
@@ -208,7 +202,6 @@ impl TableProvider for BedTableProvider {
             schema: schema.clone(),
             projection: projection.cloned(),
             limit,
-            thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
         }))

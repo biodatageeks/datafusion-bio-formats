@@ -31,7 +31,6 @@ use std::sync::Arc;
 /// - `projection`: Optional column indices to project/filter the output columns
 /// - `cache`: Cached plan properties for performance
 /// - `limit`: Optional maximum number of records to read
-/// - `thread_num`: Number of threads to use for parallel BGZF decompression
 /// - `object_storage_options`: Configuration for cloud storage access
 #[allow(dead_code)]
 pub struct FastaExec {
@@ -45,8 +44,6 @@ pub struct FastaExec {
     pub(crate) cache: PlanProperties,
     /// Optional record limit.
     pub(crate) limit: Option<usize>,
-    /// Number of threads for decompression.
-    pub(crate) thread_num: Option<usize>,
     /// Cloud storage configuration options.
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
 }
@@ -128,7 +125,6 @@ impl ExecutionPlan for FastaExec {
             self.file_path.clone(),
             schema.clone(),
             batch_size,
-            self.thread_num,
             self.projection.clone(),
             self.object_storage_options.clone(),
         );
@@ -211,7 +207,6 @@ async fn get_local_fasta(
     file_path: String,
     schema: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
@@ -223,13 +218,8 @@ async fn get_local_fasta(
     // let mut count: usize = 0;
     let mut batch_num = 0;
     let file_path = file_path.clone();
-    let thread_num = thread_num.unwrap_or(1);
-    let mut reader = FastaLocalReader::new(
-        file_path.clone(),
-        thread_num,
-        object_storage_options.unwrap(),
-    )
-    .await?;
+    let mut reader =
+        FastaLocalReader::new(file_path.clone(), object_storage_options.unwrap()).await?;
     let mut record_num = 0;
 
     let stream = try_stream! {
@@ -289,7 +279,6 @@ async fn get_local_fasta_sync(
     file_path: String,
     schema_ref: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     compression_type: CompressionType,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
@@ -297,11 +286,9 @@ async fn get_local_fasta_sync(
     let (mut tx, rx) = futures::channel::mpsc::channel::<
         Result<RecordBatch, datafusion::arrow::error::ArrowError>,
     >(2);
-    let thread_count = thread_num.unwrap_or(1);
-
     std::thread::spawn(move || {
         let read_and_send = || -> Result<(), DataFusionError> {
-            let mut reader = open_local_fasta_sync(&file_path, compression_type, thread_count)
+            let mut reader = open_local_fasta_sync(&file_path, compression_type)
                 .map_err(|e| DataFusionError::Execution(format!("Failed to open FASTA: {}", e)))?;
 
             let mut name: Vec<String> = Vec::with_capacity(batch_size);
@@ -456,7 +443,6 @@ async fn get_stream(
     file_path: String,
     schema_ref: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
@@ -485,7 +471,6 @@ async fn get_stream(
                     file_path.clone(),
                     schema.clone(),
                     batch_size,
-                    thread_num,
                     projection,
                     object_storage_options,
                 )
@@ -497,7 +482,6 @@ async fn get_stream(
                     file_path.clone(),
                     schema_ref,
                     batch_size,
-                    thread_num,
                     projection,
                     compression_type,
                 )

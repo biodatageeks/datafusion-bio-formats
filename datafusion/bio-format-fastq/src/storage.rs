@@ -63,17 +63,15 @@ pub async fn get_remote_fastq_gz_reader(
     Ok(reader)
 }
 
-/// Creates a synchronous BGZF-decompressing FASTQ reader for local files
+/// Creates a synchronous BGZF-decompressing FASTQ reader for local files.
 ///
-/// Uses a single worker thread for sequential BGZF decompression.
+/// Uses single-threaded BGZF decompression.
 /// Parallel reading is handled at the partition level by the execution plan.
 pub fn get_local_fastq_bgzf_reader(
     file_path: String,
-) -> Result<fastq::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
+) -> Result<fastq::io::Reader<bgzf::Reader<std::fs::File>>, Error> {
     std::fs::File::open(file_path)
-        .map(|f| {
-            bgzf::MultithreadedReader::with_worker_count(std::num::NonZero::new(1).unwrap(), f)
-        })
+        .map(bgzf::Reader::new)
         .map(fastq::io::Reader::new)
 }
 
@@ -165,7 +163,7 @@ impl FastqRemoteReader {
 /// A FASTQ reader that automatically detects and handles local file compression
 pub enum FastqLocalReader {
     /// BGZF-compressed local FASTQ file reader
-    BGZF(fastq::io::Reader<bgzf::MultithreadedReader<std::fs::File>>),
+    BGZF(fastq::io::Reader<bgzf::Reader<std::fs::File>>),
     /// GZIP-compressed local FASTQ file reader
     GZIP(
         fastq::r#async::io::Reader<

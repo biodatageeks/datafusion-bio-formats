@@ -84,27 +84,21 @@ pub async fn get_remote_fasta_gz_reader(
     Ok(reader)
 }
 
-/// Creates a FASTA reader for BGZF-compressed local files with parallel decompression.
+/// Creates a FASTA reader for BGZF-compressed local files.
 ///
 /// # Arguments
 ///
 /// * `file_path` - Path to the BGZF-compressed FASTA file
-/// * `thread_num` - Number of threads to use for parallel decompression
 ///
 /// # Returns
 ///
-/// A FASTA reader with multithreaded BGZF decompression support.
+/// A FASTA reader with single-threaded BGZF decompression.
+/// Parallel reading is handled at the partition level.
 pub fn get_local_fasta_bgzf_reader(
     file_path: String,
-    thread_num: usize,
-) -> Result<fasta::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
+) -> Result<fasta::io::Reader<bgzf::Reader<std::fs::File>>, Error> {
     std::fs::File::open(file_path)
-        .map(|f| {
-            bgzf::MultithreadedReader::with_worker_count(
-                std::num::NonZero::new(thread_num).unwrap(),
-                f,
-            )
-        })
+        .map(bgzf::Reader::new)
         .map(fasta::io::Reader::new)
 }
 
@@ -242,8 +236,8 @@ impl FastaRemoteReader {
 /// - `GZIP`: Reads GZIP-compressed files asynchronously
 /// - `PLAIN`: Reads uncompressed files synchronously
 pub enum FastaLocalReader {
-    /// BGZF-compressed reader variant with multithreading support
-    BGZF(fasta::io::Reader<bgzf::MultithreadedReader<std::fs::File>>),
+    /// BGZF-compressed reader variant
+    BGZF(fasta::io::Reader<bgzf::Reader<std::fs::File>>),
     /// GZIP-compressed reader variant
     GZIP(
         fasta::r#async::io::Reader<
@@ -260,7 +254,6 @@ impl FastaLocalReader {
     /// # Arguments
     ///
     /// * `file_path` - Path to the FASTA file on the local filesystem
-    /// * `thread_num` - Number of threads to use for BGZF decompression
     /// * `object_storage_options` - Configuration (including compression type hints)
     ///
     /// # Returns
@@ -268,7 +261,6 @@ impl FastaLocalReader {
     /// A new `FastaLocalReader` instance with the appropriate compression handler.
     pub async fn new(
         file_path: String,
-        thread_num: usize,
         object_storage_options: ObjectStorageOptions,
     ) -> Result<Self, Error> {
         let compression_type = get_compression_type(
@@ -280,7 +272,7 @@ impl FastaLocalReader {
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         match compression_type {
             CompressionType::BGZF => {
-                let reader = get_local_fasta_bgzf_reader(file_path, thread_num)?;
+                let reader = get_local_fasta_bgzf_reader(file_path)?;
                 Ok(FastaLocalReader::BGZF(reader))
             }
             CompressionType::GZIP => {
@@ -316,8 +308,8 @@ impl FastaLocalReader {
 /// Synchronous local FASTA reader for BGZF and uncompressed files.
 /// Used by the buffer-reuse read path to avoid per-record clone allocations.
 pub enum FastaSyncReader {
-    /// BGZF-compressed reader with multithreaded decompression.
-    Bgzf(fasta::io::Reader<bgzf::MultithreadedReader<std::fs::File>>),
+    /// BGZF-compressed reader.
+    Bgzf(fasta::io::Reader<bgzf::Reader<std::fs::File>>),
     /// Uncompressed reader with buffered I/O.
     Plain(fasta::io::Reader<BufReader<File>>),
 }
@@ -347,12 +339,10 @@ impl FastaSyncReader {
 pub fn open_local_fasta_sync(
     file_path: &str,
     compression_type: CompressionType,
-    thread_num: usize,
 ) -> std::io::Result<FastaSyncReader> {
     match compression_type {
         CompressionType::BGZF => Ok(FastaSyncReader::Bgzf(get_local_fasta_bgzf_reader(
             file_path.to_string(),
-            thread_num,
         )?)),
         CompressionType::NONE => Ok(FastaSyncReader::Plain(get_local_fasta_reader(
             file_path.to_string(),

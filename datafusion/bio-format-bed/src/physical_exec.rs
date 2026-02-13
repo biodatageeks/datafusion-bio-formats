@@ -37,8 +37,6 @@ pub struct BedExec {
     pub(crate) cache: PlanProperties,
     /// Optional maximum number of rows to return
     pub(crate) limit: Option<usize>,
-    /// Optional number of threads for parallel reading
-    pub(crate) thread_num: Option<usize>,
     /// Optional cloud storage configuration
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -134,7 +132,6 @@ impl ExecutionPlan for BedExec {
             self.bed_fields.clone(),
             schema.clone(),
             batch_size,
-            self.thread_num,
             self.projection.clone(),
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
@@ -251,7 +248,6 @@ async fn get_remote_bed_stream(
 /// * `bed_fields` - BED format variant
 /// * `schema` - Output schema
 /// * `batch_size` - Number of records per batch
-/// * `thread_num` - Number of threads for parallel BGZF decompression
 /// * `projection` - Optional column projection
 /// * `coordinate_system_zero_based` - If true, output 0-based coordinates; if false, 1-based
 async fn get_local_bed(
@@ -259,15 +255,12 @@ async fn get_local_bed(
     bed_fields: BEDFields,
     schema: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
     let mut reader = match bed_fields {
-        BEDFields::BED4 => {
-            BedLocalReader::<4>::new(file_path.clone(), thread_num.unwrap_or(1)).await?
-        }
+        BEDFields::BED4 => BedLocalReader::<4>::new(file_path.clone()).await?,
         _ => unimplemented!("Unsupported BED fields: {:?}", bed_fields),
     };
 
@@ -398,7 +391,6 @@ fn build_record_batch(
 /// * `bed_fields` - BED format variant
 /// * `schema_ref` - Output schema
 /// * `batch_size` - Number of records per batch
-/// * `thread_num` - Optional thread count for parallel reading
 /// * `projection` - Optional column projection
 /// * `object_storage_options` - Cloud storage configuration
 /// * `coordinate_system_zero_based` - If true, output 0-based coordinates; if false, 1-based
@@ -408,7 +400,6 @@ async fn get_stream(
     bed_fields: BEDFields,
     schema_ref: SchemaRef,
     batch_size: usize,
-    thread_num: Option<usize>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -426,7 +417,6 @@ async fn get_stream(
                 bed_fields.clone(),
                 schema.clone(),
                 batch_size,
-                thread_num,
                 projection,
                 coordinate_system_zero_based,
             )

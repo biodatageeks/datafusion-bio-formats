@@ -12,11 +12,10 @@ use log::{debug, error, info};
 use noodles::bgzf;
 use noodles_bed;
 use noodles_bed::Record;
-use noodles_bgzf::MultithreadedReader;
+use noodles_bgzf::Reader as BgzfReader;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::Error;
-use std::num::NonZero;
 use tokio_util::io::StreamReader;
 
 /// Creates a remote BGZF-compressed BED reader from cloud storage
@@ -92,7 +91,6 @@ pub async fn get_remote_bed_reader<const N: usize>(
 /// # Arguments
 ///
 /// * `file_path` - Local file path
-/// * `thread_num` - Number of threads for parallel BGZF decompression
 ///
 /// # Type Parameters
 ///
@@ -103,19 +101,10 @@ pub async fn get_remote_bed_reader<const N: usize>(
 /// Returns error if file cannot be opened
 pub fn get_local_bed_bgzf_reader<const N: usize>(
     file_path: String,
-    thread_num: usize,
-) -> Result<noodles_bed::io::Reader<N, MultithreadedReader<File>>, Error> {
-    debug!(
-        "Reading VCF file from local storage with {} threads",
-        thread_num
-    );
+) -> Result<noodles_bed::io::Reader<N, BgzfReader<File>>, Error> {
+    debug!("Reading BED file from local storage");
     File::open(file_path)
-        .map(|f| {
-            noodles_bgzf::MultithreadedReader::with_worker_count(
-                NonZero::new(thread_num).unwrap(),
-                f,
-            )
-        })
+        .map(BgzfReader::new)
         .map(noodles_bed::io::Reader::new)
 }
 
@@ -256,8 +245,8 @@ impl_bed_remote_reader!(3, 4, 5, 6);
 ///
 /// * `N` - Number of BED columns (3-6)
 pub enum BedLocalReader<const N: usize> {
-    /// BGZF-compressed BED reader with parallel decompression
-    BGZF(noodles_bed::io::Reader<N, MultithreadedReader<File>>),
+    /// BGZF-compressed BED reader
+    BGZF(noodles_bed::io::Reader<N, BgzfReader<File>>),
     /// Uncompressed BED reader
     PLAIN(noodles_bed::io::Reader<N, std::io::BufReader<File>>),
 }
@@ -268,7 +257,7 @@ macro_rules! impl_bed_local_reader {
         $(
             impl BedLocalReader<$n> {
                 /// Creates a new local BED reader, auto-detecting compression format
-                pub async fn new(file_path: String, thread_num: usize) -> Result<Self, Error> {
+                pub async fn new(file_path: String) -> Result<Self, Error> {
                     info!("Creating local BED reader: {}", file_path);
                     let compression_type = get_compression_type(
                         file_path.clone(),
@@ -279,7 +268,7 @@ macro_rules! impl_bed_local_reader {
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
                     match compression_type {
                         CompressionType::BGZF => {
-                            let reader = get_local_bed_bgzf_reader::<$n>(file_path, thread_num)?;
+                            let reader = get_local_bed_bgzf_reader::<$n>(file_path)?;
                             Ok(BedLocalReader::BGZF(reader))
                         }
                         CompressionType::NONE => {

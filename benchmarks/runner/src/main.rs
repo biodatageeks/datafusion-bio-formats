@@ -243,14 +243,14 @@ async fn register_table(
             use datafusion_bio_format_bed::table_provider::{BEDFields, BedTableProvider};
             // Default to BED3 format (chrom, start, end)
             let provider =
-                BedTableProvider::new(file_path.to_string(), BEDFields::BED3, None, None, true)
+                BedTableProvider::new(file_path.to_string(), BEDFields::BED3, None, true)
                     .context("Failed to create BED table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register BED table")?;
         }
         "fasta" => {
             use datafusion_bio_format_fasta::table_provider::FastaTableProvider;
-            let provider = FastaTableProvider::new(file_path.to_string(), None, None)
+            let provider = FastaTableProvider::new(file_path.to_string(), None)
                 .context("Failed to create FASTA table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register FASTA table")?;
