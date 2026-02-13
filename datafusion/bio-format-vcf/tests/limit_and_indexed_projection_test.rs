@@ -154,6 +154,63 @@ async fn test_limit_sequential_with_projection() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+/// Regression test: LIMIT equal to batch_size must not drop the final batch.
+/// When LIMIT == batch_size, the limit check breaks before the modulo-based
+/// flush, and the tail flush `record_num % batch_size != 0` is also false,
+/// silently dropping all accumulated rows.
+#[tokio::test]
+async fn test_limit_at_batch_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("batch_boundary").await?;
+
+    let table = VcfTableProvider::new(
+        file_path.clone(),
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    // Set batch_size = 5 so LIMIT 5 hits the exact boundary
+    let config = SessionConfig::new().with_batch_size(5);
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table("vcf", Arc::new(table))?;
+
+    let count = count_rows(&ctx, "SELECT chrom FROM vcf LIMIT 5").await;
+    assert_eq!(
+        count, 5,
+        "LIMIT equal to batch_size must return all rows, not drop the batch"
+    );
+
+    Ok(())
+}
+
+/// Regression test: LIMIT equal to 2*batch_size — verifies the second batch boundary.
+#[tokio::test]
+async fn test_limit_at_double_batch_boundary() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("double_batch_boundary").await?;
+
+    let table = VcfTableProvider::new(
+        file_path.clone(),
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    // 10 records total, batch_size = 5, LIMIT 10 = 2 * batch_size
+    let config = SessionConfig::new().with_batch_size(5);
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table("vcf", Arc::new(table))?;
+
+    let count = count_rows(&ctx, "SELECT chrom FROM vcf LIMIT 10").await;
+    assert_eq!(
+        count, 10,
+        "LIMIT equal to 2*batch_size must return all 10 rows"
+    );
+
+    Ok(())
+}
+
 // ============================================================================
 // Indexed scan LIMIT tests (VCF.gz with TBI)
 // ============================================================================

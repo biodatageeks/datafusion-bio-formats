@@ -345,7 +345,8 @@ async fn get_local_vcf(
     let header = reader.read_header().await?;
     let infos = header.infos();
     let formats = header.formats();
-    let mut record_num = 0;
+    let mut record_num: usize = 0;
+    let mut batch_row_count: usize = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
     set_info_builders(batch_size, info_fields, infos, &mut info_builders);
@@ -510,6 +511,7 @@ async fn get_local_vcf(
                 load_formats_single_pass(&record, &header, sample_count, &format_builders.2, &mut format_builders.3, &format_field_to_index, num_format_fields, &mut format_populated)?;
             }
             record_num += 1;
+            batch_row_count += 1;
 
             // Check limit — break early if reached
             if limit.is_some_and(|lim| record_num >= lim) {
@@ -517,7 +519,7 @@ async fn get_local_vcf(
             }
 
             // Once the batch size is reached, build and yield a record batch.
-            if record_num % batch_size == 0 {
+            if batch_row_count == batch_size {
                 debug!("Record number: {}", record_num);
                 let info_arrays = if needs_any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
@@ -543,9 +545,10 @@ async fn get_local_vcf(
                     format_arrays.as_ref(),
                     num_info_fields,
                     &projection,
-                    batch_size,
+                    batch_row_count,
                 )?;
                 batch_num += 1;
+                batch_row_count = 0;
                 debug!("Batch number: {}", batch_num);
                 yield batch;
                 // Clear vectors for the next batch.
@@ -562,7 +565,7 @@ async fn get_local_vcf(
         }
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
-        if record_num > 0 && record_num % batch_size != 0 {
+        if batch_row_count > 0 {
             let info_arrays = if needs_any_info {
                 Some(builders_to_arrays(&mut info_builders.2))
             } else {
@@ -587,7 +590,7 @@ async fn get_local_vcf(
                 format_arrays.as_ref(),
                 num_info_fields,
                 &projection,
-                record_num % batch_size,
+                batch_row_count,
             )?;
             yield batch;
         }
@@ -746,6 +749,7 @@ async fn get_local_vcf_sync(
             let has_residual_filters = !residual_filters.is_empty();
             let mut record = noodles_vcf::Record::default();
             let mut record_num = 0usize;
+            let mut batch_row_count: usize = 0;
 
             loop {
                 match reader.read_record(&mut record) {
@@ -859,13 +863,14 @@ async fn get_local_vcf_sync(
                         }
 
                         record_num += 1;
+                        batch_row_count += 1;
 
                         // Check limit — break early if reached
                         if limit.is_some_and(|lim| record_num >= lim) {
                             break;
                         }
 
-                        if record_num % batch_size == 0 {
+                        if batch_row_count == batch_size {
                             debug!("Record number: {}", record_num);
                             let info_arrays = if needs_any_info {
                                 Some(builders_to_arrays(&mut info_builders.2))
@@ -891,7 +896,7 @@ async fn get_local_vcf_sync(
                                 format_arrays.as_ref(),
                                 num_info_fields,
                                 &projection,
-                                batch_size,
+                                batch_row_count,
                             )?;
 
                             let mut pending = Ok(batch);
@@ -906,6 +911,7 @@ async fn get_local_vcf_sync(
                                 }
                             }
 
+                            batch_row_count = 0;
                             chroms.clear();
                             poss.clear();
                             pose.clear();
@@ -923,7 +929,7 @@ async fn get_local_vcf_sync(
             }
 
             // Remaining records
-            if record_num > 0 && record_num % batch_size != 0 {
+            if batch_row_count > 0 {
                 let info_arrays = if needs_any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
                 } else {
@@ -948,7 +954,7 @@ async fn get_local_vcf_sync(
                     format_arrays.as_ref(),
                     num_info_fields,
                     &projection,
-                    record_num % batch_size,
+                    batch_row_count,
                 )?;
                 let mut pending = Ok(batch);
                 loop {
@@ -1092,7 +1098,8 @@ async fn get_remote_vcf_stream(
 
         debug!("Info fields: {:?}", info_builders);
 
-        let mut record_num = 0;
+        let mut record_num: usize = 0;
+        let mut batch_row_count: usize = 0;
         let mut batch_num = 0;
 
 
@@ -1139,6 +1146,7 @@ async fn get_remote_vcf_stream(
                 load_formats_single_pass(&record, &header, sample_count, &format_builders.2, &mut format_builders.3, &format_field_to_index, num_format_fields, &mut format_populated)?;
             }
             record_num += 1;
+            batch_row_count += 1;
 
             // Check limit — break early if reached
             if limit.is_some_and(|lim| record_num >= lim) {
@@ -1146,7 +1154,7 @@ async fn get_remote_vcf_stream(
             }
 
             // Once the batch size is reached, build and yield a record batch.
-            if record_num % batch_size == 0 {
+            if batch_row_count == batch_size {
                 debug!("Record number: {}", record_num);
                 let info_arrays = if needs_any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
@@ -1172,9 +1180,10 @@ async fn get_remote_vcf_stream(
                     format_arrays.as_ref(),
                     num_info_fields,
                     &projection,
-                    batch_size,
+                    batch_row_count,
                 )?;
                 batch_num += 1;
+                batch_row_count = 0;
                 debug!("Batch number: {}", batch_num);
                 yield batch;
                 // Clear vectors for the next batch.
@@ -1191,7 +1200,7 @@ async fn get_remote_vcf_stream(
         }
         // If there are remaining records that don't fill a complete batch,
         // yield them as well.
-        if record_num > 0 && record_num % batch_size != 0 {
+        if batch_row_count > 0 {
             let info_arrays = if needs_any_info {
                 Some(builders_to_arrays(&mut info_builders.2))
             } else {
@@ -1216,7 +1225,7 @@ async fn get_remote_vcf_stream(
                 format_arrays.as_ref(),
                 num_info_fields,
                 &projection,
-                record_num % batch_size,
+                batch_row_count,
             )?;
             yield batch;
         }
