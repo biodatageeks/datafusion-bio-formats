@@ -492,6 +492,7 @@ async fn get_local_vcf(
     let mut builders = CoreBatchBuilders::new(&flags, batch_size);
 
     let has_residual_filters = !residual_filters.is_empty();
+    let needs_start = flags.start || has_residual_filters;
 
     let stream = try_stream! {
         let mut join_buf = String::with_capacity(64);
@@ -500,20 +501,32 @@ async fn get_local_vcf(
         while let Some(result) = records.next().await {
             let record = result?;
 
-            let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
-            let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
+            let start_val = if needs_start {
+                let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
+                Some(if coordinate_system_zero_based {
+                    start_pos_1based - 1
+                } else {
+                    start_pos_1based
+                })
+            } else {
+                None
+            };
 
-            let chrom_str = if flags.chrom || has_residual_filters {
+            let chrom_for_filters = if has_residual_filters {
                 Some(record.reference_sequence_name().to_string())
-            } else { None };
+            } else {
+                None
+            };
             let end_val = if flags.end || has_residual_filters {
                 Some(get_variant_end(&record, &header))
-            } else { None };
+            } else {
+                None
+            };
 
             if has_residual_filters {
                 let fields = VcfRecordFields {
-                    chrom: chrom_str.clone(),
-                    start: Some(start_val),
+                    chrom: chrom_for_filters.clone(),
+                    start: start_val,
                     end: end_val,
                 };
                 if !evaluate_record_filters(&fields, &residual_filters) {
@@ -521,8 +534,16 @@ async fn get_local_vcf(
                 }
             }
 
-            if flags.chrom { builders.append_chrom(chrom_str.as_deref().unwrap()); }
-            if flags.start { builders.append_start(start_val); }
+            if flags.chrom {
+                if let Some(chrom) = chrom_for_filters.as_deref() {
+                    builders.append_chrom(chrom);
+                } else {
+                    builders.append_chrom(record.reference_sequence_name());
+                }
+            }
+            if flags.start {
+                builders.append_start(start_val.unwrap());
+            }
             if flags.end { builders.append_end(end_val.unwrap()); }
             if flags.id { join_into(&mut join_buf, record.ids().iter(), ';'); builders.append_id(&join_buf); }
             if flags.reference { builders.append_ref(record.reference_bases()); }
@@ -673,6 +694,7 @@ async fn get_local_vcf_sync(
             let mut join_buf = String::with_capacity(64);
 
             let has_residual_filters = !residual_filters.is_empty();
+            let needs_start = flags.start || has_residual_filters;
             let mut record = noodles_vcf::Record::default();
             let mut record_num = 0usize;
             let mut batch_row_count: usize = 0;
@@ -681,22 +703,26 @@ async fn get_local_vcf_sync(
                 match reader.read_record(&mut record) {
                     Ok(0) => break, // EOF
                     Ok(_) => {
-                        let start_pos_1based = record
-                            .variant_start()
-                            .ok_or_else(|| {
-                                DataFusionError::Execution("Missing variant start".to_string())
-                            })?
-                            .map_err(|e| {
-                                DataFusionError::Execution(format!("VCF position error: {}", e))
-                            })?
-                            .get() as u32;
-                        let start_val = if coordinate_system_zero_based {
-                            start_pos_1based - 1
+                        let start_val = if needs_start {
+                            let start_pos_1based = record
+                                .variant_start()
+                                .ok_or_else(|| {
+                                    DataFusionError::Execution("Missing variant start".to_string())
+                                })?
+                                .map_err(|e| {
+                                    DataFusionError::Execution(format!("VCF position error: {}", e))
+                                })?
+                                .get() as u32;
+                            Some(if coordinate_system_zero_based {
+                                start_pos_1based - 1
+                            } else {
+                                start_pos_1based
+                            })
                         } else {
-                            start_pos_1based
+                            None
                         };
 
-                        let chrom_str = if flags.chrom || has_residual_filters {
+                        let chrom_for_filters = if has_residual_filters {
                             Some(record.reference_sequence_name().to_string())
                         } else {
                             None
@@ -709,8 +735,8 @@ async fn get_local_vcf_sync(
 
                         if has_residual_filters {
                             let fields = VcfRecordFields {
-                                chrom: chrom_str.clone(),
-                                start: Some(start_val),
+                                chrom: chrom_for_filters.clone(),
+                                start: start_val,
                                 end: end_val,
                             };
                             if !evaluate_record_filters(&fields, &residual_filters) {
@@ -719,10 +745,14 @@ async fn get_local_vcf_sync(
                         }
 
                         if flags.chrom {
-                            builders.append_chrom(chrom_str.as_deref().unwrap());
+                            if let Some(chrom) = chrom_for_filters.as_deref() {
+                                builders.append_chrom(chrom);
+                            } else {
+                                builders.append_chrom(record.reference_sequence_name());
+                            }
                         }
                         if flags.start {
-                            builders.append_start(start_val);
+                            builders.append_start(start_val.unwrap());
                         }
                         if flags.end {
                             builders.append_end(end_val.unwrap());
@@ -956,6 +986,7 @@ async fn get_remote_vcf_stream(
 
     let flags = ProjectionFlags::new(&projection, num_info_fields);
     let has_residual_filters = !residual_filters.is_empty();
+    let needs_start = flags.start || has_residual_filters;
 
     let stream = try_stream! {
         let mut builders = CoreBatchBuilders::new(&flags, batch_size);
@@ -971,20 +1002,32 @@ async fn get_remote_vcf_stream(
         while let Some(result) = records.next().await {
             let record = result?;
 
-            let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
-            let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
+            let start_val = if needs_start {
+                let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
+                Some(if coordinate_system_zero_based {
+                    start_pos_1based - 1
+                } else {
+                    start_pos_1based
+                })
+            } else {
+                None
+            };
 
-            let chrom_str = if flags.chrom || has_residual_filters {
+            let chrom_for_filters = if has_residual_filters {
                 Some(record.reference_sequence_name().to_string())
-            } else { None };
+            } else {
+                None
+            };
             let end_val = if flags.end || has_residual_filters {
                 Some(get_variant_end(&record, &header))
-            } else { None };
+            } else {
+                None
+            };
 
             if has_residual_filters {
                 let fields = VcfRecordFields {
-                    chrom: chrom_str.clone(),
-                    start: Some(start_val),
+                    chrom: chrom_for_filters.clone(),
+                    start: start_val,
                     end: end_val,
                 };
                 if !evaluate_record_filters(&fields, &residual_filters) {
@@ -992,8 +1035,16 @@ async fn get_remote_vcf_stream(
                 }
             }
 
-            if flags.chrom { builders.append_chrom(chrom_str.as_deref().unwrap()); }
-            if flags.start { builders.append_start(start_val); }
+            if flags.chrom {
+                if let Some(chrom) = chrom_for_filters.as_deref() {
+                    builders.append_chrom(chrom);
+                } else {
+                    builders.append_chrom(record.reference_sequence_name());
+                }
+            }
+            if flags.start {
+                builders.append_start(start_val.unwrap());
+            }
             if flags.end { builders.append_end(end_val.unwrap()); }
             if flags.id { join_into(&mut join_buf, record.ids().iter(), ';'); builders.append_id(&join_buf); }
             if flags.reference { builders.append_ref(record.reference_bases()); }
@@ -1631,6 +1682,7 @@ async fn get_indexed_vcf_stream(
             let mut builders = CoreBatchBuilders::new(&flags, batch_size);
             let mut join_buf = String::with_capacity(64);
             let has_residual_filters = !residual_filters.is_empty();
+            let needs_start_for_filters = flags.start || has_residual_filters;
 
             let mut total_records = 0usize;
             let mut batch_record_count = 0usize;
@@ -1654,33 +1706,41 @@ async fn get_indexed_vcf_stream(
                         DataFusionError::Execution(format!("VCF record read error: {}", e))
                     })?;
 
-                    let start_pos = record
-                        .variant_start()
-                        .ok_or_else(|| {
-                            DataFusionError::Execution("Missing variant start".to_string())
-                        })?
-                        .map_err(|e| {
-                            DataFusionError::Execution(format!("VCF position error: {}", e))
-                        })?
-                        .get() as u32;
-                    let start_val = if coordinate_system_zero_based {
-                        start_pos - 1
+                    let needs_start_for_region =
+                        region_start_1based.is_some() || region_end_1based.is_some();
+                    let needs_start = needs_start_for_filters || needs_start_for_region;
+                    let (start_pos, start_val) = if needs_start {
+                        let start_pos = record
+                            .variant_start()
+                            .ok_or_else(|| {
+                                DataFusionError::Execution("Missing variant start".to_string())
+                            })?
+                            .map_err(|e| {
+                                DataFusionError::Execution(format!("VCF position error: {}", e))
+                            })?
+                            .get() as u32;
+                        let start_val = if coordinate_system_zero_based {
+                            start_pos - 1
+                        } else {
+                            start_pos
+                        };
+                        (Some(start_pos), Some(start_val))
                     } else {
-                        start_pos
+                        (None, None)
                     };
 
                     if let Some(rs) = region_start_1based {
-                        if start_pos < rs {
+                        if start_pos.unwrap() < rs {
                             continue;
                         }
                     }
                     if let Some(re) = region_end_1based {
-                        if start_pos > re {
+                        if start_pos.unwrap() > re {
                             continue;
                         }
                     }
 
-                    let chrom_str = if flags.chrom || has_residual_filters {
+                    let chrom_for_filters = if has_residual_filters {
                         Some(record.reference_sequence_name().to_string())
                     } else {
                         None
@@ -1693,8 +1753,8 @@ async fn get_indexed_vcf_stream(
 
                     if has_residual_filters {
                         let fields = VcfRecordFields {
-                            chrom: chrom_str.clone(),
-                            start: Some(start_val),
+                            chrom: chrom_for_filters.clone(),
+                            start: start_val,
                             end: end_val,
                         };
                         if !evaluate_record_filters(&fields, &residual_filters) {
@@ -1703,10 +1763,14 @@ async fn get_indexed_vcf_stream(
                     }
 
                     if flags.chrom {
-                        builders.append_chrom(chrom_str.as_deref().unwrap());
+                        if let Some(chrom) = chrom_for_filters.as_deref() {
+                            builders.append_chrom(chrom);
+                        } else {
+                            builders.append_chrom(record.reference_sequence_name());
+                        }
                     }
                     if flags.start {
-                        builders.append_start(start_val);
+                        builders.append_start(start_val.unwrap());
                     }
                     if flags.end {
                         builders.append_end(end_val.unwrap());
