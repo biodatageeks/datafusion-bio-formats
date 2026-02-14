@@ -9,7 +9,7 @@ use crate::storage::{
 use crate::table_provider::{format_to_arrow_type, info_to_arrow_type};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, Float64Array, StringArray, UInt32Array};
+use datafusion::arrow::array::{Array, Float64Builder, StringBuilder, UInt32Builder};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
@@ -54,101 +54,216 @@ where
     }
 }
 
-/// Constructs a DataFusion RecordBatch from VCF variant data.
+/// Precomputed flags indicating which core VCF columns are needed based on projection.
+struct ProjectionFlags {
+    chrom: bool,
+    start: bool,
+    end: bool,
+    id: bool,
+    reference: bool,
+    alt: bool,
+    qual: bool,
+    filter: bool,
+    any_info: bool,
+    any_format: bool,
+}
+
+impl ProjectionFlags {
+    fn new(projection: &Option<Vec<usize>>, num_info_fields: usize) -> Self {
+        let contains = |idx: usize| {
+            projection
+                .as_ref()
+                .is_none_or(|p: &Vec<usize>| p.contains(&idx))
+        };
+        Self {
+            chrom: contains(0),
+            start: contains(1),
+            end: contains(2),
+            id: contains(3),
+            reference: contains(4),
+            alt: contains(5),
+            qual: contains(6),
+            filter: contains(7),
+            any_info: projection
+                .as_ref()
+                .is_none_or(|p| p.iter().any(|&i| i >= 8 && i < 8 + num_info_fields)),
+            any_format: projection
+                .as_ref()
+                .is_none_or(|p| p.iter().any(|&i| i >= 8 + num_info_fields)),
+        }
+    }
+}
+
+/// Arrow builders for the 8 core VCF columns, replacing Vec<T> accumulators
+/// to eliminate double-buffering (Vec → Arrow copy at batch boundary).
+struct CoreBatchBuilders {
+    chrom: Option<StringBuilder>,
+    start: Option<UInt32Builder>,
+    end: Option<UInt32Builder>,
+    id: Option<StringBuilder>,
+    reference: Option<StringBuilder>,
+    alt: Option<StringBuilder>,
+    qual: Option<Float64Builder>,
+    filter: Option<StringBuilder>,
+}
+
+impl CoreBatchBuilders {
+    fn new(flags: &ProjectionFlags, batch_size: usize) -> Self {
+        Self {
+            chrom: if flags.chrom {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 8))
+            } else {
+                None
+            },
+            start: if flags.start {
+                Some(UInt32Builder::with_capacity(batch_size))
+            } else {
+                None
+            },
+            end: if flags.end {
+                Some(UInt32Builder::with_capacity(batch_size))
+            } else {
+                None
+            },
+            id: if flags.id {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 8))
+            } else {
+                None
+            },
+            reference: if flags.reference {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 4))
+            } else {
+                None
+            },
+            alt: if flags.alt {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 8))
+            } else {
+                None
+            },
+            qual: if flags.qual {
+                Some(Float64Builder::with_capacity(batch_size))
+            } else {
+                None
+            },
+            filter: if flags.filter {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 8))
+            } else {
+                None
+            },
+        }
+    }
+
+    #[inline]
+    fn append_chrom(&mut self, value: &str) {
+        if let Some(b) = &mut self.chrom {
+            b.append_value(value);
+        }
+    }
+
+    #[inline]
+    fn append_start(&mut self, value: u32) {
+        if let Some(b) = &mut self.start {
+            b.append_value(value);
+        }
+    }
+
+    #[inline]
+    fn append_end(&mut self, value: u32) {
+        if let Some(b) = &mut self.end {
+            b.append_value(value);
+        }
+    }
+
+    #[inline]
+    fn append_id(&mut self, value: &str) {
+        if let Some(b) = &mut self.id {
+            b.append_value(value);
+        }
+    }
+
+    #[inline]
+    fn append_ref(&mut self, value: &str) {
+        if let Some(b) = &mut self.reference {
+            b.append_value(value);
+        }
+    }
+
+    #[inline]
+    fn append_alt(&mut self, value: &str) {
+        if let Some(b) = &mut self.alt {
+            b.append_value(value);
+        }
+    }
+
+    #[inline]
+    fn append_qual(&mut self, value: Option<f64>) {
+        if let Some(b) = &mut self.qual {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+    }
+
+    #[inline]
+    fn append_filter(&mut self, value: &str) {
+        if let Some(b) = &mut self.filter {
+            b.append_value(value);
+        }
+    }
+
+    /// Finishes all active builders and returns the 8 core arrays.
+    fn finish(&mut self) -> [Option<Arc<dyn Array>>; 8] {
+        [
+            self.chrom
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.start
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.end
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.id
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.reference
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.alt
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.qual
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.filter
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+        ]
+    }
+}
+
+/// Constructs a DataFusion RecordBatch from Arrow builder arrays + INFO/FORMAT arrays.
 ///
-/// This function assembles core VCF columns (chrom, pos, ref, alt, etc.), INFO fields,
-/// and FORMAT fields into a RecordBatch for execution. It supports projection pushdown
-/// to optimize queries.
-///
-/// # Arguments
-///
-/// * `schema` - The target Arrow schema
-/// * `chroms` - Chromosome names
-/// * `poss` - Variant start positions (0-based)
-/// * `pose` - Variant end positions (0-based, inclusive)
-/// * `ids` - Variant identifiers (semicolon-separated if multiple)
-/// * `refs` - Reference bases
-/// * `alts` - Alternate bases (pipe-separated if multiple)
-/// * `quals` - Quality scores (optional)
-/// * `filters` - FILTER field values (semicolon-separated)
-/// * `infos` - Optional arrow arrays for INFO fields
-/// * `formats` - Optional arrow arrays for FORMAT fields (per-sample)
-/// * `num_info_fields` - Number of INFO fields (used for projection index calculation)
-/// * `projection` - Optional list of column indices to project (None = all columns)
-///
-/// # Returns
-///
-/// A DataFusion RecordBatch with the specified data
-///
-/// # Errors
-///
-/// Returns an error if the RecordBatch cannot be created
-#[allow(clippy::too_many_arguments)]
-pub fn build_record_batch(
+/// Unlike `build_record_batch` which copies from Vec<T> into Arrow arrays, this function
+/// takes pre-built Arrow arrays from `CoreBatchBuilders::finish()`.
+fn build_record_batch_from_builders(
     schema: SchemaRef,
-    chroms: &[String],
-    poss: &[u32],
-    pose: &[u32],
-    ids: &[String],
-    refs: &[String],
-    alts: &[String],
-    quals: &[Option<f64>],
-    filters: &[String],
+    core_arrays: [Option<Arc<dyn Array>>; 8],
     infos: Option<&Vec<Arc<dyn Array>>>,
     formats: Option<&Vec<Arc<dyn Array>>>,
     num_info_fields: usize,
     projection: &Option<Vec<usize>>,
     record_count: usize,
 ) -> datafusion::error::Result<RecordBatch> {
-    let make_chrom = || {
-        Arc::new(StringArray::from_iter_values(
-            chroms.iter().map(|s| s.as_str()),
-        )) as Arc<dyn Array>
-    };
-    let make_start =
-        || Arc::new(UInt32Array::from_iter_values(poss.iter().copied())) as Arc<dyn Array>;
-    let make_end =
-        || Arc::new(UInt32Array::from_iter_values(pose.iter().copied())) as Arc<dyn Array>;
-    let make_id = || {
-        Arc::new(StringArray::from_iter_values(
-            ids.iter().map(|s| s.as_str()),
-        )) as Arc<dyn Array>
-    };
-    let make_ref = || {
-        Arc::new(StringArray::from_iter_values(
-            refs.iter().map(|s| s.as_str()),
-        )) as Arc<dyn Array>
-    };
-    let make_alt = || {
-        Arc::new(StringArray::from_iter_values(
-            alts.iter().map(|s| s.as_str()),
-        )) as Arc<dyn Array>
-    };
-    let make_qual = || Arc::new(Float64Array::from_iter(quals.iter().copied())) as Arc<dyn Array>;
-    let make_filter = || {
-        Arc::new(StringArray::from_iter_values(
-            filters.iter().map(|s| s.as_str()),
-        )) as Arc<dyn Array>
-    };
-
-    // Column index layout:
-    // 0-7: core fields (chrom, start, end, id, ref, alt, qual, filter)
-    // 8 to (8 + num_info_fields - 1): INFO fields
-    // (8 + num_info_fields) onwards: FORMAT fields (per-sample)
     let format_start_idx = 8 + num_info_fields;
 
     let arrays = match projection {
         None => {
-            let mut arrays: Vec<Arc<dyn Array>> = vec![
-                make_chrom(),
-                make_start(),
-                make_end(),
-                make_id(),
-                make_ref(),
-                make_alt(),
-                make_qual(),
-                make_filter(),
-            ];
+            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(8 + num_info_fields);
+            for a in core_arrays.iter().flatten() {
+                arrays.push(a.clone());
+            }
             if let Some(info_arrays) = infos {
                 arrays.extend_from_slice(info_arrays);
             }
@@ -159,31 +274,21 @@ pub fn build_record_batch(
         }
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
-            if proj_ids.is_empty() {
-                // For empty projections (COUNT(*)), return an empty vector
-                // The schema should already be empty from the table provider
-            } else {
-                for &i in proj_ids {
-                    match i {
-                        0 => arrays.push(make_chrom()),
-                        1 => arrays.push(make_start()),
-                        2 => arrays.push(make_end()),
-                        3 => arrays.push(make_id()),
-                        4 => arrays.push(make_ref()),
-                        5 => arrays.push(make_alt()),
-                        6 => arrays.push(make_qual()),
-                        7 => arrays.push(make_filter()),
-                        idx if idx < format_start_idx => {
-                            // INFO field
-                            if let Some(info_arrays) = infos {
-                                arrays.push(info_arrays[idx - 8].clone());
-                            }
+            for &i in proj_ids {
+                match i {
+                    0..=7 => {
+                        if let Some(a) = &core_arrays[i] {
+                            arrays.push(a.clone());
                         }
-                        idx => {
-                            // FORMAT field
-                            if let Some(format_arrays) = formats {
-                                arrays.push(format_arrays[idx - format_start_idx].clone());
-                            }
+                    }
+                    idx if idx < format_start_idx => {
+                        if let Some(info_arrays) = infos {
+                            arrays.push(info_arrays[idx - 8].clone());
+                        }
+                    }
+                    idx => {
+                        if let Some(format_arrays) = formats {
+                            arrays.push(format_arrays[idx - format_start_idx].clone());
                         }
                     }
                 }
@@ -192,14 +297,13 @@ pub fn build_record_batch(
         }
     };
 
-    // For empty projections (COUNT(*)), we need to specify row count
     if arrays.is_empty() {
         let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
             .with_row_count(Some(record_count));
-        RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
+        RecordBatch::try_new_with_options(schema, arrays, &options)
             .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
     } else {
-        RecordBatch::try_new(schema.clone(), arrays)
+        RecordBatch::try_new(schema, arrays)
             .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
     }
 }
@@ -220,7 +324,7 @@ fn load_infos_single_pass(
     }
 
     // Reset populated tracking
-    info_populated.iter_mut().for_each(|v| *v = false);
+    info_populated.fill(false);
 
     let info = record.info();
     for result in info.iter(header) {
@@ -241,12 +345,10 @@ fn load_infos_single_pass(
                     builder.append_int(v)?;
                 }
                 Some(Value::Array(ValueArray::Integer(values))) => {
-                    builder
-                        .append_array_int(values.iter().map(|v| v.unwrap().unwrap()).collect())?;
+                    builder.append_array_int_iter(values.iter().map(|v| v.unwrap().unwrap()))?;
                 }
                 Some(Value::Array(ValueArray::Float(values))) => {
-                    builder
-                        .append_array_float(values.iter().map(|v| v.unwrap().unwrap()).collect())?;
+                    builder.append_array_float_iter(values.iter().map(|v| v.unwrap().unwrap()))?;
                 }
                 Some(Value::Float(v)) => {
                     builder.append_float(v)?;
@@ -255,12 +357,7 @@ fn load_infos_single_pass(
                     builder.append_string(&v)?;
                 }
                 Some(Value::Array(ValueArray::String(values))) => {
-                    builder.append_array_string(
-                        values
-                            .iter()
-                            .map(|v| v.unwrap().unwrap().to_string())
-                            .collect(),
-                    )?;
+                    builder.append_array_string_iter(values.iter().map(|v| v.unwrap().unwrap()))?;
                 }
                 Some(Value::Flag) => {
                     builder.append_boolean(true)?;
@@ -391,78 +488,8 @@ async fn get_local_vcf(
     let mut format_populated = vec![false; num_format_fields];
     let sample_count = sample_names.len();
 
-    // Determine which core fields are needed based on projection
-    let needs_chrom = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&0));
-    let needs_start = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&1));
-    let needs_end = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&2));
-    let needs_id = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&3));
-    let needs_ref = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&4));
-    let needs_alt = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&5));
-    let needs_qual = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&6));
-    let needs_filter = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&7));
-    let needs_any_info = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 && i < 8 + num_info_fields));
-    let needs_any_format = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 + num_info_fields));
-
-    let mut chroms: Vec<String> = if needs_chrom {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut poss: Vec<u32> = if needs_start {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut pose: Vec<u32> = if needs_end {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut ids: Vec<String> = if needs_id {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut refs: Vec<String> = if needs_ref {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut alts: Vec<String> = if needs_alt {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut quals: Vec<Option<f64>> = if needs_qual {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut filters: Vec<String> = if needs_filter {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
+    let flags = ProjectionFlags::new(&projection, num_info_fields);
+    let mut builders = CoreBatchBuilders::new(&flags, batch_size);
 
     let has_residual_filters = !residual_filters.is_empty();
 
@@ -470,23 +497,19 @@ async fn get_local_vcf(
         let mut join_buf = String::with_capacity(64);
 
         let mut records = reader.read_records();
-        // let iter_start_time = Instant::now();
         while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+            let record = result?;
 
-            // Compute position fields needed for early filtering
             let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
             let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
 
-            // Compute chrom and end once, reuse for filtering and accumulation
-            let chrom_str = if needs_chrom || has_residual_filters {
+            let chrom_str = if flags.chrom || has_residual_filters {
                 Some(record.reference_sequence_name().to_string())
             } else { None };
-            let end_val = if needs_end || has_residual_filters {
+            let end_val = if flags.end || has_residual_filters {
                 Some(get_variant_end(&record, &header))
             } else { None };
 
-            // Apply residual filters early to skip records before accumulation
             if has_residual_filters {
                 let fields = VcfRecordFields {
                     chrom: chrom_str.clone(),
@@ -498,49 +521,41 @@ async fn get_local_vcf(
                 }
             }
 
-            if needs_chrom { chroms.push(chrom_str.unwrap()); }
-            if needs_start { poss.push(start_val); }
-            if needs_end { pose.push(end_val.unwrap()); }
-            if needs_id { join_into(&mut join_buf, record.ids().iter(), ';'); ids.push(join_buf.clone()); }
-            if needs_ref { refs.push(record.reference_bases().to_string()); }
-            if needs_alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); alts.push(join_buf.clone()); }
-            if needs_qual { quals.push(record.quality_score().transpose()?.map(|v| v as f64)); }
-            if needs_filter { join_into(&mut join_buf, record.filters().iter(&header).map(|v| v.unwrap_or(".")), ';'); filters.push(join_buf.clone()); }
-            if needs_any_info { load_infos_single_pass(&record, &header, &info_builders.1, &mut info_builders.2, &info_name_to_index, &mut info_populated)?; }
-            if has_format_fields && needs_any_format {
+            if flags.chrom { builders.append_chrom(chrom_str.as_deref().unwrap()); }
+            if flags.start { builders.append_start(start_val); }
+            if flags.end { builders.append_end(end_val.unwrap()); }
+            if flags.id { join_into(&mut join_buf, record.ids().iter(), ';'); builders.append_id(&join_buf); }
+            if flags.reference { builders.append_ref(record.reference_bases()); }
+            if flags.alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); builders.append_alt(&join_buf); }
+            if flags.qual { builders.append_qual(record.quality_score().transpose()?.map(|v| v as f64)); }
+            if flags.filter { join_into(&mut join_buf, record.filters().iter(&header).map(|v| v.unwrap_or(".")), ';'); builders.append_filter(&join_buf); }
+            if flags.any_info { load_infos_single_pass(&record, &header, &info_builders.1, &mut info_builders.2, &info_name_to_index, &mut info_populated)?; }
+            if has_format_fields && flags.any_format {
                 load_formats_single_pass(&record, &header, sample_count, &format_builders.2, &mut format_builders.3, &format_field_to_index, num_format_fields, &mut format_populated)?;
             }
             record_num += 1;
             batch_row_count += 1;
 
-            // Check limit — break early if reached
             if limit.is_some_and(|lim| record_num >= lim) {
                 break;
             }
 
-            // Once the batch size is reached, build and yield a record batch.
             if batch_row_count == batch_size {
                 debug!("Record number: {}", record_num);
-                let info_arrays = if needs_any_info {
+                let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
                 } else {
                     None
                 };
-                let format_arrays = if has_format_fields && needs_any_format {
+                let format_arrays = if has_format_fields && flags.any_format {
                     Some(builders_to_arrays(&mut format_builders.3))
                 } else {
                     None
                 };
-                let batch = build_record_batch(
+                let core_arrays = builders.finish();
+                let batch = build_record_batch_from_builders(
                     schema.clone(),
-                    &chroms,
-                    &poss,
-                    &pose,
-                    &ids,
-                    &refs,
-                    &alts,
-                    &quals,
-                    &filters,
+                    core_arrays,
                     info_arrays.as_ref(),
                     format_arrays.as_ref(),
                     num_info_fields,
@@ -551,41 +566,23 @@ async fn get_local_vcf(
                 batch_row_count = 0;
                 debug!("Batch number: {}", batch_num);
                 yield batch;
-                // Clear vectors for the next batch.
-                chroms.clear();
-                poss.clear();
-                pose.clear();
-                ids.clear();
-                refs.clear();
-                alts.clear();
-                quals.clear();
-                filters.clear();
-
             }
         }
-        // If there are remaining records that don't fill a complete batch,
-        // yield them as well.
         if batch_row_count > 0 {
-            let info_arrays = if needs_any_info {
+            let info_arrays = if flags.any_info {
                 Some(builders_to_arrays(&mut info_builders.2))
             } else {
                 None
             };
-            let format_arrays = if has_format_fields && needs_any_format {
+            let format_arrays = if has_format_fields && flags.any_format {
                 Some(builders_to_arrays(&mut format_builders.3))
             } else {
                 None
             };
-            let batch = build_record_batch(
+            let core_arrays = builders.finish();
+            let batch = build_record_batch_from_builders(
                 schema.clone(),
-                &chroms,
-                &poss,
-                &pose,
-                &ids,
-                &refs,
-                &alts,
-                &quals,
-                &filters,
+                core_arrays,
                 info_arrays.as_ref(),
                 format_arrays.as_ref(),
                 num_info_fields,
@@ -671,79 +668,8 @@ async fn get_local_vcf_sync(
             let mut format_populated = vec![false; num_format_fields];
             let sample_count = sample_names.len();
 
-            // Projection flags
-            let needs_chrom = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&0));
-            let needs_start = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&1));
-            let needs_end = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&2));
-            let needs_id = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&3));
-            let needs_ref = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&4));
-            let needs_alt = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&5));
-            let needs_qual = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&6));
-            let needs_filter = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&7));
-            let needs_any_info = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 && i < 8 + num_info_fields));
-            let needs_any_format = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 + num_info_fields));
-
-            // Initialize accumulators
-            let mut chroms: Vec<String> = if needs_chrom {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut poss: Vec<u32> = if needs_start {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut pose: Vec<u32> = if needs_end {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut ids: Vec<String> = if needs_id {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut refs: Vec<String> = if needs_ref {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut alts: Vec<String> = if needs_alt {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut quals: Vec<Option<f64>> = if needs_qual {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut filters: Vec<String> = if needs_filter {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
+            let flags = ProjectionFlags::new(&projection, num_info_fields);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
             let mut join_buf = String::with_capacity(64);
 
             let has_residual_filters = !residual_filters.is_empty();
@@ -770,19 +696,17 @@ async fn get_local_vcf_sync(
                             start_pos_1based
                         };
 
-                        // Compute chrom and end once, reuse for filtering and accumulation
-                        let chrom_str = if needs_chrom || has_residual_filters {
+                        let chrom_str = if flags.chrom || has_residual_filters {
                             Some(record.reference_sequence_name().to_string())
                         } else {
                             None
                         };
-                        let end_val = if needs_end || has_residual_filters {
+                        let end_val = if flags.end || has_residual_filters {
                             Some(get_variant_end(&record, &header))
                         } else {
                             None
                         };
 
-                        // Apply residual filters early
                         if has_residual_filters {
                             let fields = VcfRecordFields {
                                 chrom: chrom_str.clone(),
@@ -794,32 +718,32 @@ async fn get_local_vcf_sync(
                             }
                         }
 
-                        if needs_chrom {
-                            chroms.push(chrom_str.unwrap());
+                        if flags.chrom {
+                            builders.append_chrom(chrom_str.as_deref().unwrap());
                         }
-                        if needs_start {
-                            poss.push(start_val);
+                        if flags.start {
+                            builders.append_start(start_val);
                         }
-                        if needs_end {
-                            pose.push(end_val.unwrap());
+                        if flags.end {
+                            builders.append_end(end_val.unwrap());
                         }
-                        if needs_id {
+                        if flags.id {
                             join_into(&mut join_buf, record.ids().iter(), ';');
-                            ids.push(join_buf.clone());
+                            builders.append_id(&join_buf);
                         }
-                        if needs_ref {
-                            refs.push(record.reference_bases().to_string());
+                        if flags.reference {
+                            builders.append_ref(record.reference_bases());
                         }
-                        if needs_alt {
+                        if flags.alt {
                             join_into(
                                 &mut join_buf,
                                 record.alternate_bases().iter().map(|v| v.unwrap_or(".")),
                                 '|',
                             );
-                            alts.push(join_buf.clone());
+                            builders.append_alt(&join_buf);
                         }
-                        if needs_qual {
-                            quals.push(
+                        if flags.qual {
+                            builders.append_qual(
                                 record
                                     .quality_score()
                                     .transpose()
@@ -829,15 +753,15 @@ async fn get_local_vcf_sync(
                                     .map(|v| v as f64),
                             );
                         }
-                        if needs_filter {
+                        if flags.filter {
                             join_into(
                                 &mut join_buf,
                                 record.filters().iter(&header).map(|v| v.unwrap_or(".")),
                                 ';',
                             );
-                            filters.push(join_buf.clone());
+                            builders.append_filter(&join_buf);
                         }
-                        if needs_any_info {
+                        if flags.any_info {
                             load_infos_single_pass(
                                 &record,
                                 &header,
@@ -848,7 +772,7 @@ async fn get_local_vcf_sync(
                             )
                             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                         }
-                        if has_format_fields && needs_any_format {
+                        if has_format_fields && flags.any_format {
                             load_formats_single_pass(
                                 &record,
                                 &header,
@@ -865,33 +789,26 @@ async fn get_local_vcf_sync(
                         record_num += 1;
                         batch_row_count += 1;
 
-                        // Check limit — break early if reached
                         if limit.is_some_and(|lim| record_num >= lim) {
                             break;
                         }
 
                         if batch_row_count == batch_size {
                             debug!("Record number: {}", record_num);
-                            let info_arrays = if needs_any_info {
+                            let info_arrays = if flags.any_info {
                                 Some(builders_to_arrays(&mut info_builders.2))
                             } else {
                                 None
                             };
-                            let format_arrays = if has_format_fields && needs_any_format {
+                            let format_arrays = if has_format_fields && flags.any_format {
                                 Some(builders_to_arrays(&mut format_builders.3))
                             } else {
                                 None
                             };
-                            let batch = build_record_batch(
+                            let core_arrays = builders.finish();
+                            let batch = build_record_batch_from_builders(
                                 Arc::clone(&schema),
-                                &chroms,
-                                &poss,
-                                &pose,
-                                &ids,
-                                &refs,
-                                &alts,
-                                &quals,
-                                &filters,
+                                core_arrays,
                                 info_arrays.as_ref(),
                                 format_arrays.as_ref(),
                                 num_info_fields,
@@ -912,14 +829,6 @@ async fn get_local_vcf_sync(
                             }
 
                             batch_row_count = 0;
-                            chroms.clear();
-                            poss.clear();
-                            pose.clear();
-                            ids.clear();
-                            refs.clear();
-                            alts.clear();
-                            quals.clear();
-                            filters.clear();
                         }
                     }
                     Err(e) => {
@@ -930,26 +839,20 @@ async fn get_local_vcf_sync(
 
             // Remaining records
             if batch_row_count > 0 {
-                let info_arrays = if needs_any_info {
+                let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
                 } else {
                     None
                 };
-                let format_arrays = if has_format_fields && needs_any_format {
+                let format_arrays = if has_format_fields && flags.any_format {
                     Some(builders_to_arrays(&mut format_builders.3))
                 } else {
                     None
                 };
-                let batch = build_record_batch(
+                let core_arrays = builders.finish();
+                let batch = build_record_batch_from_builders(
                     Arc::clone(&schema),
-                    &chroms,
-                    &poss,
-                    &pose,
-                    &ids,
-                    &refs,
-                    &alts,
-                    &quals,
-                    &filters,
+                    core_arrays,
                     info_arrays.as_ref(),
                     format_arrays.as_ref(),
                     num_info_fields,
@@ -1051,49 +954,11 @@ async fn get_remote_vcf_stream(
     let mut format_populated = vec![false; num_format_fields];
     let sample_count = sample_names.len();
 
-    // Determine which core fields are needed based on projection
-    let needs_chrom = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&0));
-    let needs_start = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&1));
-    let needs_end = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&2));
-    let needs_id = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&3));
-    let needs_ref = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&4));
-    let needs_alt = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&5));
-    let needs_qual = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&6));
-    let needs_filter = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&7));
-    let needs_any_info = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 && i < 8 + num_info_fields));
-    let needs_any_format = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 + num_info_fields));
+    let flags = ProjectionFlags::new(&projection, num_info_fields);
     let has_residual_filters = !residual_filters.is_empty();
 
     let stream = try_stream! {
-        // Create vectors for accumulating record data.
-        let mut chroms: Vec<String> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut poss: Vec<u32> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut pose: Vec<u32> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut ids: Vec<String> = if needs_id { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut refs: Vec<String> = if needs_ref { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut alts: Vec<String> = if needs_alt { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut quals: Vec<Option<f64>> = if needs_qual { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut filters: Vec<String> = if needs_filter { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut builders = CoreBatchBuilders::new(&flags, batch_size);
         let mut join_buf = String::with_capacity(64);
 
         debug!("Info fields: {:?}", info_builders);
@@ -1102,26 +967,20 @@ async fn get_remote_vcf_stream(
         let mut batch_row_count: usize = 0;
         let mut batch_num = 0;
 
-
-        // Process records one by one.
-
         let mut records = reader.read_records().await;
         while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+            let record = result?;
 
-            // Compute position fields needed for early filtering
             let start_pos_1based = record.variant_start().unwrap()?.get() as u32;
             let start_val = if coordinate_system_zero_based { start_pos_1based - 1 } else { start_pos_1based };
 
-            // Compute chrom and end once, reuse for filtering and accumulation
-            let chrom_str = if needs_chrom || has_residual_filters {
+            let chrom_str = if flags.chrom || has_residual_filters {
                 Some(record.reference_sequence_name().to_string())
             } else { None };
-            let end_val = if needs_end || has_residual_filters {
+            let end_val = if flags.end || has_residual_filters {
                 Some(get_variant_end(&record, &header))
             } else { None };
 
-            // Apply residual filters early to skip records before accumulation
             if has_residual_filters {
                 let fields = VcfRecordFields {
                     chrom: chrom_str.clone(),
@@ -1133,49 +992,41 @@ async fn get_remote_vcf_stream(
                 }
             }
 
-            if needs_chrom { chroms.push(chrom_str.unwrap()); }
-            if needs_start { poss.push(start_val); }
-            if needs_end { pose.push(end_val.unwrap()); }
-            if needs_id { join_into(&mut join_buf, record.ids().iter(), ';'); ids.push(join_buf.clone()); }
-            if needs_ref { refs.push(record.reference_bases().to_string()); }
-            if needs_alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); alts.push(join_buf.clone()); }
-            if needs_qual { quals.push(record.quality_score().transpose()?.map(|v| v as f64)); }
-            if needs_filter { join_into(&mut join_buf, record.filters().iter(&header).map(|v| v.unwrap_or(".")), ';'); filters.push(join_buf.clone()); }
-            if needs_any_info { load_infos_single_pass(&record, &header, &info_builders.1, &mut info_builders.2, &info_name_to_index, &mut info_populated)?; }
-            if has_format_fields && needs_any_format {
+            if flags.chrom { builders.append_chrom(chrom_str.as_deref().unwrap()); }
+            if flags.start { builders.append_start(start_val); }
+            if flags.end { builders.append_end(end_val.unwrap()); }
+            if flags.id { join_into(&mut join_buf, record.ids().iter(), ';'); builders.append_id(&join_buf); }
+            if flags.reference { builders.append_ref(record.reference_bases()); }
+            if flags.alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); builders.append_alt(&join_buf); }
+            if flags.qual { builders.append_qual(record.quality_score().transpose()?.map(|v| v as f64)); }
+            if flags.filter { join_into(&mut join_buf, record.filters().iter(&header).map(|v| v.unwrap_or(".")), ';'); builders.append_filter(&join_buf); }
+            if flags.any_info { load_infos_single_pass(&record, &header, &info_builders.1, &mut info_builders.2, &info_name_to_index, &mut info_populated)?; }
+            if has_format_fields && flags.any_format {
                 load_formats_single_pass(&record, &header, sample_count, &format_builders.2, &mut format_builders.3, &format_field_to_index, num_format_fields, &mut format_populated)?;
             }
             record_num += 1;
             batch_row_count += 1;
 
-            // Check limit — break early if reached
             if limit.is_some_and(|lim| record_num >= lim) {
                 break;
             }
 
-            // Once the batch size is reached, build and yield a record batch.
             if batch_row_count == batch_size {
                 debug!("Record number: {}", record_num);
-                let info_arrays = if needs_any_info {
+                let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
                 } else {
                     None
                 };
-                let format_arrays = if has_format_fields && needs_any_format {
+                let format_arrays = if has_format_fields && flags.any_format {
                     Some(builders_to_arrays(&mut format_builders.3))
                 } else {
                     None
                 };
-                let batch = build_record_batch(
+                let core_arrays = builders.finish();
+                let batch = build_record_batch_from_builders(
                     schema.clone(),
-                    &chroms,
-                    &poss,
-                    &pose,
-                    &ids,
-                    &refs,
-                    &alts,
-                    &quals,
-                    &filters,
+                    core_arrays,
                     info_arrays.as_ref(),
                     format_arrays.as_ref(),
                     num_info_fields,
@@ -1186,41 +1037,23 @@ async fn get_remote_vcf_stream(
                 batch_row_count = 0;
                 debug!("Batch number: {}", batch_num);
                 yield batch;
-                // Clear vectors for the next batch.
-                chroms.clear();
-                poss.clear();
-                pose.clear();
-                ids.clear();
-                refs.clear();
-                alts.clear();
-                quals.clear();
-                filters.clear();
-
             }
         }
-        // If there are remaining records that don't fill a complete batch,
-        // yield them as well.
         if batch_row_count > 0 {
-            let info_arrays = if needs_any_info {
+            let info_arrays = if flags.any_info {
                 Some(builders_to_arrays(&mut info_builders.2))
             } else {
                 None
             };
-            let format_arrays = if has_format_fields && needs_any_format {
+            let format_arrays = if has_format_fields && flags.any_format {
                 Some(builders_to_arrays(&mut format_builders.3))
             } else {
                 None
             };
-            let batch = build_record_batch(
+            let core_arrays = builders.finish();
+            let batch = build_record_batch_from_builders(
                 schema.clone(),
-                &chroms,
-                &poss,
-                &pose,
-                &ids,
-                &refs,
-                &alts,
-                &quals,
-                &filters,
+                core_arrays,
                 info_arrays.as_ref(),
                 format_arrays.as_ref(),
                 num_info_fields,
@@ -1313,7 +1146,7 @@ fn load_formats_single_pass(
         let base_builder_idx = sample_idx * num_format_fields;
 
         // Reset populated tracking for this sample
-        format_populated.iter_mut().for_each(|v| *v = false);
+        format_populated.fill(false);
 
         for result in sample.iter(header) {
             let (key, value) = result.map_err(|e| {
@@ -1366,7 +1199,10 @@ fn load_formats_single_pass(
                 Some(SV::Integer(v)) => builder.append_int(v)?,
                 Some(SV::Float(v)) => builder.append_float(v)?,
                 Some(SV::String(v)) => builder.append_string(&v)?,
-                Some(SV::Character(c)) => builder.append_string(&c.to_string())?,
+                Some(SV::Character(c)) => {
+                    let mut buf = [0u8; 4];
+                    builder.append_string(c.encode_utf8(&mut buf))?;
+                }
                 Some(SV::Array(arr)) => {
                     match arr {
                         SamplesArray::Integer(values) => {
@@ -1791,92 +1627,19 @@ async fn get_indexed_vcf_stream(
             let mut format_populated = vec![false; num_format_fields];
             let sample_count = sample_names.len();
 
-            // Projection flags
-            let needs_chrom = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&0));
-            let needs_start = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&1));
-            let needs_end = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&2));
-            let needs_id = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&3));
-            let needs_ref = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&4));
-            let needs_alt = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&5));
-            let needs_qual = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&6));
-            let needs_filter = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&7));
-            let needs_any_info = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 && i < 8 + num_info_fields));
-            let needs_any_format = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 8 + num_info_fields));
-            let has_residual_filters = !residual_filters.is_empty();
-
-            // Initialize accumulators conditionally based on projection
-            let mut chroms: Vec<String> = if needs_chrom {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut poss: Vec<u32> = if needs_start {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut pose: Vec<u32> = if needs_end {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut ids: Vec<String> = if needs_id {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut refs: Vec<String> = if needs_ref {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut alts: Vec<String> = if needs_alt {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut quals: Vec<Option<f64>> = if needs_qual {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut filters: Vec<String> = if needs_filter {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
+            let flags = ProjectionFlags::new(&projection, num_info_fields);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
             let mut join_buf = String::with_capacity(64);
+            let has_residual_filters = !residual_filters.is_empty();
 
             let mut total_records = 0usize;
             let mut batch_record_count = 0usize;
 
             'regions: for region in &regions {
-                // Skip unmapped_tail regions — not applicable to VCF
                 if region.unmapped_tail {
                     continue;
                 }
 
-                // Sub-region bounds for deduplication (1-based, from partition balancer)
                 let region_start_1based = region.start.map(|s| s as u32);
                 let region_end_1based = region.end.map(|e| e as u32);
 
@@ -1906,8 +1669,6 @@ async fn get_indexed_vcf_stream(
                         start_pos
                     };
 
-                    // Skip records outside the sub-region bounds (TBI bins may return
-                    // overlapping records at sub-region boundaries)
                     if let Some(rs) = region_start_1based {
                         if start_pos < rs {
                             continue;
@@ -1919,19 +1680,17 @@ async fn get_indexed_vcf_stream(
                         }
                     }
 
-                    // Compute chrom and end once, reuse for filtering and accumulation
-                    let chrom_str = if needs_chrom || has_residual_filters {
+                    let chrom_str = if flags.chrom || has_residual_filters {
                         Some(record.reference_sequence_name().to_string())
                     } else {
                         None
                     };
-                    let end_val = if needs_end || has_residual_filters {
+                    let end_val = if flags.end || has_residual_filters {
                         Some(get_variant_end(&record, &header))
                     } else {
                         None
                     };
 
-                    // Apply residual filters
                     if has_residual_filters {
                         let fields = VcfRecordFields {
                             chrom: chrom_str.clone(),
@@ -1943,32 +1702,32 @@ async fn get_indexed_vcf_stream(
                         }
                     }
 
-                    if needs_chrom {
-                        chroms.push(chrom_str.unwrap());
+                    if flags.chrom {
+                        builders.append_chrom(chrom_str.as_deref().unwrap());
                     }
-                    if needs_start {
-                        poss.push(start_val);
+                    if flags.start {
+                        builders.append_start(start_val);
                     }
-                    if needs_end {
-                        pose.push(end_val.unwrap());
+                    if flags.end {
+                        builders.append_end(end_val.unwrap());
                     }
-                    if needs_id {
+                    if flags.id {
                         join_into(&mut join_buf, record.ids().iter(), ';');
-                        ids.push(join_buf.clone());
+                        builders.append_id(&join_buf);
                     }
-                    if needs_ref {
-                        refs.push(record.reference_bases().to_string());
+                    if flags.reference {
+                        builders.append_ref(record.reference_bases());
                     }
-                    if needs_alt {
+                    if flags.alt {
                         join_into(
                             &mut join_buf,
                             record.alternate_bases().iter().map(|v| v.unwrap_or(".")),
                             '|',
                         );
-                        alts.push(join_buf.clone());
+                        builders.append_alt(&join_buf);
                     }
-                    if needs_qual {
-                        quals.push(
+                    if flags.qual {
+                        builders.append_qual(
                             record
                                 .quality_score()
                                 .transpose()
@@ -1978,15 +1737,15 @@ async fn get_indexed_vcf_stream(
                                 .map(|v| v as f64),
                         );
                     }
-                    if needs_filter {
+                    if flags.filter {
                         join_into(
                             &mut join_buf,
                             record.filters().iter(&header).map(|v| v.unwrap_or(".")),
                             ';',
                         );
-                        filters.push(join_buf.clone());
+                        builders.append_filter(&join_buf);
                     }
-                    if needs_any_info {
+                    if flags.any_info {
                         load_infos_single_pass(
                             &record,
                             &header,
@@ -1997,7 +1756,7 @@ async fn get_indexed_vcf_stream(
                         )
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     }
-                    if has_format_fields && needs_any_format {
+                    if has_format_fields && flags.any_format {
                         load_formats_single_pass(
                             &record,
                             &header,
@@ -2014,32 +1773,25 @@ async fn get_indexed_vcf_stream(
                     total_records += 1;
                     batch_record_count += 1;
 
-                    // Check limit — break out of both loops if reached
                     if limit.is_some_and(|lim| total_records >= lim) {
                         break 'regions;
                     }
 
                     if batch_record_count == batch_size {
-                        let info_arrays = if needs_any_info {
+                        let info_arrays = if flags.any_info {
                             Some(builders_to_arrays(&mut info_builders.2))
                         } else {
                             None
                         };
-                        let format_arrays = if has_format_fields && needs_any_format {
+                        let format_arrays = if has_format_fields && flags.any_format {
                             Some(builders_to_arrays(&mut format_builders.3))
                         } else {
                             None
                         };
-                        let batch = build_record_batch(
+                        let core_arrays = builders.finish();
+                        let batch = build_record_batch_from_builders(
                             Arc::clone(&schema),
-                            &chroms,
-                            &poss,
-                            &pose,
-                            &ids,
-                            &refs,
-                            &alts,
-                            &quals,
-                            &filters,
+                            core_arrays,
                             info_arrays.as_ref(),
                             format_arrays.as_ref(),
                             num_info_fields,
@@ -2047,7 +1799,6 @@ async fn get_indexed_vcf_stream(
                             batch_record_count,
                         )?;
 
-                        // Send batch with backpressure
                         let mut pending = Ok(batch);
                         loop {
                             match tx.try_send(pending) {
@@ -2060,14 +1811,6 @@ async fn get_indexed_vcf_stream(
                             }
                         }
 
-                        chroms.clear();
-                        poss.clear();
-                        pose.clear();
-                        ids.clear();
-                        refs.clear();
-                        alts.clear();
-                        quals.clear();
-                        filters.clear();
                         batch_record_count = 0;
                     }
                 }
@@ -2075,26 +1818,20 @@ async fn get_indexed_vcf_stream(
 
             // Remaining records
             if batch_record_count > 0 {
-                let info_arrays = if needs_any_info {
+                let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
                 } else {
                     None
                 };
-                let format_arrays = if has_format_fields && needs_any_format {
+                let format_arrays = if has_format_fields && flags.any_format {
                     Some(builders_to_arrays(&mut format_builders.3))
                 } else {
                     None
                 };
-                let batch = build_record_batch(
+                let core_arrays = builders.finish();
+                let batch = build_record_batch_from_builders(
                     Arc::clone(&schema),
-                    &chroms,
-                    &poss,
-                    &pose,
-                    &ids,
-                    &refs,
-                    &alts,
-                    &quals,
-                    &filters,
+                    core_arrays,
                     info_arrays.as_ref(),
                     format_arrays.as_ref(),
                     num_info_fields,
