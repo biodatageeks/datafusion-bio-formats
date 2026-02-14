@@ -31,6 +31,7 @@ use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -217,119 +218,138 @@ fn set_tag_builders(
     }
 }
 
-/// Extract tag values from a BAM record and populate builders
-fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
-    for i in 0..tag_builders.0.len() {
-        let builder = &mut tag_builders.2[i];
-        let expected_type = &tag_builders.1[i]; // Expected Arrow type from schema
-        let tag = &tag_builders.3[i]; // Use pre-parsed tag
-
-        // Access tag using noodles API: record.data().get(tag)
-        let data = record.data();
-        let tag_result = data.get(tag);
-
-        match tag_result {
-            Some(Ok(value)) => {
-                match value {
-                    Value::Int8(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::UInt8(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::Int16(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::UInt16(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::Int32(v) => append_int_value(builder, expected_type, v)?,
-                    Value::UInt32(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::Float(f) => {
-                        if matches!(expected_type, DataType::Utf8) {
-                            builder.append_string(&f.to_string())?
-                        } else {
-                            builder.append_float(f)?
-                        }
-                    }
-                    Value::String(s) => {
-                        // BStr needs to be converted to str
-                        match std::str::from_utf8(s.as_ref()) {
-                            Ok(string) => builder.append_string(string)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    Value::Character(c) => {
-                        if matches!(expected_type, DataType::Int32) {
-                            builder.append_int(c as i32)?
-                        } else {
-                            // Convert u8 to char, not to its numeric string representation
-                            let ch = char::from(c);
-                            builder.append_string(&ch.to_string())?
-                        }
-                    }
-                    Value::Hex(h) => {
-                        // Convert hex bytes to hex string
-                        let bytes: &[u8] = h.as_ref();
-                        let hex_str = hex::encode(bytes);
-                        builder.append_string(&hex_str)?
-                    }
-                    Value::Array(arr) => {
-                        // Handle array types
-                        match arr {
-                            SamArray::Int8(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::UInt8(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::Int16(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::UInt16(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::Int32(vals) => {
-                                let vec: Result<Vec<i32>, _> = vals.iter().collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::UInt32(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::Float(vals) => {
-                                let vec: Result<Vec<f32>, _> = vals.iter().collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_float(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                        }
-                    }
+/// Dispatch a single tag value to the appropriate builder.
+fn append_tag_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    value: Value<'_>,
+) -> Result<(), ArrowError> {
+    match value {
+        Value::Int8(v) => append_int_value(builder, expected_type, v as i32),
+        Value::UInt8(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Int16(v) => append_int_value(builder, expected_type, v as i32),
+        Value::UInt16(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Int32(v) => append_int_value(builder, expected_type, v),
+        Value::UInt32(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Float(f) => {
+            if matches!(expected_type, DataType::Utf8) {
+                builder.append_string(&f.to_string())
+            } else {
+                builder.append_float(f)
+            }
+        }
+        Value::String(s) => match std::str::from_utf8(s.as_ref()) {
+            Ok(string) => builder.append_string(string),
+            Err(_) => builder.append_null(),
+        },
+        Value::Character(c) => {
+            if matches!(expected_type, DataType::Int32) {
+                builder.append_int(c as i32)
+            } else {
+                let ch = char::from(c);
+                builder.append_string(&ch.to_string())
+            }
+        }
+        Value::Hex(h) => {
+            let bytes: &[u8] = h.as_ref();
+            let hex_str = hex::encode(bytes);
+            builder.append_string(&hex_str)
+        }
+        Value::Array(arr) => match arr {
+            SamArray::Int8(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
                 }
             }
-            _ => builder.append_null()?,
+            SamArray::UInt8(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Int16(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::UInt16(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Int32(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::UInt32(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Float(vals) => {
+                let vec: Result<Vec<f32>, _> = vals.iter().collect();
+                match vec {
+                    Ok(v) => builder.append_array_float(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+        },
+    }
+}
+
+/// Extract tag values from a BAM record using single-pass iteration.
+///
+/// Instead of calling `data.get(tag)` per requested tag (O(N*M) per record),
+/// iterates all tags once and dispatches via HashMap lookup (O(M+N) per record).
+fn load_tags<R: Record>(
+    record: &R,
+    tag_builders: &mut TagBuilders,
+    tag_to_index: &HashMap<Tag, usize>,
+    tag_populated: &mut [bool],
+) -> Result<(), ArrowError> {
+    let num_tags = tag_builders.0.len();
+    if num_tags == 0 {
+        return Ok(());
+    }
+
+    // Reset populated tracking
+    tag_populated.iter_mut().for_each(|v| *v = false);
+
+    // Single pass over all tags in the record
+    let data = record.data();
+    for result in data.iter() {
+        match result {
+            Ok((tag, value)) => {
+                if let Some(&idx) = tag_to_index.get(&tag) {
+                    tag_populated[idx] = true;
+                    let expected_type = &tag_builders.1[idx];
+                    let builder = &mut tag_builders.2[idx];
+                    append_tag_value(builder, expected_type, value)?;
+                }
+            }
+            Err(_) => continue, // skip malformed tags
         }
     }
+
+    // Backfill nulls for tags not found in this record
+    for (idx, &populated) in tag_populated.iter().enumerate().take(num_tags) {
+        if !populated {
+            tag_builders.2[idx].append_null()?;
+        }
+    }
+
     Ok(())
 }
 
@@ -409,6 +429,10 @@ macro_rules! process_bam_records_impl {
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
+
+        // Pre-compute tag lookup structures for single-pass iteration
+        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let mut tag_populated = vec![false; num_tag_fields];
 
         let mut cigar_buf = String::new();
         let mut seq_buf = String::new();
@@ -532,7 +556,7 @@ macro_rules! process_bam_records_impl {
 
             // Load tag fields
             if needs_any_tag {
-                load_tags(&record, &mut tag_builders)?;
+                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
             }
 
             record_num += 1;
@@ -771,6 +795,15 @@ async fn get_local_bam_sync(
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
+            // Pre-compute tag lookup structures for single-pass iteration
+            let tag_to_index: HashMap<Tag, usize> = tag_builders
+                .3
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (*t, i))
+                .collect();
+            let mut tag_populated = vec![false; num_tag_fields];
+
             let mut cigar_buf = String::new();
             let mut seq_buf = String::new();
             let mut qual_buf = String::new();
@@ -898,8 +931,13 @@ async fn get_local_bam_sync(
                         }
 
                         if needs_any_tag {
-                            load_tags(&record, &mut tag_builders)
-                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                            load_tags(
+                                &record,
+                                &mut tag_builders,
+                                &tag_to_index,
+                                &mut tag_populated,
+                            )
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                         }
 
                         total_records += 1;
@@ -1045,6 +1083,10 @@ macro_rules! process_sam_records_impl {
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
+        // Pre-compute tag lookup structures for single-pass iteration
+        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let mut tag_populated = vec![false; num_tag_fields];
+
         let mut cigar_buf = String::new();
         let mut seq_buf = String::new();
         let mut qual_buf = String::new();
@@ -1153,7 +1195,7 @@ macro_rules! process_sam_records_impl {
             }
 
             if needs_any_tag {
-                load_tags(&record, &mut tag_builders)?;
+                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
             }
 
             record_num += 1;
@@ -1448,6 +1490,15 @@ async fn get_indexed_stream(
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
+            // Pre-compute tag lookup structures for single-pass iteration
+            let tag_to_index: HashMap<Tag, usize> = tag_builders
+                .3
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (*t, i))
+                .collect();
+            let mut tag_populated = vec![false; num_tag_fields];
+
             let mut cigar_buf = String::new();
             let mut seq_buf = String::new();
             let mut qual_buf = String::new();
@@ -1574,8 +1625,13 @@ async fn get_indexed_stream(
                         };
                     }
                     if needs_any_tag {
-                        load_tags(&$record, &mut tag_builders)
-                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                        load_tags(
+                            &$record,
+                            &mut tag_builders,
+                            &tag_to_index,
+                            &mut tag_populated,
+                        )
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     }
                 }};
             }
