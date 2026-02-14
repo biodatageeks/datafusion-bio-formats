@@ -260,7 +260,7 @@ pub fn build_record_batch(
 ///
 /// # Arguments
 /// * `schema` - The Arrow schema for the batch
-/// * `core_arrays` - 12-element array of Option<ArrayRef> from builder finish()
+/// * `core_arrays` - 12-element array of `Option<ArrayRef>` from builder finish()
 /// * `tag_arrays` - Optional vector of tag column arrays
 /// * `projection` - Optional column indices to include in output
 /// * `record_count` - Number of records in this batch (used for empty projection / null arrays)
@@ -320,7 +320,7 @@ pub fn build_record_batch_from_builders(
 
 /// Container for core alignment field builders (Arrow builder-based path).
 ///
-/// Replaces the 12 Vec/StringBuilder field declarations with Option<Builder> fields.
+/// Replaces the 12 Vec/StringBuilder field declarations with `Option<Builder>` fields.
 /// Each field is `None` when not projected, avoiding unnecessary allocations.
 /// Builders write directly into Arrow buffers, eliminating double-buffering.
 pub struct CoreBatchBuilders {
