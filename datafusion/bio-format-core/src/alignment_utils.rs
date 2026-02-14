@@ -1,6 +1,6 @@
 use datafusion::arrow::array::{
     Array, ArrayRef, BooleanBuilder, Float32Builder, Int32Array, Int32Builder, ListBuilder,
-    NullArray, StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array,
+    NullArray, StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array, UInt32Builder,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -250,6 +250,323 @@ pub fn build_record_batch(
     } else {
         RecordBatch::try_new(schema.clone(), arrays)
             .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    }
+}
+
+/// Build a RecordBatch from pre-built Arrow arrays (builder-based path).
+///
+/// Takes arrays produced by `CoreBatchBuilders::finish()` and assembles them
+/// into a RecordBatch, handling projection and tag arrays.
+///
+/// # Arguments
+/// * `schema` - The Arrow schema for the batch
+/// * `core_arrays` - 12-element array of Option<ArrayRef> from builder finish()
+/// * `tag_arrays` - Optional vector of tag column arrays
+/// * `projection` - Optional column indices to include in output
+/// * `record_count` - Number of records in this batch (used for empty projection / null arrays)
+pub fn build_record_batch_from_builders(
+    schema: SchemaRef,
+    core_arrays: [Option<ArrayRef>; 12],
+    tag_arrays: Option<&Vec<ArrayRef>>,
+    projection: &Option<Vec<usize>>,
+    record_count: usize,
+) -> datafusion::error::Result<RecordBatch> {
+    let arrays = match projection {
+        None => {
+            // No projection — all 12 core arrays must be present
+            let mut arrays: Vec<ArrayRef> =
+                core_arrays.into_iter().map(|opt| opt.unwrap()).collect();
+            if let Some(tags) = tag_arrays {
+                arrays.extend_from_slice(tags);
+            }
+            arrays
+        }
+        Some(proj_ids) => {
+            let mut arrays: Vec<ArrayRef> = Vec::with_capacity(proj_ids.len());
+            for &i in proj_ids.iter() {
+                if i < 12 {
+                    if let Some(arr) = &core_arrays[i] {
+                        arrays.push(arr.clone());
+                    }
+                } else {
+                    // Tag fields start at index 12
+                    let tag_idx = i - 12;
+                    if let Some(tags) = tag_arrays {
+                        if tag_idx < tags.len() {
+                            arrays.push(tags[tag_idx].clone());
+                        } else {
+                            let field = &schema.fields()[i];
+                            arrays.push(new_null_array(field.data_type(), record_count));
+                        }
+                    } else {
+                        let field = &schema.fields()[i];
+                        arrays.push(new_null_array(field.data_type(), record_count));
+                    }
+                }
+            }
+            arrays
+        }
+    };
+
+    if arrays.is_empty() {
+        let options = RecordBatchOptions::new().with_row_count(Some(record_count));
+        RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    } else {
+        RecordBatch::try_new(schema.clone(), arrays)
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+    }
+}
+
+/// Container for core alignment field builders (Arrow builder-based path).
+///
+/// Replaces the 12 Vec/StringBuilder field declarations with Option<Builder> fields.
+/// Each field is `None` when not projected, avoiding unnecessary allocations.
+/// Builders write directly into Arrow buffers, eliminating double-buffering.
+pub struct CoreBatchBuilders {
+    name: Option<StringBuilder>,
+    chrom: Option<StringBuilder>,
+    start: Option<UInt32Builder>,
+    end: Option<UInt32Builder>,
+    flag: Option<UInt32Builder>,
+    cigar: Option<StringBuilder>,
+    mapq: Option<UInt32Builder>,
+    mate_chrom: Option<StringBuilder>,
+    mate_start: Option<UInt32Builder>,
+    sequence: Option<StringBuilder>,
+    quality: Option<StringBuilder>,
+    tlen: Option<Int32Builder>,
+}
+
+/// Projection flags for alignment fields.
+///
+/// Determines which of the 13 core fields are needed based on the projection.
+pub struct ProjectionFlags {
+    /// Whether read name (index 0) is projected
+    pub name: bool,
+    /// Whether chromosome (index 1) is projected
+    pub chrom: bool,
+    /// Whether alignment start (index 2) is projected
+    pub start: bool,
+    /// Whether alignment end (index 3) is projected
+    pub end: bool,
+    /// Whether SAM flags (index 4) are projected
+    pub flags: bool,
+    /// Whether CIGAR string (index 5) is projected
+    pub cigar: bool,
+    /// Whether mapping quality (index 6) is projected
+    pub mapq: bool,
+    /// Whether mate chromosome (index 7) is projected
+    pub mate_chrom: bool,
+    /// Whether mate start position (index 8) is projected
+    pub mate_start: bool,
+    /// Whether sequence (index 9) is projected
+    pub sequence: bool,
+    /// Whether quality scores (index 10) are projected
+    pub quality: bool,
+    /// Whether template length (index 11) is projected
+    pub tlen: bool,
+    /// Whether any tag field (index >= 12) is projected
+    pub any_tag: bool,
+}
+
+impl ProjectionFlags {
+    /// Create projection flags from an optional projection vector.
+    pub fn new(projection: &Option<Vec<usize>>) -> Self {
+        let needs = |idx: usize| projection.as_ref().is_none_or(|p| p.contains(&idx));
+        Self {
+            name: needs(0),
+            chrom: needs(1),
+            start: needs(2),
+            end: needs(3),
+            flags: needs(4),
+            cigar: needs(5),
+            mapq: needs(6),
+            mate_chrom: needs(7),
+            mate_start: needs(8),
+            sequence: needs(9),
+            quality: needs(10),
+            tlen: needs(11),
+            any_tag: projection
+                .as_ref()
+                .is_none_or(|p| p.iter().any(|&i| i >= 12)),
+        }
+    }
+}
+
+impl CoreBatchBuilders {
+    /// Create builders for projected fields, `None` for unprojected ones.
+    pub fn new(flags: &ProjectionFlags, batch_size: usize) -> Self {
+        Self {
+            name: flags
+                .name
+                .then(|| StringBuilder::with_capacity(batch_size, batch_size * 20)),
+            chrom: flags
+                .chrom
+                .then(|| StringBuilder::with_capacity(batch_size, batch_size * 10)),
+            start: flags
+                .start
+                .then(|| UInt32Builder::with_capacity(batch_size)),
+            end: flags.end.then(|| UInt32Builder::with_capacity(batch_size)),
+            flag: flags
+                .flags
+                .then(|| UInt32Builder::with_capacity(batch_size)),
+            cigar: flags
+                .cigar
+                .then(|| StringBuilder::with_capacity(batch_size, batch_size * 20)),
+            mapq: flags.mapq.then(|| UInt32Builder::with_capacity(batch_size)),
+            mate_chrom: flags
+                .mate_chrom
+                .then(|| StringBuilder::with_capacity(batch_size, batch_size * 10)),
+            mate_start: flags
+                .mate_start
+                .then(|| UInt32Builder::with_capacity(batch_size)),
+            sequence: flags
+                .sequence
+                .then(|| StringBuilder::with_capacity(batch_size, batch_size * 150)),
+            quality: flags
+                .quality
+                .then(|| StringBuilder::with_capacity(batch_size, batch_size * 150)),
+            tlen: flags.tlen.then(|| Int32Builder::with_capacity(batch_size)),
+        }
+    }
+
+    /// Append a read name value (nullable).
+    #[inline]
+    pub fn append_name(&mut self, value: Option<&str>) {
+        if let Some(b) = &mut self.name {
+            b.append_option(value);
+        }
+    }
+
+    /// Append a chromosome name (nullable).
+    #[inline]
+    pub fn append_chrom(&mut self, value: Option<&str>) {
+        if let Some(b) = &mut self.chrom {
+            b.append_option(value);
+        }
+    }
+
+    /// Append an alignment start position (nullable).
+    #[inline]
+    pub fn append_start(&mut self, value: Option<u32>) {
+        if let Some(b) = &mut self.start {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+    }
+
+    /// Append an alignment end position (nullable).
+    #[inline]
+    pub fn append_end(&mut self, value: Option<u32>) {
+        if let Some(b) = &mut self.end {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+    }
+
+    /// Append SAM flags (non-nullable).
+    #[inline]
+    pub fn append_flag(&mut self, value: u32) {
+        if let Some(b) = &mut self.flag {
+            b.append_value(value);
+        }
+    }
+
+    /// Append a CIGAR string (non-nullable).
+    #[inline]
+    pub fn append_cigar(&mut self, value: &str) {
+        if let Some(b) = &mut self.cigar {
+            b.append_value(value);
+        }
+    }
+
+    /// Append mapping quality (non-nullable, 255 for unavailable).
+    #[inline]
+    pub fn append_mapq(&mut self, value: u32) {
+        if let Some(b) = &mut self.mapq {
+            b.append_value(value);
+        }
+    }
+
+    /// Append a mate chromosome name (nullable).
+    #[inline]
+    pub fn append_mate_chrom(&mut self, value: Option<&str>) {
+        if let Some(b) = &mut self.mate_chrom {
+            b.append_option(value);
+        }
+    }
+
+    /// Append a mate start position (nullable).
+    #[inline]
+    pub fn append_mate_start(&mut self, value: Option<u32>) {
+        if let Some(b) = &mut self.mate_start {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+    }
+
+    /// Append a read sequence (non-nullable).
+    #[inline]
+    pub fn append_sequence(&mut self, value: &str) {
+        if let Some(b) = &mut self.sequence {
+            b.append_value(value);
+        }
+    }
+
+    /// Append base quality scores (non-nullable).
+    #[inline]
+    pub fn append_quality(&mut self, value: &str) {
+        if let Some(b) = &mut self.quality {
+            b.append_value(value);
+        }
+    }
+
+    /// Append template length (non-nullable).
+    #[inline]
+    pub fn append_tlen(&mut self, value: i32) {
+        if let Some(b) = &mut self.tlen {
+            b.append_value(value);
+        }
+    }
+
+    /// Finalize all active builders into arrays.
+    /// After calling this, the builders are reset and ready for the next batch.
+    pub fn finish(&mut self) -> [Option<ArrayRef>; 12] {
+        [
+            self.name.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.chrom
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.start
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.end.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.flag.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.cigar
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.mapq.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.mate_chrom
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.mate_start
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.sequence
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.quality
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.tlen.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
+        ]
     }
 }
 

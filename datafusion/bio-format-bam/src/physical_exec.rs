@@ -3,7 +3,7 @@ use crate::storage::{
 };
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{ArrayRef, RecordBatch, StringBuilder};
+use datafusion::arrow::array::{ArrayRef, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::common::DataFusionError;
@@ -11,8 +11,9 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::alignment_utils::{
-    RecordFields, build_record_batch, chrom_name_by_idx, format_cigar_ops, format_cigar_ops_unwrap,
-    get_chrom_idx_bam as get_chrom_idx, get_chrom_idx_cram as get_chrom_idx_sam,
+    CoreBatchBuilders, ProjectionFlags, build_record_batch_from_builders, chrom_name_by_idx,
+    format_cigar_ops, format_cigar_ops_unwrap, get_chrom_idx_bam as get_chrom_idx,
+    get_chrom_idx_cram as get_chrom_idx_sam,
 };
 use datafusion_bio_format_core::genomic_filter::GenomicRegion;
 use datafusion_bio_format_core::object_storage::{
@@ -325,7 +326,7 @@ fn load_tags<R: Record>(
     }
 
     // Reset populated tracking
-    tag_populated.iter_mut().for_each(|v| *v = false);
+    tag_populated.fill(false);
 
     // Single pass over all tags in the record
     let data = record.data();
@@ -396,41 +397,13 @@ fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, A
 macro_rules! process_bam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
-        // Determine which fields are needed based on projection
-        let needs_name = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
-        let needs_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
-        let needs_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
-        let needs_end = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
-        let needs_flags = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
-        let needs_cigar = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
-        let needs_mapq = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
-        let needs_mate_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
-        let needs_mate_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
-        let needs_sequence = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
-        let needs_quality = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
-        let needs_tlen = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
-        let needs_any_tag = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
+        let flags = ProjectionFlags::new(&$projection);
+        let mut builders = CoreBatchBuilders::new(&flags, $batch_size);
 
-        // Create vectors for accumulating record data (conditional capacity)
-        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut chrom: Vec<Option<&str>> = if needs_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut qual_builder = if needs_quality { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut template_length: Vec<i32> = if needs_tlen { Vec::with_capacity($batch_size) } else { Vec::new() };
-
-        // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
-        // Pre-compute tag lookup structures for single-pass iteration
         let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
         let mut tag_populated = vec![false; num_tag_fields];
 
@@ -440,128 +413,96 @@ macro_rules! process_bam_records_impl {
         let mut record_num = 0;
         let mut batch_num = 0;
 
-        // Get reference sequences and record iterator
         let ref_sequences = $reader.read_sequences().await;
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
         let mut records = $reader.read_records().await;
 
-        // Process records one by one
         while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+            let record = result?;
 
-            // Extract record name
-            if needs_name {
+            if flags.name {
                 match record.name() {
-                    Some(read_name) => {
-                        name.push(Some(read_name.to_string()));
-                    },
-                    None => {
-                        name.push(Some("*".to_string()));
-                    }
+                    Some(read_name) => builders.append_name(Some(&read_name.to_string())),
+                    None => builders.append_name(Some("*")),
                 };
             }
 
-            // Extract chromosome name
-            if needs_chrom {
-                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+            if flags.chrom {
+                builders.append_chrom(chrom_name_by_idx(get_chrom_idx(
                     record.reference_sequence_id()), &names,
-                );
-                chrom.push(chrom_name);
+                ));
             }
 
-            // Extract alignment start position
-            if needs_start {
+            if flags.start {
                 match record.alignment_start() {
                     Some(start_pos) => {
-                        // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
                         let pos = start_pos?.get() as u32;
-                        start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    None => {
-                        start.push(None);
-                    }
+                    None => builders.append_start(None),
                 }
             }
 
-            // Extract alignment end position
-            if needs_end {
+            if flags.end {
                 match record.alignment_end() {
-                    Some(end_pos) => {
-                        end.push(Some(end_pos?.get() as u32));
-                    },
-                    None => {
-                        end.push(None);
-                    }
+                    Some(end_pos) => builders.append_end(Some(end_pos?.get() as u32)),
+                    None => builders.append_end(None),
                 };
             }
 
-            // Extract mapping quality
-            if needs_mapq {
+            if flags.mapq {
                 match record.mapping_quality() {
-                    Some(mapping_quality_value) => {
-                        mapping_quality.push(mapping_quality_value.get() as u32);
-                    },
-                    None => {
-                        mapping_quality.push(255u32);
-                    }
+                    Some(mq) => builders.append_mapq(mq.get() as u32),
+                    None => builders.append_mapq(255u32),
                 };
             }
 
-            // Extract template length
-            if needs_tlen {
-                template_length.push(record.template_length());
+            if flags.tlen {
+                builders.append_tlen(record.template_length());
             }
 
-            // Extract sequence
-            if needs_sequence {
+            if flags.sequence {
                 seq_buf.clear();
                 seq_buf.extend(record.sequence().iter().map(char::from));
-                seq_builder.append_value(&seq_buf);
+                builders.append_sequence(&seq_buf);
             }
 
-            // Extract quality scores
-            if needs_quality {
+            if flags.quality {
                 qual_buf.clear();
                 qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
-                qual_builder.append_value(&qual_buf);
+                builders.append_quality(&qual_buf);
             }
 
-            // Extract flags and CIGAR
-            if needs_flags {
-                flag.push(record.flags().bits() as u32);
+            if flags.flags {
+                builders.append_flag(record.flags().bits() as u32);
             }
-            if needs_cigar {
+            if flags.cigar {
                 format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-                cigar.push(cigar_buf.clone());
+                builders.append_cigar(&cigar_buf);
             }
 
-            // Extract mate information
-            if needs_mate_chrom {
-                let mate_chrom_name = chrom_name_by_idx(get_chrom_idx(
+            if flags.mate_chrom {
+                builders.append_mate_chrom(chrom_name_by_idx(get_chrom_idx(
                     record.mate_reference_sequence_id()), &names,
-                );
-                mate_chrom.push(mate_chrom_name);
+                ));
             }
 
-            if needs_mate_start {
+            if flags.mate_start {
                 match record.mate_alignment_start() {
                     Some(mate_start_pos) => {
-                        // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
                         let pos = mate_start_pos?.get() as u32;
-                        mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_mate_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    _ => mate_start.push(None),
+                    _ => builders.append_mate_start(None),
                 };
             }
 
-            // Load tag fields
-            if needs_any_tag {
+            if flags.any_tag {
                 load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
             }
 
             record_num += 1;
 
-            // Once the batch size is reached, build and yield a record batch
             if record_num % $batch_size == 0 {
                 log::debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
@@ -569,22 +510,9 @@ macro_rules! process_bam_records_impl {
                 } else {
                     None
                 };
-                let batch = build_record_batch(
-                    Arc::clone(&$schema.clone()),
-                    RecordFields {
-                        name: &name,
-                        chrom: &chrom,
-                        start: &start,
-                        end: &end,
-                        flag: &flag,
-                        cigar: &cigar,
-                        mapping_quality: &mapping_quality,
-                        mate_chrom: &mate_chrom,
-                        mate_start: &mate_start,
-                        sequence: Arc::new(seq_builder.finish()),
-                        quality_scores: Arc::new(qual_builder.finish()),
-                        template_length: &template_length,
-                    },
+                let batch = build_record_batch_from_builders(
+                    Arc::clone(&$schema),
+                    builders.finish(),
                     tag_arrays.as_ref(),
                     &$projection,
                     $batch_size,
@@ -592,44 +520,18 @@ macro_rules! process_bam_records_impl {
                 batch_num += 1;
                 log::debug!("Batch number: {}", batch_num);
                 yield batch;
-
-                // Clear vectors for the next batch
-                name.clear();
-                chrom.clear();
-                start.clear();
-                end.clear();
-                flag.clear();
-                cigar.clear();
-                mapping_quality.clear();
-                mate_chrom.clear();
-                mate_start.clear();
-                template_length.clear();
             }
         }
 
-        // If there are remaining records that don't fill a complete batch, yield them as well
         if record_num > 0 && record_num % $batch_size != 0 {
             let tag_arrays = if num_tag_fields > 0 {
                 Some(builders_to_arrays(&mut tag_builders.2)?)
             } else {
                 None
             };
-            let batch = build_record_batch(
-                Arc::clone(&$schema.clone()),
-                RecordFields {
-                    name: &name,
-                    chrom: &chrom,
-                    start: &start,
-                    end: &end,
-                    flag: &flag,
-                    cigar: &cigar,
-                    mapping_quality: &mapping_quality,
-                    mate_chrom: &mate_chrom,
-                    mate_start: &mate_start,
-                    sequence: Arc::new(seq_builder.finish()),
-                    quality_scores: Arc::new(qual_builder.finish()),
-                    template_length: &template_length,
-                },
+            let batch = build_record_batch_from_builders(
+                Arc::clone(&$schema),
+                builders.finish(),
                 tag_arrays.as_ref(),
                 &$projection,
                 record_num % $batch_size,
@@ -688,114 +590,13 @@ async fn get_local_bam_sync(
             let ref_sequences = header.reference_sequences();
             let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
 
-            // Projection flags
-            let needs_name = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&0));
-            let needs_chrom = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&1));
-            let needs_start = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&2));
-            let needs_end = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&3));
-            let needs_flags = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&4));
-            let needs_cigar = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&5));
-            let needs_mapq = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&6));
-            let needs_mate_chrom = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&7));
-            let needs_mate_start = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&8));
-            let needs_sequence = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&9));
-            let needs_quality = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&10));
-            let needs_tlen = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.contains(&11));
-            let needs_any_tag = projection
-                .as_ref()
-                .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
-
-            // Initialize accumulators
-            let mut name: Vec<Option<String>> = if needs_name {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut chrom: Vec<Option<&str>> = if needs_chrom {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut start: Vec<Option<u32>> = if needs_start {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut end: Vec<Option<u32>> = if needs_end {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut mapping_quality: Vec<u32> = if needs_mapq {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut flag: Vec<u32> = if needs_flags {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut cigar: Vec<String> = if needs_cigar {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut mate_start: Vec<Option<u32>> = if needs_mate_start {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut seq_builder = if needs_sequence {
-                StringBuilder::with_capacity(batch_size, batch_size * 150)
-            } else {
-                StringBuilder::new()
-            };
-            let mut qual_builder = if needs_quality {
-                StringBuilder::with_capacity(batch_size, batch_size * 150)
-            } else {
-                StringBuilder::new()
-            };
-            let mut template_length: Vec<i32> = if needs_tlen {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
+            let flags = ProjectionFlags::new(&projection);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
 
             let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
-            // Pre-compute tag lookup structures for single-pass iteration
             let tag_to_index: HashMap<Tag, usize> = tag_builders
                 .3
                 .iter()
@@ -815,22 +616,23 @@ async fn get_local_bam_sync(
                 match reader.read_record(&mut record) {
                     Ok(0) => break, // EOF
                     Ok(_) => {
-                        if needs_name {
+                        if flags.name {
                             match record.name() {
-                                Some(read_name) => name.push(Some(read_name.to_string())),
-                                None => name.push(Some("*".to_string())),
+                                Some(read_name) => {
+                                    builders.append_name(Some(&read_name.to_string()))
+                                }
+                                None => builders.append_name(Some("*")),
                             };
                         }
 
-                        if needs_chrom {
-                            let chrom_name = chrom_name_by_idx(
+                        if flags.chrom {
+                            builders.append_chrom(chrom_name_by_idx(
                                 get_chrom_idx(record.reference_sequence_id()),
                                 &names,
-                            );
-                            chrom.push(chrom_name);
+                            ));
                         }
 
-                        if needs_start {
+                        if flags.start {
                             match record.alignment_start() {
                                 Some(start_pos) => {
                                     let pos = start_pos
@@ -841,20 +643,20 @@ async fn get_local_bam_sync(
                                             ))
                                         })?
                                         .get() as u32;
-                                    start.push(Some(if coordinate_system_zero_based {
+                                    builders.append_start(Some(if coordinate_system_zero_based {
                                         pos - 1
                                     } else {
                                         pos
                                     }));
                                 }
-                                None => start.push(None),
+                                None => builders.append_start(None),
                             }
                         }
 
-                        if needs_end {
+                        if flags.end {
                             match record.alignment_end() {
                                 Some(end_pos) => {
-                                    end.push(Some(
+                                    builders.append_end(Some(
                                         end_pos
                                             .map_err(|e| {
                                                 DataFusionError::Execution(format!(
@@ -865,51 +667,50 @@ async fn get_local_bam_sync(
                                             .get() as u32,
                                     ));
                                 }
-                                None => end.push(None),
+                                None => builders.append_end(None),
                             };
                         }
 
-                        if needs_mapq {
+                        if flags.mapq {
                             match record.mapping_quality() {
-                                Some(mq) => mapping_quality.push(mq.get() as u32),
-                                None => mapping_quality.push(255u32),
+                                Some(mq) => builders.append_mapq(mq.get() as u32),
+                                None => builders.append_mapq(255u32),
                             };
                         }
 
-                        if needs_tlen {
-                            template_length.push(record.template_length());
+                        if flags.tlen {
+                            builders.append_tlen(record.template_length());
                         }
 
-                        if needs_sequence {
+                        if flags.sequence {
                             seq_buf.clear();
                             seq_buf.extend(record.sequence().iter().map(char::from));
-                            seq_builder.append_value(&seq_buf);
+                            builders.append_sequence(&seq_buf);
                         }
 
-                        if needs_quality {
+                        if flags.quality {
                             qual_buf.clear();
                             qual_buf
                                 .extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
-                            qual_builder.append_value(&qual_buf);
+                            builders.append_quality(&qual_buf);
                         }
 
-                        if needs_flags {
-                            flag.push(record.flags().bits() as u32);
+                        if flags.flags {
+                            builders.append_flag(record.flags().bits() as u32);
                         }
-                        if needs_cigar {
+                        if flags.cigar {
                             format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-                            cigar.push(cigar_buf.clone());
+                            builders.append_cigar(&cigar_buf);
                         }
 
-                        if needs_mate_chrom {
-                            let mate_chrom_name = chrom_name_by_idx(
+                        if flags.mate_chrom {
+                            builders.append_mate_chrom(chrom_name_by_idx(
                                 get_chrom_idx(record.mate_reference_sequence_id()),
                                 &names,
-                            );
-                            mate_chrom.push(mate_chrom_name);
+                            ));
                         }
 
-                        if needs_mate_start {
+                        if flags.mate_start {
                             match record.mate_alignment_start() {
                                 Some(mate_start_pos) => {
                                     let pos = mate_start_pos
@@ -920,17 +721,19 @@ async fn get_local_bam_sync(
                                             ))
                                         })?
                                         .get() as u32;
-                                    mate_start.push(Some(if coordinate_system_zero_based {
-                                        pos - 1
-                                    } else {
-                                        pos
-                                    }));
+                                    builders.append_mate_start(Some(
+                                        if coordinate_system_zero_based {
+                                            pos - 1
+                                        } else {
+                                            pos
+                                        },
+                                    ));
                                 }
-                                _ => mate_start.push(None),
+                                _ => builders.append_mate_start(None),
                             };
                         }
 
-                        if needs_any_tag {
+                        if flags.any_tag {
                             load_tags(
                                 &record,
                                 &mut tag_builders,
@@ -952,22 +755,9 @@ async fn get_local_bam_sync(
                                 } else {
                                     None
                                 };
-                            let batch = build_record_batch(
+                            let batch = build_record_batch_from_builders(
                                 Arc::clone(&schema),
-                                RecordFields {
-                                    name: &name,
-                                    chrom: &chrom,
-                                    start: &start,
-                                    end: &end,
-                                    flag: &flag,
-                                    cigar: &cigar,
-                                    mapping_quality: &mapping_quality,
-                                    mate_chrom: &mate_chrom,
-                                    mate_start: &mate_start,
-                                    sequence: Arc::new(seq_builder.finish()),
-                                    quality_scores: Arc::new(qual_builder.finish()),
-                                    template_length: &template_length,
-                                },
+                                builders.finish(),
                                 tag_arrays.as_ref(),
                                 &projection,
                                 batch_row_count,
@@ -978,16 +768,6 @@ async fn get_local_bam_sync(
                                 Err(_) => return Ok(()),
                             }
 
-                            name.clear();
-                            chrom.clear();
-                            start.clear();
-                            end.clear();
-                            flag.clear();
-                            cigar.clear();
-                            mapping_quality.clear();
-                            mate_chrom.clear();
-                            mate_start.clear();
-                            template_length.clear();
                             batch_row_count = 0;
                         }
                     }
@@ -1007,22 +787,9 @@ async fn get_local_bam_sync(
                 } else {
                     None
                 };
-                let batch = build_record_batch(
+                let batch = build_record_batch_from_builders(
                     Arc::clone(&schema),
-                    RecordFields {
-                        name: &name,
-                        chrom: &chrom,
-                        start: &start,
-                        end: &end,
-                        flag: &flag,
-                        cigar: &cigar,
-                        mapping_quality: &mapping_quality,
-                        mate_chrom: &mate_chrom,
-                        mate_start: &mate_start,
-                        sequence: Arc::new(seq_builder.finish()),
-                        quality_scores: Arc::new(qual_builder.finish()),
-                        template_length: &template_length,
-                    },
+                    builders.finish(),
                     tag_arrays.as_ref(),
                     &projection,
                     batch_row_count,
@@ -1051,39 +818,13 @@ async fn get_local_bam_sync(
 macro_rules! process_sam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
-        // Determine which fields are needed based on projection
-        let needs_name = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
-        let needs_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
-        let needs_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
-        let needs_end = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
-        let needs_flags = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
-        let needs_cigar = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
-        let needs_mapq = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
-        let needs_mate_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
-        let needs_mate_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
-        let needs_sequence = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
-        let needs_quality = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
-        let needs_tlen = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
-        let needs_any_tag = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
-
-        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut chrom: Vec<Option<&str>> = if needs_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut qual_builder = if needs_quality { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut template_length: Vec<i32> = if needs_tlen { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let flags = ProjectionFlags::new(&$projection);
+        let mut builders = CoreBatchBuilders::new(&flags, $batch_size);
 
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
 
-        // Pre-compute tag lookup structures for single-pass iteration
         let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
         let mut tag_populated = vec![false; num_tag_fields];
 
@@ -1100,101 +841,84 @@ macro_rules! process_sam_records_impl {
         while let Some(result) = records.next().await {
             let record = result?;
 
-            if needs_name {
+            if flags.name {
                 match record.name() {
-                    Some(read_name) => {
-                        name.push(Some(read_name.to_string()));
-                    },
-                    None => {
-                        name.push(Some("*".to_string()));
-                    }
+                    Some(read_name) => builders.append_name(Some(&read_name.to_string())),
+                    None => builders.append_name(Some("*")),
                 };
             }
 
-            if needs_chrom {
-                let chrom_name = chrom_name_by_idx(get_chrom_idx_sam(
+            if flags.chrom {
+                builders.append_chrom(chrom_name_by_idx(get_chrom_idx_sam(
                     record.reference_sequence_id()), &names,
-                );
-                chrom.push(chrom_name);
+                ));
             }
 
-            if needs_start {
+            if flags.start {
                 match record.alignment_start() {
                     Some(start_pos) => {
                         let pos = usize::from(start_pos) as u32;
-                        start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    None => {
-                        start.push(None);
-                    }
+                    None => builders.append_start(None),
                 }
             }
 
-            if needs_end {
+            if flags.end {
                 match record.alignment_end() {
-                    Some(end_pos) => {
-                        let pos = usize::from(end_pos) as u32;
-                        end.push(Some(pos));
-                    },
-                    None => {
-                        end.push(None);
-                    }
+                    Some(end_pos) => builders.append_end(Some(usize::from(end_pos) as u32)),
+                    None => builders.append_end(None),
                 };
             }
 
-            if needs_mapq {
+            if flags.mapq {
                 match record.mapping_quality() {
-                    Some(mapping_quality_value) => {
-                        mapping_quality.push(u8::from(mapping_quality_value) as u32);
-                    },
-                    None => {
-                        mapping_quality.push(255u32);
-                    }
+                    Some(mq) => builders.append_mapq(u8::from(mq) as u32),
+                    None => builders.append_mapq(255u32),
                 };
             }
 
-            if needs_tlen {
-                template_length.push(record.template_length());
+            if flags.tlen {
+                builders.append_tlen(record.template_length());
             }
 
-            if needs_sequence {
+            if flags.sequence {
                 seq_buf.clear();
                 seq_buf.extend(record.sequence().as_ref().iter().map(|b| char::from(*b)));
-                seq_builder.append_value(&seq_buf);
+                builders.append_sequence(&seq_buf);
             }
 
-            if needs_quality {
+            if flags.quality {
                 qual_buf.clear();
                 qual_buf.extend(record.quality_scores().as_ref().iter().map(|s| char::from(*s + 33)));
-                qual_builder.append_value(&qual_buf);
+                builders.append_quality(&qual_buf);
             }
 
-            if needs_flags {
-                flag.push(record.flags().bits() as u32);
+            if flags.flags {
+                builders.append_flag(record.flags().bits() as u32);
             }
-            if needs_cigar {
+            if flags.cigar {
                 format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
-                cigar.push(cigar_buf.clone());
+                builders.append_cigar(&cigar_buf);
             }
 
-            if needs_mate_chrom {
-                let mate_chrom_name = chrom_name_by_idx(get_chrom_idx_sam(
+            if flags.mate_chrom {
+                builders.append_mate_chrom(chrom_name_by_idx(get_chrom_idx_sam(
                     record.mate_reference_sequence_id()), &names,
-                );
-                mate_chrom.push(mate_chrom_name);
+                ));
             }
 
-            if needs_mate_start {
+            if flags.mate_start {
                 match record.mate_alignment_start() {
                     Some(mate_start_pos) => {
                         let pos = usize::from(mate_start_pos) as u32;
-                        mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_mate_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    _ => mate_start.push(None),
+                    _ => builders.append_mate_start(None),
                 };
             }
 
-            if needs_any_tag {
+            if flags.any_tag {
                 load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
             }
 
@@ -1207,22 +931,9 @@ macro_rules! process_sam_records_impl {
                 } else {
                     None
                 };
-                let batch = build_record_batch(
-                    Arc::clone(&$schema.clone()),
-                    RecordFields {
-                        name: &name,
-                        chrom: &chrom,
-                        start: &start,
-                        end: &end,
-                        flag: &flag,
-                        cigar: &cigar,
-                        mapping_quality: &mapping_quality,
-                        mate_chrom: &mate_chrom,
-                        mate_start: &mate_start,
-                        sequence: Arc::new(seq_builder.finish()),
-                        quality_scores: Arc::new(qual_builder.finish()),
-                        template_length: &template_length,
-                    },
+                let batch = build_record_batch_from_builders(
+                    Arc::clone(&$schema),
+                    builders.finish(),
                     tag_arrays.as_ref(),
                     &$projection,
                     $batch_size,
@@ -1230,17 +941,6 @@ macro_rules! process_sam_records_impl {
                 batch_num += 1;
                 log::debug!("Batch number: {}", batch_num);
                 yield batch;
-
-                name.clear();
-                chrom.clear();
-                start.clear();
-                end.clear();
-                flag.clear();
-                cigar.clear();
-                mapping_quality.clear();
-                mate_chrom.clear();
-                mate_start.clear();
-                template_length.clear();
             }
         }
 
@@ -1250,22 +950,9 @@ macro_rules! process_sam_records_impl {
             } else {
                 None
             };
-            let batch = build_record_batch(
-                Arc::clone(&$schema.clone()),
-                RecordFields {
-                    name: &name,
-                    chrom: &chrom,
-                    start: &start,
-                    end: &end,
-                    flag: &flag,
-                    cigar: &cigar,
-                    mapping_quality: &mapping_quality,
-                    mate_chrom: &mate_chrom,
-                    mate_start: &mate_start,
-                    sequence: Arc::new(seq_builder.finish()),
-                    quality_scores: Arc::new(qual_builder.finish()),
-                    template_length: &template_length,
-                },
+            let batch = build_record_batch_from_builders(
+                Arc::clone(&$schema),
+                builders.finish(),
                 tag_arrays.as_ref(),
                 &$projection,
                 record_num % $batch_size,
@@ -1403,94 +1090,17 @@ async fn get_indexed_stream(
 
             let names = indexed_reader.reference_names();
 
-            // Projection flags — determine which fields are needed
-            let needs_name = projection.as_ref().is_none_or(|p| p.contains(&0));
-            let needs_chrom = projection.as_ref().is_none_or(|p| p.contains(&1));
-            let needs_start = projection.as_ref().is_none_or(|p| p.contains(&2));
-            let needs_end = projection.as_ref().is_none_or(|p| p.contains(&3));
-            let needs_flags = projection.as_ref().is_none_or(|p| p.contains(&4));
-            let needs_cigar = projection.as_ref().is_none_or(|p| p.contains(&5));
-            let needs_mapq = projection.as_ref().is_none_or(|p| p.contains(&6));
-            let needs_mate_chrom = projection.as_ref().is_none_or(|p| p.contains(&7));
-            let needs_mate_start = projection.as_ref().is_none_or(|p| p.contains(&8));
-            let needs_sequence = projection.as_ref().is_none_or(|p| p.contains(&9));
-            let needs_quality = projection.as_ref().is_none_or(|p| p.contains(&10));
-            let needs_tlen = projection.as_ref().is_none_or(|p| p.contains(&11));
-            let needs_any_tag = projection
-                .as_ref()
-                .is_none_or(|p| p.iter().any(|&i| i >= 12));
+            let flags = ProjectionFlags::new(&projection);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
 
             // chrom/start/end/mapq/flags are always decoded for residual filter evaluation
             // and sub-region dedup, but only accumulated when projected
             let has_residual_filters = !residual_filters.is_empty();
 
-            // Initialize accumulators (conditional capacity)
-            let mut name: Vec<Option<String>> = if needs_name {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut chrom: Vec<Option<&str>> = if needs_chrom {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut start: Vec<Option<u32>> = if needs_start {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut end: Vec<Option<u32>> = if needs_end {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut mapping_quality: Vec<u32> = if needs_mapq {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut flag: Vec<u32> = if needs_flags {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut cigar: Vec<String> = if needs_cigar {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut mate_start: Vec<Option<u32>> = if needs_mate_start {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-            let mut seq_builder = if needs_sequence {
-                StringBuilder::with_capacity(batch_size, batch_size * 150)
-            } else {
-                StringBuilder::new()
-            };
-            let mut qual_builder = if needs_quality {
-                StringBuilder::with_capacity(batch_size, batch_size * 150)
-            } else {
-                StringBuilder::new()
-            };
-            let mut template_length: Vec<i32> = if needs_tlen {
-                Vec::with_capacity(batch_size)
-            } else {
-                Vec::new()
-            };
-
             let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
-            // Pre-compute tag lookup structures for single-pass iteration
             let tag_to_index: HashMap<Tag, usize> = tag_builders
                 .3
                 .iter()
@@ -1516,22 +1126,9 @@ async fn get_indexed_stream(
                     } else {
                         None
                     };
-                    let batch = build_record_batch(
+                    let batch = build_record_batch_from_builders(
                         Arc::clone(&schema),
-                        RecordFields {
-                            name: &name,
-                            chrom: &chrom,
-                            start: &start,
-                            end: &end,
-                            flag: &flag,
-                            cigar: &cigar,
-                            mapping_quality: &mapping_quality,
-                            mate_chrom: &mate_chrom,
-                            mate_start: &mate_start,
-                            sequence: Arc::new(seq_builder.finish()),
-                            quality_scores: Arc::new(qual_builder.finish()),
-                            template_length: &template_length,
-                        },
+                        builders.finish(),
                         tag_arrays.as_ref(),
                         &projection,
                         $batch_row_count,
@@ -1541,70 +1138,58 @@ async fn get_indexed_stream(
                         Ok(()) => {}
                         Err(_) => $disconnect_action,
                     }
-
-                    name.clear();
-                    chrom.clear();
-                    start.clear();
-                    end.clear();
-                    flag.clear();
-                    cigar.clear();
-                    mapping_quality.clear();
-                    mate_chrom.clear();
-                    mate_start.clear();
-                    template_length.clear();
                 }};
             }
 
-            /// Helper macro to accumulate fields from a record into batch vectors.
+            /// Helper macro to accumulate fields from a record into builders.
             macro_rules! accumulate_record_fields {
                 ($record:expr, $chrom_name:expr, $start_val:expr, $end_val:expr, $mq:expr) => {{
-                    if needs_name {
+                    if flags.name {
                         match $record.name() {
-                            Some(read_name) => name.push(Some(read_name.to_string())),
-                            _ => name.push(Some("*".to_string())),
+                            Some(read_name) => builders.append_name(Some(&read_name.to_string())),
+                            _ => builders.append_name(Some("*")),
                         };
                     }
-                    if needs_chrom {
-                        chrom.push($chrom_name);
+                    if flags.chrom {
+                        builders.append_chrom($chrom_name);
                     }
-                    if needs_start {
-                        start.push($start_val);
+                    if flags.start {
+                        builders.append_start($start_val);
                     }
-                    if needs_end {
-                        end.push($end_val);
+                    if flags.end {
+                        builders.append_end($end_val);
                     }
-                    if needs_mapq {
-                        mapping_quality.push($mq);
+                    if flags.mapq {
+                        builders.append_mapq($mq);
                     }
-                    if needs_tlen {
-                        template_length.push($record.template_length());
+                    if flags.tlen {
+                        builders.append_tlen($record.template_length());
                     }
-                    if needs_sequence {
+                    if flags.sequence {
                         seq_buf.clear();
                         seq_buf.extend($record.sequence().iter().map(char::from));
-                        seq_builder.append_value(&seq_buf);
+                        builders.append_sequence(&seq_buf);
                     }
-                    if needs_quality {
+                    if flags.quality {
                         qual_buf.clear();
                         qual_buf
                             .extend($record.quality_scores().iter().map(|p| char::from(p + 33)));
-                        qual_builder.append_value(&qual_buf);
+                        builders.append_quality(&qual_buf);
                     }
-                    if needs_flags {
-                        flag.push($record.flags().bits() as u32);
+                    if flags.flags {
+                        builders.append_flag($record.flags().bits() as u32);
                     }
-                    if needs_cigar {
+                    if flags.cigar {
                         format_cigar_ops_unwrap($record.cigar().iter(), &mut cigar_buf);
-                        cigar.push(cigar_buf.clone());
+                        builders.append_cigar(&cigar_buf);
                     }
-                    if needs_mate_chrom {
-                        let mate_chrom_name = chrom_name_by_idx(
+                    if flags.mate_chrom {
+                        builders.append_mate_chrom(chrom_name_by_idx(
                             get_chrom_idx($record.mate_reference_sequence_id()),
                             &names,
-                        );
-                        mate_chrom.push(mate_chrom_name);
+                        ));
                     }
-                    if needs_mate_start {
+                    if flags.mate_start {
                         match $record.mate_alignment_start() {
                             Some(mate_start_pos) => {
                                 let pos = mate_start_pos
@@ -1615,16 +1200,16 @@ async fn get_indexed_stream(
                                         ))
                                     })?
                                     .get() as u32;
-                                mate_start.push(Some(if coordinate_system_zero_based {
+                                builders.append_mate_start(Some(if coordinate_system_zero_based {
                                     pos - 1
                                 } else {
                                     pos
                                 }));
                             }
-                            _ => mate_start.push(None),
+                            _ => builders.append_mate_start(None),
                         };
                     }
-                    if needs_any_tag {
+                    if flags.any_tag {
                         load_tags(
                             &$record,
                             &mut tag_builders,
