@@ -1,7 +1,9 @@
-use crate::storage::{BamReader, BamRecordFields, IndexedBamReader, SamReader, is_sam_file};
+use crate::storage::{
+    BamReader, BamRecordFields, IndexedBamReader, SamReader, is_sam_file, open_local_bam_sync,
+};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{ArrayRef, RecordBatch, StringBuilder};
+use datafusion::arrow::array::{ArrayRef, RecordBatch};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::error::ArrowError;
 use datafusion::common::DataFusionError;
@@ -9,9 +11,9 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::alignment_utils::{
-    RecordFields, build_record_batch, format_cigar_ops, format_cigar_ops_unwrap,
-    get_chrom_by_seq_id_bam as get_chrom_by_seq_id,
-    get_chrom_by_seq_id_cram as get_chrom_by_seq_id_sam,
+    CoreBatchBuilders, ProjectionFlags, build_record_batch_from_builders, chrom_name_by_idx,
+    format_cigar_ops, format_cigar_ops_unwrap, get_chrom_idx_bam as get_chrom_idx,
+    get_chrom_idx_cram as get_chrom_idx_sam,
 };
 use datafusion_bio_format_core::genomic_filter::GenomicRegion;
 use datafusion_bio_format_core::object_storage::{
@@ -22,6 +24,7 @@ use datafusion_bio_format_core::record_filter::evaluate_record_filters;
 use datafusion_bio_format_core::table_utils::OptionalField;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 
+use futures::SinkExt;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
 use noodles_bam as bam;
@@ -29,6 +32,7 @@ use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -215,119 +219,138 @@ fn set_tag_builders(
     }
 }
 
-/// Extract tag values from a BAM record and populate builders
-fn load_tags<R: Record>(record: &R, tag_builders: &mut TagBuilders) -> Result<(), ArrowError> {
-    for i in 0..tag_builders.0.len() {
-        let builder = &mut tag_builders.2[i];
-        let expected_type = &tag_builders.1[i]; // Expected Arrow type from schema
-        let tag = &tag_builders.3[i]; // Use pre-parsed tag
-
-        // Access tag using noodles API: record.data().get(tag)
-        let data = record.data();
-        let tag_result = data.get(tag);
-
-        match tag_result {
-            Some(Ok(value)) => {
-                match value {
-                    Value::Int8(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::UInt8(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::Int16(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::UInt16(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::Int32(v) => append_int_value(builder, expected_type, v)?,
-                    Value::UInt32(v) => append_int_value(builder, expected_type, v as i32)?,
-                    Value::Float(f) => {
-                        if matches!(expected_type, DataType::Utf8) {
-                            builder.append_string(&f.to_string())?
-                        } else {
-                            builder.append_float(f)?
-                        }
-                    }
-                    Value::String(s) => {
-                        // BStr needs to be converted to str
-                        match std::str::from_utf8(s.as_ref()) {
-                            Ok(string) => builder.append_string(string)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    Value::Character(c) => {
-                        if matches!(expected_type, DataType::Int32) {
-                            builder.append_int(c as i32)?
-                        } else {
-                            // Convert u8 to char, not to its numeric string representation
-                            let ch = char::from(c);
-                            builder.append_string(&ch.to_string())?
-                        }
-                    }
-                    Value::Hex(h) => {
-                        // Convert hex bytes to hex string
-                        let bytes: &[u8] = h.as_ref();
-                        let hex_str = hex::encode(bytes);
-                        builder.append_string(&hex_str)?
-                    }
-                    Value::Array(arr) => {
-                        // Handle array types
-                        match arr {
-                            SamArray::Int8(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::UInt8(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::Int16(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::UInt16(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::Int32(vals) => {
-                                let vec: Result<Vec<i32>, _> = vals.iter().collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::UInt32(vals) => {
-                                let vec: Result<Vec<i32>, _> =
-                                    vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_int(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                            SamArray::Float(vals) => {
-                                let vec: Result<Vec<f32>, _> = vals.iter().collect();
-                                match vec {
-                                    Ok(v) => builder.append_array_float(v)?,
-                                    Err(_) => builder.append_null()?,
-                                }
-                            }
-                        }
-                    }
+/// Dispatch a single tag value to the appropriate builder.
+fn append_tag_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    value: Value<'_>,
+) -> Result<(), ArrowError> {
+    match value {
+        Value::Int8(v) => append_int_value(builder, expected_type, v as i32),
+        Value::UInt8(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Int16(v) => append_int_value(builder, expected_type, v as i32),
+        Value::UInt16(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Int32(v) => append_int_value(builder, expected_type, v),
+        Value::UInt32(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Float(f) => {
+            if matches!(expected_type, DataType::Utf8) {
+                builder.append_string(&f.to_string())
+            } else {
+                builder.append_float(f)
+            }
+        }
+        Value::String(s) => match std::str::from_utf8(s.as_ref()) {
+            Ok(string) => builder.append_string(string),
+            Err(_) => builder.append_null(),
+        },
+        Value::Character(c) => {
+            if matches!(expected_type, DataType::Int32) {
+                builder.append_int(c as i32)
+            } else {
+                let ch = char::from(c);
+                builder.append_string(&ch.to_string())
+            }
+        }
+        Value::Hex(h) => {
+            let bytes: &[u8] = h.as_ref();
+            let hex_str = hex::encode(bytes);
+            builder.append_string(&hex_str)
+        }
+        Value::Array(arr) => match arr {
+            SamArray::Int8(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
                 }
             }
-            _ => builder.append_null()?,
+            SamArray::UInt8(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Int16(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::UInt16(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Int32(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::UInt32(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Float(vals) => {
+                let vec: Result<Vec<f32>, _> = vals.iter().collect();
+                match vec {
+                    Ok(v) => builder.append_array_float(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+        },
+    }
+}
+
+/// Extract tag values from a BAM record using single-pass iteration.
+///
+/// Instead of calling `data.get(tag)` per requested tag (O(N*M) per record),
+/// iterates all tags once and dispatches via HashMap lookup (O(M+N) per record).
+fn load_tags<R: Record>(
+    record: &R,
+    tag_builders: &mut TagBuilders,
+    tag_to_index: &HashMap<Tag, usize>,
+    tag_populated: &mut [bool],
+) -> Result<(), ArrowError> {
+    let num_tags = tag_builders.0.len();
+    if num_tags == 0 {
+        return Ok(());
+    }
+
+    // Reset populated tracking
+    tag_populated.fill(false);
+
+    // Single pass over all tags in the record
+    let data = record.data();
+    for result in data.iter() {
+        match result {
+            Ok((tag, value)) => {
+                if let Some(&idx) = tag_to_index.get(&tag) {
+                    tag_populated[idx] = true;
+                    let expected_type = &tag_builders.1[idx];
+                    let builder = &mut tag_builders.2[idx];
+                    append_tag_value(builder, expected_type, value)?;
+                }
+            }
+            Err(_) => continue, // skip malformed tags
         }
     }
+
+    // Backfill nulls for tags not found in this record
+    for (idx, &populated) in tag_populated.iter().enumerate().take(num_tags) {
+        if !populated {
+            tag_builders.2[idx].append_null()?;
+        }
+    }
+
     Ok(())
 }
 
@@ -374,39 +397,15 @@ fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, A
 macro_rules! process_bam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
-        // Determine which fields are needed based on projection
-        let needs_name = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
-        let needs_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
-        let needs_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
-        let needs_end = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
-        let needs_flags = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
-        let needs_cigar = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
-        let needs_mapq = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
-        let needs_mate_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
-        let needs_mate_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
-        let needs_sequence = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
-        let needs_quality = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
-        let needs_tlen = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
-        let needs_any_tag = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
+        let flags = ProjectionFlags::new(&$projection);
+        let mut builders = CoreBatchBuilders::new(&flags, $batch_size);
 
-        // Create vectors for accumulating record data (conditional capacity)
-        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut chrom: Vec<Option<String>> = if needs_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut qual_builder = if needs_quality { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut template_length: Vec<i32> = if needs_tlen { Vec::with_capacity($batch_size) } else { Vec::new() };
-
-        // Initialize tag builders
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
+
+        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let mut tag_populated = vec![false; num_tag_fields];
 
         let mut cigar_buf = String::new();
         let mut seq_buf = String::new();
@@ -414,130 +413,96 @@ macro_rules! process_bam_records_impl {
         let mut record_num = 0;
         let mut batch_num = 0;
 
-        // Get reference sequences and record iterator
         let ref_sequences = $reader.read_sequences().await;
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
         let mut records = $reader.read_records().await;
 
-        // Process records one by one
         while let Some(result) = records.next().await {
-            let record = result?;  // propagate errors if any
+            let record = result?;
 
-            // Extract record name
-            if needs_name {
+            if flags.name {
                 match record.name() {
-                    Some(read_name) => {
-                        name.push(Some(read_name.to_string()));
-                    },
-                    None => {
-                        name.push(Some("*".to_string()));
-                    }
+                    Some(read_name) => builders.append_name(Some(&read_name.to_string())),
+                    None => builders.append_name(Some("*")),
                 };
             }
 
-            // Extract chromosome name
-            if needs_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.reference_sequence_id(),
-                    &names,
-                );
-                chrom.push(chrom_name);
+            if flags.chrom {
+                builders.append_chrom(chrom_name_by_idx(get_chrom_idx(
+                    record.reference_sequence_id()), &names,
+                ));
             }
 
-            // Extract alignment start position
-            if needs_start {
+            if flags.start {
                 match record.alignment_start() {
                     Some(start_pos) => {
-                        // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
                         let pos = start_pos?.get() as u32;
-                        start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    None => {
-                        start.push(None);
-                    }
+                    None => builders.append_start(None),
                 }
             }
 
-            // Extract alignment end position
-            if needs_end {
+            if flags.end {
                 match record.alignment_end() {
-                    Some(end_pos) => {
-                        end.push(Some(end_pos?.get() as u32));
-                    },
-                    None => {
-                        end.push(None);
-                    }
+                    Some(end_pos) => builders.append_end(Some(end_pos?.get() as u32)),
+                    None => builders.append_end(None),
                 };
             }
 
-            // Extract mapping quality
-            if needs_mapq {
+            if flags.mapq {
                 match record.mapping_quality() {
-                    Some(mapping_quality_value) => {
-                        mapping_quality.push(mapping_quality_value.get() as u32);
-                    },
-                    None => {
-                        mapping_quality.push(255u32);
-                    }
+                    Some(mq) => builders.append_mapq(mq.get() as u32),
+                    None => builders.append_mapq(255u32),
                 };
             }
 
-            // Extract template length
-            if needs_tlen {
-                template_length.push(record.template_length());
+            if flags.tlen {
+                builders.append_tlen(record.template_length());
             }
 
-            // Extract sequence
-            if needs_sequence {
+            if flags.sequence {
                 seq_buf.clear();
                 seq_buf.extend(record.sequence().iter().map(char::from));
-                seq_builder.append_value(&seq_buf);
+                builders.append_sequence(&seq_buf);
             }
 
-            // Extract quality scores
-            if needs_quality {
+            if flags.quality {
                 qual_buf.clear();
                 qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
-                qual_builder.append_value(&qual_buf);
+                builders.append_quality(&qual_buf);
             }
 
-            // Extract flags and CIGAR
-            if needs_flags {
-                flag.push(record.flags().bits() as u32);
+            if flags.flags {
+                builders.append_flag(record.flags().bits() as u32);
             }
-            if needs_cigar {
+            if flags.cigar {
                 format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-                cigar.push(cigar_buf.clone());
+                builders.append_cigar(&cigar_buf);
             }
 
-            // Extract mate information
-            if needs_mate_chrom {
-                let mate_chrom_name = get_chrom_by_seq_id(
-                    record.mate_reference_sequence_id(),
-                    &names,
-                );
-                mate_chrom.push(mate_chrom_name);
+            if flags.mate_chrom {
+                builders.append_mate_chrom(chrom_name_by_idx(get_chrom_idx(
+                    record.mate_reference_sequence_id()), &names,
+                ));
             }
 
-            if needs_mate_start {
+            if flags.mate_start {
                 match record.mate_alignment_start() {
                     Some(mate_start_pos) => {
-                        // noodles normalizes all positions to 1-based; subtract 1 for 0-based output
                         let pos = mate_start_pos?.get() as u32;
-                        mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_mate_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    _ => mate_start.push(None),
+                    _ => builders.append_mate_start(None),
                 };
             }
 
-            // Load tag fields
-            if needs_any_tag {
-                load_tags(&record, &mut tag_builders)?;
+            if flags.any_tag {
+                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
             }
 
             record_num += 1;
 
-            // Once the batch size is reached, build and yield a record batch
             if record_num % $batch_size == 0 {
                 log::debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
@@ -545,69 +510,30 @@ macro_rules! process_bam_records_impl {
                 } else {
                     None
                 };
-                let batch = build_record_batch(
-                    Arc::clone(&$schema.clone()),
-                    RecordFields {
-                        name: &name,
-                        chrom: &chrom,
-                        start: &start,
-                        end: &end,
-                        flag: &flag,
-                        cigar: &cigar,
-                        mapping_quality: &mapping_quality,
-                        mate_chrom: &mate_chrom,
-                        mate_start: &mate_start,
-                        sequence: Arc::new(seq_builder.finish()),
-                        quality_scores: Arc::new(qual_builder.finish()),
-                        template_length: &template_length,
-                    },
+                let batch = build_record_batch_from_builders(
+                    Arc::clone(&$schema),
+                    builders.finish(),
                     tag_arrays.as_ref(),
-                    $projection.clone(),
+                    &$projection,
                     $batch_size,
                 )?;
                 batch_num += 1;
                 log::debug!("Batch number: {}", batch_num);
                 yield batch;
-
-                // Clear vectors for the next batch
-                name.clear();
-                chrom.clear();
-                start.clear();
-                end.clear();
-                flag.clear();
-                cigar.clear();
-                mapping_quality.clear();
-                mate_chrom.clear();
-                mate_start.clear();
-                template_length.clear();
             }
         }
 
-        // If there are remaining records that don't fill a complete batch, yield them as well
         if record_num > 0 && record_num % $batch_size != 0 {
             let tag_arrays = if num_tag_fields > 0 {
                 Some(builders_to_arrays(&mut tag_builders.2)?)
             } else {
                 None
             };
-            let batch = build_record_batch(
-                Arc::clone(&$schema.clone()),
-                RecordFields {
-                    name: &name,
-                    chrom: &chrom,
-                    start: &start,
-                    end: &end,
-                    flag: &flag,
-                    cigar: &cigar,
-                    mapping_quality: &mapping_quality,
-                    mate_chrom: &mate_chrom,
-                    mate_start: &mate_start,
-                    sequence: Arc::new(seq_builder.finish()),
-                    quality_scores: Arc::new(qual_builder.finish()),
-                    template_length: &template_length,
-                },
+            let batch = build_record_batch_from_builders(
+                Arc::clone(&$schema),
+                builders.finish(),
                 tag_arrays.as_ref(),
-                $projection.clone(),
+                &$projection,
                 record_num % $batch_size,
             )?;
             yield batch;
@@ -639,25 +565,248 @@ async fn get_remote_bam_stream(
     Ok(stream)
 }
 
-async fn get_local_bam(
+/// Reads a local BAM file using a synchronous thread with buffer reuse.
+///
+/// Uses `read_record(&mut record)` to reuse a single record buffer across reads,
+/// avoiding per-record clone allocations. Sends batches via a bounded channel for
+/// backpressure.
+#[allow(clippy::too_many_arguments)]
+async fn get_local_bam_sync(
     file_path: String,
-    schema: SchemaRef,
+    schema_ref: SchemaRef,
     batch_size: usize,
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     tag_fields: Option<Vec<String>>,
-) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
-{
-    let mut reader = BamReader::new(file_path.clone(), None).await;
-    let stream = process_bam_records_impl!(
-        reader,
-        schema,
-        batch_size,
-        projection,
-        coordinate_system_zero_based,
-        tag_fields
-    );
-    Ok(stream)
+) -> datafusion::error::Result<SendableRecordBatchStream> {
+    let schema = schema_ref.clone();
+    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
+
+    std::thread::spawn(move || {
+        let read_and_send = || -> Result<(), DataFusionError> {
+            let (mut reader, header) = open_local_bam_sync(&file_path)
+                .map_err(|e| DataFusionError::Execution(format!("Failed to open BAM: {}", e)))?;
+
+            let ref_sequences = header.reference_sequences();
+            let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
+
+            let flags = ProjectionFlags::new(&projection);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+
+            let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
+            let num_tag_fields = tag_builders.0.len();
+
+            let tag_to_index: HashMap<Tag, usize> = tag_builders
+                .3
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (*t, i))
+                .collect();
+            let mut tag_populated = vec![false; num_tag_fields];
+
+            let mut cigar_buf = String::new();
+            let mut seq_buf = String::new();
+            let mut qual_buf = String::new();
+            let mut record = bam::Record::default();
+            let mut total_records = 0usize;
+            let mut batch_row_count = 0usize;
+
+            loop {
+                match reader.read_record(&mut record) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        if flags.name {
+                            match record.name() {
+                                Some(read_name) => {
+                                    builders.append_name(Some(&read_name.to_string()))
+                                }
+                                None => builders.append_name(Some("*")),
+                            };
+                        }
+
+                        if flags.chrom {
+                            builders.append_chrom(chrom_name_by_idx(
+                                get_chrom_idx(record.reference_sequence_id()),
+                                &names,
+                            ));
+                        }
+
+                        if flags.start {
+                            match record.alignment_start() {
+                                Some(start_pos) => {
+                                    let pos = start_pos
+                                        .map_err(|e| {
+                                            DataFusionError::Execution(format!(
+                                                "BAM position error: {}",
+                                                e
+                                            ))
+                                        })?
+                                        .get() as u32;
+                                    builders.append_start(Some(if coordinate_system_zero_based {
+                                        pos - 1
+                                    } else {
+                                        pos
+                                    }));
+                                }
+                                None => builders.append_start(None),
+                            }
+                        }
+
+                        if flags.end {
+                            match record.alignment_end() {
+                                Some(end_pos) => {
+                                    builders.append_end(Some(
+                                        end_pos
+                                            .map_err(|e| {
+                                                DataFusionError::Execution(format!(
+                                                    "BAM end pos error: {}",
+                                                    e
+                                                ))
+                                            })?
+                                            .get() as u32,
+                                    ));
+                                }
+                                None => builders.append_end(None),
+                            };
+                        }
+
+                        if flags.mapq {
+                            match record.mapping_quality() {
+                                Some(mq) => builders.append_mapq(mq.get() as u32),
+                                None => builders.append_mapq(255u32),
+                            };
+                        }
+
+                        if flags.tlen {
+                            builders.append_tlen(record.template_length());
+                        }
+
+                        if flags.sequence {
+                            seq_buf.clear();
+                            seq_buf.extend(record.sequence().iter().map(char::from));
+                            builders.append_sequence(&seq_buf);
+                        }
+
+                        if flags.quality {
+                            qual_buf.clear();
+                            qual_buf
+                                .extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
+                            builders.append_quality(&qual_buf);
+                        }
+
+                        if flags.flags {
+                            builders.append_flag(record.flags().bits() as u32);
+                        }
+                        if flags.cigar {
+                            format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
+                            builders.append_cigar(&cigar_buf);
+                        }
+
+                        if flags.mate_chrom {
+                            builders.append_mate_chrom(chrom_name_by_idx(
+                                get_chrom_idx(record.mate_reference_sequence_id()),
+                                &names,
+                            ));
+                        }
+
+                        if flags.mate_start {
+                            match record.mate_alignment_start() {
+                                Some(mate_start_pos) => {
+                                    let pos = mate_start_pos
+                                        .map_err(|e| {
+                                            DataFusionError::Execution(format!(
+                                                "BAM mate pos error: {}",
+                                                e
+                                            ))
+                                        })?
+                                        .get() as u32;
+                                    builders.append_mate_start(Some(
+                                        if coordinate_system_zero_based {
+                                            pos - 1
+                                        } else {
+                                            pos
+                                        },
+                                    ));
+                                }
+                                _ => builders.append_mate_start(None),
+                            };
+                        }
+
+                        if flags.any_tag {
+                            load_tags(
+                                &record,
+                                &mut tag_builders,
+                                &tag_to_index,
+                                &mut tag_populated,
+                            )
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                        }
+
+                        total_records += 1;
+                        batch_row_count += 1;
+
+                        if batch_row_count == batch_size {
+                            let tag_arrays =
+                                if num_tag_fields > 0 {
+                                    Some(builders_to_arrays(&mut tag_builders.2).map_err(|e| {
+                                        DataFusionError::ArrowError(Box::new(e), None)
+                                    })?)
+                                } else {
+                                    None
+                                };
+                            let batch = build_record_batch_from_builders(
+                                Arc::clone(&schema),
+                                builders.finish(),
+                                tag_arrays.as_ref(),
+                                &projection,
+                                batch_row_count,
+                            )?;
+
+                            match futures::executor::block_on(tx.send(Ok(batch))) {
+                                Ok(()) => {}
+                                Err(_) => return Ok(()),
+                            }
+
+                            batch_row_count = 0;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(DataFusionError::Execution(format!("BAM read error: {}", e)));
+                    }
+                }
+            }
+
+            // Remaining records
+            if batch_row_count > 0 {
+                let tag_arrays = if num_tag_fields > 0 {
+                    Some(
+                        builders_to_arrays(&mut tag_builders.2)
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                    )
+                } else {
+                    None
+                };
+                let batch = build_record_batch_from_builders(
+                    Arc::clone(&schema),
+                    builders.finish(),
+                    tag_arrays.as_ref(),
+                    &projection,
+                    batch_row_count,
+                )?;
+                let _ = futures::executor::block_on(tx.send(Ok(batch)));
+            }
+
+            debug!("Local BAM sync scan: {} records", total_records);
+            Ok(())
+        };
+        if let Err(e) = read_and_send() {
+            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
+        }
+    });
+
+    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+    Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
 
 /// Macro to generate the record processing logic for SAM readers.
@@ -669,37 +818,15 @@ async fn get_local_bam(
 macro_rules! process_sam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
-        // Determine which fields are needed based on projection
-        let needs_name = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
-        let needs_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
-        let needs_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
-        let needs_end = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
-        let needs_flags = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
-        let needs_cigar = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
-        let needs_mapq = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
-        let needs_mate_chrom = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
-        let needs_mate_start = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
-        let needs_sequence = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
-        let needs_quality = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
-        let needs_tlen = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
-        let needs_any_tag = $projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
-
-        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut chrom: Vec<Option<String>> = if needs_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity($batch_size) } else { Vec::new() };
-        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut qual_builder = if needs_quality { StringBuilder::with_capacity($batch_size, $batch_size * 150) } else { StringBuilder::new() };
-        let mut template_length: Vec<i32> = if needs_tlen { Vec::with_capacity($batch_size) } else { Vec::new() };
+        let flags = ProjectionFlags::new(&$projection);
+        let mut builders = CoreBatchBuilders::new(&flags, $batch_size);
 
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
+
+        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let mut tag_populated = vec![false; num_tag_fields];
 
         let mut cigar_buf = String::new();
         let mut seq_buf = String::new();
@@ -714,104 +841,85 @@ macro_rules! process_sam_records_impl {
         while let Some(result) = records.next().await {
             let record = result?;
 
-            if needs_name {
+            if flags.name {
                 match record.name() {
-                    Some(read_name) => {
-                        name.push(Some(read_name.to_string()));
-                    },
-                    None => {
-                        name.push(Some("*".to_string()));
-                    }
+                    Some(read_name) => builders.append_name(Some(&read_name.to_string())),
+                    None => builders.append_name(Some("*")),
                 };
             }
 
-            if needs_chrom {
-                let chrom_name = get_chrom_by_seq_id_sam(
-                    record.reference_sequence_id(),
-                    &names,
-                );
-                chrom.push(chrom_name);
+            if flags.chrom {
+                builders.append_chrom(chrom_name_by_idx(get_chrom_idx_sam(
+                    record.reference_sequence_id()), &names,
+                ));
             }
 
-            if needs_start {
+            if flags.start {
                 match record.alignment_start() {
                     Some(start_pos) => {
                         let pos = usize::from(start_pos) as u32;
-                        start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    None => {
-                        start.push(None);
-                    }
+                    None => builders.append_start(None),
                 }
             }
 
-            if needs_end {
+            if flags.end {
                 match record.alignment_end() {
-                    Some(end_pos) => {
-                        let pos = usize::from(end_pos) as u32;
-                        end.push(Some(pos));
-                    },
-                    None => {
-                        end.push(None);
-                    }
+                    Some(end_pos) => builders.append_end(Some(usize::from(end_pos) as u32)),
+                    None => builders.append_end(None),
                 };
             }
 
-            if needs_mapq {
+            if flags.mapq {
                 match record.mapping_quality() {
-                    Some(mapping_quality_value) => {
-                        mapping_quality.push(u8::from(mapping_quality_value) as u32);
-                    },
-                    None => {
-                        mapping_quality.push(255u32);
-                    }
+                    Some(mq) => builders.append_mapq(u8::from(mq) as u32),
+                    None => builders.append_mapq(255u32),
                 };
             }
 
-            if needs_tlen {
-                template_length.push(record.template_length());
+            if flags.tlen {
+                builders.append_tlen(record.template_length());
             }
 
-            if needs_sequence {
+            if flags.sequence {
                 seq_buf.clear();
                 seq_buf.extend(record.sequence().as_ref().iter().map(|b| char::from(*b)));
-                seq_builder.append_value(&seq_buf);
+                builders.append_sequence(&seq_buf);
             }
 
-            if needs_quality {
+            if flags.quality {
                 qual_buf.clear();
                 qual_buf.extend(record.quality_scores().as_ref().iter().map(|s| char::from(*s + 33)));
-                qual_builder.append_value(&qual_buf);
+                builders.append_quality(&qual_buf);
             }
 
-            if needs_flags {
-                flag.push(record.flags().bits() as u32);
+            if flags.flags {
+                builders.append_flag(record.flags().bits() as u32);
             }
-            if needs_cigar {
+            if flags.cigar {
                 format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
-                cigar.push(cigar_buf.clone());
+                builders.append_cigar(&cigar_buf);
             }
 
-            if needs_mate_chrom {
-                let mate_chrom_name = get_chrom_by_seq_id_sam(
-                    record.mate_reference_sequence_id(),
-                    &names,
-                );
-                mate_chrom.push(mate_chrom_name);
+            if flags.mate_chrom {
+                builders.append_mate_chrom(chrom_name_by_idx(get_chrom_idx_sam(
+                    record.mate_reference_sequence_id()), &names,
+                ));
             }
 
-            if needs_mate_start {
+            if flags.mate_start {
                 match record.mate_alignment_start() {
                     Some(mate_start_pos) => {
                         let pos = usize::from(mate_start_pos) as u32;
-                        mate_start.push(Some(if $coord_zero_based { pos - 1 } else { pos }));
+                        builders.append_mate_start(Some(if $coord_zero_based { pos - 1 } else { pos }));
                     },
-                    _ => mate_start.push(None),
+                    _ => builders.append_mate_start(None),
                 };
             }
 
-            if needs_any_tag {
-                load_tags(&record, &mut tag_builders)?;
+            if flags.any_tag {
+                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
             }
 
             record_num += 1;
@@ -823,40 +931,16 @@ macro_rules! process_sam_records_impl {
                 } else {
                     None
                 };
-                let batch = build_record_batch(
-                    Arc::clone(&$schema.clone()),
-                    RecordFields {
-                        name: &name,
-                        chrom: &chrom,
-                        start: &start,
-                        end: &end,
-                        flag: &flag,
-                        cigar: &cigar,
-                        mapping_quality: &mapping_quality,
-                        mate_chrom: &mate_chrom,
-                        mate_start: &mate_start,
-                        sequence: Arc::new(seq_builder.finish()),
-                        quality_scores: Arc::new(qual_builder.finish()),
-                        template_length: &template_length,
-                    },
+                let batch = build_record_batch_from_builders(
+                    Arc::clone(&$schema),
+                    builders.finish(),
                     tag_arrays.as_ref(),
-                    $projection.clone(),
+                    &$projection,
                     $batch_size,
                 )?;
                 batch_num += 1;
                 log::debug!("Batch number: {}", batch_num);
                 yield batch;
-
-                name.clear();
-                chrom.clear();
-                start.clear();
-                end.clear();
-                flag.clear();
-                cigar.clear();
-                mapping_quality.clear();
-                mate_chrom.clear();
-                mate_start.clear();
-                template_length.clear();
             }
         }
 
@@ -866,24 +950,11 @@ macro_rules! process_sam_records_impl {
             } else {
                 None
             };
-            let batch = build_record_batch(
-                Arc::clone(&$schema.clone()),
-                RecordFields {
-                    name: &name,
-                    chrom: &chrom,
-                    start: &start,
-                    end: &end,
-                    flag: &flag,
-                    cigar: &cigar,
-                    mapping_quality: &mapping_quality,
-                    mate_chrom: &mate_chrom,
-                    mate_start: &mate_start,
-                    sequence: Arc::new(seq_builder.finish()),
-                    quality_scores: Arc::new(qual_builder.finish()),
-                    template_length: &template_length,
-                },
+            let batch = build_record_batch_from_builders(
+                Arc::clone(&$schema),
+                builders.finish(),
                 tag_arrays.as_ref(),
-                $projection.clone(),
+                &$projection,
                 record_num % $batch_size,
             )?;
             yield batch;
@@ -942,16 +1013,15 @@ async fn get_stream(
                 .await?;
                 Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
             } else {
-                let stream = get_local_bam(
+                get_local_bam_sync(
                     file_path.clone(),
-                    schema.clone(),
+                    schema_ref,
                     batch_size,
                     projection,
                     coordinate_system_zero_based,
                     tag_fields,
                 )
-                .await?;
-                Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+                .await
             }
         }
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
@@ -991,104 +1061,6 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
         .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
 }
 
-/// Read unmapped records for a specific reference sequence via direct BGZF seek.
-///
-/// Computes the end of mapped data by finding the max `chunk.end()` across all BAI bins
-/// for this reference, then seeks there and reads forward collecting only unmapped records
-/// (those with a matching reference_sequence_id but no alignment_start).
-fn read_unmapped_tail(
-    file_path: &str,
-    index_path: &str,
-    chrom: &str,
-    reference_names: &[String],
-) -> Result<Vec<bam::Record>, DataFusionError> {
-    let index = bam::bai::fs::read(index_path).map_err(|e| {
-        DataFusionError::Execution(format!("Failed to read BAI for unmapped tail: {}", e))
-    })?;
-
-    let ref_idx = reference_names
-        .iter()
-        .position(|n| n == chrom)
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!("Reference '{}' not found in BAM header", chrom))
-        })?;
-
-    let ref_seq = index.reference_sequences().get(ref_idx).ok_or_else(|| {
-        DataFusionError::Execution(format!(
-            "Reference index {} not found in BAI index",
-            ref_idx
-        ))
-    })?;
-
-    // Find the end of mapped data by computing the max chunk.end() across all bins.
-    // This is more reliable than metadata().end_position(), which some indexers
-    // (e.g., samtools) update for ALL records including unmapped — causing a seek
-    // past the unmapped section. Bins only contain mapped records, so max(chunk.end())
-    // is guaranteed to be the end of mapped data.
-    let seek_pos = ref_seq
-        .bins()
-        .values()
-        .flat_map(|bin| bin.chunks())
-        .map(|chunk| chunk.end())
-        .max()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "No bins found in BAI for reference '{}' — cannot locate unmapped section",
-                chrom
-            ))
-        })?;
-
-    // Open a separate BGZF reader and seek to the unmapped section
-    let mut reader = bam::io::indexed_reader::Builder::default()
-        .set_index(index)
-        .build_from_path(file_path)
-        .map_err(|e| DataFusionError::Execution(format!("Failed to open BAM file: {}", e)))?;
-    let _header = reader
-        .read_header()
-        .map_err(|e| DataFusionError::Execution(format!("Failed to read BAM header: {}", e)))?;
-
-    // Seek to the end of mapped data (max chunk.end() from BAI bins)
-    reader
-        .get_mut()
-        .seek(seek_pos)
-        .map_err(|e| DataFusionError::Execution(format!("BGZF seek failed: {}", e)))?;
-
-    let mut record = bam::Record::default();
-    let mut unmapped_records = Vec::new();
-
-    loop {
-        match reader.read_record(&mut record) {
-            Ok(0) => break, // EOF
-            Ok(_) => {
-                // Check reference_sequence_id matches
-                match record.reference_sequence_id() {
-                    Some(Ok(id)) if id == ref_idx => {}
-                    _ => break, // Left this reference or no reference — done
-                }
-                // Only collect unmapped records (no alignment position)
-                if record.alignment_start().is_none() {
-                    unmapped_records.push(record.clone());
-                }
-                // Skip mapped records that may appear right after the seek point
-            }
-            Err(e) => {
-                return Err(DataFusionError::Execution(format!(
-                    "Error reading unmapped BAM records: {}",
-                    e
-                )));
-            }
-        }
-    }
-
-    debug!(
-        "Read {} unmapped records for {} via direct seek",
-        unmapped_records.len(),
-        chrom
-    );
-
-    Ok(unmapped_records)
-}
-
 /// Get a streaming RecordBatch stream from an indexed BAM file for one or more regions.
 ///
 /// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
@@ -1118,86 +1090,107 @@ async fn get_indexed_stream(
 
             let names = indexed_reader.reference_names();
 
-            // Initialize accumulators
-            let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
-            let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-            let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-            let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-            let mut mapping_quality: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
-            let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
-            let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-            let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
-            let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
-            let mut template_length: Vec<i32> = Vec::with_capacity(batch_size);
+            let flags = ProjectionFlags::new(&projection);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+
+            // chrom/start/end/mapq/flags are always decoded for residual filter evaluation
+            // and sub-region dedup, but only accumulated when projected
+            let has_residual_filters = !residual_filters.is_empty();
 
             let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
 
+            let tag_to_index: HashMap<Tag, usize> = tag_builders
+                .3
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (*t, i))
+                .collect();
+            let mut tag_populated = vec![false; num_tag_fields];
+
             let mut cigar_buf = String::new();
             let mut seq_buf = String::new();
             let mut qual_buf = String::new();
             let mut total_records = 0usize;
+            let mut batch_row_count = 0usize;
 
-            for region in &regions {
-                // Handle unmapped tail regions via direct BGZF seek
-                if region.unmapped_tail {
-                    let unmapped_records =
-                        read_unmapped_tail(&file_path, &index_path, &region.chrom, &names)?;
+            /// Helper macro to flush the current batch via the channel.
+            macro_rules! flush_batch {
+                ($batch_row_count:expr, $disconnect_action:expr) => {{
+                    let tag_arrays = if num_tag_fields > 0 {
+                        Some(
+                            builders_to_arrays(&mut tag_builders.2)
+                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                        )
+                    } else {
+                        None
+                    };
+                    let batch = build_record_batch_from_builders(
+                        Arc::clone(&schema),
+                        builders.finish(),
+                        tag_arrays.as_ref(),
+                        &projection,
+                        $batch_row_count,
+                    )?;
 
-                    for record in unmapped_records {
-                        let chrom_name = Some(region.chrom.clone());
-                        let start_val: Option<u32> = None;
-                        let end_val: Option<u32> = None;
-                        let mq = record
-                            .mapping_quality()
-                            .map(|q| q.get() as u32)
-                            .unwrap_or(255u32);
+                    match futures::executor::block_on(tx.send(Ok(batch))) {
+                        Ok(()) => {}
+                        Err(_) => $disconnect_action,
+                    }
+                }};
+            }
 
-                        // Apply residual filters
-                        if !residual_filters.is_empty() {
-                            let fields = BamRecordFields {
-                                chrom: chrom_name.clone(),
-                                start: start_val,
-                                end: end_val,
-                                mapping_quality: Some(mq),
-                                flags: record.flags().bits() as u32,
-                            };
-                            if !evaluate_record_filters(&fields, &residual_filters) {
-                                continue;
-                            }
-                        }
-
-                        match record.name() {
-                            Some(read_name) => name.push(Some(read_name.to_string())),
-                            _ => name.push(Some("*".to_string())),
+            /// Helper macro to accumulate fields from a record into builders.
+            macro_rules! accumulate_record_fields {
+                ($record:expr, $chrom_name:expr, $start_val:expr, $end_val:expr, $mq:expr) => {{
+                    if flags.name {
+                        match $record.name() {
+                            Some(read_name) => builders.append_name(Some(&read_name.to_string())),
+                            _ => builders.append_name(Some("*")),
                         };
-
-                        chrom.push(chrom_name);
-                        start.push(start_val);
-                        end.push(end_val);
-                        mapping_quality.push(mq);
-                        template_length.push(record.template_length());
-
+                    }
+                    if flags.chrom {
+                        builders.append_chrom($chrom_name);
+                    }
+                    if flags.start {
+                        builders.append_start($start_val);
+                    }
+                    if flags.end {
+                        builders.append_end($end_val);
+                    }
+                    if flags.mapq {
+                        builders.append_mapq($mq);
+                    }
+                    if flags.tlen {
+                        builders.append_tlen($record.template_length());
+                    }
+                    if flags.sequence {
                         seq_buf.clear();
-                        seq_buf.extend(record.sequence().iter().map(char::from));
-                        seq_builder.append_value(&seq_buf);
-
+                        seq_buf.extend($record.sequence().iter().map(char::from));
+                        builders.append_sequence(&seq_buf);
+                    }
+                    if flags.quality {
                         qual_buf.clear();
-                        qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
-                        qual_builder.append_value(&qual_buf);
-
-                        flag.push(record.flags().bits() as u32);
-                        format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-                        cigar.push(cigar_buf.clone());
-
-                        let mate_chrom_name =
-                            get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
-                        mate_chrom.push(mate_chrom_name);
-
-                        match record.mate_alignment_start() {
+                        qual_buf
+                            .extend($record.quality_scores().iter().map(|p| char::from(p + 33)));
+                        builders.append_quality(&qual_buf);
+                    }
+                    if flags.flags {
+                        builders.append_flag($record.flags().bits() as u32);
+                    }
+                    if flags.cigar {
+                        format_cigar_ops_unwrap($record.cigar().iter(), &mut cigar_buf);
+                        builders.append_cigar(&cigar_buf);
+                    }
+                    if flags.mate_chrom {
+                        builders.append_mate_chrom(chrom_name_by_idx(
+                            get_chrom_idx($record.mate_reference_sequence_id()),
+                            &names,
+                        ));
+                    }
+                    if flags.mate_start {
+                        match $record.mate_alignment_start() {
                             Some(mate_start_pos) => {
                                 let pos = mate_start_pos
                                     .map_err(|e| {
@@ -1207,70 +1200,151 @@ async fn get_indexed_stream(
                                         ))
                                     })?
                                     .get() as u32;
-                                mate_start.push(Some(if coordinate_system_zero_based {
+                                builders.append_mate_start(Some(if coordinate_system_zero_based {
                                     pos - 1
                                 } else {
                                     pos
                                 }));
                             }
-                            _ => mate_start.push(None),
+                            _ => builders.append_mate_start(None),
                         };
+                    }
+                    if flags.any_tag {
+                        load_tags(
+                            &$record,
+                            &mut tag_builders,
+                            &tag_to_index,
+                            &mut tag_populated,
+                        )
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                    }
+                }};
+            }
 
-                        load_tags(&record, &mut tag_builders)
-                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+            for region in &regions {
+                // Handle unmapped tail regions via direct BGZF seek —
+                // stream records one-by-one instead of collecting into Vec.
+                if region.unmapped_tail {
+                    let unmapped_index = bam::bai::fs::read(&index_path).map_err(|e| {
+                        DataFusionError::Execution(format!(
+                            "Failed to read BAI for unmapped tail: {}",
+                            e
+                        ))
+                    })?;
 
-                        total_records += 1;
+                    let ref_idx =
+                        names
+                            .iter()
+                            .position(|n| n == &region.chrom)
+                            .ok_or_else(|| {
+                                DataFusionError::Execution(format!(
+                                    "Reference '{}' not found in BAM header",
+                                    region.chrom
+                                ))
+                            })?;
 
-                        if total_records % batch_size == 0 {
-                            let tag_arrays =
-                                if num_tag_fields > 0 {
-                                    Some(builders_to_arrays(&mut tag_builders.2).map_err(|e| {
-                                        DataFusionError::ArrowError(Box::new(e), None)
-                                    })?)
-                                } else {
-                                    None
-                                };
-                            let batch = build_record_batch(
-                                Arc::clone(&schema),
-                                RecordFields {
-                                    name: &name,
-                                    chrom: &chrom,
-                                    start: &start,
-                                    end: &end,
-                                    flag: &flag,
-                                    cigar: &cigar,
-                                    mapping_quality: &mapping_quality,
-                                    mate_chrom: &mate_chrom,
-                                    mate_start: &mate_start,
-                                    sequence: Arc::new(seq_builder.finish()),
-                                    quality_scores: Arc::new(qual_builder.finish()),
-                                    template_length: &template_length,
-                                },
-                                tag_arrays.as_ref(),
-                                projection.clone(),
-                                name.len(),
-                            )?;
+                    let ref_seq = unmapped_index
+                        .reference_sequences()
+                        .get(ref_idx)
+                        .ok_or_else(|| {
+                            DataFusionError::Execution(format!(
+                                "Reference index {} not found in BAI index",
+                                ref_idx
+                            ))
+                        })?;
 
-                            loop {
-                                match tx.try_send(Ok(batch.clone())) {
-                                    Ok(()) => break,
-                                    Err(e) if e.is_disconnected() => return Ok(()),
-                                    Err(_) => std::thread::yield_now(),
+                    let seek_pos = ref_seq
+                        .bins()
+                        .values()
+                        .flat_map(|bin| bin.chunks())
+                        .map(|chunk| chunk.end())
+                        .max()
+                        .ok_or_else(|| {
+                            DataFusionError::Execution(format!(
+                                "No bins found in BAI for reference '{}' — cannot locate unmapped section",
+                                region.chrom
+                            ))
+                        })?;
+
+                    let mut unmapped_reader = bam::io::indexed_reader::Builder::default()
+                        .set_index(unmapped_index)
+                        .build_from_path(&file_path)
+                        .map_err(|e| {
+                            DataFusionError::Execution(format!("Failed to open BAM file: {}", e))
+                        })?;
+                    let _unmapped_header = unmapped_reader.read_header().map_err(|e| {
+                        DataFusionError::Execution(format!("Failed to read BAM header: {}", e))
+                    })?;
+                    unmapped_reader.get_mut().seek(seek_pos).map_err(|e| {
+                        DataFusionError::Execution(format!("BGZF seek failed: {}", e))
+                    })?;
+
+                    let mut unmapped_buf = bam::Record::default();
+                    let mut unmapped_count: usize = 0;
+
+                    loop {
+                        match unmapped_reader.read_record(&mut unmapped_buf) {
+                            Ok(0) => break, // EOF
+                            Ok(_) => {
+                                match unmapped_buf.reference_sequence_id() {
+                                    Some(Ok(id)) if id == ref_idx => {}
+                                    _ => break,
+                                }
+                                if unmapped_buf.alignment_start().is_some() {
+                                    continue; // Skip mapped records near seek point
+                                }
+
+                                let chrom_name: Option<&str> = Some(region.chrom.as_str());
+                                let start_val: Option<u32> = None;
+                                let end_val: Option<u32> = None;
+                                let mq = unmapped_buf
+                                    .mapping_quality()
+                                    .map(|q| q.get() as u32)
+                                    .unwrap_or(255u32);
+
+                                if has_residual_filters {
+                                    let fields = BamRecordFields {
+                                        chrom: chrom_name.map(|s| s.to_string()),
+                                        start: start_val,
+                                        end: end_val,
+                                        mapping_quality: Some(mq),
+                                        flags: unmapped_buf.flags().bits() as u32,
+                                    };
+                                    if !evaluate_record_filters(&fields, &residual_filters) {
+                                        continue;
+                                    }
+                                }
+
+                                accumulate_record_fields!(
+                                    unmapped_buf,
+                                    chrom_name,
+                                    start_val,
+                                    end_val,
+                                    mq
+                                );
+
+                                total_records += 1;
+                                batch_row_count += 1;
+                                unmapped_count += 1;
+
+                                if batch_row_count == batch_size {
+                                    flush_batch!(batch_row_count, return Ok(()));
+                                    batch_row_count = 0;
                                 }
                             }
-
-                            name.clear();
-                            chrom.clear();
-                            start.clear();
-                            end.clear();
-                            flag.clear();
-                            cigar.clear();
-                            mapping_quality.clear();
-                            mate_chrom.clear();
-                            mate_start.clear();
-                            template_length.clear();
+                            Err(e) => {
+                                return Err(DataFusionError::Execution(format!(
+                                    "Error reading unmapped BAM records: {}",
+                                    e
+                                )));
+                            }
                         }
                     }
+
+                    debug!(
+                        "Read {} unmapped records for {} via direct seek",
+                        unmapped_count, region.chrom
+                    );
                     continue; // Done with this unmapped_tail region
                 }
 
@@ -1288,7 +1362,9 @@ async fn get_indexed_stream(
                         DataFusionError::Execution(format!("BAM record read error: {}", e))
                     })?;
 
-                    let chrom_name = get_chrom_by_seq_id(record.reference_sequence_id(), &names);
+                    // Always decode chrom/start for sub-region dedup and residual filters
+                    let chrom_name =
+                        chrom_name_by_idx(get_chrom_idx(record.reference_sequence_id()), &names);
 
                     let start_val = match record.alignment_start() {
                         Some(start_pos) => {
@@ -1344,9 +1420,9 @@ async fn get_indexed_stream(
                         .unwrap_or(255u32);
 
                     // Apply residual filters
-                    if !residual_filters.is_empty() {
+                    if has_residual_filters {
                         let fields = BamRecordFields {
-                            chrom: chrom_name.clone(),
+                            chrom: chrom_name.map(|s| s.to_string()),
                             start: start_val,
                             end: end_val,
                             mapping_quality: Some(mq),
@@ -1357,144 +1433,21 @@ async fn get_indexed_stream(
                         }
                     }
 
-                    match record.name() {
-                        Some(read_name) => name.push(Some(read_name.to_string())),
-                        _ => name.push(Some("*".to_string())),
-                    };
-
-                    chrom.push(chrom_name);
-                    start.push(start_val);
-                    end.push(end_val);
-                    mapping_quality.push(mq);
-                    template_length.push(record.template_length());
-
-                    seq_buf.clear();
-                    seq_buf.extend(record.sequence().iter().map(char::from));
-                    seq_builder.append_value(&seq_buf);
-
-                    qual_buf.clear();
-                    qual_buf.extend(record.quality_scores().iter().map(|p| char::from(p + 33)));
-                    qual_builder.append_value(&qual_buf);
-
-                    flag.push(record.flags().bits() as u32);
-                    format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-                    cigar.push(cigar_buf.clone());
-
-                    let mate_chrom_name =
-                        get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
-                    mate_chrom.push(mate_chrom_name);
-
-                    match record.mate_alignment_start() {
-                        Some(mate_start_pos) => {
-                            let pos = mate_start_pos
-                                .map_err(|e| {
-                                    DataFusionError::Execution(format!("BAM mate pos error: {}", e))
-                                })?
-                                .get() as u32;
-                            mate_start.push(Some(if coordinate_system_zero_based {
-                                pos - 1
-                            } else {
-                                pos
-                            }));
-                        }
-                        _ => mate_start.push(None),
-                    };
-
-                    load_tags(&record, &mut tag_builders)
-                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                    accumulate_record_fields!(record, chrom_name, start_val, end_val, mq);
 
                     total_records += 1;
+                    batch_row_count += 1;
 
-                    if total_records % batch_size == 0 {
-                        let tag_arrays = if num_tag_fields > 0 {
-                            Some(
-                                builders_to_arrays(&mut tag_builders.2)
-                                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-                            )
-                        } else {
-                            None
-                        };
-                        let batch = build_record_batch(
-                            Arc::clone(&schema),
-                            RecordFields {
-                                name: &name,
-                                chrom: &chrom,
-                                start: &start,
-                                end: &end,
-                                flag: &flag,
-                                cigar: &cigar,
-                                mapping_quality: &mapping_quality,
-                                mate_chrom: &mate_chrom,
-                                mate_start: &mate_start,
-                                sequence: Arc::new(seq_builder.finish()),
-                                quality_scores: Arc::new(qual_builder.finish()),
-                                template_length: &template_length,
-                            },
-                            tag_arrays.as_ref(),
-                            projection.clone(),
-                            name.len(),
-                        )?;
-
-                        // Send batch with backpressure
-                        loop {
-                            match tx.try_send(Ok(batch.clone())) {
-                                Ok(()) => break,
-                                Err(e) if e.is_disconnected() => return Ok(()),
-                                Err(_) => std::thread::yield_now(),
-                            }
-                        }
-
-                        name.clear();
-                        chrom.clear();
-                        start.clear();
-                        end.clear();
-                        flag.clear();
-                        cigar.clear();
-                        mapping_quality.clear();
-                        mate_chrom.clear();
-                        mate_start.clear();
-                        template_length.clear();
+                    if batch_row_count == batch_size {
+                        flush_batch!(batch_row_count, return Ok(()));
+                        batch_row_count = 0;
                     }
                 }
             }
 
             // Remaining records
-            if !name.is_empty() {
-                let tag_arrays = if num_tag_fields > 0 {
-                    Some(
-                        builders_to_arrays(&mut tag_builders.2)
-                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-                    )
-                } else {
-                    None
-                };
-                let batch = build_record_batch(
-                    Arc::clone(&schema),
-                    RecordFields {
-                        name: &name,
-                        chrom: &chrom,
-                        start: &start,
-                        end: &end,
-                        flag: &flag,
-                        cigar: &cigar,
-                        mapping_quality: &mapping_quality,
-                        mate_chrom: &mate_chrom,
-                        mate_start: &mate_start,
-                        sequence: Arc::new(seq_builder.finish()),
-                        quality_scores: Arc::new(qual_builder.finish()),
-                        template_length: &template_length,
-                    },
-                    tag_arrays.as_ref(),
-                    projection.clone(),
-                    name.len(),
-                )?;
-                loop {
-                    match tx.try_send(Ok(batch.clone())) {
-                        Ok(()) => break,
-                        Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
-                    }
-                }
+            if batch_row_count > 0 {
+                flush_batch!(batch_row_count, {});
             }
 
             debug!(

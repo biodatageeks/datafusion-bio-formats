@@ -379,12 +379,11 @@ impl BamTableProvider {
         } else if matches!(storage_type, StorageType::LOCAL) {
             // For local BAM files, read header synchronously
             use noodles_bam as bam;
-            use noodles_bgzf::io::MultithreadedReader;
+            use noodles_bgzf::io::Reader as BgzfReader;
             use std::fs::File;
-            use std::num::NonZero;
 
             match File::open(&file_path)
-                .map(|f| MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
+                .map(BgzfReader::new)
                 .map(bam::io::Reader::from)
                 .and_then(|mut reader| reader.read_header())
             {

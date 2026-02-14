@@ -47,7 +47,7 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
 ///
 /// # async fn example() -> datafusion::error::Result<()> {
 /// let ctx = SessionContext::new();
-/// let table = FastaTableProvider::new("sequences.fasta".to_string(), None, None)?;
+/// let table = FastaTableProvider::new("sequences.fasta".to_string(), None)?;
 /// ctx.register_table("fasta", Arc::new(table))?;
 ///
 /// let df = ctx.sql("SELECT name, sequence FROM fasta WHERE length(sequence) > 100").await?;
@@ -61,8 +61,6 @@ pub struct FastaTableProvider {
     file_path: String,
     /// Arrow schema describing FASTA records
     schema: SchemaRef,
-    /// Number of threads for parallel decompression
-    thread_num: Option<usize>,
     /// Cloud storage configuration
     object_storage_options: Option<ObjectStorageOptions>,
 }
@@ -73,7 +71,6 @@ impl FastaTableProvider {
     /// # Arguments
     ///
     /// * `file_path` - Path to the FASTA file (local or cloud storage URI)
-    /// * `thread_num` - Optional number of threads for BGZF decompression (defaults to 1)
     /// * `object_storage_options` - Optional cloud storage configuration
     ///
     /// # Returns
@@ -81,14 +78,12 @@ impl FastaTableProvider {
     /// A new `FastaTableProvider` instance or an error if schema determination fails.
     pub fn new(
         file_path: String,
-        thread_num: Option<usize>,
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> datafusion::common::Result<Self> {
         let schema = determine_schema()?;
         Ok(Self {
             file_path,
             schema,
-            thread_num,
             object_storage_options,
         })
     }
@@ -144,7 +139,6 @@ impl TableProvider for FastaTableProvider {
             schema: schema.clone(),
             projection: projection.cloned(),
             limit,
-            thread_num: self.thread_num,
             object_storage_options: self.object_storage_options.clone(),
         }))
     }

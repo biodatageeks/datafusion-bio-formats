@@ -516,10 +516,9 @@ pub fn get_local_gff_gz_sync_reader(
 /// A synchronous GFF reader configured for BGZF-compressed files with parallel decompression
 pub fn get_local_gff_bgzf_sync_reader(
     file_path: String,
-) -> Result<gff::io::Reader<bgzf::MultithreadedReader<std::fs::File>>, Error> {
+) -> Result<gff::io::Reader<bgzf::Reader<std::fs::File>>, Error> {
     let file = std::fs::File::open(file_path)?;
-    let reader =
-        bgzf::MultithreadedReader::with_worker_count(std::num::NonZero::new(1).unwrap(), file);
+    let reader = bgzf::Reader::new(file);
     Ok(gff::io::Reader::new(reader))
 }
 
@@ -606,21 +605,21 @@ pub enum GffLocalReader {
     /// Standard parser with GZIP compression
     GZIP(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
     /// Standard parser with BGZF compression
-    BGZF(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    BGZF(gff::io::Reader<bgzf::Reader<File>>),
     /// Standard parser with no compression
     PLAIN(gff::io::Reader<BufReader<File>>),
 
     /// Fast parser with GZIP compression
     GzipFast(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
     /// Fast parser with BGZF compression
-    BgzfFast(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    BgzfFast(gff::io::Reader<bgzf::Reader<File>>),
     /// Fast parser with no compression
     PlainFast(gff::io::Reader<BufReader<File>>),
 
     /// SIMD parser with GZIP compression
     GzipSimd(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
     /// SIMD parser with BGZF compression
-    BgzfSimd(gff::io::Reader<bgzf::MultithreadedReader<File>>),
+    BgzfSimd(gff::io::Reader<bgzf::Reader<File>>),
     /// SIMD parser with no compression
     PlainSimd(gff::io::Reader<BufReader<File>>),
 }

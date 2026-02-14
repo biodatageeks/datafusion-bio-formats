@@ -210,6 +210,83 @@ impl OptionalField {
         }
     }
 
+    /// Appends integer values from an iterator as an array element, avoiding temporary Vec allocation
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - Iterator yielding i32 values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayInt32Builder
+    pub fn append_array_int_iter(
+        &mut self,
+        iter: impl Iterator<Item = i32>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayInt32Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayInt32Builder".into())),
+        }
+    }
+
+    /// Appends float values from an iterator as an array element, avoiding temporary Vec allocation
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - Iterator yielding f32 values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayFloat32Builder
+    pub fn append_array_float_iter(
+        &mut self,
+        iter: impl Iterator<Item = f32>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayFloat32Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError(
+                "Expected ArrayFloat32Builder".into(),
+            )),
+        }
+    }
+
+    /// Appends string values from an iterator as an array element, avoiding temporary Vec allocation
+    ///
+    /// # Arguments
+    ///
+    /// * `iter` - Iterator yielding &str values to append as a single array element
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayUtf8Builder
+    pub fn append_array_string_iter(
+        &mut self,
+        iter: impl Iterator<Item = impl AsRef<str>>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayUtf8Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v.as_ref());
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayUtf8Builder".into())),
+        }
+    }
+
     /// Appends a vector of integers as an array element
     ///
     /// # Arguments

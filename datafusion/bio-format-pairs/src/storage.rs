@@ -19,7 +19,7 @@ use std::path::Path;
 /// Local Pairs file reader supporting BGZF, GZIP, and plain text.
 pub enum PairsLocalReader {
     /// BGZF-compressed reader
-    BGZF(BufReader<bgzf::MultithreadedReader<File>>),
+    BGZF(BufReader<bgzf::Reader<File>>),
     /// GZIP-compressed reader
     GZIP(Box<BufReader<GzDecoder<File>>>),
     /// Plain text reader
@@ -59,7 +59,7 @@ pub fn get_local_pairs_header(
     if is_bgzf {
         // Try BGZF first (superset of GZIP for our purposes)
         let file = File::open(file_path)?;
-        let bgzf_reader = bgzf::MultithreadedReader::new(file);
+        let bgzf_reader = bgzf::Reader::new(file);
         let mut buf_reader = BufReader::new(bgzf_reader);
         parse_pairs_header(&mut buf_reader)
     } else {
@@ -85,7 +85,7 @@ pub async fn new_local_reader(
     let file = File::open(file_path)?;
     match compression {
         CompressionType::BGZF => {
-            let bgzf_reader = bgzf::MultithreadedReader::new(file);
+            let bgzf_reader = bgzf::Reader::new(file);
             Ok(PairsLocalReader::BGZF(BufReader::new(bgzf_reader)))
         }
         CompressionType::GZIP => {
@@ -136,7 +136,7 @@ impl IndexedPairsReader {
         // Parse header from the BGZF file for column info
         let header = {
             let file = File::open(file_path)?;
-            let bgzf_reader = bgzf::MultithreadedReader::new(file);
+            let bgzf_reader = bgzf::Reader::new(file);
             let mut buf_reader = BufReader::new(bgzf_reader);
             parse_pairs_header(&mut buf_reader)?
         };

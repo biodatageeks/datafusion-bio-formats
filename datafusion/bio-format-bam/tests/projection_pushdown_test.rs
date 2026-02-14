@@ -158,6 +158,39 @@ async fn test_bam_count_star() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+// ── Partial batch / no-name projection tests ────────────────────────────────
+
+/// Regression test: selecting columns that exclude `name` must not drop the
+/// final partial batch.  `multi_chrom.bam` has 421 reads — with the default
+/// batch size (8192) the entire file is one partial batch.
+#[tokio::test]
+async fn test_bam_projection_no_name_returns_all_rows() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = setup_bam_ctx("t").await?;
+    let df = ctx.sql("SELECT chrom FROM t").await?;
+    let batches = df.collect().await?;
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 421);
+    for batch in &batches {
+        assert_eq!(batch.num_columns(), 1);
+        assert_eq!(batch.schema().field(0).name(), "chrom");
+    }
+    Ok(())
+}
+
+/// Regression test: filtered projection without `name` — verify row counts per
+/// chromosome are correct even through the indexed path.
+#[tokio::test]
+async fn test_bam_projection_no_name_with_filter() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = setup_bam_ctx("t").await?;
+    let df = ctx
+        .sql("SELECT chrom, start FROM t WHERE chrom = 'chr1'")
+        .await?;
+    let batches = df.collect().await?;
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 160);
+    Ok(())
+}
+
 // ── SAM tests ───────────────────────────────────────────────────────────────
 
 /// Helper: write a small SAM file, return its path in a temp dir that must be kept alive.

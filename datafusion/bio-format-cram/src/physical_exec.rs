@@ -9,8 +9,8 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::alignment_utils::{
-    RecordFields, build_record_batch, format_cigar_ops,
-    get_chrom_by_seq_id_cram as get_chrom_by_seq_id,
+    RecordFields, build_record_batch, chrom_name_by_idx, format_cigar_ops,
+    get_chrom_idx_cram as get_chrom_idx,
 };
 use datafusion_bio_format_core::calculated_tags::{calculate_md_tag, calculate_nm_tag};
 use datafusion_bio_format_core::genomic_filter::GenomicRegion;
@@ -28,6 +28,7 @@ use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -220,156 +221,172 @@ fn set_tag_builders(
     }
 }
 
+/// Dispatch a single tag value to the appropriate builder.
+fn append_tag_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    value: Value<'_>,
+) -> Result<(), ArrowError> {
+    match value {
+        Value::Int8(v) => append_int_value(builder, expected_type, v as i32),
+        Value::UInt8(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Int16(v) => append_int_value(builder, expected_type, v as i32),
+        Value::UInt16(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Int32(v) => append_int_value(builder, expected_type, v),
+        Value::UInt32(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Float(f) => {
+            if matches!(expected_type, DataType::Utf8) {
+                builder.append_string(&f.to_string())
+            } else {
+                builder.append_float(f)
+            }
+        }
+        Value::String(s) => match std::str::from_utf8(s.as_ref()) {
+            Ok(string) => builder.append_string(string),
+            Err(_) => builder.append_null(),
+        },
+        Value::Character(c) => {
+            if matches!(expected_type, DataType::Int32) {
+                builder.append_int(c as i32)
+            } else {
+                let ch = char::from(c);
+                builder.append_string(&ch.to_string())
+            }
+        }
+        Value::Hex(h) => {
+            let hex_str = hex::encode::<&[u8]>(h.as_ref());
+            builder.append_string(&hex_str)
+        }
+        Value::Array(arr) => match arr {
+            SamArray::Int8(vals) => {
+                let vec: Result<Vec<i32>, _> = vals
+                    .as_ref()
+                    .iter()
+                    .map(|v| v.map(|val| val as i32))
+                    .collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::UInt8(vals) => {
+                let vec: Result<Vec<i32>, _> = vals
+                    .as_ref()
+                    .iter()
+                    .map(|v| v.map(|val| val as i32))
+                    .collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Int16(vals) => {
+                let vec: Result<Vec<i32>, _> = vals
+                    .as_ref()
+                    .iter()
+                    .map(|v| v.map(|val| val as i32))
+                    .collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::UInt16(vals) => {
+                let vec: Result<Vec<i32>, _> = vals
+                    .as_ref()
+                    .iter()
+                    .map(|v| v.map(|val| val as i32))
+                    .collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Int32(vals) => {
+                let vec: Result<Vec<i32>, _> = vals.as_ref().iter().collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::UInt32(vals) => {
+                let vec: Result<Vec<i32>, _> = vals
+                    .as_ref()
+                    .iter()
+                    .map(|v| v.map(|val| val as i32))
+                    .collect();
+                match vec {
+                    Ok(v) => builder.append_array_int(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+            SamArray::Float(vals) => {
+                let vec: Result<Vec<f32>, _> = vals.as_ref().iter().collect();
+                match vec {
+                    Ok(v) => builder.append_array_float(v),
+                    Err(_) => builder.append_null(),
+                }
+            }
+        },
+    }
+}
+
+/// Extract tag values from a CRAM record using single-pass iteration.
+///
+/// Instead of calling `data.get(tag)` per requested tag (O(N*M) per record),
+/// iterates all tags once and dispatches via HashMap lookup (O(M+N) per record).
+/// Preserves MD/NM fallback calculation for tags not found in record data.
 fn load_tags<R: Record>(
     record: &R,
     tag_builders: &mut TagBuilders,
+    tag_to_index: &HashMap<Tag, usize>,
+    tag_populated: &mut [bool],
+    md_index: Option<usize>,
+    nm_index: Option<usize>,
     reference_seq: Option<&[u8]>,
 ) -> Result<(), ArrowError> {
-    for i in 0..tag_builders.0.len() {
-        let tag = &tag_builders.3[i];
-        let tag_name = &tag_builders.0[i];
-        let builder = &mut tag_builders.2[i];
-        let data = record.data();
-        let tag_result = data.get(tag);
+    let num_tags = tag_builders.0.len();
+    if num_tags == 0 {
+        return Ok(());
+    }
 
-        // Check if this is a calculated tag (MD or NM) that can be computed
-        let is_md_tag = tag_name == "MD";
-        let is_nm_tag = tag_name == "NM";
+    // Reset populated tracking
+    tag_populated.iter_mut().for_each(|v| *v = false);
 
-        if tag_result.is_none() {
-            debug!("Tag {} not found in record data", tag_name);
-
-            // Try to calculate MD or NM tags if not present in data
-            if is_md_tag && reference_seq.is_some() {
-                debug!("Attempting to calculate MD tag from alignment");
-                if let Some(md_value) = calculate_md_tag(record, reference_seq.unwrap()) {
-                    debug!("Successfully calculated MD tag: {}", md_value);
-                    builder.append_string(&md_value)?;
-                    continue;
-                } else {
-                    debug!("Failed to calculate MD tag");
-                }
-            } else if is_nm_tag {
-                debug!("Attempting to calculate NM tag from alignment");
-                if let Some(nm_value) = calculate_nm_tag(record, reference_seq) {
-                    debug!("Successfully calculated NM tag: {}", nm_value);
-                    builder.append_int(nm_value)?;
-                    continue;
-                } else {
-                    debug!("Failed to calculate NM tag");
+    // Single pass over all tags in the record
+    let data = record.data();
+    for result in data.iter() {
+        match result {
+            Ok((tag, value)) => {
+                if let Some(&idx) = tag_to_index.get(&tag) {
+                    tag_populated[idx] = true;
+                    let expected_type = &tag_builders.1[idx];
+                    let builder = &mut tag_builders.2[idx];
+                    append_tag_value(builder, expected_type, value)?;
                 }
             }
-        }
-
-        let expected_type = &tag_builders.1[i]; // Expected Arrow type from schema
-
-        match tag_result {
-            Some(Ok(value)) => match value {
-                Value::Int8(v) => append_int_value(builder, expected_type, v as i32)?,
-                Value::UInt8(v) => append_int_value(builder, expected_type, v as i32)?,
-                Value::Int16(v) => append_int_value(builder, expected_type, v as i32)?,
-                Value::UInt16(v) => append_int_value(builder, expected_type, v as i32)?,
-                Value::Int32(v) => append_int_value(builder, expected_type, v)?,
-                Value::UInt32(v) => append_int_value(builder, expected_type, v as i32)?,
-                Value::Float(f) => {
-                    if matches!(expected_type, DataType::Utf8) {
-                        builder.append_string(&f.to_string())?
-                    } else {
-                        builder.append_float(f)?
-                    }
-                }
-                Value::String(s) => match std::str::from_utf8(s.as_ref()) {
-                    Ok(string) => builder.append_string(string)?,
-                    Err(_) => builder.append_null()?,
-                },
-                Value::Character(c) => {
-                    if matches!(expected_type, DataType::Int32) {
-                        builder.append_int(c as i32)?
-                    } else {
-                        // Convert u8 to char, not to its numeric string representation
-                        let ch = char::from(c);
-                        builder.append_string(&ch.to_string())?
-                    }
-                }
-                Value::Hex(h) => {
-                    let hex_str = hex::encode::<&[u8]>(h.as_ref());
-                    builder.append_string(&hex_str)?
-                }
-                Value::Array(arr) => match arr {
-                    SamArray::Int8(vals) => {
-                        let vec: Result<Vec<i32>, _> = vals
-                            .as_ref()
-                            .iter()
-                            .map(|v| v.map(|val| val as i32))
-                            .collect();
-                        match vec {
-                            Ok(v) => builder.append_array_int(v)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    SamArray::UInt8(vals) => {
-                        let vec: Result<Vec<i32>, _> = vals
-                            .as_ref()
-                            .iter()
-                            .map(|v| v.map(|val| val as i32))
-                            .collect();
-                        match vec {
-                            Ok(v) => builder.append_array_int(v)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    SamArray::Int16(vals) => {
-                        let vec: Result<Vec<i32>, _> = vals
-                            .as_ref()
-                            .iter()
-                            .map(|v| v.map(|val| val as i32))
-                            .collect();
-                        match vec {
-                            Ok(v) => builder.append_array_int(v)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    SamArray::UInt16(vals) => {
-                        let vec: Result<Vec<i32>, _> = vals
-                            .as_ref()
-                            .iter()
-                            .map(|v| v.map(|val| val as i32))
-                            .collect();
-                        match vec {
-                            Ok(v) => builder.append_array_int(v)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    SamArray::Int32(vals) => {
-                        let vec: Result<Vec<i32>, _> = vals.as_ref().iter().collect();
-                        match vec {
-                            Ok(v) => builder.append_array_int(v)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    SamArray::UInt32(vals) => {
-                        let vec: Result<Vec<i32>, _> = vals
-                            .as_ref()
-                            .iter()
-                            .map(|v| v.map(|val| val as i32))
-                            .collect();
-                        match vec {
-                            Ok(v) => builder.append_array_int(v)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                    SamArray::Float(vals) => {
-                        let vec: Result<Vec<f32>, _> = vals.as_ref().iter().collect();
-                        match vec {
-                            Ok(v) => builder.append_array_float(v)?,
-                            Err(_) => builder.append_null()?,
-                        }
-                    }
-                },
-            },
-            _ => builder.append_null()?,
+            Err(_) => continue, // skip malformed tags
         }
     }
+
+    // Backfill: attempt MD/NM calculation for unpopulated tags, then null for the rest
+    for (idx, &populated) in tag_populated.iter().enumerate().take(num_tags) {
+        if !populated {
+            if Some(idx) == md_index && reference_seq.is_some() {
+                if let Some(md_value) = calculate_md_tag(record, reference_seq.unwrap()) {
+                    tag_builders.2[idx].append_string(&md_value)?;
+                    continue;
+                }
+            } else if Some(idx) == nm_index {
+                if let Some(nm_value) = calculate_nm_tag(record, reference_seq) {
+                    tag_builders.2[idx].append_int(nm_value)?;
+                    continue;
+                }
+            }
+            tag_builders.2[idx].append_null()?;
+        }
+    }
+
     Ok(())
 }
 
@@ -432,14 +449,14 @@ async fn get_remote_cram_stream(
 
         // Create vectors for accumulating record data.
         let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut chrom: Vec<Option<String>> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut chrom: Vec<Option<&str>> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
 
         let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut seq_builder = if needs_sequence { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
         let mut qual_builder = if needs_quality { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
@@ -449,6 +466,14 @@ async fn get_remote_cram_stream(
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
         let num_tag_fields = tag_builders.0.len();
+
+        // Pre-compute tag lookup structures for single-pass iteration
+        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let mut tag_populated = vec![false; num_tag_fields];
+        let md_tag = Tag::from([b'M', b'D']);
+        let nm_tag = Tag::from([b'N', b'M']);
+        let md_index = tag_to_index.get(&md_tag).copied();
+        let nm_index = tag_to_index.get(&nm_tag).copied();
 
         let mut cigar_buf = String::new();
         let mut seq_buf = String::new();
@@ -483,9 +508,8 @@ async fn get_remote_cram_stream(
                 };
             }
             if needs_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.reference_sequence_id()), &names,
                 );
                 chrom.push(chrom_name);
             }
@@ -544,9 +568,8 @@ async fn get_remote_cram_stream(
                 cigar.push(cigar_buf.clone());
             }
             if needs_mate_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.mate_reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.mate_reference_sequence_id()), &names,
                 );
                 mate_chrom.push(chrom_name);
             }
@@ -565,15 +588,13 @@ async fn get_remote_cram_stream(
             if needs_any_tag {
                 // Extract reference sequence for MD/NM tag calculation
                 let reference_region = if let Some(ref refs) = reference_seqs {
-                    // Get reference sequence ID and alignment positions
                     if let (Some(seq_id), Some(start_pos), Some(end_pos)) = (
                         record.reference_sequence_id(),
                         record.alignment_start(),
                         record.alignment_end(),
                     ) {
-                        // Fetch the reference sequence for this chromosome
                         refs.get(seq_id).map(|ref_seq| {
-                            let start = (usize::from(start_pos) - 1).min(ref_seq.len()); // Convert to 0-based
+                            let start = (usize::from(start_pos) - 1).min(ref_seq.len());
                             let end = usize::from(end_pos).min(ref_seq.len());
                             &ref_seq[start..end]
                         })
@@ -584,11 +605,10 @@ async fn get_remote_cram_stream(
                     None
                 };
 
-                load_tags(&record, &mut tag_builders, reference_region)?;
+                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated, md_index, nm_index, reference_region)?;
             }
 
             record_num += 1;
-            // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
@@ -613,13 +633,12 @@ async fn get_remote_cram_stream(
                         template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
-                    projection.clone(),
+                    &projection,
                     batch_size,
                 )?;
                 batch_num += 1;
                 debug!("Batch number: {}", batch_num);
                 yield batch;
-                // Clear vectors for the next batch.
                 name.clear();
                 chrom.clear();
                 start.clear();
@@ -632,8 +651,6 @@ async fn get_remote_cram_stream(
                 template_length.clear();
             }
         }
-        // If there are remaining records that don't fill a complete batch,
-        // yield them as well.
         if record_num > 0 && record_num % batch_size != 0 {
             let tag_arrays = if num_tag_fields > 0 {
                 Some(builders_to_arrays(&mut tag_builders.2)?)
@@ -657,7 +674,7 @@ async fn get_remote_cram_stream(
                     template_length: &template_length,
                 },
                 tag_arrays.as_ref(),
-                projection.clone(),
+                &projection,
                 record_num % batch_size,
             )?;
             yield batch;
@@ -677,128 +694,56 @@ async fn get_local_cram(
     tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    // Determine which fields are needed based on projection
-    let needs_name = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&0));
-    let needs_chrom = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&1));
-    let needs_start = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&2));
-    let needs_end = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&3));
-    let needs_flags = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&4));
-    let needs_cigar = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&5));
-    let needs_mapq = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&6));
-    let needs_mate_chrom = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&7));
-    let needs_mate_start = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&8));
-    let needs_sequence = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&9));
-    let needs_quality = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&10));
-    let needs_tlen = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.contains(&11));
-    let needs_any_tag = projection
-        .as_ref()
-        .is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
-
-    let mut name: Vec<Option<String>> = if needs_name {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut chrom: Vec<Option<String>> = if needs_chrom {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut start: Vec<Option<u32>> = if needs_start {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut end: Vec<Option<u32>> = if needs_end {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
-    let mut mapping_quality: Vec<u32> = if needs_mapq {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut flag: Vec<u32> = if needs_flags {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut cigar: Vec<String> = if needs_cigar {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut mate_chrom: Vec<Option<String>> = if needs_mate_chrom {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut mate_start: Vec<Option<u32>> = if needs_mate_start {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut seq_builder = if needs_sequence {
-        StringBuilder::with_capacity(batch_size, batch_size * 150)
-    } else {
-        StringBuilder::new()
-    };
-    let mut qual_builder = if needs_quality {
-        StringBuilder::with_capacity(batch_size, batch_size * 150)
-    } else {
-        StringBuilder::new()
-    };
-    let mut template_length: Vec<i32> = if needs_tlen {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
-    // Initialize tag builders
-    let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    set_tag_builders(
-        batch_size,
-        tag_fields.clone(),
-        schema.clone(),
-        &mut tag_builders,
-    );
-    let num_tag_fields = tag_builders.0.len();
-
-    let mut cigar_buf = String::new();
-    let mut seq_buf = String::new();
-    let mut qual_buf = String::new();
-    let mut batch_num = 0;
     let file_path = file_path.clone();
     let mut reader = CramReader::new(file_path.clone(), reference_path, None).await;
-    let mut record_num = 0;
 
     let stream = try_stream! {
+        // Determine which fields are needed based on projection
+        let needs_name = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&0));
+        let needs_chrom = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&1));
+        let needs_start = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&2));
+        let needs_end = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&3));
+        let needs_flags = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&4));
+        let needs_cigar = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&5));
+        let needs_mapq = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&6));
+        let needs_mate_chrom = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&7));
+        let needs_mate_start = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&8));
+        let needs_sequence = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&9));
+        let needs_quality = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
+        let needs_tlen = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
+        let needs_any_tag = projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
+
+        let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut chrom: Vec<Option<&str>> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut start: Vec<Option<u32>> = if needs_start { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut seq_builder = if needs_sequence { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
+        let mut qual_builder = if needs_quality { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
+        let mut template_length: Vec<i32> = if needs_tlen { Vec::with_capacity(batch_size) } else { Vec::new() };
+
+        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
+        let num_tag_fields = tag_builders.0.len();
+
+        // Pre-compute tag lookup structures for single-pass iteration
+        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let mut tag_populated = vec![false; num_tag_fields];
+        let md_tag = Tag::from([b'M', b'D']);
+        let nm_tag = Tag::from([b'N', b'M']);
+        let md_index = tag_to_index.get(&md_tag).copied();
+        let nm_index = tag_to_index.get(&nm_tag).copied();
+
+        let mut cigar_buf = String::new();
+        let mut seq_buf = String::new();
+        let mut qual_buf = String::new();
+        let mut batch_num = 0;
+        let mut record_num = 0;
+
         let ref_sequences = reader.get_sequences();
         let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
 
@@ -825,9 +770,8 @@ async fn get_local_cram(
                 };
             }
             if needs_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.reference_sequence_id()), &names,
                 );
                 chrom.push(chrom_name);
             }
@@ -889,9 +833,8 @@ async fn get_local_cram(
                 cigar.push(cigar_buf.clone());
             }
             if needs_mate_chrom {
-                let chrom_name = get_chrom_by_seq_id(
-                    record.mate_reference_sequence_id(),
-                    &names,
+                let chrom_name = chrom_name_by_idx(get_chrom_idx(
+                    record.mate_reference_sequence_id()), &names,
                 );
                 mate_chrom.push(chrom_name);
             }
@@ -908,17 +851,14 @@ async fn get_local_cram(
 
             // Load tag values if present
             if needs_any_tag {
-                // Extract reference sequence for MD/NM tag calculation
                 let reference_region = if let Some(ref refs) = reference_seqs {
-                    // Get reference sequence ID and alignment positions
                     if let (Some(seq_id), Some(start_pos), Some(end_pos)) = (
                         record.reference_sequence_id(),
                         record.alignment_start(),
                         record.alignment_end(),
                     ) {
-                        // Fetch the reference sequence for this chromosome
                         refs.get(seq_id).map(|ref_seq| {
-                            let start = (usize::from(start_pos) - 1).min(ref_seq.len()); // Convert to 0-based
+                            let start = (usize::from(start_pos) - 1).min(ref_seq.len());
                             let end = usize::from(end_pos).min(ref_seq.len());
                             &ref_seq[start..end]
                         })
@@ -929,11 +869,10 @@ async fn get_local_cram(
                     None
                 };
 
-                load_tags(&record, &mut tag_builders, reference_region)?;
+                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated, md_index, nm_index, reference_region)?;
             }
 
             record_num += 1;
-            // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
                 debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
@@ -958,7 +897,7 @@ async fn get_local_cram(
                         template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
-                    projection.clone(),
+                    &projection,
                     batch_size,
                 )?;
                 batch_num += 1;
@@ -1002,7 +941,7 @@ async fn get_local_cram(
                     template_length: &template_length,
                 },
                 tag_arrays.as_ref(),
-                projection.clone(),
+                &projection,
                 record_num % batch_size,
             )?;
             yield batch;
@@ -1105,13 +1044,13 @@ async fn get_indexed_stream(
 
             // Initialize accumulators
             let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
-            let mut chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut chrom: Vec<Option<&str>> = Vec::with_capacity(batch_size);
             let mut start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut mapping_quality: Vec<u32> = Vec::with_capacity(batch_size);
             let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
             let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
-            let mut mate_chrom: Vec<Option<String>> = Vec::with_capacity(batch_size);
+            let mut mate_chrom: Vec<Option<&str>> = Vec::with_capacity(batch_size);
             let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
             let mut qual_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
@@ -1120,6 +1059,19 @@ async fn get_indexed_stream(
             let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
             let num_tag_fields = tag_builders.0.len();
+
+            // Pre-compute tag lookup structures for single-pass iteration
+            let tag_to_index: HashMap<Tag, usize> = tag_builders
+                .3
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (*t, i))
+                .collect();
+            let mut tag_populated = vec![false; num_tag_fields];
+            let md_tag = Tag::from([b'M', b'D']);
+            let nm_tag = Tag::from([b'N', b'M']);
+            let md_index = tag_to_index.get(&md_tag).copied();
+            let nm_index = tag_to_index.get(&nm_tag).copied();
 
             let mut cigar_buf = String::new();
             let mut seq_buf = String::new();
@@ -1149,7 +1101,8 @@ async fn get_indexed_stream(
                         DataFusionError::Execution(format!("CRAM record read error: {}", e))
                     })?;
 
-                    let chrom_name = get_chrom_by_seq_id(record.reference_sequence_id(), &names);
+                    let chrom_name =
+                        chrom_name_by_idx(get_chrom_idx(record.reference_sequence_id()), &names);
 
                     // CRAM RecordBuf: positions are returned directly (no io::Result wrapper)
                     let start_val = match record.alignment_start() {
@@ -1197,7 +1150,7 @@ async fn get_indexed_stream(
                     // Apply residual filters
                     if !residual_filters.is_empty() {
                         let fields = CramRecordFields {
-                            chrom: chrom_name.clone(),
+                            chrom: chrom_name.map(|s| s.to_string()),
                             start: start_val,
                             end: end_val,
                             mapping_quality: Some(mq),
@@ -1243,8 +1196,10 @@ async fn get_indexed_stream(
                     format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
                     cigar.push(cigar_buf.clone());
 
-                    let mate_chrom_name =
-                        get_chrom_by_seq_id(record.mate_reference_sequence_id(), &names);
+                    let mate_chrom_name = chrom_name_by_idx(
+                        get_chrom_idx(record.mate_reference_sequence_id()),
+                        &names,
+                    );
                     mate_chrom.push(mate_chrom_name);
 
                     match record.mate_alignment_start() {
@@ -1260,8 +1215,16 @@ async fn get_indexed_stream(
                     };
 
                     // Load tag values (no reference-based tag calculation in indexed path for now)
-                    load_tags(&record, &mut tag_builders, None)
-                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                    load_tags(
+                        &record,
+                        &mut tag_builders,
+                        &tag_to_index,
+                        &mut tag_populated,
+                        md_index,
+                        nm_index,
+                        None,
+                    )
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
 
                     total_records += 1;
 
@@ -1291,7 +1254,7 @@ async fn get_indexed_stream(
                                 template_length: &template_length,
                             },
                             tag_arrays.as_ref(),
-                            projection.clone(),
+                            &projection,
                             name.len(),
                         )?;
 
@@ -1345,7 +1308,7 @@ async fn get_indexed_stream(
                         template_length: &template_length,
                     },
                     tag_arrays.as_ref(),
-                    projection.clone(),
+                    &projection,
                     name.len(),
                 )?;
                 loop {

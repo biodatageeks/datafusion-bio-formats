@@ -30,7 +30,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let table = BedTableProvider::new(
         file_path.clone(),
         BEDFields::BED4,
-        Some(1),
         Some(object_storage_options),
         true, // Use 0-based coordinates (default)
     )

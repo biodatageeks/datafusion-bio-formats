@@ -10,7 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = SessionConfig::new().with_information_schema(true);
     let ctx = SessionContext::new_with_config(config);
 
-    let table_provider = FastaTableProvider::new(path.to_str().unwrap().to_string(), None, None)?;
+    let table_provider = FastaTableProvider::new(path.to_str().unwrap().to_string(), None)?;
     ctx.register_table("fasta", std::sync::Arc::new(table_provider))?;
 
     let df = ctx.sql("SELECT * FROM fasta").await?;

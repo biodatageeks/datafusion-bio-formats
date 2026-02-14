@@ -8,7 +8,7 @@ use noodles_bam as bam;
 use noodles_bam::Record;
 use noodles_bam::io::Reader;
 use noodles_bgzf::r#async::io::Reader as AsyncBgzfReader;
-use noodles_bgzf::io::MultithreadedReader;
+use noodles_bgzf::io::Reader as BgzfReader;
 use noodles_csi::binning_index::ReferenceSequence as BinningRefSeq;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -16,7 +16,6 @@ use noodles_sam::header::ReferenceSequences;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufReader, Error};
-use std::num::NonZero;
 use tokio_util::io::StreamReader;
 
 /// Creates a remote BAM reader for cloud storage (GCS, S3, Azure).
@@ -41,7 +40,7 @@ pub async fn get_remote_bam_reader(
     Ok(reader)
 }
 
-/// Creates a local BAM reader with multithreaded decompression.
+/// Creates a local BAM reader with single-threaded BGZF decompression.
 ///
 /// # Arguments
 ///
@@ -49,12 +48,10 @@ pub async fn get_remote_bam_reader(
 ///
 /// # Returns
 ///
-/// A local BAM reader with multithreaded BGZF decompression capability
-pub async fn get_local_bam_reader(
-    file_path: String,
-) -> Result<Reader<MultithreadedReader<File>>, Error> {
+/// A local BAM reader. Parallel reading is handled at the partition level.
+pub async fn get_local_bam_reader(file_path: String) -> Result<Reader<BgzfReader<File>>, Error> {
     File::open(file_path)
-        .map(|f| MultithreadedReader::with_worker_count(NonZero::new(1).unwrap(), f))
+        .map(BgzfReader::new)
         .map(bam::io::Reader::from)
 }
 
@@ -63,8 +60,8 @@ pub async fn get_local_bam_reader(
 /// This type abstracts over the different reader implementations needed for local
 /// files with multithreaded decompression and remote files accessed via cloud storage.
 pub enum BamReader {
-    /// Local BAM reader with multithreaded BGZF decompression
-    Local(Reader<MultithreadedReader<File>>),
+    /// Local BAM reader with single-threaded BGZF decompression
+    Local(Reader<BgzfReader<File>>),
     /// Remote BAM reader for cloud storage access
     Remote(
         bam::r#async::io::Reader<AsyncBgzfReader<StreamReader<FuturesBytesStream, bytes::Bytes>>>,
@@ -152,6 +149,18 @@ impl BamReader {
             BamReader::Remote(reader) => reader.read_header().await.unwrap(),
         }
     }
+}
+
+/// Opens a local BAM file synchronously and returns the reader + header.
+/// Used by the buffer-reuse read path to avoid per-record clone allocations.
+pub fn open_local_bam_sync(
+    file_path: &str,
+) -> Result<(Reader<BgzfReader<File>>, sam::Header), Error> {
+    let file = File::open(file_path)?;
+    let bgzf_reader = BgzfReader::new(file);
+    let mut reader = bam::io::Reader::from(bgzf_reader);
+    let header = reader.read_header()?;
+    Ok((reader, header))
 }
 
 /// Checks if a file path refers to a SAM file based on file extension.
