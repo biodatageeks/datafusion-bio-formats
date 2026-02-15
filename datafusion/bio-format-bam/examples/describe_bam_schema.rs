@@ -14,8 +14,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
         None,
-        true, // 0-based coordinates
-        None, // No pre-specified tags
+        true,  // 0-based coordinates
+        None,  // No pre-specified tags
+        false, // String CIGAR (default)
     )
     .await?;
 

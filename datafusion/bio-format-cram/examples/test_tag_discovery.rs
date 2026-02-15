@@ -17,6 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true,
         Some(10),
+        false,
     )
     .await?;
 
@@ -48,6 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true,
         None, // No tags specified
+        false,
     )
     .await?;
 

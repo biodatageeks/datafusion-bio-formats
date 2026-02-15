@@ -4,8 +4,10 @@
 //! to CRAM format for writing to files.
 
 use datafusion::arrow::array::{
-    Array, Float32Array, Int32Array, ListArray, RecordBatch, StringArray, UInt8Array, UInt32Array,
+    Array, BinaryArray, Float32Array, Int32Array, ListArray, RecordBatch, StringArray, UInt8Array,
+    UInt32Array,
 };
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY};
 use noodles_sam as sam;
@@ -14,6 +16,34 @@ use noodles_sam::alignment::record_buf::{
     Cigar, QualityScores, Sequence, data::field::Value as TagValue,
 };
 use std::collections::HashMap;
+
+/// Cigar column data: either string or binary
+enum CigarColumn<'a> {
+    String(&'a StringArray),
+    Binary(&'a BinaryArray),
+}
+
+/// Look up the cigar column, handling both Utf8 and Binary types
+fn get_cigar_column(batch: &RecordBatch) -> Result<CigarColumn<'_>> {
+    let idx = batch.schema().index_of("cigar").map_err(|_| {
+        DataFusionError::Execution("Required column 'cigar' not found in batch".to_string())
+    })?;
+    let col = batch.column(idx);
+    match col.data_type() {
+        DataType::Binary => {
+            let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
+                DataFusionError::Execution("Column 'cigar' downcast to BinaryArray failed".into())
+            })?;
+            Ok(CigarColumn::Binary(arr))
+        }
+        _ => {
+            let arr = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                DataFusionError::Execution("Column 'cigar' must be String or Binary type".into())
+            })?;
+            Ok(CigarColumn::String(arr))
+        }
+    }
+}
 
 /// Converts an Arrow RecordBatch to a vector of CRAM records.
 ///
@@ -53,7 +83,7 @@ pub fn batch_to_cram_records(
     let chroms = get_string_column_by_name(batch, "chrom")?;
     let starts = get_u32_column_by_name(batch, "start")?;
     let flags = get_u32_column_by_name(batch, "flags")?;
-    let cigars = get_string_column_by_name(batch, "cigar")?;
+    let cigar_col = get_cigar_column(batch)?;
     let mapping_qualities = get_u32_column_by_name(batch, "mapping_quality")?;
     let mate_chroms = get_string_column_by_name(batch, "mate_chrom")?;
     let mate_starts = get_u32_column_by_name(batch, "mate_start")?;
@@ -73,7 +103,7 @@ pub fn batch_to_cram_records(
             chroms,
             starts,
             flags,
-            cigars,
+            &cigar_col,
             mapping_qualities,
             mate_chroms,
             mate_starts,
@@ -100,7 +130,7 @@ fn build_single_record(
     chroms: &StringArray,
     starts: &UInt32Array,
     flags: &UInt32Array,
-    cigars: &StringArray,
+    cigar_col: &CigarColumn<'_>,
     mapping_qualities: &UInt32Array,
     mate_chroms: &StringArray,
     mate_starts: &UInt32Array,
@@ -159,8 +189,21 @@ fn build_single_record(
     *record.mapping_quality_mut() = mapq;
 
     // 6. CIGAR
-    let cigar_str = cigars.value(row);
-    let cigar = parse_cigar_string(cigar_str)?;
+    let cigar = match cigar_col {
+        CigarColumn::String(arr) => {
+            let cigar_str = arr.value(row);
+            parse_cigar_string(cigar_str)?
+        }
+        CigarColumn::Binary(arr) => {
+            let bytes = arr.value(row);
+            let ops =
+                datafusion_bio_format_core::alignment_utils::decode_binary_cigar_to_ops(bytes)
+                    .map_err(|e| {
+                        DataFusionError::Execution(format!("Failed to decode binary CIGAR: {}", e))
+                    })?;
+            Cigar::from(ops)
+        }
+    };
     *record.cigar_mut() = cigar;
 
     // 7. RNEXT (mate reference sequence ID)

@@ -8,9 +8,10 @@ use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_bio_format_core::BAM_BINARY_CIGAR_KEY;
 use datafusion_bio_format_core::alignment_utils::{
-    RecordFields, build_record_batch, chrom_name_by_idx, format_cigar_ops,
-    get_chrom_idx_cram as get_chrom_idx,
+    CigarData, RecordFields, build_record_batch, chrom_name_by_idx, encode_cigar_ops_to_binary,
+    format_cigar_ops, get_chrom_idx_cram as get_chrom_idx,
 };
 use datafusion_bio_format_core::calculated_tags::{calculate_md_tag, calculate_nm_tag};
 use datafusion_bio_format_core::genomic_filter::GenomicRegion;
@@ -446,6 +447,7 @@ async fn get_remote_cram_stream(
         let needs_quality = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
         let needs_tlen = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
         let needs_any_tag = projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
+        let binary_cigar = schema.metadata().get(BAM_BINARY_CIGAR_KEY).map(|v| v == "true").unwrap_or(false);
 
         // Create vectors for accumulating record data.
         let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
@@ -455,7 +457,9 @@ async fn get_remote_cram_stream(
 
         let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar_strings: Vec<String> = if !binary_cigar && needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar_binary: Vec<Vec<u8>> = if binary_cigar && needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar_binary_buf: Vec<u8> = Vec::new();
         let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut seq_builder = if needs_sequence { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
@@ -564,8 +568,13 @@ async fn get_remote_cram_stream(
                 flag.push(record.flags().bits() as u32);
             }
             if needs_cigar {
-                format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
-                cigar.push(cigar_buf.clone());
+                if binary_cigar {
+                    encode_cigar_ops_to_binary(record.cigar().as_ref().iter().copied(), &mut cigar_binary_buf);
+                    cigar_binary.push(cigar_binary_buf.clone());
+                } else {
+                    format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+                    cigar_strings.push(cigar_buf.clone());
+                }
             }
             if needs_mate_chrom {
                 let chrom_name = chrom_name_by_idx(get_chrom_idx(
@@ -624,7 +633,7 @@ async fn get_remote_cram_stream(
                         start: &start,
                         end: &end,
                         flag: &flag,
-                        cigar: &cigar,
+                        cigar: if binary_cigar { CigarData::Binary(&cigar_binary) } else { CigarData::Strings(&cigar_strings) },
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,
@@ -644,7 +653,8 @@ async fn get_remote_cram_stream(
                 start.clear();
                 end.clear();
                 flag.clear();
-                cigar.clear();
+                cigar_strings.clear();
+                cigar_binary.clear();
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
@@ -665,7 +675,7 @@ async fn get_remote_cram_stream(
                     start: &start,
                     end: &end,
                     flag: &flag,
-                    cigar: &cigar,
+                    cigar: if binary_cigar { CigarData::Binary(&cigar_binary) } else { CigarData::Strings(&cigar_strings) },
                     mapping_quality: &mapping_quality,
                     mate_chrom: &mate_chrom,
                     mate_start: &mate_start,
@@ -712,6 +722,7 @@ async fn get_local_cram(
         let needs_quality = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&10));
         let needs_tlen = projection.as_ref().is_none_or(|p: &Vec<usize>| p.contains(&11));
         let needs_any_tag = projection.as_ref().is_none_or(|p: &Vec<usize>| p.iter().any(|&i| i >= 12));
+        let binary_cigar = schema.metadata().get(BAM_BINARY_CIGAR_KEY).map(|v| v == "true").unwrap_or(false);
 
         let mut name: Vec<Option<String>> = if needs_name { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut chrom: Vec<Option<&str>> = if needs_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
@@ -719,7 +730,9 @@ async fn get_local_cram(
         let mut end: Vec<Option<u32>> = if needs_end { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut mapping_quality: Vec<u32> = if needs_mapq { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut flag: Vec<u32> = if needs_flags { Vec::with_capacity(batch_size) } else { Vec::new() };
-        let mut cigar: Vec<String> = if needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar_strings: Vec<String> = if !binary_cigar && needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar_binary: Vec<Vec<u8>> = if binary_cigar && needs_cigar { Vec::with_capacity(batch_size) } else { Vec::new() };
+        let mut cigar_binary_buf: Vec<u8> = Vec::new();
         let mut mate_chrom: Vec<Option<&str>> = if needs_mate_chrom { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut mate_start: Vec<Option<u32>> = if needs_mate_start { Vec::with_capacity(batch_size) } else { Vec::new() };
         let mut seq_builder = if needs_sequence { StringBuilder::with_capacity(batch_size, batch_size * 150) } else { StringBuilder::new() };
@@ -829,8 +842,13 @@ async fn get_local_cram(
                 flag.push(record.flags().bits() as u32);
             }
             if needs_cigar {
-                format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
-                cigar.push(cigar_buf.clone());
+                if binary_cigar {
+                    encode_cigar_ops_to_binary(record.cigar().as_ref().iter().copied(), &mut cigar_binary_buf);
+                    cigar_binary.push(cigar_binary_buf.clone());
+                } else {
+                    format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+                    cigar_strings.push(cigar_buf.clone());
+                }
             }
             if needs_mate_chrom {
                 let chrom_name = chrom_name_by_idx(get_chrom_idx(
@@ -888,7 +906,7 @@ async fn get_local_cram(
                         start: &start,
                         end: &end,
                         flag: &flag,
-                        cigar: &cigar,
+                        cigar: if binary_cigar { CigarData::Binary(&cigar_binary) } else { CigarData::Strings(&cigar_strings) },
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,
@@ -909,7 +927,8 @@ async fn get_local_cram(
                 start.clear();
                 end.clear();
                 flag.clear();
-                cigar.clear();
+                cigar_strings.clear();
+                cigar_binary.clear();
                 mapping_quality.clear();
                 mate_chrom.clear();
                 mate_start.clear();
@@ -932,7 +951,7 @@ async fn get_local_cram(
                     start: &start,
                     end: &end,
                     flag: &flag,
-                    cigar: &cigar,
+                    cigar: if binary_cigar { CigarData::Binary(&cigar_binary) } else { CigarData::Strings(&cigar_strings) },
                     mapping_quality: &mapping_quality,
                     mate_chrom: &mate_chrom,
                     mate_start: &mate_start,
@@ -1042,6 +1061,12 @@ async fn get_indexed_stream(
 
             let names = indexed_reader.reference_names();
 
+            let binary_cigar = schema
+                .metadata()
+                .get(BAM_BINARY_CIGAR_KEY)
+                .map(|v| v == "true")
+                .unwrap_or(false);
+
             // Initialize accumulators
             let mut name: Vec<Option<String>> = Vec::with_capacity(batch_size);
             let mut chrom: Vec<Option<&str>> = Vec::with_capacity(batch_size);
@@ -1049,7 +1074,9 @@ async fn get_indexed_stream(
             let mut end: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut mapping_quality: Vec<u32> = Vec::with_capacity(batch_size);
             let mut flag: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut cigar: Vec<String> = Vec::with_capacity(batch_size);
+            let mut cigar_strings: Vec<String> = Vec::with_capacity(batch_size);
+            let mut cigar_binary: Vec<Vec<u8>> = Vec::with_capacity(batch_size);
+            let mut cigar_binary_buf: Vec<u8> = Vec::new();
             let mut mate_chrom: Vec<Option<&str>> = Vec::with_capacity(batch_size);
             let mut mate_start: Vec<Option<u32>> = Vec::with_capacity(batch_size);
             let mut seq_builder = StringBuilder::with_capacity(batch_size, batch_size * 150);
@@ -1193,8 +1220,16 @@ async fn get_indexed_stream(
                     qual_builder.append_value(&qual_buf);
 
                     flag.push(record.flags().bits() as u32);
-                    format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
-                    cigar.push(cigar_buf.clone());
+                    if binary_cigar {
+                        encode_cigar_ops_to_binary(
+                            record.cigar().as_ref().iter().copied(),
+                            &mut cigar_binary_buf,
+                        );
+                        cigar_binary.push(cigar_binary_buf.clone());
+                    } else {
+                        format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+                        cigar_strings.push(cigar_buf.clone());
+                    }
 
                     let mate_chrom_name = chrom_name_by_idx(
                         get_chrom_idx(record.mate_reference_sequence_id()),
@@ -1245,7 +1280,11 @@ async fn get_indexed_stream(
                                 start: &start,
                                 end: &end,
                                 flag: &flag,
-                                cigar: &cigar,
+                                cigar: if binary_cigar {
+                                    CigarData::Binary(&cigar_binary)
+                                } else {
+                                    CigarData::Strings(&cigar_strings)
+                                },
                                 mapping_quality: &mapping_quality,
                                 mate_chrom: &mate_chrom,
                                 mate_start: &mate_start,
@@ -1272,7 +1311,8 @@ async fn get_indexed_stream(
                         start.clear();
                         end.clear();
                         flag.clear();
-                        cigar.clear();
+                        cigar_strings.clear();
+                        cigar_binary.clear();
                         mapping_quality.clear();
                         template_length.clear();
                         mate_chrom.clear();
@@ -1299,7 +1339,11 @@ async fn get_indexed_stream(
                         start: &start,
                         end: &end,
                         flag: &flag,
-                        cigar: &cigar,
+                        cigar: if binary_cigar {
+                            CigarData::Binary(&cigar_binary)
+                        } else {
+                            CigarData::Strings(&cigar_strings)
+                        },
                         mapping_quality: &mapping_quality,
                         mate_chrom: &mate_chrom,
                         mate_start: &mate_start,

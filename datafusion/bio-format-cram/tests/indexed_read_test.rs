@@ -50,10 +50,11 @@ async fn setup_cram_ctx() -> datafusion::error::Result<SessionContext> {
     let ctx = SessionContext::new();
     let provider = CramTableProvider::new(
         "tests/multi_chrom.cram".to_string(),
-        None, // reference_path: None for no_ref CRAM
-        None, // object_storage_options
-        true, // zero-based coordinates
-        None, // tag_fields
+        None,  // reference_path: None for no_ref CRAM
+        None,  // object_storage_options
+        true,  // zero-based coordinates
+        None,  // tag_fields
+        false, // binary_cigar
     )
     .await?;
     ctx.register_table("cram", Arc::new(provider))?;

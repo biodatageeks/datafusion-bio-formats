@@ -19,8 +19,8 @@ use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
-    BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
-    COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
+    BAM_BINARY_CIGAR_KEY, BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY,
+    BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
 use log::{debug, warn};
 use std::any::Any;
@@ -30,15 +30,21 @@ use std::sync::Arc;
 fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
+    binary_cigar: bool,
     header_metadata: Option<HashMap<String, String>>,
 ) -> datafusion::common::Result<SchemaRef> {
+    let cigar_type = if binary_cigar {
+        DataType::Binary
+    } else {
+        DataType::Utf8
+    };
     let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
         Field::new("chrom", DataType::Utf8, true),
         Field::new("start", DataType::UInt32, true),
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false),
-        Field::new("cigar", DataType::Utf8, false),
+        Field::new("cigar", cigar_type, false),
         Field::new("mapping_quality", DataType::UInt32, false),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
@@ -79,6 +85,9 @@ fn determine_schema(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
     );
+    if binary_cigar {
+        metadata.insert(BAM_BINARY_CIGAR_KEY.to_string(), "true".to_string());
+    }
     let schema = Schema::new_with_metadata(fields, metadata);
     debug!("CRAM Schema: {:?}", schema);
     Ok(Arc::new(schema))
@@ -125,6 +134,8 @@ pub struct CramTableProvider {
     tag_fields: Option<Vec<String>>,
     /// Whether to sort records by coordinate (chrom ASC, start ASC) on write
     sort_on_write: bool,
+    /// If true, expose CIGAR as Binary (raw LE u32 ops) instead of Utf8 string
+    binary_cigar: bool,
     /// Path to an index file (CRAI). Auto-discovered if not provided.
     index_path: Option<String>,
     /// Reference sequence names from the file header (for partitioning full scans by chromosome)
@@ -153,6 +164,7 @@ impl CramTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
+        binary_cigar: bool,
     ) -> datafusion::common::Result<Self> {
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
 
@@ -201,6 +213,7 @@ impl CramTableProvider {
         let schema = determine_schema(
             &tag_fields,
             coordinate_system_zero_based,
+            binary_cigar,
             Some(header_metadata),
         )?;
 
@@ -222,6 +235,7 @@ impl CramTableProvider {
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write: false,
+            binary_cigar,
             index_path,
             reference_names,
             reference_lengths,
@@ -253,6 +267,7 @@ impl CramTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         sample_size: Option<usize>,
+        binary_cigar: bool,
     ) -> datafusion::common::Result<Self> {
         use crate::storage::CramReader;
         use futures_util::StreamExt;
@@ -317,6 +332,7 @@ impl CramTableProvider {
         let schema = determine_schema(
             &Some(tag_fields.clone()),
             coordinate_system_zero_based,
+            binary_cigar,
             Some(header_metadata.clone()),
         )?;
 
@@ -345,6 +361,7 @@ impl CramTableProvider {
             coordinate_system_zero_based,
             tag_fields: Some(tag_fields),
             sort_on_write: false,
+            binary_cigar,
             index_path,
             reference_names,
             reference_lengths,
@@ -370,6 +387,11 @@ impl CramTableProvider {
         coordinate_system_zero_based: bool,
         sort_on_write: bool,
     ) -> Self {
+        let binary_cigar = schema
+            .metadata()
+            .get(BAM_BINARY_CIGAR_KEY)
+            .map(|v| v == "true")
+            .unwrap_or(false);
         Self {
             file_path: output_path,
             schema,
@@ -378,6 +400,7 @@ impl CramTableProvider {
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write,
+            binary_cigar,
             index_path: None,
             reference_names: Vec::new(),
             reference_lengths: Vec::new(),
@@ -455,7 +478,16 @@ impl CramTableProvider {
             ("start", "UInt32", true, "Alignment start position"),
             ("end", "UInt32", true, "Alignment end position"),
             ("flags", "UInt32", false, "SAM flags"),
-            ("cigar", "Utf8", false, "CIGAR string"),
+            (
+                "cigar",
+                if self.binary_cigar { "Binary" } else { "Utf8" },
+                false,
+                if self.binary_cigar {
+                    "CIGAR binary (raw LE u32 ops)"
+                } else {
+                    "CIGAR string"
+                },
+            ),
             ("mapping_quality", "UInt32", false, "Mapping quality"),
             ("mate_chrom", "Utf8", true, "Mate chromosome"),
             ("mate_start", "UInt32", true, "Mate start position"),
