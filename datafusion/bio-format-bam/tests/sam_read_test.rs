@@ -114,8 +114,14 @@ async fn test_sam_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Read back from SAM
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
 
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
@@ -260,6 +266,7 @@ async fn test_sam_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true,
         Some(tag_fields),
+        false,
     )
     .await?;
 
@@ -364,6 +371,7 @@ async fn test_sam_schema_inference() -> Result<(), Box<dyn std::error::Error>> {
         true,
         Some(tag_fields),
         Some(10),
+        false,
     )
     .await?;
 
@@ -424,8 +432,14 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         .await?;
 
     // Step 2: Read BAM
-    let read_bam =
-        BamTableProvider::new(bam_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_bam = BamTableProvider::new(
+        bam_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     let bam_read_schema = read_bam.schema();
     ctx.register_table("bam_data", Arc::new(read_bam))?;
 
@@ -445,8 +459,14 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         .await?;
 
     // Step 4: Read SAM and verify
-    let read_sam =
-        BamTableProvider::new(sam_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_sam = BamTableProvider::new(
+        sam_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("sam_data", Arc::new(read_sam))?;
 
     let df = ctx
@@ -545,8 +565,14 @@ async fn test_mapq_255_preserved() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Read back
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
     let df = ctx
@@ -615,8 +641,14 @@ async fn test_name_star_preserved() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Read back
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
     let df = ctx.sql("SELECT name FROM test_sam ORDER BY name").await?;
@@ -691,8 +723,14 @@ async fn test_template_length_round_trip() -> Result<(), Box<dyn std::error::Err
         .await?;
 
     // Read back
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
     let df = ctx
