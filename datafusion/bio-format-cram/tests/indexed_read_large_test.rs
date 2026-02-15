@@ -41,6 +41,7 @@ async fn setup_cram_ctx() -> datafusion::error::Result<SessionContext> {
         None,
         true,
         None,
+        false,
     )
     .await?;
     ctx.register_table("cram", Arc::new(provider))?;

@@ -10,7 +10,8 @@ async fn test_bam_without_tags() {
         "tests/rev_reads.bam".to_string(),
         None,
         true,
-        None, // No tags
+        None,  // No tags
+        false, // String CIGAR (default)
     )
     .await
     .unwrap();
@@ -36,6 +37,7 @@ async fn test_bam_with_specified_tags() {
         None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -71,6 +73,7 @@ async fn test_query_with_tag_projection() {
         None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -102,6 +105,7 @@ async fn test_query_without_tag_projection() {
         None,
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -133,6 +137,7 @@ async fn test_count_query() {
         None,
         true,
         Some(vec!["NM".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -155,6 +160,7 @@ async fn test_unknown_tag_accepted() {
         None,
         true,
         Some(vec!["UNKNOWN_TAG".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -199,6 +205,7 @@ async fn test_multiple_tags() {
             "AS".to_string(),
             "RG".to_string(),
         ]),
+        false,
     )
     .await
     .unwrap();
@@ -220,10 +227,15 @@ async fn test_multiple_tags() {
 #[tokio::test]
 async fn test_empty_tag_list() {
     // Test that Some(vec![]) behaves like None (no tags)
-    let provider =
-        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, Some(vec![]))
-            .await
-            .unwrap();
+    let provider = BamTableProvider::new(
+        "tests/rev_reads.bam".to_string(),
+        None,
+        true,
+        Some(vec![]),
+        false,
+    )
+    .await
+    .unwrap();
 
     let ctx = SessionContext::new();
     ctx.register_table("bam", Arc::new(provider)).unwrap();
@@ -256,6 +268,7 @@ async fn test_read_all_13_tags() {
         None,
         true, // 0-based coordinates
         Some(tag_fields),
+        false,
     )
     .await
     .unwrap();
@@ -304,6 +317,7 @@ async fn test_xt_tag_character_values() {
         None,
         true,
         Some(vec!["XT".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -361,6 +375,7 @@ async fn test_integer_tags_from_int8_encoding() {
         None,
         true,
         Some(vec!["NM".to_string(), "MQ".to_string(), "UQ".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -412,6 +427,7 @@ async fn test_nullable_tags_with_mixed_presence() {
             "XN".to_string(),
             "OC".to_string(),
         ]),
+        false,
     )
     .await
     .unwrap();
@@ -503,9 +519,10 @@ async fn test_nullable_tags_with_mixed_presence() {
 async fn test_describe_discovers_tags() {
     use datafusion::prelude::*;
 
-    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None)
-        .await
-        .unwrap();
+    let provider =
+        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None, false)
+            .await
+            .unwrap();
 
     let ctx = SessionContext::new();
 
@@ -558,9 +575,10 @@ async fn test_describe_discovers_tags() {
 async fn test_describe_with_display() {
     use datafusion::prelude::*;
 
-    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None)
-        .await
-        .unwrap();
+    let provider =
+        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None, false)
+            .await
+            .unwrap();
 
     let ctx = SessionContext::new();
     let schema_df = provider.describe(&ctx, Some(100)).await.unwrap();
@@ -575,9 +593,10 @@ async fn test_describe_method_signature() {
     // Test that describe method exists with correct signature
     use datafusion::prelude::*;
 
-    let provider = BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None)
-        .await
-        .unwrap();
+    let provider =
+        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None, false)
+            .await
+            .unwrap();
 
     let ctx = SessionContext::new();
     let result = provider.describe(&ctx, Some(10)).await;

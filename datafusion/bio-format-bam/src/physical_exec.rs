@@ -10,10 +10,11 @@ use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion_bio_format_core::BAM_BINARY_CIGAR_KEY;
 use datafusion_bio_format_core::alignment_utils::{
     CoreBatchBuilders, ProjectionFlags, build_record_batch_from_builders, chrom_name_by_idx,
-    format_cigar_ops, format_cigar_ops_unwrap, get_chrom_idx_bam as get_chrom_idx,
-    get_chrom_idx_cram as get_chrom_idx_sam,
+    encode_cigar_ops_to_binary, format_cigar_ops, format_cigar_ops_unwrap,
+    get_chrom_idx_bam as get_chrom_idx, get_chrom_idx_cram as get_chrom_idx_sam,
 };
 use datafusion_bio_format_core::genomic_filter::GenomicRegion;
 use datafusion_bio_format_core::object_storage::{
@@ -397,8 +398,9 @@ fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, A
 macro_rules! process_bam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
+        let binary_cigar = $schema.metadata().get(BAM_BINARY_CIGAR_KEY).is_some_and(|v| v == "true");
         let flags = ProjectionFlags::new(&$projection);
-        let mut builders = CoreBatchBuilders::new(&flags, $batch_size);
+        let mut builders = CoreBatchBuilders::new(&flags, $batch_size, binary_cigar);
 
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
@@ -477,8 +479,12 @@ macro_rules! process_bam_records_impl {
                 builders.append_flag(record.flags().bits() as u32);
             }
             if flags.cigar {
-                format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-                builders.append_cigar(&cigar_buf);
+                if binary_cigar {
+                    builders.append_cigar_binary(record.cigar().as_ref());
+                } else {
+                    format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
+                    builders.append_cigar(&cigar_buf);
+                }
             }
 
             if flags.mate_chrom {
@@ -590,8 +596,12 @@ async fn get_local_bam_sync(
             let ref_sequences = header.reference_sequences();
             let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
 
+            let binary_cigar = schema
+                .metadata()
+                .get(BAM_BINARY_CIGAR_KEY)
+                .is_some_and(|v| v == "true");
             let flags = ProjectionFlags::new(&projection);
-            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size, binary_cigar);
 
             let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
@@ -699,8 +709,12 @@ async fn get_local_bam_sync(
                             builders.append_flag(record.flags().bits() as u32);
                         }
                         if flags.cigar {
-                            format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
-                            builders.append_cigar(&cigar_buf);
+                            if binary_cigar {
+                                builders.append_cigar_binary(record.cigar().as_ref());
+                            } else {
+                                format_cigar_ops_unwrap(record.cigar().iter(), &mut cigar_buf);
+                                builders.append_cigar(&cigar_buf);
+                            }
                         }
 
                         if flags.mate_chrom {
@@ -818,8 +832,9 @@ async fn get_local_bam_sync(
 macro_rules! process_sam_records_impl {
     ($reader:expr, $schema:expr, $batch_size:expr, $projection:expr, $coord_zero_based:expr, $tag_fields:expr) => {
         try_stream! {
+        let binary_cigar = $schema.metadata().get(BAM_BINARY_CIGAR_KEY).is_some_and(|v| v == "true");
         let flags = ProjectionFlags::new(&$projection);
-        let mut builders = CoreBatchBuilders::new(&flags, $batch_size);
+        let mut builders = CoreBatchBuilders::new(&flags, $batch_size, binary_cigar);
 
         let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
@@ -829,6 +844,7 @@ macro_rules! process_sam_records_impl {
         let mut tag_populated = vec![false; num_tag_fields];
 
         let mut cigar_buf = String::new();
+        let mut cigar_binary_buf: Vec<u8> = Vec::new();
         let mut seq_buf = String::new();
         let mut qual_buf = String::new();
         let mut record_num = 0;
@@ -898,8 +914,13 @@ macro_rules! process_sam_records_impl {
                 builders.append_flag(record.flags().bits() as u32);
             }
             if flags.cigar {
-                format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
-                builders.append_cigar(&cigar_buf);
+                if binary_cigar {
+                    encode_cigar_ops_to_binary(record.cigar().as_ref().iter().copied(), &mut cigar_binary_buf);
+                    builders.append_cigar_binary(&cigar_binary_buf);
+                } else {
+                    format_cigar_ops(record.cigar().as_ref().iter().copied(), &mut cigar_buf);
+                    builders.append_cigar(&cigar_buf);
+                }
             }
 
             if flags.mate_chrom {
@@ -1090,8 +1111,12 @@ async fn get_indexed_stream(
 
             let names = indexed_reader.reference_names();
 
+            let binary_cigar = schema
+                .metadata()
+                .get(BAM_BINARY_CIGAR_KEY)
+                .is_some_and(|v| v == "true");
             let flags = ProjectionFlags::new(&projection);
-            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+            let mut builders = CoreBatchBuilders::new(&flags, batch_size, binary_cigar);
 
             // chrom/start/end/mapq/flags are always decoded for residual filter evaluation
             // and sub-region dedup, but only accumulated when projected
@@ -1180,8 +1205,12 @@ async fn get_indexed_stream(
                         builders.append_flag($record.flags().bits() as u32);
                     }
                     if flags.cigar {
-                        format_cigar_ops_unwrap($record.cigar().iter(), &mut cigar_buf);
-                        builders.append_cigar(&cigar_buf);
+                        if binary_cigar {
+                            builders.append_cigar_binary($record.cigar().as_ref());
+                        } else {
+                            format_cigar_ops_unwrap($record.cigar().iter(), &mut cigar_buf);
+                            builders.append_cigar(&cigar_buf);
+                        }
                     }
                     if flags.mate_chrom {
                         builders.append_mate_chrom(chrom_name_by_idx(

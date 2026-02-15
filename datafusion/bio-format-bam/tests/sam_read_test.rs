@@ -114,8 +114,14 @@ async fn test_sam_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Read back from SAM
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
 
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
@@ -260,6 +266,7 @@ async fn test_sam_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true,
         Some(tag_fields),
+        false,
     )
     .await?;
 
@@ -364,6 +371,7 @@ async fn test_sam_schema_inference() -> Result<(), Box<dyn std::error::Error>> {
         true,
         Some(tag_fields),
         Some(10),
+        false,
     )
     .await?;
 
@@ -424,8 +432,14 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         .await?;
 
     // Step 2: Read BAM
-    let read_bam =
-        BamTableProvider::new(bam_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_bam = BamTableProvider::new(
+        bam_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     let bam_read_schema = read_bam.schema();
     ctx.register_table("bam_data", Arc::new(read_bam))?;
 
@@ -445,8 +459,14 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         .await?;
 
     // Step 4: Read SAM and verify
-    let read_sam =
-        BamTableProvider::new(sam_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_sam = BamTableProvider::new(
+        sam_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("sam_data", Arc::new(read_sam))?;
 
     let df = ctx
@@ -545,8 +565,14 @@ async fn test_mapq_255_preserved() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Read back
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
     let df = ctx
@@ -615,8 +641,14 @@ async fn test_name_star_preserved() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     // Read back
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
     let df = ctx.sql("SELECT name FROM test_sam ORDER BY name").await?;
@@ -691,8 +723,14 @@ async fn test_template_length_round_trip() -> Result<(), Box<dyn std::error::Err
         .await?;
 
     // Read back
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
 
     let df = ctx
@@ -711,6 +749,81 @@ async fn test_template_length_round_trip() -> Result<(), Box<dyn std::error::Err
     assert_eq!(tlen.value(0), 160); // read1
     assert_eq!(tlen.value(1), -160); // read2
     assert_eq!(tlen.value(2), 0); // read3
+
+    Ok(())
+}
+
+/// Write a SAM file with string CIGAR, read back with binary_cigar=true,
+/// verify the column is BinaryArray and decodes back to the original ops.
+#[tokio::test]
+async fn test_binary_cigar_read_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::array::BinaryArray;
+    use datafusion_bio_format_core::alignment_utils::decode_binary_cigar_to_ops;
+
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_binary_cigar.sam");
+
+    let schema = create_test_schema(&[]);
+    let batch = create_basic_test_batch(schema.clone());
+
+    // Write to SAM (string CIGAR)
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        None,
+        true,
+        false,
+    );
+    ctx.register_table("output_sam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_sam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    // Read back with binary_cigar=true
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        true, // binary_cigar
+    )
+    .await?;
+
+    // Verify schema has Binary type for cigar column
+    let read_schema = read_provider.schema();
+    let cigar_field = read_schema.field_with_name("cigar").unwrap();
+    assert_eq!(cigar_field.data_type(), &DataType::Binary);
+
+    ctx.register_table("test_binary", Arc::new(read_provider))?;
+
+    let df = ctx
+        .sql("SELECT cigar FROM test_binary ORDER BY name")
+        .await?;
+    let results = df.collect().await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    let cigar_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .expect("cigar column should be BinaryArray");
+
+    // All 3 reads have "10M" CIGAR — decode and verify
+    for i in 0..3 {
+        let ops = decode_binary_cigar_to_ops(cigar_col.value(i)).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            ops[0].kind(),
+            noodles_sam::alignment::record::cigar::op::Kind::Match
+        );
+        assert_eq!(ops[0].len(), 10);
+    }
 
     Ok(())
 }

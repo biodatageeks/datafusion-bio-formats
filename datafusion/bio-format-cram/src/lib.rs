@@ -29,6 +29,7 @@
 //!     None,
 //!     true,
 //!     Some(vec!["MD".to_string(), "NM".to_string(), "RG".to_string()]),
+//!     false,
 //! ).await?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!
@@ -57,6 +58,7 @@
 //!     None,
 //!     true,
 //!     Some(100),  // Sample 100 records
+//!     false,
 //! ).await?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!

@@ -22,8 +22,8 @@ use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 use datafusion_bio_format_core::{
-    BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
-    COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
+    BAM_BINARY_CIGAR_KEY, BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY,
+    BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
 use log::debug;
 use std::any::Any;
@@ -34,14 +34,20 @@ fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
     header_metadata: Option<HashMap<String, String>>,
+    binary_cigar: bool,
 ) -> datafusion::common::Result<SchemaRef> {
+    let cigar_type = if binary_cigar {
+        DataType::Binary
+    } else {
+        DataType::Utf8
+    };
     let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
         Field::new("chrom", DataType::Utf8, true),
         Field::new("start", DataType::UInt32, true),
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false), //FIXME:: optimize storage
-        Field::new("cigar", DataType::Utf8, false),
+        Field::new("cigar", cigar_type, false),
         Field::new("mapping_quality", DataType::UInt32, false),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
@@ -76,12 +82,15 @@ fn determine_schema(
         }
     }
 
-    // Add coordinate system metadata to schema
+    // Add coordinate system and binary_cigar metadata to schema
     let mut metadata = header_metadata.unwrap_or_default();
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
     );
+    if binary_cigar {
+        metadata.insert(BAM_BINARY_CIGAR_KEY.to_string(), "true".to_string());
+    }
     let schema = Schema::new_with_metadata(fields, metadata);
     debug!("Schema: {:?}", schema);
     Ok(Arc::new(schema))
@@ -97,18 +106,24 @@ async fn determine_schema_from_file(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
     sample_size: usize,
+    binary_cigar: bool,
 ) -> datafusion::common::Result<SchemaRef> {
     use crate::storage::BamReader;
     use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
     use futures_util::StreamExt;
 
+    let cigar_type = if binary_cigar {
+        DataType::Binary
+    } else {
+        DataType::Utf8
+    };
     let mut fields = vec![
         Field::new("name", DataType::Utf8, true),
         Field::new("chrom", DataType::Utf8, true),
         Field::new("start", DataType::UInt32, true),
         Field::new("end", DataType::UInt32, true),
         Field::new("flags", DataType::UInt32, false),
-        Field::new("cigar", DataType::Utf8, false),
+        Field::new("cigar", cigar_type, false),
         Field::new("mapping_quality", DataType::UInt32, false),
         Field::new("mate_chrom", DataType::Utf8, true),
         Field::new("mate_start", DataType::UInt32, true),
@@ -271,12 +286,15 @@ async fn determine_schema_from_file(
         }
     }
 
-    // Merge header metadata with coordinate system metadata
+    // Merge header metadata with coordinate system and binary_cigar metadata
     let mut metadata = header_metadata;
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
     );
+    if binary_cigar {
+        metadata.insert(BAM_BINARY_CIGAR_KEY.to_string(), "true".to_string());
+    }
     let schema = Schema::new_with_metadata(fields, metadata);
     debug!("Schema (from file): {:?}", schema);
     Ok(Arc::new(schema))
@@ -301,6 +319,8 @@ pub struct BamTableProvider {
     tag_fields: Option<Vec<String>>,
     /// Whether to sort records by coordinate (chrom ASC, start ASC) on write
     sort_on_write: bool,
+    /// Whether to use binary CIGAR encoding (raw LE u32 ops) instead of string
+    binary_cigar: bool,
     /// Path to an index file (BAI/CSI). Auto-discovered if not provided.
     index_path: Option<String>,
     /// Reference sequence names from the file header (for partitioning full scans by chromosome)
@@ -345,14 +365,7 @@ impl BamTableProvider {
     ///     None,     // No cloud storage
     ///     true,     // Use 0-based coordinates (default)
     ///     None,     // No tag fields
-    /// ).await?;
-    ///
-    /// // With alignment tags
-    /// let provider_with_tags = BamTableProvider::new(
-    ///     "data/alignments.bam".to_string(),
-    ///     None,
-    ///     true,
-    ///     Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
+    ///     false,    // String CIGAR (default)
     /// ).await?;
     /// # Ok(())
     /// # }
@@ -362,6 +375,7 @@ impl BamTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
+        binary_cigar: bool,
     ) -> datafusion::common::Result<Self> {
         use crate::storage::{SamReader, is_sam_file};
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
@@ -417,6 +431,7 @@ impl BamTableProvider {
             &tag_fields,
             coordinate_system_zero_based,
             Some(header_metadata),
+            binary_cigar,
         )?;
 
         // Auto-discover index file for local files
@@ -436,6 +451,7 @@ impl BamTableProvider {
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write: false,
+            binary_cigar,
             index_path,
             reference_names,
             reference_lengths,
@@ -474,6 +490,7 @@ impl BamTableProvider {
     ///     true,
     ///     Some(vec!["XS".to_string(), "XT".to_string()]),
     ///     Some(100),  // Sample 100 records
+    ///     false,      // String CIGAR (default)
     /// ).await?;
     /// # Ok(())
     /// # }
@@ -484,6 +501,7 @@ impl BamTableProvider {
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
         sample_size: Option<usize>,
+        binary_cigar: bool,
     ) -> datafusion::common::Result<Self> {
         use crate::storage::is_sam_file;
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
@@ -495,6 +513,7 @@ impl BamTableProvider {
             &tag_fields,
             coordinate_system_zero_based,
             sample_size,
+            binary_cigar,
         )
         .await?;
 
@@ -522,6 +541,7 @@ impl BamTableProvider {
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write: false,
+            binary_cigar,
             index_path,
             reference_names,
             reference_lengths,
@@ -553,6 +573,10 @@ impl BamTableProvider {
         coordinate_system_zero_based: bool,
         sort_on_write: bool,
     ) -> Self {
+        let binary_cigar = schema
+            .metadata()
+            .get(BAM_BINARY_CIGAR_KEY)
+            .is_some_and(|v| v == "true");
         Self {
             file_path: output_path,
             schema,
@@ -560,6 +584,7 @@ impl BamTableProvider {
             coordinate_system_zero_based,
             tag_fields,
             sort_on_write,
+            binary_cigar,
             index_path: None,
             reference_names: Vec::new(),
             reference_lengths: Vec::new(),
@@ -600,6 +625,7 @@ impl BamTableProvider {
     ///     None,
     ///     true,
     ///     None,
+    ///     false,
     /// ).await?;
     ///
     /// let schema_df = provider.describe(&ctx, Some(100)).await?;
@@ -704,7 +730,20 @@ impl BamTableProvider {
             ("start", DataType::UInt32, true, "Leftmost mapping position"),
             ("end", DataType::UInt32, true, "Rightmost mapping position"),
             ("flags", DataType::UInt32, false, "Bitwise flags"),
-            ("cigar", DataType::Utf8, false, "CIGAR string"),
+            (
+                "cigar",
+                if self.binary_cigar {
+                    DataType::Binary
+                } else {
+                    DataType::Utf8
+                },
+                false,
+                if self.binary_cigar {
+                    "CIGAR (binary LE u32 ops)"
+                } else {
+                    "CIGAR string"
+                },
+            ),
             (
                 "mapping_quality",
                 DataType::UInt32,

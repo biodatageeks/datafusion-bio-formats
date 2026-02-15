@@ -97,6 +97,9 @@ pub const BAM_TAG_TYPE_KEY: &str = "bio.bam.tag.type";
 /// BAM optional tag description stored in field metadata
 pub const BAM_TAG_DESCRIPTION_KEY: &str = "bio.bam.tag.description";
 
+/// Whether the CIGAR column uses binary encoding (raw LE u32 ops) instead of string
+pub const BAM_BINARY_CIGAR_KEY: &str = "bio.bam.binary_cigar";
+
 // ============================================================================
 // GFF-Specific Metadata Keys (For Future Use)
 // ============================================================================
