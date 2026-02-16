@@ -20,7 +20,7 @@ async fn count_rows(
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let table = BamTableProvider::new(BAM_PATH.to_string(), None, true, None).await?;
+    let table = BamTableProvider::new(BAM_PATH.to_string(), None, true, None, false).await?;
 
     let ctx = SessionContext::new();
     ctx.register_table("bam", Arc::new(table))?;

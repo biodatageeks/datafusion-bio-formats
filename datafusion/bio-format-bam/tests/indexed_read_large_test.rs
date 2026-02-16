@@ -35,8 +35,14 @@ async fn collect_distinct_chroms(ctx: &SessionContext, sql: &str) -> HashSet<Str
 
 async fn setup_bam_ctx() -> datafusion::error::Result<SessionContext> {
     let ctx = SessionContext::new();
-    let provider =
-        BamTableProvider::new("tests/multi_chrom_large.bam".to_string(), None, true, None).await?;
+    let provider = BamTableProvider::new(
+        "tests/multi_chrom_large.bam".to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
     ctx.register_table("bam", Arc::new(provider))?;
     Ok(ctx)
 }

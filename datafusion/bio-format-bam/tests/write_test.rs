@@ -127,6 +127,7 @@ async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         None, // storage options
         true, // 0-based coordinates
         Some(tag_fields.clone()),
+        false, // String CIGAR (default)
     )
     .await?;
 
@@ -260,6 +261,7 @@ async fn test_character_tags_round_trip() -> Result<(), Box<dyn std::error::Erro
         true,
         Some(tag_fields.clone()),
         Some(10), // Sample 10 records
+        false,    // String CIGAR (default)
     )
     .await?;
 
@@ -373,6 +375,7 @@ async fn test_integer_array_tags_round_trip() -> Result<(), Box<dyn std::error::
         true,
         Some(tag_fields.clone()),
         Some(10), // Sample 10 records
+        false,    // String CIGAR (default)
     )
     .await?;
 
@@ -501,6 +504,7 @@ async fn test_byte_array_tags_round_trip() -> Result<(), Box<dyn std::error::Err
         true,
         Some(tag_fields.clone()),
         Some(10), // Sample 10 records
+        false,    // String CIGAR (default)
     )
     .await?;
 
@@ -616,6 +620,7 @@ async fn test_float_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> 
         true,
         Some(tag_fields.clone()),
         Some(10), // Sample 10 records
+        false,    // String CIGAR (default)
     )
     .await?;
 
@@ -778,8 +783,14 @@ async fn test_sort_on_write_coordinate_order() -> Result<(), Box<dyn std::error:
         .await?;
 
     // Read back and verify order: chr1:100, chr1:200, chr2:300
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
 
     // Verify header has SO:coordinate
     let read_schema = read_provider.schema();
@@ -897,8 +908,14 @@ async fn test_sort_on_write_false_sets_unsorted() -> Result<(), Box<dyn std::err
         .await?;
 
     // Read back and verify header has SO:unsorted
-    let read_provider =
-        BamTableProvider::new(output_path.to_str().unwrap().to_string(), None, true, None).await?;
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        None,
+        false,
+    )
+    .await?;
 
     let read_schema = read_provider.schema();
     let sort_order = read_schema.metadata().get(BAM_SORT_ORDER_KEY);

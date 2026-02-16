@@ -26,6 +26,7 @@ async fn test_cram_read_with_tags() {
             "MQ".to_string(),
             "RG".to_string(),
         ]),
+        false,
     )
     .await
     .unwrap();
@@ -128,6 +129,7 @@ async fn test_cram_nullable_tags_with_mixed_presence() {
         None,
         true,
         Some(vec!["NM".to_string(), "MQ".to_string(), "E2".to_string()]),
+        false,
     )
     .await
     .unwrap();
@@ -173,6 +175,7 @@ async fn test_cram_tag_projection_pushdown() {
             "MQ".to_string(),
             "RG".to_string(),
         ]),
+        false,
     )
     .await
     .unwrap();
@@ -202,6 +205,7 @@ async fn test_cram_tag_with_filter() {
         None,
         true,
         Some(vec!["NM".to_string()]),
+        false,
     )
     .await
     .unwrap();

@@ -17,6 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true,
         Some(vec!["MD".to_string(), "NM".to_string()]),
+        false,
     )
     .await?;
 
@@ -50,6 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         true,
         Some(10),
+        false,
     )
     .await?;
 

@@ -18,7 +18,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         file_path.clone(),
         Some(object_storage_options),
         true,
-        None, // No tag fields
+        None,  // No tag fields
+        false, // String CIGAR (default)
     )
     .await
     .unwrap();

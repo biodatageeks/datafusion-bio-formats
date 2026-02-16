@@ -1,6 +1,7 @@
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanBuilder, Float32Builder, Int32Array, Int32Builder, ListBuilder,
-    NullArray, StringArray, StringBuilder, UInt8Builder, UInt16Builder, UInt32Array, UInt32Builder,
+    Array, ArrayRef, BinaryArray, BinaryBuilder, BooleanBuilder, Float32Builder, Int32Array,
+    Int32Builder, ListBuilder, NullArray, StringArray, StringBuilder, UInt8Builder, UInt16Builder,
+    UInt32Array, UInt32Builder,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -48,6 +49,13 @@ fn new_null_array(data_type: &DataType, length: usize) -> ArrayRef {
             }
             Arc::new(builder.finish())
         }
+        DataType::Binary => {
+            let mut builder = BinaryBuilder::new();
+            for _ in 0..length {
+                builder.append_null();
+            }
+            Arc::new(builder.finish())
+        }
         DataType::List(field) => match field.data_type() {
             DataType::Int32 => {
                 let mut builder = ListBuilder::new(Int32Builder::new());
@@ -90,6 +98,14 @@ fn new_null_array(data_type: &DataType, length: usize) -> ArrayRef {
     }
 }
 
+/// CIGAR data in either string or binary form (for `RecordFields` / `build_record_batch`).
+pub enum CigarData<'a> {
+    /// Traditional CIGAR strings (e.g. "10M5I3D")
+    Strings(&'a [String]),
+    /// Raw binary CIGAR: each entry is concatenated LE u32 ops
+    Binary(&'a [Vec<u8>]),
+}
+
 /// Container for alignment record field data
 pub struct RecordFields<'a> {
     /// Read/query template names
@@ -102,8 +118,8 @@ pub struct RecordFields<'a> {
     pub end: &'a [Option<u32>],
     /// SAM flags
     pub flag: &'a [u32],
-    /// CIGAR strings
-    pub cigar: &'a [String],
+    /// CIGAR data (string or binary)
+    pub cigar: CigarData<'a>,
     /// Mapping quality scores (255 = unavailable per SAM spec, but always present)
     pub mapping_quality: &'a [u32],
     /// Mate/next segment reference sequence names — borrowed from names array
@@ -157,10 +173,15 @@ pub fn build_record_batch(
     let make_end = || Arc::new(UInt32Array::from_iter(end.iter().copied())) as Arc<dyn Array>;
     let make_flag =
         || Arc::new(UInt32Array::from_iter_values(flag.iter().copied())) as Arc<dyn Array>;
-    let make_cigar = || {
-        Arc::new(StringArray::from_iter_values(
-            cigar.iter().map(|s| s.as_str()),
-        )) as Arc<dyn Array>
+    let make_cigar = || -> Arc<dyn Array> {
+        match &cigar {
+            CigarData::Strings(s) => {
+                Arc::new(StringArray::from_iter_values(s.iter().map(|v| v.as_str())))
+            }
+            CigarData::Binary(b) => Arc::new(BinaryArray::from_iter_values(
+                b.iter().map(|v| v.as_slice()),
+            )),
+        }
     };
     let make_mapq = || {
         Arc::new(UInt32Array::from_iter_values(
@@ -318,6 +339,14 @@ pub fn build_record_batch_from_builders(
     }
 }
 
+/// Builder for the CIGAR column: either string or binary mode.
+pub enum CigarBuilder {
+    /// Traditional CIGAR string builder (e.g. "10M5I3D")
+    String(StringBuilder),
+    /// Binary CIGAR builder: raw LE u32 ops per record
+    Binary(BinaryBuilder),
+}
+
 /// Container for core alignment field builders (Arrow builder-based path).
 ///
 /// Replaces the 12 Vec/StringBuilder field declarations with `Option<Builder>` fields.
@@ -329,7 +358,7 @@ pub struct CoreBatchBuilders {
     start: Option<UInt32Builder>,
     end: Option<UInt32Builder>,
     flag: Option<UInt32Builder>,
-    cigar: Option<StringBuilder>,
+    cigar: Option<CigarBuilder>,
     mapq: Option<UInt32Builder>,
     mate_chrom: Option<StringBuilder>,
     mate_start: Option<UInt32Builder>,
@@ -396,7 +425,10 @@ impl ProjectionFlags {
 
 impl CoreBatchBuilders {
     /// Create builders for projected fields, `None` for unprojected ones.
-    pub fn new(flags: &ProjectionFlags, batch_size: usize) -> Self {
+    ///
+    /// When `binary_cigar` is true, the cigar builder uses `BinaryBuilder` instead of
+    /// `StringBuilder`, producing `BinaryArray` columns with raw LE u32 CIGAR ops.
+    pub fn new(flags: &ProjectionFlags, batch_size: usize, binary_cigar: bool) -> Self {
         Self {
             name: flags
                 .name
@@ -411,9 +443,13 @@ impl CoreBatchBuilders {
             flag: flags
                 .flags
                 .then(|| UInt32Builder::with_capacity(batch_size)),
-            cigar: flags
-                .cigar
-                .then(|| StringBuilder::with_capacity(batch_size, batch_size * 20)),
+            cigar: flags.cigar.then(|| {
+                if binary_cigar {
+                    CigarBuilder::Binary(BinaryBuilder::with_capacity(batch_size, batch_size * 24))
+                } else {
+                    CigarBuilder::String(StringBuilder::with_capacity(batch_size, batch_size * 20))
+                }
+            }),
             mapq: flags.mapq.then(|| UInt32Builder::with_capacity(batch_size)),
             mate_chrom: flags
                 .mate_chrom
@@ -477,10 +513,18 @@ impl CoreBatchBuilders {
         }
     }
 
-    /// Append a CIGAR string (non-nullable).
+    /// Append a CIGAR string (non-nullable). Only writes when builder is in String mode.
     #[inline]
     pub fn append_cigar(&mut self, value: &str) {
-        if let Some(b) = &mut self.cigar {
+        if let Some(CigarBuilder::String(b)) = &mut self.cigar {
+            b.append_value(value);
+        }
+    }
+
+    /// Append raw binary CIGAR bytes (non-nullable). Only writes when builder is in Binary mode.
+    #[inline]
+    pub fn append_cigar_binary(&mut self, value: &[u8]) {
+        if let Some(CigarBuilder::Binary(b)) = &mut self.cigar {
             b.append_value(value);
         }
     }
@@ -549,9 +593,10 @@ impl CoreBatchBuilders {
                 .map(|b| Arc::new(b.finish()) as ArrayRef),
             self.end.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
             self.flag.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
-            self.cigar
-                .as_mut()
-                .map(|b| Arc::new(b.finish()) as ArrayRef),
+            self.cigar.as_mut().map(|b| match b {
+                CigarBuilder::String(sb) => Arc::new(sb.finish()) as ArrayRef,
+                CigarBuilder::Binary(bb) => Arc::new(bb.finish()) as ArrayRef,
+            }),
             self.mapq.as_mut().map(|b| Arc::new(b.finish()) as ArrayRef),
             self.mate_chrom
                 .as_mut()
@@ -624,6 +669,93 @@ pub fn format_cigar_ops_unwrap(ops: impl Iterator<Item = io::Result<Op>>, buf: &
     for op in ops {
         let op = op.unwrap();
         let _ = write!(buf, "{}{}", op.len(), cigar_op_char(op.kind()));
+    }
+}
+
+/// Encode CIGAR `Op` values to the BAM binary format (LE u32: `op_len << 4 | op_code`).
+///
+/// Clears `buf` first, then appends 4 bytes per op.
+pub fn encode_cigar_ops_to_binary(ops: impl Iterator<Item = Op>, buf: &mut Vec<u8>) {
+    buf.clear();
+    for op in ops {
+        let code = op_kind_to_code(op.kind());
+        let packed: u32 = (op.len() as u32) << 4 | code as u32;
+        buf.extend_from_slice(&packed.to_le_bytes());
+    }
+}
+
+/// Encode CIGAR `io::Result<Op>` values to binary (BAM lazy records).
+pub fn encode_cigar_ops_to_binary_unwrap(
+    ops: impl Iterator<Item = io::Result<Op>>,
+    buf: &mut Vec<u8>,
+) {
+    buf.clear();
+    for op in ops {
+        let op = op.unwrap();
+        let code = op_kind_to_code(op.kind());
+        let packed: u32 = (op.len() as u32) << 4 | code as u32;
+        buf.extend_from_slice(&packed.to_le_bytes());
+    }
+}
+
+/// Decode binary CIGAR bytes (LE u32 per op) back to `Vec<Op>`.
+pub fn decode_binary_cigar_to_ops(bytes: &[u8]) -> io::Result<Vec<Op>> {
+    if bytes.len() % 4 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("binary CIGAR length {} is not a multiple of 4", bytes.len()),
+        ));
+    }
+    let mut ops = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let packed = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let op_code = (packed & 0xF) as u8;
+        let op_len = (packed >> 4) as usize;
+        if op_len == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid CIGAR op length: 0",
+            ));
+        }
+        let kind = code_to_op_kind(op_code)?;
+        ops.push(Op::new(kind, op_len));
+    }
+    Ok(ops)
+}
+
+/// Map an `OpKind` to its BAM numeric code.
+#[inline]
+fn op_kind_to_code(kind: OpKind) -> u8 {
+    match kind {
+        OpKind::Match => 0,
+        OpKind::Insertion => 1,
+        OpKind::Deletion => 2,
+        OpKind::Skip => 3,
+        OpKind::SoftClip => 4,
+        OpKind::HardClip => 5,
+        OpKind::Pad => 6,
+        OpKind::SequenceMatch => 7,
+        OpKind::SequenceMismatch => 8,
+    }
+}
+
+/// Map a BAM numeric code back to `OpKind`.
+#[inline]
+fn code_to_op_kind(code: u8) -> io::Result<OpKind> {
+    match code {
+        0 => Ok(OpKind::Match),
+        1 => Ok(OpKind::Insertion),
+        2 => Ok(OpKind::Deletion),
+        3 => Ok(OpKind::Skip),
+        4 => Ok(OpKind::SoftClip),
+        5 => Ok(OpKind::HardClip),
+        6 => Ok(OpKind::Pad),
+        7 => Ok(OpKind::SequenceMatch),
+        8 => Ok(OpKind::SequenceMismatch),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid CIGAR op code: {}", code),
+        )),
     }
 }
 
@@ -783,5 +915,76 @@ mod tests {
             chrom_name_by_idx(get_chrom_idx_bam(Some(Ok(2))), &names),
             Some("MT")
         );
+    }
+
+    #[test]
+    fn test_encode_decode_cigar_roundtrip() {
+        let ops = [
+            Op::new(Kind::Match, 10),
+            Op::new(Kind::Insertion, 5),
+            Op::new(Kind::Deletion, 3),
+        ];
+        let mut buf = Vec::new();
+        encode_cigar_ops_to_binary(ops.iter().copied(), &mut buf);
+        assert_eq!(buf.len(), 12); // 3 ops * 4 bytes each
+        let decoded = decode_binary_cigar_to_ops(&buf).unwrap();
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(decoded[0], Op::new(Kind::Match, 10));
+        assert_eq!(decoded[1], Op::new(Kind::Insertion, 5));
+        assert_eq!(decoded[2], Op::new(Kind::Deletion, 3));
+    }
+
+    #[test]
+    fn test_encode_decode_all_op_kinds() {
+        let ops = [
+            Op::new(Kind::Match, 1),
+            Op::new(Kind::Insertion, 2),
+            Op::new(Kind::Deletion, 3),
+            Op::new(Kind::Skip, 4),
+            Op::new(Kind::SoftClip, 5),
+            Op::new(Kind::HardClip, 6),
+            Op::new(Kind::Pad, 7),
+            Op::new(Kind::SequenceMatch, 8),
+            Op::new(Kind::SequenceMismatch, 9),
+        ];
+        let mut buf = Vec::new();
+        encode_cigar_ops_to_binary(ops.iter().copied(), &mut buf);
+        let decoded = decode_binary_cigar_to_ops(&buf).unwrap();
+        assert_eq!(decoded, ops.to_vec());
+    }
+
+    #[test]
+    fn test_encode_decode_empty_cigar() {
+        let ops: [Op; 0] = [];
+        let mut buf = Vec::new();
+        encode_cigar_ops_to_binary(ops.into_iter(), &mut buf);
+        assert!(buf.is_empty());
+        let decoded = decode_binary_cigar_to_ops(&buf).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_decode_invalid_length() {
+        let bad_bytes = [0u8, 1, 2]; // 3 bytes, not a multiple of 4
+        let result = decode_binary_cigar_to_ops(&bad_bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_invalid_op_code() {
+        // op code 15 is invalid (only 0-8 valid)
+        let packed: u32 = (10 << 4) | 15;
+        let bytes = packed.to_le_bytes();
+        let result = decode_binary_cigar_to_ops(&bytes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_decode_zero_op_len() {
+        // op_len == 0 is invalid per BAM spec
+        let packed: u32 = 0; // op_len=0, op_code=0 (Match with length 0)
+        let bytes = packed.to_le_bytes();
+        let result = decode_binary_cigar_to_ops(&bytes);
+        assert!(result.is_err());
     }
 }

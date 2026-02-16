@@ -12,7 +12,7 @@ use std::sync::Arc;
 const BAM_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/multi_chrom.bam");
 
 async fn setup_bam_ctx(table_name: &str) -> Result<SessionContext, Box<dyn std::error::Error>> {
-    let table = BamTableProvider::new(BAM_PATH.to_string(), None, true, None).await?;
+    let table = BamTableProvider::new(BAM_PATH.to_string(), None, true, None, false).await?;
     let ctx = SessionContext::new();
     ctx.register_table(table_name, Arc::new(table))?;
     Ok(ctx)
@@ -209,7 +209,7 @@ async fn write_sam_file() -> Result<(tempfile::TempDir, String), Box<dyn std::er
 #[tokio::test]
 async fn test_sam_plan_projection() -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp, sam_path) = write_sam_file().await?;
-    let table = BamTableProvider::new(sam_path, None, true, None).await?;
+    let table = BamTableProvider::new(sam_path, None, true, None, false).await?;
     let ctx = SessionContext::new();
     ctx.register_table("t", Arc::new(table))?;
     let df = ctx.sql("SELECT name, chrom FROM t").await?;
@@ -221,7 +221,7 @@ async fn test_sam_plan_projection() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn test_sam_projection_single_column() -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp, sam_path) = write_sam_file().await?;
-    let table = BamTableProvider::new(sam_path, None, true, None).await?;
+    let table = BamTableProvider::new(sam_path, None, true, None, false).await?;
     let ctx = SessionContext::new();
     ctx.register_table("t", Arc::new(table))?;
     let df = ctx.sql("SELECT name FROM t").await?;
@@ -242,7 +242,7 @@ async fn test_sam_projection_single_column() -> Result<(), Box<dyn std::error::E
 #[tokio::test]
 async fn test_sam_projection_reordered() -> Result<(), Box<dyn std::error::Error>> {
     let (_tmp, sam_path) = write_sam_file().await?;
-    let table = BamTableProvider::new(sam_path, None, true, None).await?;
+    let table = BamTableProvider::new(sam_path, None, true, None, false).await?;
     let ctx = SessionContext::new();
     ctx.register_table("t", Arc::new(table))?;
     let df = ctx.sql("SELECT mapping_quality, name FROM t").await?;

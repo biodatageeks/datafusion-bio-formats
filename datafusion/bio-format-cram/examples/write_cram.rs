@@ -25,6 +25,7 @@ async fn main() -> datafusion::error::Result<()> {
         None,      // object storage options
         true,      // 0-based coordinates
         Some(100), // Sample 100 records to discover tags
+        false,     // binary_cigar
     )
     .await?;
     ctx.register_table("input_cram", Arc::new(input_table))?;
@@ -101,6 +102,7 @@ async fn main() -> datafusion::error::Result<()> {
         true,      // 0-based coordinates
         None,      // tag_fields (None to discover all)
         Some(100), // Sample 100 records to discover tags
+        false,     // String CIGAR (default)
     )
     .await?;
     ctx.register_table("input_bam", Arc::new(bam_input))?;

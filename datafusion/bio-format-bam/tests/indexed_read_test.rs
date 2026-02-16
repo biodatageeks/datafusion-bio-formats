@@ -48,9 +48,10 @@ async fn setup_bam_ctx() -> datafusion::error::Result<SessionContext> {
     let ctx = SessionContext::new();
     let provider = BamTableProvider::new(
         "tests/multi_chrom.bam".to_string(),
-        None, // object_storage_options
-        true, // zero-based coordinates
-        None, // tag_fields
+        None,  // object_storage_options
+        true,  // zero-based coordinates
+        None,  // tag_fields
+        false, // String CIGAR (default)
     )
     .await?;
     ctx.register_table("bam", Arc::new(provider))?;
@@ -256,6 +257,7 @@ async fn setup_bam_ctx_with_partitions(
         None,
         true, // zero-based coordinates
         None,
+        false, // String CIGAR (default)
     )
     .await?;
     ctx.register_table("bam", Arc::new(provider))?;
