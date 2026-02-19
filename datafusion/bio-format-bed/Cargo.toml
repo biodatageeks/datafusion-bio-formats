@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-bed"
-version = "0.5.1"
+version = "0.5.2"
 description = "BED file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
