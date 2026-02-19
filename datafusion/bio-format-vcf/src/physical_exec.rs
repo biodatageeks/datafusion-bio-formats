@@ -345,10 +345,13 @@ fn load_infos_single_pass(
                     builder.append_int(v)?;
                 }
                 Some(Value::Array(ValueArray::Integer(values))) => {
-                    builder.append_array_int_iter(values.iter().map(|v| v.unwrap().unwrap()))?;
+                    let ints: Vec<Option<i32>> = values.iter().map(|v| v.ok().flatten()).collect();
+                    builder.append_array_int_nullable(ints)?;
                 }
                 Some(Value::Array(ValueArray::Float(values))) => {
-                    builder.append_array_float_iter(values.iter().map(|v| v.unwrap().unwrap()))?;
+                    let floats: Vec<Option<f32>> =
+                        values.iter().map(|v| v.ok().flatten()).collect();
+                    builder.append_array_float_nullable(floats)?;
                 }
                 Some(Value::Float(v)) => {
                     builder.append_float(v)?;
@@ -357,7 +360,11 @@ fn load_infos_single_pass(
                     builder.append_string(&v)?;
                 }
                 Some(Value::Array(ValueArray::String(values))) => {
-                    builder.append_array_string_iter(values.iter().map(|v| v.unwrap().unwrap()))?;
+                    let strings: Vec<Option<String>> = values
+                        .iter()
+                        .map(|v| v.ok().flatten().map(|s| s.to_string()))
+                        .collect();
+                    builder.append_array_string_nullable(strings)?;
                 }
                 Some(Value::Flag) => {
                     builder.append_boolean(true)?;
