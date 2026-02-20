@@ -60,7 +60,7 @@ async fn variation_non_tabix_streaming_query_works() -> datafusion::common::Resu
     assert_eq!(first_i64(&batches), 3);
 
     let batches = ctx
-        .sql("SELECT COUNT(*) FROM variation WHERE chr = '1' AND start >= 150")
+        .sql("SELECT COUNT(*) FROM variation WHERE chrom = '1' AND start >= 150")
         .await?
         .collect()
         .await?;
@@ -151,7 +151,7 @@ async fn variation_coordinate_system_metadata_and_values_work() -> datafusion::c
     let ctx = SessionContext::new();
     ctx.register_table("variation", Arc::new(one_based))?;
     let one_based_rows = ctx
-        .sql("SELECT start FROM variation WHERE chr = '1' ORDER BY start LIMIT 1")
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start LIMIT 1")
         .await?
         .collect()
         .await?;
@@ -171,14 +171,14 @@ async fn variation_coordinate_system_metadata_and_values_work() -> datafusion::c
     let ctx = SessionContext::new();
     ctx.register_table("variation", Arc::new(zero_based))?;
     let zero_based_rows = ctx
-        .sql("SELECT start FROM variation WHERE chr = '1' ORDER BY start LIMIT 1")
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start LIMIT 1")
         .await?
         .collect()
         .await?;
     assert_eq!(first_i64_at(&zero_based_rows, 0), 99);
 
     let filtered = ctx
-        .sql("SELECT COUNT(*) FROM variation WHERE chr = '1' AND start = 99")
+        .sql("SELECT COUNT(*) FROM variation WHERE chrom = '1' AND start = 99")
         .await?
         .collect()
         .await?;

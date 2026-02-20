@@ -3,7 +3,7 @@ use datafusion::logical_expr::{Expr, Operator};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SimplePredicate {
-    pub chr: Option<String>,
+    pub chrom: Option<String>,
     pub start_min: Option<i64>,
     pub start_max: Option<i64>,
     pub end_min: Option<i64>,
@@ -12,12 +12,12 @@ pub(crate) struct SimplePredicate {
 }
 
 impl SimplePredicate {
-    pub fn matches(&self, chr: &str, start: i64, end: i64) -> bool {
+    pub fn matches(&self, chrom: &str, start: i64, end: i64) -> bool {
         if self.always_false {
             return false;
         }
-        if let Some(expected_chr) = &self.chr {
-            if expected_chr != chr {
+        if let Some(expected_chrom) = &self.chrom {
+            if expected_chrom != chrom {
                 return false;
             }
         }
@@ -81,7 +81,7 @@ pub(crate) fn is_pushdown_supported(expr: &Expr) -> bool {
             };
 
             match col.name.as_str() {
-                "chr" => matches!(binary_expr.op, Operator::Eq),
+                "chrom" | "chr" => matches!(binary_expr.op, Operator::Eq),
                 "start" | "end" => matches!(
                     binary_expr.op,
                     Operator::Eq | Operator::Gt | Operator::GtEq | Operator::Lt | Operator::LtEq
@@ -108,15 +108,15 @@ fn apply_expr(expr: &Expr, predicate: &mut SimplePredicate) {
             };
 
             match column.name.as_str() {
-                "chr" => {
+                "chrom" | "chr" => {
                     if binary_expr.op == Operator::Eq {
-                        if let Some(chr) = scalar_to_string(literal) {
-                            if let Some(existing) = &predicate.chr {
-                                if existing != &chr {
+                        if let Some(chrom) = scalar_to_string(literal) {
+                            if let Some(existing) = &predicate.chrom {
+                                if existing != &chrom {
                                     predicate.always_false = true;
                                 }
                             }
-                            predicate.chr = Some(chr);
+                            predicate.chrom = Some(chrom);
                         }
                     }
                 }

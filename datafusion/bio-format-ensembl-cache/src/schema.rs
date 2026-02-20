@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const REQUIRED_VARIATION_COLUMNS: [&str; 6] = [
-    "chr",
+    "chrom",
     "start",
     "end",
     "variation_name",
@@ -38,7 +38,7 @@ pub(crate) fn variation_schema(
     }
 
     let mut fields = vec![
-        Field::new("chr", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
         Field::new("end", DataType::Int64, false),
         Field::new("variation_name", DataType::Utf8, false),
@@ -61,6 +61,8 @@ pub(crate) fn variation_schema(
         .chain(CANONICAL_OPTIONAL_VARIATION_COLUMNS.iter())
         .map(|v| v.to_string())
         .collect();
+    // Input cache rows often use "chr" while output schema standardizes on "chrom".
+    known.insert("chr".to_string());
 
     for source in &cache_info.source_descriptors {
         if !known.contains(&source.ids_column) {
@@ -86,7 +88,7 @@ pub(crate) fn transcript_schema(
     coordinate_system_zero_based: bool,
 ) -> SchemaRef {
     let mut fields = vec![
-        Field::new("chr", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
         Field::new("end", DataType::Int64, false),
         Field::new("strand", DataType::Int8, false),
@@ -120,7 +122,7 @@ pub(crate) fn regulatory_feature_schema(
     coordinate_system_zero_based: bool,
 ) -> SchemaRef {
     let mut fields = vec![
-        Field::new("chr", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
         Field::new("end", DataType::Int64, false),
         Field::new("strand", DataType::Int8, false),
@@ -142,7 +144,7 @@ pub(crate) fn motif_feature_schema(
     coordinate_system_zero_based: bool,
 ) -> SchemaRef {
     let mut fields = vec![
-        Field::new("chr", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
         Field::new("end", DataType::Int64, false),
         Field::new("strand", DataType::Int8, false),

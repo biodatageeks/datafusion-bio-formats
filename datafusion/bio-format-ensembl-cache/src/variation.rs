@@ -66,10 +66,10 @@ pub(crate) fn parse_variation_line(
         }
     }
 
-    let chr =
+    let chrom =
         first_non_empty(&source_values, &["chr", "chrom", "seq_region_name"]).ok_or_else(|| {
             exec_err(format!(
-                "Variation row missing required chr in {}: {}",
+                "Variation row missing required chrom in {}: {}",
                 source_file.display(),
                 trimmed
             ))
@@ -91,7 +91,7 @@ pub(crate) fn parse_variation_line(
     let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
     let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
-    if !predicate.matches(&chr, start, end) {
+    if !predicate.matches(&chrom, start, end) {
         return Ok(None);
     }
 
@@ -117,7 +117,7 @@ pub(crate) fn parse_variation_line(
     let variation_name_for_ids = variation_name.clone();
 
     let mut row: Row = HashMap::new();
-    row.insert("chr".to_string(), CellValue::Utf8(chr));
+    row.insert("chrom".to_string(), CellValue::Utf8(chrom));
     row.insert("start".to_string(), CellValue::Int64(start));
     row.insert("end".to_string(), CellValue::Int64(end));
     row.insert(
