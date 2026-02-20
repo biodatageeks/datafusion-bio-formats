@@ -25,7 +25,11 @@ use std::sync::Arc;
 pub struct EnsemblCacheOptions {
     /// Root directory of a single Ensembl VEP cache.
     pub cache_root: String,
-    /// Coordinate-system metadata marker exposed in Arrow schema.
+    /// If true, expose genomic coordinates as 0-based half-open.
+    /// If false, expose genomic coordinates as 1-based closed (VEP native).
+    ///
+    /// Value is also exposed in Arrow schema metadata under
+    /// `bio.coordinate_system_zero_based`.
     pub coordinate_system_zero_based: bool,
     /// Optional batch-size override used by the execution plan.
     pub batch_size_hint: Option<usize>,
@@ -149,6 +153,7 @@ impl ProviderInner {
             limit,
             self.variation_region_size,
             self.options.batch_size_hint,
+            self.options.coordinate_system_zero_based,
         )))
     }
 }

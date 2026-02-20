@@ -14,6 +14,11 @@ DataFusion `TableProvider` implementations for raw Ensembl VEP cache directories
 - Reads `.gz` files directly (no manual `gunzip` required).
 - Uses streaming execution and emits batches incrementally.
 - Supports native Storable (`pst0`) decoding for transcript/regulatory cache files.
+- Supports configurable coordinate output:
+  - `coordinate_system_zero_based = false` (default): 1-based closed `[start, end]`
+  - `coordinate_system_zero_based = true`: 0-based half-open `[start, end)`
+- Writes coordinate mode to Arrow schema metadata as
+  `bio.coordinate_system_zero_based`.
 - Supports fixture/test payload shortcuts for unit fixtures:
   - `storable`: `JSON:{...}`
   - `sereal`: `SRL1{...}`
@@ -27,7 +32,9 @@ use std::sync::Arc;
 
 # async fn example() -> datafusion::common::Result<()> {
 let ctx = SessionContext::new();
-let table = VariationTableProvider::new(EnsemblCacheOptions::new("/path/to/cache"))?;
+let mut options = EnsemblCacheOptions::new("/path/to/cache");
+options.coordinate_system_zero_based = true;
+let table = VariationTableProvider::new(options)?;
 ctx.register_table("vep_variation", Arc::new(table))?;
 # Ok(())
 # }

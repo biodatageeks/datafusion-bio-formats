@@ -32,6 +32,7 @@ pub(crate) struct EnsemblCacheExec {
     pub(crate) limit: Option<usize>,
     pub(crate) variation_region_size: Option<i64>,
     pub(crate) batch_size_hint: Option<usize>,
+    pub(crate) coordinate_system_zero_based: bool,
     pub(crate) cache: PlanProperties,
 }
 
@@ -66,6 +67,7 @@ impl EnsemblCacheExec {
         limit: Option<usize>,
         variation_region_size: Option<i64>,
         batch_size_hint: Option<usize>,
+        coordinate_system_zero_based: bool,
     ) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -83,6 +85,7 @@ impl EnsemblCacheExec {
             limit,
             variation_region_size,
             batch_size_hint,
+            coordinate_system_zero_based,
             cache,
         }
     }
@@ -131,6 +134,7 @@ impl ExecutionPlan for EnsemblCacheExec {
         let predicate = self.predicate.clone();
         let limit = self.limit;
         let variation_region_size = self.variation_region_size.unwrap_or(1_000_000);
+        let coordinate_system_zero_based = self.coordinate_system_zero_based;
         let batch_size = self
             .batch_size_hint
             .unwrap_or_else(|| context.session_config().batch_size());
@@ -154,19 +158,26 @@ impl ExecutionPlan for EnsemblCacheExec {
                 if use_native_storable {
                     let parsed_rows = match kind {
                         EnsemblEntityKind::Transcript => {
-                            parse_transcript_storable_file(&source_file, &cache_info, &predicate)?
+                            parse_transcript_storable_file(
+                                &source_file,
+                                &cache_info,
+                                &predicate,
+                                coordinate_system_zero_based,
+                            )?
                         }
                         EnsemblEntityKind::RegulatoryFeature => parse_regulatory_storable_file(
                             &source_file,
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::RegulatoryFeature,
+                            coordinate_system_zero_based,
                         )?,
                         EnsemblEntityKind::MotifFeature => parse_regulatory_storable_file(
                             &source_file,
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::MotifFeature,
+                            coordinate_system_zero_based,
                         )?,
                         EnsemblEntityKind::Variation => Vec::new(),
                     };
@@ -217,9 +228,16 @@ impl ExecutionPlan for EnsemblCacheExec {
                             &cache_info,
                             &predicate,
                             variation_region_size,
+                            coordinate_system_zero_based,
                         )?,
                         EnsemblEntityKind::Transcript => {
-                            parse_transcript_line(line_trimmed, &source_file, &cache_info, &predicate)?
+                            parse_transcript_line(
+                                line_trimmed,
+                                &source_file,
+                                &cache_info,
+                                &predicate,
+                                coordinate_system_zero_based,
+                            )?
                         }
                         EnsemblEntityKind::RegulatoryFeature => parse_regulatory_line(
                             line_trimmed,
@@ -227,6 +245,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::RegulatoryFeature,
+                            coordinate_system_zero_based,
                         )?,
                         EnsemblEntityKind::MotifFeature => parse_regulatory_line(
                             line_trimmed,
@@ -234,6 +253,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::MotifFeature,
+                            coordinate_system_zero_based,
                         )?,
                     };
 
