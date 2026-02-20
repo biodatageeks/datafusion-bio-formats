@@ -1,0 +1,70 @@
+# datafusion-bio-format-ensembl-cache
+
+DataFusion `TableProvider` implementations for raw Ensembl VEP cache directories.
+
+## Supported entities
+
+- `variation`
+- `transcript`
+- `regulatory_feature`
+- `motif_feature`
+
+## Notes
+
+- Reads `.gz` files directly (no manual `gunzip` required).
+- Uses streaming execution and emits batches incrementally.
+- Supports native Storable (`pst0`) decoding for transcript/regulatory cache files.
+- Supports fixture/test payload shortcuts for unit fixtures:
+  - `storable`: `JSON:{...}`
+  - `sereal`: `SRL1{...}`
+
+## Example: Entity-Specific Provider
+
+```rust,no_run
+use datafusion::prelude::SessionContext;
+use datafusion_bio_format_ensembl_cache::{EnsemblCacheOptions, VariationTableProvider};
+use std::sync::Arc;
+
+# async fn example() -> datafusion::common::Result<()> {
+let ctx = SessionContext::new();
+let table = VariationTableProvider::new(EnsemblCacheOptions::new("/path/to/cache"))?;
+ctx.register_table("vep_variation", Arc::new(table))?;
+# Ok(())
+# }
+```
+
+## Example: Generic Provider Factory
+
+Use `EnsemblCacheTableProvider::for_entity(...)` when you want one entrypoint
+and switch by entity type (`variation`, `transcript`, etc.) yourself.
+
+```rust,no_run
+use datafusion::prelude::SessionContext;
+use datafusion_bio_format_ensembl_cache::{
+    EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
+};
+
+fn parse_cache_type(cache_type: &str) -> Option<EnsemblEntityKind> {
+    match cache_type.to_ascii_lowercase().as_str() {
+        "variation" => Some(EnsemblEntityKind::Variation),
+        "transcript" => Some(EnsemblEntityKind::Transcript),
+        "regulatory_feature" => Some(EnsemblEntityKind::RegulatoryFeature),
+        "motif_feature" => Some(EnsemblEntityKind::MotifFeature),
+        _ => None,
+    }
+}
+
+# async fn example() -> datafusion::common::Result<()> {
+let cache_type = "variation";
+let kind = parse_cache_type(cache_type).expect("unsupported cache type");
+
+let table = EnsemblCacheTableProvider::for_entity(
+    kind,
+    EnsemblCacheOptions::new("/path/to/cache"),
+)?;
+
+let ctx = SessionContext::new();
+ctx.register_table("vep_cache", table)?;
+# Ok(())
+# }
+```
