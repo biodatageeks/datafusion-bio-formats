@@ -31,6 +31,10 @@ pub struct EnsemblCacheOptions {
     /// Value is also exposed in Arrow schema metadata under
     /// `bio.coordinate_system_zero_based`.
     pub coordinate_system_zero_based: bool,
+    /// Optional target partition count for parallel file scanning.
+    ///
+    /// If not set, the provider uses DataFusion session target partitions.
+    pub target_partitions: Option<usize>,
     /// Optional batch-size override used by the execution plan.
     pub batch_size_hint: Option<usize>,
 }
@@ -40,11 +44,13 @@ impl EnsemblCacheOptions {
     ///
     /// Defaults:
     /// - `coordinate_system_zero_based = false` (VEP cache semantics)
+    /// - `target_partitions = None` (use DataFusion session target partitions)
     /// - `batch_size_hint = None` (use DataFusion session batch size)
     pub fn new(cache_root: impl Into<String>) -> Self {
         Self {
             cache_root: cache_root.into(),
             coordinate_system_zero_based: false,
+            target_partitions: None,
             batch_size_hint: None,
         }
     }
@@ -137,12 +143,19 @@ impl ProviderInner {
 
     async fn scan(
         &self,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let projected_schema = project_schema(&self.schema, projection);
         let predicate = extract_simple_predicate(filters);
+        let requested_partitions = self
+            .options
+            .target_partitions
+            .unwrap_or_else(|| state.config().target_partitions())
+            .max(1);
+        let num_partitions = requested_partitions.min(self.files.len().max(1));
 
         Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
             kind: self.kind,
@@ -154,6 +167,7 @@ impl ProviderInner {
             variation_region_size: self.variation_region_size,
             batch_size_hint: self.options.batch_size_hint,
             coordinate_system_zero_based: self.options.coordinate_system_zero_based,
+            num_partitions,
         })))
     }
 }
@@ -299,12 +313,12 @@ macro_rules! impl_table_provider {
 
             async fn scan(
                 &self,
-                _state: &dyn Session,
+                state: &dyn Session,
                 projection: Option<&Vec<usize>>,
                 filters: &[Expr],
                 limit: Option<usize>,
             ) -> Result<Arc<dyn ExecutionPlan>> {
-                self.inner.scan(projection, filters, limit).await
+                self.inner.scan(state, projection, filters, limit).await
             }
         }
     };
