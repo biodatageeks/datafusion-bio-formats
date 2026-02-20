@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 struct TranscriptRowCore {
-    chr: String,
+    chrom: String,
     start: i64,
     end: i64,
     strand: i8,
@@ -64,12 +64,12 @@ pub(crate) fn parse_transcript_line(
         ))
     })?;
 
-    let chr = if !parts[0].trim().is_empty() && parts[0].trim() != "." {
+    let chrom = if !parts[0].trim().is_empty() && parts[0].trim() != "." {
         parts[0].trim().to_string()
     } else {
         json_str(object.get("chr").or_else(|| object.get("chrom"))).ok_or_else(|| {
             exec_err(format!(
-                "Transcript row missing required chr in {}: {}",
+                "Transcript row missing required chrom in {}: {}",
                 source_file.display(),
                 trimmed
             ))
@@ -99,7 +99,7 @@ pub(crate) fn parse_transcript_line(
     let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
     let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
-    if !predicate.matches(&chr, start, end) {
+    if !predicate.matches(&chrom, start, end) {
         return Ok(None);
     }
 
@@ -120,7 +120,7 @@ pub(crate) fn parse_transcript_line(
     })?;
 
     let core = TranscriptRowCore {
-        chr,
+        chrom,
         start,
         end,
         strand,
@@ -173,7 +173,7 @@ pub(crate) fn parse_transcript_storable_file(
                 ))
             })?;
 
-            let chr = sv_str(obj.get("chr").or_else(|| obj.get("chrom")))
+            let chrom = sv_str(obj.get("chr").or_else(|| obj.get("chrom")))
                 .or_else(|| {
                     obj.get("slice")
                         .and_then(SValue::as_hash)
@@ -211,12 +211,12 @@ pub(crate) fn parse_transcript_storable_file(
             let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
             let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
-            if !predicate.matches(&chr, start, end) {
+            if !predicate.matches(&chrom, start, end) {
                 continue;
             }
 
             let core = TranscriptRowCore {
-                chr,
+                chrom,
                 start,
                 end,
                 strand,
@@ -242,7 +242,7 @@ fn build_transcript_row(
     context: &TranscriptRowContext<'_>,
 ) -> Result<Row> {
     let TranscriptRowCore {
-        chr,
+        chrom,
         start,
         end,
         strand,
@@ -252,7 +252,7 @@ fn build_transcript_row(
     let object_hash = stable_hash(&canonical_json);
 
     let mut row: Row = HashMap::new();
-    row.insert("chr".to_string(), CellValue::Utf8(chr));
+    row.insert("chrom".to_string(), CellValue::Utf8(chrom));
     row.insert("start".to_string(), CellValue::Int64(start));
     row.insert("end".to_string(), CellValue::Int64(end));
     row.insert("strand".to_string(), CellValue::Int8(strand));
@@ -458,7 +458,7 @@ fn build_transcript_row_storable(
     context: &TranscriptRowContext<'_>,
 ) -> Result<Row> {
     let TranscriptRowCore {
-        chr,
+        chrom,
         start,
         end,
         strand,
@@ -468,7 +468,7 @@ fn build_transcript_row_storable(
     let object_hash = stable_hash(&canonical_json);
 
     let mut row: Row = HashMap::new();
-    row.insert("chr".to_string(), CellValue::Utf8(chr));
+    row.insert("chrom".to_string(), CellValue::Utf8(chrom));
     row.insert("start".to_string(), CellValue::Int64(start));
     row.insert("end".to_string(), CellValue::Int64(end));
     row.insert("strand".to_string(), CellValue::Int8(strand));
