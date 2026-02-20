@@ -152,8 +152,7 @@ fn parse_variation_cols(raw: &str) -> Vec<String> {
         .trim()
         .trim_start_matches('[')
         .trim_end_matches(']')
-        .replace('"', "")
-        .replace('\'', "");
+        .replace(['"', '\''], "");
 
     cleaned
         .split([',', ' ', '\t'])

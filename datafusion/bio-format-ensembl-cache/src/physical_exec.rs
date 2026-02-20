@@ -36,6 +36,18 @@ pub(crate) struct EnsemblCacheExec {
     pub(crate) cache: PlanProperties,
 }
 
+pub(crate) struct EnsemblCacheExecConfig {
+    pub(crate) kind: EnsemblEntityKind,
+    pub(crate) cache_info: CacheInfo,
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) schema: SchemaRef,
+    pub(crate) predicate: SimplePredicate,
+    pub(crate) limit: Option<usize>,
+    pub(crate) variation_region_size: Option<i64>,
+    pub(crate) batch_size_hint: Option<usize>,
+    pub(crate) coordinate_system_zero_based: bool,
+}
+
 impl Debug for EnsemblCacheExec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EnsemblCacheExec")
@@ -58,34 +70,24 @@ impl DisplayAs for EnsemblCacheExec {
 }
 
 impl EnsemblCacheExec {
-    pub(crate) fn new(
-        kind: EnsemblEntityKind,
-        cache_info: CacheInfo,
-        files: Vec<PathBuf>,
-        schema: SchemaRef,
-        predicate: SimplePredicate,
-        limit: Option<usize>,
-        variation_region_size: Option<i64>,
-        batch_size_hint: Option<usize>,
-        coordinate_system_zero_based: bool,
-    ) -> Self {
+    pub(crate) fn new(config: EnsemblCacheExecConfig) -> Self {
         let cache = PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
+            EquivalenceProperties::new(config.schema.clone()),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Final,
             Boundedness::Bounded,
         );
 
         Self {
-            kind,
-            cache_info,
-            files,
-            schema,
-            predicate,
-            limit,
-            variation_region_size,
-            batch_size_hint,
-            coordinate_system_zero_based,
+            kind: config.kind,
+            cache_info: config.cache_info,
+            files: config.files,
+            schema: config.schema,
+            predicate: config.predicate,
+            limit: config.limit,
+            variation_region_size: config.variation_region_size,
+            batch_size_hint: config.batch_size_hint,
+            coordinate_system_zero_based: config.coordinate_system_zero_based,
             cache,
         }
     }

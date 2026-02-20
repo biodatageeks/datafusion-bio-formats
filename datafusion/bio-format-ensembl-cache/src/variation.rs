@@ -219,9 +219,7 @@ fn first_non_empty(values: &HashMap<String, String>, candidates: &[&str]) -> Opt
 fn parse_region_from_filename(name: &str) -> Option<i64> {
     let marker = name.find('_')?;
     let suffix = &name[marker + 1..];
-    let Some((start_raw, rest)) = suffix.split_once('-') else {
-        return None;
-    };
+    let (start_raw, rest) = suffix.split_once('-')?;
     let end_raw: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     if end_raw.is_empty() {
         return None;

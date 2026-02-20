@@ -250,10 +250,7 @@ impl<'a> Parser<'a> {
                 }
                 SValue::Hash(map)
             }
-            0x04 => {
-                let value = self.parse_value()?;
-                value
-            }
+            0x04 => self.parse_value()?,
             0x05 => SValue::Null,
             0x08 => {
                 let byte = self.read_u8()? as i16;

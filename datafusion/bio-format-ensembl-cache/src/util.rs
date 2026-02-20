@@ -97,22 +97,22 @@ pub(crate) fn normalize_nullable(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn parse_i64(raw: Option<&str>) -> Option<i64> {
-    raw.and_then(|v| normalize_nullable(v))
+    raw.and_then(normalize_nullable)
         .and_then(|v| v.parse().ok())
 }
 
 pub(crate) fn parse_i8(raw: Option<&str>) -> Option<i8> {
-    raw.and_then(|v| normalize_nullable(v))
+    raw.and_then(normalize_nullable)
         .and_then(|v| v.parse().ok())
 }
 
 pub(crate) fn parse_f64(raw: Option<&str>) -> Option<f64> {
-    raw.and_then(|v| normalize_nullable(v))
+    raw.and_then(normalize_nullable)
         .and_then(|v| v.parse().ok())
 }
 
 pub(crate) fn parse_bool(raw: Option<&str>) -> Option<bool> {
-    raw.and_then(|v| normalize_nullable(v))
+    raw.and_then(normalize_nullable)
         .and_then(|v| match v.to_ascii_lowercase().as_str() {
             "true" | "1" | "yes" => Some(true),
             "false" | "0" | "no" => Some(false),
