@@ -11,7 +11,10 @@ pub(crate) fn discover_variation_files(cache_root: &Path) -> Result<Vec<PathBuf>
         .filter(|path| {
             path.file_name()
                 .and_then(|v| v.to_str())
-                .is_some_and(|name| name.starts_with("all_vars"))
+                .is_some_and(|name| {
+                    let lower = name.to_ascii_lowercase();
+                    lower.starts_with("all_vars") && !is_index_sidecar_name(&lower)
+                })
         })
         .cloned()
         .collect();
@@ -28,13 +31,14 @@ pub(crate) fn discover_variation_files(cache_root: &Path) -> Result<Vec<PathBuf>
                 .and_then(|v| v.to_str())
                 .is_some_and(|name| {
                     let lower = name.to_ascii_lowercase();
-                    lower.contains("_var")
-                        || name.ends_with(".var")
-                        || name.ends_with(".var.gz")
-                        || lower.contains("var.gz")
-                        || (looks_like_region_file_name(&lower)
-                            && !lower.ends_with("_reg.gz")
-                            && !lower.contains("transcript"))
+                    !is_index_sidecar_name(&lower)
+                        && (lower.contains("_var")
+                            || name.ends_with(".var")
+                            || name.ends_with(".var.gz")
+                            || lower.contains("var.gz")
+                            || (looks_like_region_file_name(&lower)
+                                && !lower.ends_with("_reg.gz")
+                                && !lower.contains("transcript")))
                 })
         })
         .cloned()
@@ -63,6 +67,10 @@ pub(crate) fn discover_transcript_files(cache_root: &Path) -> Result<Vec<PathBuf
                 .and_then(|v| v.to_str())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
+
+            if is_index_sidecar_name(&name) {
+                return false;
+            }
 
             if name == "info.txt" {
                 return false;
@@ -104,7 +112,8 @@ fn discover_entity_files(cache_root: &Path, name_patterns: &[&str]) -> Result<Ve
                 .and_then(|v| v.to_str())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            name_patterns.iter().any(|pattern| name.contains(pattern))
+            !is_index_sidecar_name(&name)
+                && name_patterns.iter().any(|pattern| name.contains(pattern))
         })
         .collect();
 
@@ -139,6 +148,10 @@ fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn is_index_sidecar_name(name: &str) -> bool {
+    name.ends_with(".csi") || name.ends_with(".tbi")
 }
 
 fn looks_like_region_file_name(name: &str) -> bool {
