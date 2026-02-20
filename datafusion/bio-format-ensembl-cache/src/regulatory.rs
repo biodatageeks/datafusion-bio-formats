@@ -7,8 +7,8 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::row::{CellValue, Row};
 use crate::util::{
-    canonical_json_string, json_f64, json_i32, json_i64, json_str, parse_i64,
-    read_maybe_gzip_bytes, stable_hash,
+    canonical_json_string, json_f64, json_i32, json_i64, json_str, normalize_genomic_end,
+    normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -25,6 +25,7 @@ pub(crate) fn parse_regulatory_line(
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
     target: RegulatoryTarget,
+    coordinate_system_zero_based: bool,
 ) -> Result<Option<Row>> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -74,7 +75,7 @@ pub(crate) fn parse_regulatory_line(
         })?
     };
 
-    let start = parse_i64(Some(parts[1]))
+    let source_start = parse_i64(Some(parts[1]))
         .or_else(|| json_i64(object.get("start")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -83,7 +84,7 @@ pub(crate) fn parse_regulatory_line(
             ))
         })?;
 
-    let end = parse_i64(Some(parts[2]))
+    let source_end = parse_i64(Some(parts[2]))
         .or_else(|| json_i64(object.get("end")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -91,6 +92,9 @@ pub(crate) fn parse_regulatory_line(
                 source_file.display()
             ))
         })?;
+
+    let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+    let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
     if !predicate.matches(&chr, start, end) {
         return Ok(None);
@@ -171,6 +175,7 @@ pub(crate) fn parse_regulatory_storable_file(
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
     target: RegulatoryTarget,
+    coordinate_system_zero_based: bool,
 ) -> Result<Vec<Row>> {
     let bytes = read_maybe_gzip_bytes(source_file)?;
     if !bytes.starts_with(b"pst0") {
@@ -222,18 +227,20 @@ pub(crate) fn parse_regulatory_storable_file(
                     })
                     .unwrap_or_else(|| region_chr.clone());
 
-                let start = sv_i64(obj.get("start")).ok_or_else(|| {
+                let source_start = sv_i64(obj.get("start")).ok_or_else(|| {
                     exec_err(format!(
                         "Regulatory storable object missing start in {}",
                         source_file.display()
                     ))
                 })?;
-                let end = sv_i64(obj.get("end")).ok_or_else(|| {
+                let source_end = sv_i64(obj.get("end")).ok_or_else(|| {
                     exec_err(format!(
                         "Regulatory storable object missing end in {}",
                         source_file.display()
                     ))
                 })?;
+                let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+                let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
                 if !predicate.matches(&chr, start, end) {
                     continue;
                 }

@@ -2,7 +2,10 @@ use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::row::{CellValue, Row};
-use crate::util::{normalize_nullable, parse_f64, parse_i8, parse_i64};
+use crate::util::{
+    normalize_genomic_end, normalize_genomic_start, normalize_nullable, parse_f64, parse_i8,
+    parse_i64,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -47,6 +50,7 @@ pub(crate) fn parse_variation_line(
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
     cache_region_size: i64,
+    coordinate_system_zero_based: bool,
 ) -> Result<Option<Row>> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -71,7 +75,7 @@ pub(crate) fn parse_variation_line(
             ))
         })?;
 
-    let start =
+    let source_start =
         parse_i64(first_non_empty(&source_values, &["start", "pos", "position"]).as_deref())
             .ok_or_else(|| {
                 exec_err(format!(
@@ -81,7 +85,11 @@ pub(crate) fn parse_variation_line(
                 ))
             })?;
 
-    let end = parse_i64(first_non_empty(&source_values, &["end"]).as_deref()).unwrap_or(start);
+    let source_end =
+        parse_i64(first_non_empty(&source_values, &["end"]).as_deref()).unwrap_or(source_start);
+
+    let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+    let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
     if !predicate.matches(&chr, start, end) {
         return Ok(None);
@@ -105,7 +113,7 @@ pub(crate) fn parse_variation_line(
             ))
         })?;
 
-    let region_bin = ((start.saturating_sub(1)) / cache_region_size.max(1)).max(0);
+    let region_bin = ((source_start.saturating_sub(1)) / cache_region_size.max(1)).max(0);
     let variation_name_for_ids = variation_name.clone();
 
     let mut row: Row = HashMap::new();

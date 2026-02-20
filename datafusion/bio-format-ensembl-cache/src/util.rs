@@ -120,6 +120,18 @@ pub(crate) fn parse_bool(raw: Option<&str>) -> Option<bool> {
         })
 }
 
+pub(crate) fn normalize_genomic_start(start: i64, coordinate_system_zero_based: bool) -> i64 {
+    if coordinate_system_zero_based {
+        start.saturating_sub(1)
+    } else {
+        start
+    }
+}
+
+pub(crate) fn normalize_genomic_end(end: i64, _coordinate_system_zero_based: bool) -> i64 {
+    end
+}
+
 pub(crate) fn stable_hash(input: &str) -> String {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in input.as_bytes() {

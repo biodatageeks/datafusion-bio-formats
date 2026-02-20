@@ -1,6 +1,7 @@
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::SessionContext;
+use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, MotifFeatureTableProvider, RegulatoryFeatureTableProvider,
     TranscriptTableProvider, VariationTableProvider,
@@ -12,8 +13,12 @@ fn fixture_path(name: &str) -> String {
 }
 
 fn first_i64(batches: &[datafusion::arrow::record_batch::RecordBatch]) -> i64 {
+    first_i64_at(batches, 0)
+}
+
+fn first_i64_at(batches: &[datafusion::arrow::record_batch::RecordBatch], column: usize) -> i64 {
     let array = batches[0]
-        .column(0)
+        .column(column)
         .as_any()
         .downcast_ref::<Int64Array>()
         .expect("expected Int64Array");
@@ -131,6 +136,58 @@ async fn variation_dynamic_source_schema_and_ids_work() -> datafusion::common::R
 }
 
 #[tokio::test]
+async fn variation_coordinate_system_metadata_and_values_work() -> datafusion::common::Result<()> {
+    let one_based = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "variation_non_tabix",
+    )))?;
+    assert_eq!(
+        one_based
+            .schema()
+            .metadata()
+            .get(COORDINATE_SYSTEM_METADATA_KEY),
+        Some(&"false".to_string())
+    );
+
+    let ctx = SessionContext::new();
+    ctx.register_table("variation", Arc::new(one_based))?;
+    let one_based_rows = ctx
+        .sql("SELECT start FROM variation WHERE chr = '1' ORDER BY start LIMIT 1")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(first_i64_at(&one_based_rows, 0), 100);
+
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    options.coordinate_system_zero_based = true;
+    let zero_based = VariationTableProvider::new(options)?;
+    assert_eq!(
+        zero_based
+            .schema()
+            .metadata()
+            .get(COORDINATE_SYSTEM_METADATA_KEY),
+        Some(&"true".to_string())
+    );
+
+    let ctx = SessionContext::new();
+    ctx.register_table("variation", Arc::new(zero_based))?;
+    let zero_based_rows = ctx
+        .sql("SELECT start FROM variation WHERE chr = '1' ORDER BY start LIMIT 1")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(first_i64_at(&zero_based_rows, 0), 99);
+
+    let filtered = ctx
+        .sql("SELECT COUNT(*) FROM variation WHERE chr = '1' AND start = 99")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(first_i64(&filtered), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn transcript_storable_query_works() -> datafusion::common::Result<()> {
     let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
         "transcript_storable",
@@ -167,6 +224,39 @@ async fn transcript_sereal_query_works() -> datafusion::common::Result<()> {
 
     let batches = ctx.sql("SELECT COUNT(*) FROM tx").await?.collect().await?;
     assert_eq!(first_i64(&batches), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_coordinate_system_metadata_and_values_work() -> datafusion::common::Result<()> {
+    let mut options = EnsemblCacheOptions::new(fixture_path("transcript_sereal"));
+    options.coordinate_system_zero_based = true;
+    let provider = TranscriptTableProvider::new(options)?;
+    assert_eq!(
+        provider
+            .schema()
+            .metadata()
+            .get(COORDINATE_SYSTEM_METADATA_KEY),
+        Some(&"true".to_string())
+    );
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let rows = ctx
+        .sql("SELECT start FROM tx WHERE stable_id = 'ENST000010'")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(first_i64_at(&rows, 0), 2999);
+
+    let filtered = ctx
+        .sql("SELECT COUNT(*) FROM tx WHERE start = 2999")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(first_i64(&filtered), 1);
 
     Ok(())
 }
@@ -239,6 +329,49 @@ async fn regulatory_and_motif_sereal_work() -> datafusion::common::Result<()> {
         .collect()
         .await?;
     assert_eq!(first_i64(&motif_batches), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn regulatory_and_motif_coordinate_system_metadata_and_values_work()
+-> datafusion::common::Result<()> {
+    let mut reg_options = EnsemblCacheOptions::new(fixture_path("regulatory_sereal"));
+    reg_options.coordinate_system_zero_based = true;
+    let reg = RegulatoryFeatureTableProvider::new(reg_options)?;
+    assert_eq!(
+        reg.schema().metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+        Some(&"true".to_string())
+    );
+
+    let mut motif_options = EnsemblCacheOptions::new(fixture_path("regulatory_sereal"));
+    motif_options.coordinate_system_zero_based = true;
+    let motif = MotifFeatureTableProvider::new(motif_options)?;
+    assert_eq!(
+        motif
+            .schema()
+            .metadata()
+            .get(COORDINATE_SYSTEM_METADATA_KEY),
+        Some(&"true".to_string())
+    );
+
+    let ctx = SessionContext::new();
+    ctx.register_table("reg", Arc::new(reg))?;
+    ctx.register_table("motif", Arc::new(motif))?;
+
+    let reg_rows = ctx
+        .sql("SELECT start FROM reg LIMIT 1")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(first_i64_at(&reg_rows, 0), 6999);
+
+    let motif_rows = ctx
+        .sql("SELECT start FROM motif LIMIT 1")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(first_i64_at(&motif_rows, 0), 7049);
 
     Ok(())
 }

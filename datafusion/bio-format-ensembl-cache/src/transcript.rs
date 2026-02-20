@@ -7,8 +7,8 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::row::{CellValue, Row};
 use crate::util::{
-    canonical_json_string, json_bool, json_i32, json_i64, json_str, parse_i64,
-    read_maybe_gzip_bytes, stable_hash,
+    canonical_json_string, json_bool, json_i32, json_i64, json_str, normalize_genomic_end,
+    normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -19,6 +19,7 @@ pub(crate) fn parse_transcript_line(
     source_file: &Path,
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
+    coordinate_system_zero_based: bool,
 ) -> Result<Option<Row>> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -61,7 +62,7 @@ pub(crate) fn parse_transcript_line(
         })?
     };
 
-    let start = parse_i64(Some(parts[1]))
+    let source_start = parse_i64(Some(parts[1]))
         .or_else(|| json_i64(object.get("start")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -71,7 +72,7 @@ pub(crate) fn parse_transcript_line(
             ))
         })?;
 
-    let end = parse_i64(Some(parts[2]))
+    let source_end = parse_i64(Some(parts[2]))
         .or_else(|| json_i64(object.get("end")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -80,6 +81,9 @@ pub(crate) fn parse_transcript_line(
                 trimmed
             ))
         })?;
+
+    let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+    let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
     if !predicate.matches(&chr, start, end) {
         return Ok(None);
@@ -109,6 +113,7 @@ pub(crate) fn parse_transcript_line(
         end,
         strand,
         stable_id,
+        coordinate_system_zero_based,
         cache_info,
         source_file,
     )?))
@@ -118,6 +123,7 @@ pub(crate) fn parse_transcript_storable_file(
     source_file: &Path,
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
+    coordinate_system_zero_based: bool,
 ) -> Result<Vec<Row>> {
     let bytes = read_maybe_gzip_bytes(source_file)?;
     if !bytes.starts_with(b"pst0") {
@@ -157,13 +163,13 @@ pub(crate) fn parse_transcript_storable_file(
                 })
                 .unwrap_or_else(|| region_chr.clone());
 
-            let start = sv_i64(obj.get("start")).ok_or_else(|| {
+            let source_start = sv_i64(obj.get("start")).ok_or_else(|| {
                 exec_err(format!(
                     "Transcript storable object missing start in {}",
                     source_file.display()
                 ))
             })?;
-            let end = sv_i64(obj.get("end")).ok_or_else(|| {
+            let source_end = sv_i64(obj.get("end")).ok_or_else(|| {
                 exec_err(format!(
                     "Transcript storable object missing end in {}",
                     source_file.display()
@@ -184,6 +190,9 @@ pub(crate) fn parse_transcript_storable_file(
                 ))
             })?;
 
+            let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+            let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
+
             if !predicate.matches(&chr, start, end) {
                 continue;
             }
@@ -196,6 +205,7 @@ pub(crate) fn parse_transcript_storable_file(
                 end,
                 strand,
                 stable_id,
+                coordinate_system_zero_based,
                 cache_info,
                 source_file,
             )?);
@@ -213,6 +223,7 @@ fn build_transcript_row(
     end: i64,
     strand: i8,
     stable_id: String,
+    coordinate_system_zero_based: bool,
     cache_info: &CacheInfo,
     source_file: &Path,
 ) -> Result<Row> {
@@ -278,12 +289,14 @@ fn build_transcript_row(
     insert_opt_i64(
         &mut row,
         "coding_region_start",
-        json_i64(object.get("coding_region_start")),
+        json_i64(object.get("coding_region_start"))
+            .map(|value| normalize_genomic_start(value, coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
         "coding_region_end",
-        json_i64(object.get("coding_region_end")),
+        json_i64(object.get("coding_region_end"))
+            .map(|value| normalize_genomic_end(value, coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
@@ -425,6 +438,7 @@ fn build_transcript_row_storable(
     end: i64,
     strand: i8,
     stable_id: String,
+    coordinate_system_zero_based: bool,
     cache_info: &CacheInfo,
     source_file: &Path,
 ) -> Result<Row> {
@@ -490,12 +504,14 @@ fn build_transcript_row_storable(
     insert_opt_i64(
         &mut row,
         "coding_region_start",
-        sv_i64(object.get("coding_region_start")),
+        sv_i64(object.get("coding_region_start"))
+            .map(|value| normalize_genomic_start(value, coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
         "coding_region_end",
-        sv_i64(object.get("coding_region_end")),
+        sv_i64(object.get("coding_region_end"))
+            .map(|value| normalize_genomic_end(value, coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
