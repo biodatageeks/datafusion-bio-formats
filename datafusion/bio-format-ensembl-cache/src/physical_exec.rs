@@ -33,6 +33,7 @@ pub(crate) struct EnsemblCacheExec {
     pub(crate) variation_region_size: Option<i64>,
     pub(crate) batch_size_hint: Option<usize>,
     pub(crate) coordinate_system_zero_based: bool,
+    pub(crate) num_partitions: usize,
     pub(crate) cache: PlanProperties,
 }
 
@@ -46,6 +47,7 @@ pub(crate) struct EnsemblCacheExecConfig {
     pub(crate) variation_region_size: Option<i64>,
     pub(crate) batch_size_hint: Option<usize>,
     pub(crate) coordinate_system_zero_based: bool,
+    pub(crate) num_partitions: usize,
 }
 
 impl Debug for EnsemblCacheExec {
@@ -53,6 +55,7 @@ impl Debug for EnsemblCacheExec {
         f.debug_struct("EnsemblCacheExec")
             .field("kind", &self.kind)
             .field("files", &self.files)
+            .field("num_partitions", &self.num_partitions)
             .field("limit", &self.limit)
             .finish()
     }
@@ -62,18 +65,20 @@ impl DisplayAs for EnsemblCacheExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "EnsemblCacheExec(kind={:?}, files={})",
+            "EnsemblCacheExec(kind={:?}, files={}, partitions={})",
             self.kind,
-            self.files.len()
+            self.files.len(),
+            self.num_partitions
         )
     }
 }
 
 impl EnsemblCacheExec {
     pub(crate) fn new(config: EnsemblCacheExecConfig) -> Self {
+        let num_partitions = config.num_partitions.max(1);
         let cache = PlanProperties::new(
             EquivalenceProperties::new(config.schema.clone()),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(num_partitions),
             EmissionType::Final,
             Boundedness::Bounded,
         );
@@ -88,6 +93,7 @@ impl EnsemblCacheExec {
             variation_region_size: config.variation_region_size,
             batch_size_hint: config.batch_size_hint,
             coordinate_system_zero_based: config.coordinate_system_zero_based,
+            num_partitions,
             cache,
         }
     }
@@ -122,9 +128,10 @@ impl ExecutionPlan for EnsemblCacheExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        if partition != 0 {
+        if partition >= self.num_partitions {
             return Err(exec_err(format!(
-                "EnsemblCacheExec has only one partition, requested {partition}"
+                "EnsemblCacheExec has {} partitions, requested {partition}",
+                self.num_partitions
             )));
         }
 
@@ -132,7 +139,18 @@ impl ExecutionPlan for EnsemblCacheExec {
         let stream_schema = schema.clone();
         let kind = self.kind;
         let cache_info = self.cache_info.clone();
-        let files = self.files.clone();
+        let files = self
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, path)| {
+                if idx % self.num_partitions == partition {
+                    Some(path.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
         let predicate = self.predicate.clone();
         let limit = self.limit;
         let variation_region_size = self.variation_region_size.unwrap_or(1_000_000);

@@ -1,7 +1,9 @@
 use datafusion::arrow::array::{Array, Int64Array, StringArray};
 use datafusion::catalog::TableProvider;
-use datafusion::prelude::SessionContext;
+use datafusion::physical_plan::ExecutionPlanProperties;
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use datafusion_bio_format_core::test_utils::find_leaf_exec;
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, MotifFeatureTableProvider, RegulatoryFeatureTableProvider,
     TranscriptTableProvider, VariationTableProvider,
@@ -41,6 +43,11 @@ fn first_string(
     }
 }
 
+fn session_ctx_with_target_partitions(target_partitions: usize) -> SessionContext {
+    let config = SessionConfig::new().with_target_partitions(target_partitions);
+    SessionContext::new_with_config(config)
+}
+
 #[tokio::test]
 async fn variation_non_tabix_streaming_query_works() -> datafusion::common::Result<()> {
     let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
@@ -65,6 +72,58 @@ async fn variation_non_tabix_streaming_query_works() -> datafusion::common::Resu
         .collect()
         .await?;
     assert_eq!(first_i64(&batches), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_parallel_row_count_invariant() -> datafusion::common::Result<()> {
+    for partitions in [1usize, 2, 4, 8] {
+        let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+            "variation_non_tabix",
+        )))?;
+        let ctx = session_ctx_with_target_partitions(partitions);
+        ctx.register_table("variation", Arc::new(provider))?;
+
+        let batches = ctx
+            .sql("SELECT COUNT(*) FROM variation")
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            first_i64(&batches),
+            3,
+            "count mismatch with target_partitions={partitions}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_target_partitions_override_applied() -> datafusion::common::Result<()> {
+    let ctx = session_ctx_with_target_partitions(8);
+
+    let mut one_partition_options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    one_partition_options.target_partitions = Some(1);
+    let provider = VariationTableProvider::new(one_partition_options)?;
+    ctx.register_table("variation_one", Arc::new(provider))?;
+    let df = ctx.sql("SELECT chrom, start FROM variation_one").await?;
+    let plan = df.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "EnsemblCacheExec");
+    assert_eq!(leaf.output_partitioning().partition_count(), 1);
+
+    let mut many_partition_options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    many_partition_options.target_partitions = Some(8);
+    let provider = VariationTableProvider::new(many_partition_options)?;
+    ctx.register_table("variation_many", Arc::new(provider))?;
+    let df = ctx.sql("SELECT chrom, start FROM variation_many").await?;
+    let plan = df.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "EnsemblCacheExec");
+    // variation_non_tabix fixture has 2 source files, so partitions are capped at 2.
+    assert_eq!(leaf.output_partitioning().partition_count(), 2);
 
     Ok(())
 }
