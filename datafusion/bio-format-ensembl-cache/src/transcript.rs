@@ -14,6 +14,20 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+struct TranscriptRowCore {
+    chr: String,
+    start: i64,
+    end: i64,
+    strand: i8,
+    stable_id: String,
+}
+
+struct TranscriptRowContext<'a> {
+    coordinate_system_zero_based: bool,
+    cache_info: &'a CacheInfo,
+    source_file: &'a Path,
+}
+
 pub(crate) fn parse_transcript_line(
     line: &str,
     source_file: &Path,
@@ -105,17 +119,21 @@ pub(crate) fn parse_transcript_line(
         ))
     })?;
 
-    Ok(Some(build_transcript_row(
-        &payload,
-        object,
+    let core = TranscriptRowCore {
         chr,
         start,
         end,
         strand,
         stable_id,
+    };
+    let context = TranscriptRowContext {
         coordinate_system_zero_based,
         cache_info,
         source_file,
+    };
+
+    Ok(Some(build_transcript_row(
+        &payload, object, core, &context,
     )?))
 }
 
@@ -197,18 +215,20 @@ pub(crate) fn parse_transcript_storable_file(
                 continue;
             }
 
-            rows.push(build_transcript_row_storable(
-                item,
-                obj,
+            let core = TranscriptRowCore {
                 chr,
                 start,
                 end,
                 strand,
                 stable_id,
+            };
+            let context = TranscriptRowContext {
                 coordinate_system_zero_based,
                 cache_info,
                 source_file,
-            )?);
+            };
+
+            rows.push(build_transcript_row_storable(item, obj, core, &context)?);
         }
     }
 
@@ -218,15 +238,16 @@ pub(crate) fn parse_transcript_storable_file(
 fn build_transcript_row(
     payload: &Value,
     object: &serde_json::Map<String, Value>,
-    chr: String,
-    start: i64,
-    end: i64,
-    strand: i8,
-    stable_id: String,
-    coordinate_system_zero_based: bool,
-    cache_info: &CacheInfo,
-    source_file: &Path,
+    core: TranscriptRowCore,
+    context: &TranscriptRowContext<'_>,
 ) -> Result<Row> {
+    let TranscriptRowCore {
+        chr,
+        start,
+        end,
+        strand,
+        stable_id,
+    } = core;
     let canonical_json = canonical_json_string(payload)?;
     let object_hash = stable_hash(&canonical_json);
 
@@ -290,13 +311,13 @@ fn build_transcript_row(
         &mut row,
         "coding_region_start",
         json_i64(object.get("coding_region_start"))
-            .map(|value| normalize_genomic_start(value, coordinate_system_zero_based)),
+            .map(|value| normalize_genomic_start(value, context.coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
         "coding_region_end",
         json_i64(object.get("coding_region_end"))
-            .map(|value| normalize_genomic_end(value, coordinate_system_zero_based)),
+            .map(|value| normalize_genomic_end(value, context.coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
@@ -347,7 +368,7 @@ fn build_transcript_row(
     );
     row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
 
-    append_provenance(&mut row, cache_info, source_file);
+    append_provenance(&mut row, context.cache_info, context.source_file);
     Ok(row)
 }
 
@@ -433,15 +454,16 @@ fn append_provenance(row: &mut Row, cache_info: &CacheInfo, source_file: &Path) 
 fn build_transcript_row_storable(
     payload: &SValue,
     object: &std::collections::BTreeMap<String, SValue>,
-    chr: String,
-    start: i64,
-    end: i64,
-    strand: i8,
-    stable_id: String,
-    coordinate_system_zero_based: bool,
-    cache_info: &CacheInfo,
-    source_file: &Path,
+    core: TranscriptRowCore,
+    context: &TranscriptRowContext<'_>,
 ) -> Result<Row> {
+    let TranscriptRowCore {
+        chr,
+        start,
+        end,
+        strand,
+        stable_id,
+    } = core;
     let canonical_json = canonical_storable_json_string(payload);
     let object_hash = stable_hash(&canonical_json);
 
@@ -505,13 +527,13 @@ fn build_transcript_row_storable(
         &mut row,
         "coding_region_start",
         sv_i64(object.get("coding_region_start"))
-            .map(|value| normalize_genomic_start(value, coordinate_system_zero_based)),
+            .map(|value| normalize_genomic_start(value, context.coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
         "coding_region_end",
         sv_i64(object.get("coding_region_end"))
-            .map(|value| normalize_genomic_end(value, coordinate_system_zero_based)),
+            .map(|value| normalize_genomic_end(value, context.coordinate_system_zero_based)),
     );
     insert_opt_i64(
         &mut row,
@@ -558,7 +580,7 @@ fn build_transcript_row_storable(
     );
     row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
 
-    append_provenance(&mut row, cache_info, source_file);
+    append_provenance(&mut row, context.cache_info, context.source_file);
     Ok(row)
 }
 

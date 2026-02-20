@@ -19,6 +19,19 @@ pub(crate) enum RegulatoryTarget {
     MotifFeature,
 }
 
+struct RegulatoryRowCore {
+    chr: String,
+    start: i64,
+    end: i64,
+    strand: i8,
+    target: RegulatoryTarget,
+}
+
+struct RegulatoryRowContext<'a> {
+    cache_info: &'a CacheInfo,
+    source_file: &'a Path,
+}
+
 pub(crate) fn parse_regulatory_line(
     line: &str,
     source_file: &Path,
@@ -193,6 +206,10 @@ pub(crate) fn parse_regulatory_storable_file(
         ))
     })?;
 
+    let context = RegulatoryRowContext {
+        cache_info,
+        source_file,
+    };
     let mut rows = Vec::new();
 
     for (region_chr, region_payload) in root_obj {
@@ -254,17 +271,15 @@ pub(crate) fn parse_regulatory_storable_file(
                         ))
                     })?;
 
-                rows.push(build_regulatory_row_storable(
-                    item,
-                    obj,
+                let core = RegulatoryRowCore {
                     chr,
                     start,
                     end,
                     strand,
                     target,
-                    cache_info,
-                    source_file,
-                )?);
+                };
+
+                rows.push(build_regulatory_row_storable(item, obj, core, &context)?);
             }
         }
     }
@@ -323,14 +338,16 @@ fn infer_kind_from_name(name: &str) -> Option<RegulatoryTarget> {
 fn build_regulatory_row_storable(
     payload: &SValue,
     object: &std::collections::BTreeMap<String, SValue>,
-    chr: String,
-    start: i64,
-    end: i64,
-    strand: i8,
-    target: RegulatoryTarget,
-    cache_info: &CacheInfo,
-    source_file: &Path,
+    core: RegulatoryRowCore,
+    context: &RegulatoryRowContext<'_>,
 ) -> Result<Row> {
+    let RegulatoryRowCore {
+        chr,
+        start,
+        end,
+        strand,
+        target,
+    } = core;
     let canonical_json = canonical_storable_json_string(payload);
     let object_hash = stable_hash(&canonical_json);
 
@@ -396,7 +413,7 @@ fn build_regulatory_row_storable(
     );
     row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
 
-    append_provenance(&mut row, cache_info, source_file);
+    append_provenance(&mut row, context.cache_info, context.source_file);
     Ok(row)
 }
 

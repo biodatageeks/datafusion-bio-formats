@@ -5,7 +5,7 @@ use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
 use crate::filter::{extract_simple_predicate, is_pushdown_supported};
 use crate::info::CacheInfo;
-use crate::physical_exec::EnsemblCacheExec;
+use crate::physical_exec::{EnsemblCacheExec, EnsemblCacheExecConfig};
 use crate::schema::{
     motif_feature_schema, regulatory_feature_schema, transcript_schema, variation_schema,
 };
@@ -144,17 +144,17 @@ impl ProviderInner {
         let projected_schema = project_schema(&self.schema, projection);
         let predicate = extract_simple_predicate(filters);
 
-        Ok(Arc::new(EnsemblCacheExec::new(
-            self.kind,
-            self.cache_info.clone(),
-            self.files.clone(),
-            projected_schema,
+        Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
+            kind: self.kind,
+            cache_info: self.cache_info.clone(),
+            files: self.files.clone(),
+            schema: projected_schema,
             predicate,
             limit,
-            self.variation_region_size,
-            self.options.batch_size_hint,
-            self.options.coordinate_system_zero_based,
-        )))
+            variation_region_size: self.variation_region_size,
+            batch_size_hint: self.options.batch_size_hint,
+            coordinate_system_zero_based: self.options.coordinate_system_zero_based,
+        })))
     }
 }
 
