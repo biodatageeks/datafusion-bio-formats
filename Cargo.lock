@@ -1048,13 +1048,11 @@ dependencies = [
 name = "datafusion-bio-format-ensembl-cache"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
  "datafusion",
  "datafusion-bio-format-core",
  "datafusion-execution",
  "flate2",
- "futures",
  "hex",
  "log",
  "serde_json",

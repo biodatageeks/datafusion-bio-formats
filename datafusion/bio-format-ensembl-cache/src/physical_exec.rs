@@ -17,13 +17,13 @@ use crate::util::{
 use crate::variation::{
     SourceIdWriter, VariationColumnIndices, VariationContext, parse_variation_line_into,
 };
-use async_stream::try_stream;
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::common::DataFusionError;
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::stream::RecordBatchReceiverStreamBuilder;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_execution::TaskContext;
 use std::any::Any;
@@ -31,6 +31,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::mpsc::Sender;
 
 #[derive(Clone)]
 pub(crate) struct EnsemblCacheExec {
@@ -259,210 +260,249 @@ impl ExecutionPlan for EnsemblCacheExec {
             .batch_size_hint
             .unwrap_or_else(|| context.session_config().batch_size());
 
-        let stream = try_stream! {
-            let col_map = ColumnMap::from_schema(&stream_schema);
-            let provenance = ProvenanceWriter::new(&col_map, &cache_info);
-            let variation_ctx = if kind == EnsemblEntityKind::Variation {
-                Some(VariationContext::new(&cache_info))
-            } else {
-                None
-            };
-            let variation_col_idx = if kind == EnsemblEntityKind::Variation {
-                Some(VariationColumnIndices::new(&col_map, variation_ctx.as_ref().unwrap()))
-            } else {
-                None
-            };
-            let mut source_id_writer = if kind == EnsemblEntityKind::Variation {
-                let ctx = variation_ctx.as_ref().unwrap();
-                Some(SourceIdWriter::new(&col_map, ctx.source_to_id_column()))
-                } else {
-                None
-            };
-            let transcript_col_idx = if kind == EnsemblEntityKind::Transcript {
-                Some(TranscriptColumnIndices::new(&col_map))
-            } else {
-                None
-            };
-            let regulatory_col_idx = if kind == EnsemblEntityKind::RegulatoryFeature
-                || kind == EnsemblEntityKind::MotifFeature
-            {
-                Some(RegulatoryColumnIndices::new(&col_map))
-            } else {
-                None
-            };
+        let mut builder = RecordBatchReceiverStreamBuilder::new(schema.clone(), 2);
+        let tx = builder.tx();
+        builder.spawn_blocking(move || {
+            process_partition(
+                tx,
+                stream_schema,
+                kind,
+                cache_info,
+                predicate,
+                files,
+                limit,
+                variation_region_size,
+                coordinate_system_zero_based,
+                batch_size,
+            )
+        });
+        Ok(builder.build())
+    }
+}
 
-            let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size.max(1))?;
-            let mut buffered_rows: Vec<Row> = Vec::new();
-            let mut emitted_rows: usize = 0;
-            let mut stop = false;
+/// Runs the file-read+parse loop on a blocking thread pool thread.
+/// Sends completed `RecordBatch`es through `tx`. Returns `Ok(())` on
+/// completion or early exit (consumer dropped / LIMIT reached).
+#[allow(clippy::too_many_arguments)]
+fn process_partition(
+    tx: Sender<DFResult<RecordBatch>>,
+    stream_schema: SchemaRef,
+    kind: EnsemblEntityKind,
+    cache_info: CacheInfo,
+    predicate: SimplePredicate,
+    files: Vec<PathBuf>,
+    limit: Option<usize>,
+    variation_region_size: i64,
+    coordinate_system_zero_based: bool,
+    batch_size: usize,
+) -> Result<()> {
+    let col_map = ColumnMap::from_schema(&stream_schema);
+    let provenance = ProvenanceWriter::new(&col_map, &cache_info);
+    let variation_ctx = if kind == EnsemblEntityKind::Variation {
+        Some(VariationContext::new(&cache_info))
+    } else {
+        None
+    };
+    let variation_col_idx = if kind == EnsemblEntityKind::Variation {
+        Some(VariationColumnIndices::new(
+            &col_map,
+            variation_ctx.as_ref().unwrap(),
+        ))
+    } else {
+        None
+    };
+    let mut source_id_writer = if kind == EnsemblEntityKind::Variation {
+        let ctx = variation_ctx.as_ref().unwrap();
+        Some(SourceIdWriter::new(&col_map, ctx.source_to_id_column()))
+    } else {
+        None
+    };
+    let transcript_col_idx = if kind == EnsemblEntityKind::Transcript {
+        Some(TranscriptColumnIndices::new(&col_map))
+    } else {
+        None
+    };
+    let regulatory_col_idx = if kind == EnsemblEntityKind::RegulatoryFeature
+        || kind == EnsemblEntityKind::MotifFeature
+    {
+        Some(RegulatoryColumnIndices::new(&col_map))
+    } else {
+        None
+    };
 
-            for source_file in files {
-                if stop {
-                    break;
-                }
+    let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size.max(1))?;
+    let mut buffered_rows: Vec<Row> = Vec::new();
+    let mut emitted_rows: usize = 0;
+    let mut stop = false;
 
-                // Pre-compute source file path string once per file
-                let source_file_str = source_file.to_str().unwrap_or_default();
-                let source_file_str: &str = if source_file_str.is_empty() {
-                    &source_file.to_string_lossy()
-                } else {
-                    source_file_str
-                };
+    for source_file in &files {
+        if stop {
+            break;
+        }
 
-                let use_native_storable = (kind == EnsemblEntityKind::Transcript
-                    || kind == EnsemblEntityKind::RegulatoryFeature
-                    || kind == EnsemblEntityKind::MotifFeature)
-                    && cache_info.serializer_type.as_deref() == Some("storable")
-                    && is_storable_binary_payload(&source_file)?;
-
-                if use_native_storable {
-                    // Storable binary path: still uses Vec<Row> + rows_to_record_batch
-                    let parsed_rows = match kind {
-                        EnsemblEntityKind::Transcript => {
-                            parse_transcript_storable_file(
-                                &source_file,
-                                &cache_info,
-                                &predicate,
-                                coordinate_system_zero_based,
-                            )?
-                        }
-                        EnsemblEntityKind::RegulatoryFeature => parse_regulatory_storable_file(
-                            &source_file,
-                            &cache_info,
-                            &predicate,
-                            RegulatoryTarget::RegulatoryFeature,
-                            coordinate_system_zero_based,
-                        )?,
-                        EnsemblEntityKind::MotifFeature => parse_regulatory_storable_file(
-                            &source_file,
-                            &cache_info,
-                            &predicate,
-                            RegulatoryTarget::MotifFeature,
-                            coordinate_system_zero_based,
-                        )?,
-                        EnsemblEntityKind::Variation => Vec::new(),
-                    };
-
-                    for row in parsed_rows {
-                        buffered_rows.push(row);
-                        emitted_rows += 1;
-
-                        if buffered_rows.len() >= batch_size.max(1) {
-                            let batch =
-                                rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
-                            buffered_rows.clear();
-                            yield batch;
-                        }
-
-                        if let Some(max_rows) = limit {
-                            if emitted_rows >= max_rows {
-                                stop = true;
-                                break;
-                            }
-                        }
-                    }
-                    continue;
-                }
-
-                // Text line path: uses BatchBuilder directly
-                let mut reader = open_text_reader(&source_file)?;
-                let mut line = String::new();
-
-                loop {
-                    line.clear();
-                    let bytes = reader.read_line(&mut line).map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Failed reading line from {}: {}",
-                            source_file.display(),
-                            e
-                        ))
-                    })?;
-
-                    if bytes == 0 {
-                        break;
-                    }
-
-                    let line_trimmed = line.trim_end_matches(['\n', '\r']);
-                    let added = match kind {
-                        EnsemblEntityKind::Variation => parse_variation_line_into(
-                            line_trimmed,
-                            source_file_str,
-                            &predicate,
-                            variation_region_size,
-                            coordinate_system_zero_based,
-                            &mut batch_builder,
-                            variation_col_idx.as_ref().unwrap(),
-                            variation_ctx.as_ref().unwrap(),
-                            &provenance,
-                            source_id_writer.as_mut().unwrap(),
-                        )?,
-                        EnsemblEntityKind::Transcript => {
-                            parse_transcript_line_into(
-                                line_trimmed,
-                                source_file_str,
-                                &cache_info,
-                                &predicate,
-                                coordinate_system_zero_based,
-                                &mut batch_builder,
-                                transcript_col_idx.as_ref().unwrap(),
-                                &provenance,
-                            )?
-                        }
-                        EnsemblEntityKind::RegulatoryFeature => parse_regulatory_line_into(
-                            line_trimmed,
-                            source_file_str,
-                            &cache_info,
-                            &predicate,
-                            RegulatoryTarget::RegulatoryFeature,
-                            coordinate_system_zero_based,
-                            &mut batch_builder,
-                            regulatory_col_idx.as_ref().unwrap(),
-                            &provenance,
-                        )?,
-                        EnsemblEntityKind::MotifFeature => parse_regulatory_line_into(
-                            line_trimmed,
-                            source_file_str,
-                            &cache_info,
-                            &predicate,
-                            RegulatoryTarget::MotifFeature,
-                            coordinate_system_zero_based,
-                            &mut batch_builder,
-                            regulatory_col_idx.as_ref().unwrap(),
-                            &provenance,
-                        )?,
-                    };
-
-                    if added {
-                        emitted_rows += 1;
-
-                        if batch_builder.len() >= batch_size.max(1) {
-                            let batch = batch_builder.finish()?;
-                            yield batch;
-                        }
-
-                        if let Some(max_rows) = limit {
-                            if emitted_rows >= max_rows {
-                                stop = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Flush remaining rows from BatchBuilder
-            if batch_builder.len() > 0 {
-                let batch = batch_builder.finish()?;
-                yield batch;
-            }
-
-            // Flush remaining rows from storable path
-            if !buffered_rows.is_empty() {
-                let batch = rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
-                yield batch;
-            }
+        // Pre-compute source file path string once per file
+        let source_file_str = source_file.to_str().unwrap_or_default();
+        let source_file_str: &str = if source_file_str.is_empty() {
+            &source_file.to_string_lossy()
+        } else {
+            source_file_str
         };
 
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        let use_native_storable = (kind == EnsemblEntityKind::Transcript
+            || kind == EnsemblEntityKind::RegulatoryFeature
+            || kind == EnsemblEntityKind::MotifFeature)
+            && cache_info.serializer_type.as_deref() == Some("storable")
+            && is_storable_binary_payload(source_file)?;
+
+        if use_native_storable {
+            // Storable binary path: still uses Vec<Row> + rows_to_record_batch
+            let parsed_rows = match kind {
+                EnsemblEntityKind::Transcript => parse_transcript_storable_file(
+                    source_file,
+                    &cache_info,
+                    &predicate,
+                    coordinate_system_zero_based,
+                )?,
+                EnsemblEntityKind::RegulatoryFeature => parse_regulatory_storable_file(
+                    source_file,
+                    &cache_info,
+                    &predicate,
+                    RegulatoryTarget::RegulatoryFeature,
+                    coordinate_system_zero_based,
+                )?,
+                EnsemblEntityKind::MotifFeature => parse_regulatory_storable_file(
+                    source_file,
+                    &cache_info,
+                    &predicate,
+                    RegulatoryTarget::MotifFeature,
+                    coordinate_system_zero_based,
+                )?,
+                EnsemblEntityKind::Variation => Vec::new(),
+            };
+
+            for row in parsed_rows {
+                buffered_rows.push(row);
+                emitted_rows += 1;
+
+                if buffered_rows.len() >= batch_size.max(1) {
+                    let batch = rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
+                    buffered_rows.clear();
+                    if tx.blocking_send(Ok(batch)).is_err() {
+                        return Ok(()); // consumer dropped — graceful shutdown
+                    }
+                }
+
+                if let Some(max_rows) = limit {
+                    if emitted_rows >= max_rows {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Text line path: uses BatchBuilder directly
+        let mut reader = open_text_reader(source_file)?;
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let bytes = reader.read_line(&mut line).map_err(|e| {
+                DataFusionError::Execution(format!(
+                    "Failed reading line from {}: {}",
+                    source_file.display(),
+                    e
+                ))
+            })?;
+
+            if bytes == 0 {
+                break;
+            }
+
+            let line_trimmed = line.trim_end_matches(['\n', '\r']);
+            let added = match kind {
+                EnsemblEntityKind::Variation => parse_variation_line_into(
+                    line_trimmed,
+                    source_file_str,
+                    &predicate,
+                    variation_region_size,
+                    coordinate_system_zero_based,
+                    &mut batch_builder,
+                    variation_col_idx.as_ref().unwrap(),
+                    variation_ctx.as_ref().unwrap(),
+                    &provenance,
+                    source_id_writer.as_mut().unwrap(),
+                )?,
+                EnsemblEntityKind::Transcript => parse_transcript_line_into(
+                    line_trimmed,
+                    source_file_str,
+                    &cache_info,
+                    &predicate,
+                    coordinate_system_zero_based,
+                    &mut batch_builder,
+                    transcript_col_idx.as_ref().unwrap(),
+                    &provenance,
+                )?,
+                EnsemblEntityKind::RegulatoryFeature => parse_regulatory_line_into(
+                    line_trimmed,
+                    source_file_str,
+                    &cache_info,
+                    &predicate,
+                    RegulatoryTarget::RegulatoryFeature,
+                    coordinate_system_zero_based,
+                    &mut batch_builder,
+                    regulatory_col_idx.as_ref().unwrap(),
+                    &provenance,
+                )?,
+                EnsemblEntityKind::MotifFeature => parse_regulatory_line_into(
+                    line_trimmed,
+                    source_file_str,
+                    &cache_info,
+                    &predicate,
+                    RegulatoryTarget::MotifFeature,
+                    coordinate_system_zero_based,
+                    &mut batch_builder,
+                    regulatory_col_idx.as_ref().unwrap(),
+                    &provenance,
+                )?,
+            };
+
+            if added {
+                emitted_rows += 1;
+
+                if batch_builder.len() >= batch_size.max(1) {
+                    let batch = batch_builder.finish()?;
+                    if tx.blocking_send(Ok(batch)).is_err() {
+                        return Ok(()); // consumer dropped — graceful shutdown
+                    }
+                }
+
+                if let Some(max_rows) = limit {
+                    if emitted_rows >= max_rows {
+                        stop = true;
+                        break;
+                    }
+                }
+            }
+        }
     }
+
+    // Flush remaining rows from BatchBuilder
+    if batch_builder.len() > 0 {
+        let batch = batch_builder.finish()?;
+        if tx.blocking_send(Ok(batch)).is_err() {
+            return Ok(());
+        }
+    }
+
+    // Flush remaining rows from storable path
+    if !buffered_rows.is_empty() {
+        let batch = rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
+        if tx.blocking_send(Ok(batch)).is_err() {
+            return Ok(());
+        }
+    }
+
+    Ok(())
 }
