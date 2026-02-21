@@ -263,6 +263,84 @@ impl ColumnMap {
 }
 
 // ---------------------------------------------------------------------------
+// ProvenanceWriter – pre-computed indices for constant provenance columns
+// ---------------------------------------------------------------------------
+
+use crate::info::CacheInfo;
+
+struct ProvenanceEntry {
+    idx: usize,
+    value: Option<String>,
+}
+
+pub(crate) struct ProvenanceWriter {
+    entries: Vec<ProvenanceEntry>,
+    source_file_idx: Option<usize>,
+}
+
+impl ProvenanceWriter {
+    pub fn new(col_map: &ColumnMap, cache_info: &CacheInfo) -> Self {
+        let mut entries = Vec::new();
+        if let Some(idx) = col_map.get("species") {
+            entries.push(ProvenanceEntry {
+                idx,
+                value: Some(cache_info.species.clone()),
+            });
+        }
+        if let Some(idx) = col_map.get("assembly") {
+            entries.push(ProvenanceEntry {
+                idx,
+                value: Some(cache_info.assembly.clone()),
+            });
+        }
+        if let Some(idx) = col_map.get("cache_version") {
+            entries.push(ProvenanceEntry {
+                idx,
+                value: Some(cache_info.cache_version.clone()),
+            });
+        }
+        for source in &cache_info.source_descriptors {
+            if let Some(idx) = col_map.get(&source.source_column) {
+                entries.push(ProvenanceEntry {
+                    idx,
+                    value: Some(source.value.clone()),
+                });
+            }
+        }
+        if let Some(idx) = col_map.get("serializer_type") {
+            entries.push(ProvenanceEntry {
+                idx,
+                value: cache_info.serializer_type.clone(),
+            });
+        }
+        if let Some(idx) = col_map.get("source_cache_path") {
+            entries.push(ProvenanceEntry {
+                idx,
+                value: Some(cache_info.source_cache_path.clone()),
+            });
+        }
+        let source_file_idx = col_map.get("source_file");
+        Self {
+            entries,
+            source_file_idx,
+        }
+    }
+
+    #[inline]
+    pub fn write(&self, batch: &mut BatchBuilder, source_file_str: &str) {
+        for entry in &self.entries {
+            match &entry.value {
+                Some(v) => batch.set_utf8(entry.idx, v),
+                None => batch.set_null(entry.idx),
+            }
+        }
+        if let Some(idx) = self.source_file_idx {
+            batch.set_utf8(idx, source_file_str);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BatchBuilder – writes directly into Arrow column builders
 // ---------------------------------------------------------------------------
 

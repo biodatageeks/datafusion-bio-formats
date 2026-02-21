@@ -2,11 +2,14 @@ use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::{
-    BatchBuilder, ColumnMap, normalize_genomic_end, normalize_genomic_start,
+    BatchBuilder, ColumnMap, ProvenanceWriter, normalize_genomic_end, normalize_genomic_start,
     normalize_nullable_ref, parse_f64_ref, parse_i8_ref, parse_i64_ref,
 };
 use std::collections::HashMap;
-use std::path::Path;
+
+// Maximum number of tab-separated fields we support per variation line.
+// Ensembl VEP variation lines typically have 20-30 fields.
+const MAX_VARIATION_FIELDS: usize = 48;
 
 // ---------------------------------------------------------------------------
 // VariationContext – pre-computed per-partition field mapping
@@ -37,6 +40,10 @@ pub(crate) struct VariationContext {
 }
 
 impl VariationContext {
+    pub fn source_to_id_column(&self) -> &HashMap<String, String> {
+        &self.source_to_id_column
+    }
+
     pub fn new(cache_info: &CacheInfo) -> Self {
         let cols = &cache_info.variation_cols;
 
@@ -134,6 +141,185 @@ impl VariationContext {
 }
 
 // ---------------------------------------------------------------------------
+// SourceIdWriter – reusable, allocation-free source ID accumulator
+// ---------------------------------------------------------------------------
+
+struct SourceIdSlot {
+    builder_idx: usize,
+    buffer: String,
+    count: usize,
+}
+
+pub(crate) struct SourceIdWriter {
+    key_to_slot: HashMap<String, usize>,
+    slots: Vec<SourceIdSlot>,
+    normalize_buf: String,
+}
+
+impl SourceIdWriter {
+    pub fn new(col_map: &ColumnMap, source_to_id_column: &HashMap<String, String>) -> Self {
+        let mut key_to_slot = HashMap::new();
+        let mut slots = Vec::new();
+        for (source_key, ids_column) in source_to_id_column {
+            if let Some(builder_idx) = col_map.get(ids_column) {
+                let slot_idx = slots.len();
+                slots.push(SourceIdSlot {
+                    builder_idx,
+                    buffer: String::with_capacity(64),
+                    count: 0,
+                });
+                key_to_slot.insert(source_key.clone(), slot_idx);
+            }
+        }
+        Self {
+            key_to_slot,
+            slots,
+            normalize_buf: String::with_capacity(32),
+        }
+    }
+
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        !self.slots.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        for slot in &mut self.slots {
+            slot.buffer.clear();
+            slot.count = 0;
+        }
+    }
+
+    pub fn populate(&mut self, variation_name: Option<&str>, var_synonyms: Option<&str>) {
+        if let Some(name) = variation_name {
+            self.assign_by_pattern(name);
+        }
+        if let Some(synonyms) = var_synonyms {
+            self.parse_var_synonyms(synonyms);
+        }
+    }
+
+    fn parse_var_synonyms(&mut self, synonyms: &str) {
+        let mut current_slot: Option<usize> = None;
+        for token in synonyms.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+
+            if let Some((source, value)) = token.split_once("::") {
+                current_slot = self.lookup_source(source);
+                if let Some(slot_idx) = current_slot {
+                    self.push_value(slot_idx, value.trim());
+                } else {
+                    self.assign_by_pattern(token);
+                }
+                continue;
+            }
+
+            if let Some((source, value)) = token.split_once(':') {
+                let slot = self.lookup_source(source);
+                if let Some(slot_idx) = slot {
+                    current_slot = Some(slot_idx);
+                    self.push_value(slot_idx, value.trim());
+                    continue;
+                }
+            }
+
+            if let Some(slot_idx) = current_slot {
+                self.push_value(slot_idx, token);
+            } else {
+                self.assign_by_pattern(token);
+            }
+        }
+    }
+
+    fn lookup_source(&mut self, raw: &str) -> Option<usize> {
+        // Normalize source name into reusable buffer (zero allocation)
+        self.normalize_buf.clear();
+        let mut previous_is_underscore = true; // skip leading underscores
+        for ch in raw.chars() {
+            if ch.is_ascii_alphanumeric() {
+                self.normalize_buf.push(ch.to_ascii_lowercase());
+                previous_is_underscore = false;
+            } else if !previous_is_underscore {
+                self.normalize_buf.push('_');
+                previous_is_underscore = true;
+            }
+        }
+        // Trim trailing underscore
+        while self.normalize_buf.ends_with('_') {
+            self.normalize_buf.pop();
+        }
+        if self.normalize_buf.is_empty() {
+            return None;
+        }
+
+        // Try lookup as-is
+        if let Some(idx) = self.key_to_slot.get(self.normalize_buf.as_str()).copied() {
+            return Some(idx);
+        }
+        // If starts with digit, try with "src_" prefix
+        if self.normalize_buf.as_bytes()[0].is_ascii_digit() {
+            self.normalize_buf.insert_str(0, "src_");
+            return self.key_to_slot.get(self.normalize_buf.as_str()).copied();
+        }
+        None
+    }
+
+    fn push_value(&mut self, slot_idx: usize, value: &str) {
+        let value = value.trim();
+        if value.is_empty() || value == "." {
+            return;
+        }
+        let slot = &mut self.slots[slot_idx];
+        // Dedup: check if value already present in comma-separated buffer
+        if slot.count > 0 && slot.buffer.split(',').any(|v| v == value) {
+            return;
+        }
+        if slot.count > 0 {
+            slot.buffer.push(',');
+        }
+        slot.buffer.push_str(value);
+        slot.count += 1;
+    }
+
+    fn assign_by_pattern(&mut self, value: &str) {
+        let value = value.trim();
+        if value.is_empty() || value == "." {
+            return;
+        }
+
+        let slot_idx = if value.starts_with("rs") && value[2..].chars().all(|c| c.is_ascii_digit())
+        {
+            self.key_to_slot.get("dbsnp").copied()
+        } else if value.starts_with("COSM") || value.starts_with("COSV") {
+            self.key_to_slot.get("cosmic").copied()
+        } else if value.starts_with("CM") && value[2..].chars().any(|c| c.is_ascii_digit()) {
+            self.key_to_slot.get("hgmd_public").copied()
+        } else if value.starts_with("RCV") || value.starts_with("VCV") {
+            self.key_to_slot.get("clinvar").copied()
+        } else {
+            None
+        };
+
+        if let Some(idx) = slot_idx {
+            self.push_value(idx, value);
+        }
+    }
+
+    pub fn flush(&self, batch: &mut BatchBuilder) {
+        for slot in &self.slots {
+            if slot.count > 0 {
+                batch.set_utf8(slot.builder_idx, &slot.buffer);
+            } else {
+                batch.set_null(slot.builder_idx);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public helpers
 // ---------------------------------------------------------------------------
 
@@ -184,21 +370,31 @@ pub(crate) fn parse_region_from_filename(name: &str) -> Option<i64> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_variation_line_into(
     line: &str,
-    source_file: &Path,
-    cache_info: &CacheInfo,
+    source_file_str: &str,
     predicate: &SimplePredicate,
     cache_region_size: i64,
     coordinate_system_zero_based: bool,
     batch: &mut BatchBuilder,
     col_map: &ColumnMap,
     ctx: &VariationContext,
+    provenance: &ProvenanceWriter,
+    source_id_writer: &mut SourceIdWriter,
 ) -> Result<bool> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Ok(false);
     }
 
-    let fields: Vec<&str> = trimmed.split('\t').collect();
+    // Stack-allocated field splitting – avoids per-line heap allocation
+    let mut fields = [""; MAX_VARIATION_FIELDS];
+    let mut field_count = 0;
+    for (i, f) in trimmed.split('\t').enumerate() {
+        if i >= MAX_VARIATION_FIELDS {
+            break;
+        }
+        fields[i] = f;
+        field_count += 1;
+    }
 
     // Helper to get a tab field by pre-computed index
     let field_at =
@@ -210,16 +406,14 @@ pub(crate) fn parse_variation_line_into(
         .ok_or_else(|| {
             exec_err(format!(
                 "Variation row missing required chrom in {}: {}",
-                source_file.display(),
-                trimmed
+                source_file_str, trimmed
             ))
         })?;
 
     let source_start = parse_i64_ref(field_at(ctx.start_tab)).ok_or_else(|| {
         exec_err(format!(
             "Variation row missing required start in {}: {}",
-            source_file.display(),
-            trimmed
+            source_file_str, trimmed
         ))
     })?;
 
@@ -237,8 +431,7 @@ pub(crate) fn parse_variation_line_into(
         .ok_or_else(|| {
             exec_err(format!(
                 "Variation row missing required variation_name in {}: {}",
-                source_file.display(),
-                trimmed
+                source_file_str, trimmed
             ))
         })?;
 
@@ -247,8 +440,7 @@ pub(crate) fn parse_variation_line_into(
         .ok_or_else(|| {
             exec_err(format!(
                 "Variation row missing required allele_string in {}: {}",
-                source_file.display(),
-                trimmed
+                source_file_str, trimmed
             ))
         })?;
 
@@ -321,225 +513,26 @@ pub(crate) fn parse_variation_line_into(
         );
     }
 
-    // Source IDs: only compute if any source ID column is projected
-    let any_source_id_projected = cache_info
-        .source_descriptors
-        .iter()
-        .any(|s| col_map.get(&s.ids_column).is_some());
-    if any_source_id_projected {
+    // Source IDs: only compute if any source ID column is projected (checked once at init)
+    if source_id_writer.is_active() {
         let var_synonyms_ref = field_at(ctx.var_synonyms_tab).and_then(normalize_nullable_ref);
-        let source_ids = extract_source_ids(
-            Some(variation_name_ref),
-            var_synonyms_ref,
-            &ctx.source_to_id_column,
-        );
-        for source in &cache_info.source_descriptors {
-            if let Some(idx) = col_map.get(&source.ids_column) {
-                match source_ids.get(&source.ids_column) {
-                    Some(value) => batch.set_utf8(idx, value),
-                    None => batch.set_null(idx),
-                }
-            }
-        }
+        source_id_writer.clear();
+        source_id_writer.populate(Some(variation_name_ref), var_synonyms_ref);
+        source_id_writer.flush(batch);
     }
 
     // Extra columns (dynamic, not in known set)
     for (tab_idx, col_name) in &ctx.extra_columns {
         if let Some(builder_idx) = col_map.get(col_name) {
-            batch.set_opt_utf8(
-                builder_idx,
-                fields
-                    .get(*tab_idx)
-                    .copied()
-                    .and_then(normalize_nullable_ref),
-            );
+            if *tab_idx < field_count {
+                batch.set_opt_utf8(builder_idx, normalize_nullable_ref(fields[*tab_idx]));
+            }
         }
     }
 
-    // Provenance columns
-    append_provenance(batch, col_map, cache_info, source_file);
+    // Provenance columns (pre-computed indices, no HashMap lookups)
+    provenance.write(batch, source_file_str);
 
     batch.finish_row();
     Ok(true)
-}
-
-// ---------------------------------------------------------------------------
-// Provenance – shared helper for appending constant provenance columns
-// ---------------------------------------------------------------------------
-
-pub(crate) fn append_provenance(
-    batch: &mut BatchBuilder,
-    col_map: &ColumnMap,
-    cache_info: &CacheInfo,
-    source_file: &Path,
-) {
-    if let Some(idx) = col_map.get("species") {
-        batch.set_utf8(idx, &cache_info.species);
-    }
-    if let Some(idx) = col_map.get("assembly") {
-        batch.set_utf8(idx, &cache_info.assembly);
-    }
-    if let Some(idx) = col_map.get("cache_version") {
-        batch.set_utf8(idx, &cache_info.cache_version);
-    }
-    for source in &cache_info.source_descriptors {
-        if let Some(idx) = col_map.get(&source.source_column) {
-            batch.set_utf8(idx, &source.value);
-        }
-    }
-    if let Some(idx) = col_map.get("serializer_type") {
-        match &cache_info.serializer_type {
-            Some(s) => batch.set_utf8(idx, s),
-            None => batch.set_null(idx),
-        }
-    }
-    if let Some(idx) = col_map.get("source_cache_path") {
-        batch.set_utf8(idx, &cache_info.source_cache_path);
-    }
-    if let Some(idx) = col_map.get("source_file") {
-        // Avoid String allocation when path is valid UTF-8
-        let path_str = source_file.to_str().unwrap_or_default();
-        if !path_str.is_empty() {
-            batch.set_utf8(idx, path_str);
-        } else {
-            batch.set_utf8(idx, &source_file.to_string_lossy());
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Source ID extraction
-// ---------------------------------------------------------------------------
-
-fn extract_source_ids(
-    variation_name: Option<&str>,
-    var_synonyms: Option<&str>,
-    source_to_id_column: &HashMap<String, String>,
-) -> HashMap<String, String> {
-    let mut buckets: HashMap<String, Vec<String>> = HashMap::new();
-
-    if let Some(variation_name) = variation_name {
-        assign_by_pattern(variation_name, source_to_id_column, &mut buckets);
-    }
-
-    if let Some(var_synonyms) = var_synonyms {
-        let mut current_source_column: Option<String> = None;
-
-        for token in var_synonyms.split(',') {
-            let token = token.trim();
-            if token.is_empty() {
-                continue;
-            }
-
-            if let Some((source, value)) = token.split_once("::") {
-                let normalized_source = normalize_source_token(source);
-                current_source_column = source_to_id_column.get(&normalized_source).cloned();
-                if let Some(column) = &current_source_column {
-                    push_source_id(column, value.trim(), &mut buckets);
-                } else {
-                    assign_by_pattern(token, source_to_id_column, &mut buckets);
-                }
-                continue;
-            }
-
-            if let Some((source, value)) = token.split_once(':') {
-                let normalized_source = normalize_source_token(source);
-                current_source_column = source_to_id_column.get(&normalized_source).cloned();
-                if let Some(column) = &current_source_column {
-                    push_source_id(column, value.trim(), &mut buckets);
-                    continue;
-                }
-            }
-
-            if let Some(column) = &current_source_column {
-                push_source_id(column, token, &mut buckets);
-            } else {
-                assign_by_pattern(token, source_to_id_column, &mut buckets);
-            }
-        }
-    }
-
-    buckets
-        .into_iter()
-        .filter_map(|(column, values)| {
-            if values.is_empty() {
-                None
-            } else {
-                Some((column, values.join(",")))
-            }
-        })
-        .collect()
-}
-
-fn assign_by_pattern(
-    value: &str,
-    source_to_id_column: &HashMap<String, String>,
-    buckets: &mut HashMap<String, Vec<String>>,
-) {
-    let value = value.trim();
-    if value.is_empty() || value == "." {
-        return;
-    }
-
-    let mut maybe_column = None;
-    if value.starts_with("rs") && value[2..].chars().all(|c| c.is_ascii_digit()) {
-        maybe_column = source_to_id_column.get("dbsnp");
-    } else if value.starts_with("COSM") || value.starts_with("COSV") {
-        maybe_column = source_to_id_column.get("cosmic");
-    } else if value.starts_with("CM") && value[2..].chars().any(|c| c.is_ascii_digit()) {
-        maybe_column = source_to_id_column.get("hgmd_public");
-    } else if value.starts_with("RCV") || value.starts_with("VCV") {
-        maybe_column = source_to_id_column.get("clinvar");
-    }
-
-    if let Some(column) = maybe_column {
-        push_source_id(column, value, buckets);
-    }
-}
-
-fn push_source_id(column: &str, value: &str, buckets: &mut HashMap<String, Vec<String>>) {
-    let value = value.trim();
-    if value.is_empty() || value == "." {
-        return;
-    }
-
-    let values = buckets.entry(column.to_string()).or_default();
-    if !values.iter().any(|existing| existing == value) {
-        values.push(value.to_string());
-    }
-}
-
-fn normalize_source_token(raw: &str) -> String {
-    let mut normalized = String::with_capacity(raw.len() + 4);
-    let mut previous_is_underscore = false;
-
-    for ch in raw.chars() {
-        let mapped = if ch.is_ascii_alphanumeric() {
-            ch.to_ascii_lowercase()
-        } else {
-            '_'
-        };
-
-        if mapped == '_' {
-            if !previous_is_underscore {
-                normalized.push('_');
-                previous_is_underscore = true;
-            }
-        } else {
-            normalized.push(mapped);
-            previous_is_underscore = false;
-        }
-    }
-
-    let normalized = normalized.trim_matches('_');
-    if normalized.is_empty() {
-        return String::new();
-    }
-
-    let mut out = normalized.to_string();
-    if out.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
-        out.insert_str(0, "src_");
-    }
-
-    out
 }

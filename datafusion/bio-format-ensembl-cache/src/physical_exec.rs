@@ -8,9 +8,10 @@ use crate::regulatory::{
 use crate::row::Row;
 use crate::transcript::{parse_transcript_line_into, parse_transcript_storable_file};
 use crate::util::{
-    BatchBuilder, ColumnMap, is_storable_binary_payload, open_text_reader, rows_to_record_batch,
+    BatchBuilder, ColumnMap, ProvenanceWriter, is_storable_binary_payload, open_text_reader,
+    rows_to_record_batch,
 };
-use crate::variation::{VariationContext, parse_variation_line_into};
+use crate::variation::{SourceIdWriter, VariationContext, parse_variation_line_into};
 use async_stream::try_stream;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
@@ -228,9 +229,16 @@ impl ExecutionPlan for EnsemblCacheExec {
 
         let stream = try_stream! {
             let col_map = ColumnMap::from_schema(&stream_schema);
+            let provenance = ProvenanceWriter::new(&col_map, &cache_info);
             let variation_ctx = if kind == EnsemblEntityKind::Variation {
                 Some(VariationContext::new(&cache_info))
             } else {
+                None
+            };
+            let mut source_id_writer = if kind == EnsemblEntityKind::Variation {
+                let ctx = variation_ctx.as_ref().unwrap();
+                Some(SourceIdWriter::new(&col_map, ctx.source_to_id_column()))
+                } else {
                 None
             };
 
@@ -243,6 +251,14 @@ impl ExecutionPlan for EnsemblCacheExec {
                 if stop {
                     break;
                 }
+
+                // Pre-compute source file path string once per file
+                let source_file_str = source_file.to_str().unwrap_or_default();
+                let source_file_str: &str = if source_file_str.is_empty() {
+                    &source_file.to_string_lossy()
+                } else {
+                    source_file_str
+                };
 
                 let use_native_storable = (kind == EnsemblEntityKind::Transcript
                     || kind == EnsemblEntityKind::RegulatoryFeature
@@ -321,45 +337,49 @@ impl ExecutionPlan for EnsemblCacheExec {
                     let added = match kind {
                         EnsemblEntityKind::Variation => parse_variation_line_into(
                             line_trimmed,
-                            &source_file,
-                            &cache_info,
+                            source_file_str,
                             &predicate,
                             variation_region_size,
                             coordinate_system_zero_based,
                             &mut batch_builder,
                             &col_map,
                             variation_ctx.as_ref().unwrap(),
+                            &provenance,
+                            source_id_writer.as_mut().unwrap(),
                         )?,
                         EnsemblEntityKind::Transcript => {
                             parse_transcript_line_into(
                                 line_trimmed,
-                                &source_file,
+                                source_file_str,
                                 &cache_info,
                                 &predicate,
                                 coordinate_system_zero_based,
                                 &mut batch_builder,
                                 &col_map,
+                                &provenance,
                             )?
                         }
                         EnsemblEntityKind::RegulatoryFeature => parse_regulatory_line_into(
                             line_trimmed,
-                            &source_file,
+                            source_file_str,
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::RegulatoryFeature,
                             coordinate_system_zero_based,
                             &mut batch_builder,
                             &col_map,
+                            &provenance,
                         )?,
                         EnsemblEntityKind::MotifFeature => parse_regulatory_line_into(
                             line_trimmed,
-                            &source_file,
+                            source_file_str,
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::MotifFeature,
                             coordinate_system_zero_based,
                             &mut batch_builder,
                             &col_map,
+                            &provenance,
                         )?,
                     };
 

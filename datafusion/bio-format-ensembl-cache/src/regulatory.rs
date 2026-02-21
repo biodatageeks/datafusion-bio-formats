@@ -6,11 +6,11 @@ use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::row::{CellValue, Row};
+use crate::util::ProvenanceWriter;
 use crate::util::{
     BatchBuilder, ColumnMap, canonical_json_string, json_f64, json_i32, json_i64, json_str,
     normalize_genomic_end, normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
 };
-use crate::variation::append_provenance;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -40,39 +40,58 @@ struct RegulatoryRowContext<'a> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn parse_regulatory_line_into(
     line: &str,
-    source_file: &Path,
+    source_file_str: &str,
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
     target: RegulatoryTarget,
     coordinate_system_zero_based: bool,
     batch: &mut BatchBuilder,
     col_map: &ColumnMap,
+    provenance: &ProvenanceWriter,
 ) -> Result<bool> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return Ok(false);
     }
 
-    let parts: Vec<&str> = trimmed.splitn(4, '\t').collect();
-    if parts.len() < 4 {
-        return Err(exec_err(format!(
+    // Iterator-based prefix split – avoids Vec allocation
+    let mut split_iter = trimmed.splitn(4, '\t');
+    let part0 = split_iter.next().ok_or_else(|| {
+        exec_err(format!(
             "Malformed regulatory row in {}: {}",
-            source_file.display(),
-            trimmed
-        )));
-    }
+            source_file_str, trimmed
+        ))
+    })?;
+    let part1 = split_iter.next().ok_or_else(|| {
+        exec_err(format!(
+            "Malformed regulatory row in {}: {}",
+            source_file_str, trimmed
+        ))
+    })?;
+    let part2 = split_iter.next().ok_or_else(|| {
+        exec_err(format!(
+            "Malformed regulatory row in {}: {}",
+            source_file_str, trimmed
+        ))
+    })?;
+    let part3 = split_iter.next().ok_or_else(|| {
+        exec_err(format!(
+            "Malformed regulatory row in {}: {}",
+            source_file_str, trimmed
+        ))
+    })?;
 
     // Early predicate check from prefix columns
     let prefix_chrom = {
-        let c = parts[0].trim();
+        let c = part0.trim();
         if c.is_empty() || c == "." {
             None
         } else {
             Some(c)
         }
     };
-    let prefix_start = parse_i64(Some(parts[1]));
-    let prefix_end = parse_i64(Some(parts[2]));
+    let prefix_start = parse_i64(Some(part1));
+    let prefix_end = parse_i64(Some(part2));
 
     if let (Some(chrom_ref), Some(raw_start), Some(raw_end)) =
         (prefix_chrom, prefix_start, prefix_end)
@@ -91,11 +110,11 @@ pub(crate) fn parse_regulatory_line_into(
         ))
     })?;
 
-    let payload = decode_payload(serializer, parts[3])?;
+    let payload = decode_payload(serializer, part3)?;
     let object = payload.as_object().ok_or_else(|| {
         exec_err(format!(
             "Regulatory payload must be a JSON object in {}",
-            source_file.display()
+            source_file_str
         ))
     })?;
 
@@ -113,7 +132,7 @@ pub(crate) fn parse_regulatory_line_into(
         json_str(object.get("chr").or_else(|| object.get("chrom"))).ok_or_else(|| {
             exec_err(format!(
                 "Regulatory row missing required chrom in {}",
-                source_file.display()
+                source_file_str
             ))
         })?
     };
@@ -123,7 +142,7 @@ pub(crate) fn parse_regulatory_line_into(
         .ok_or_else(|| {
             exec_err(format!(
                 "Regulatory row missing required start in {}",
-                source_file.display()
+                source_file_str
             ))
         })?;
 
@@ -132,7 +151,7 @@ pub(crate) fn parse_regulatory_line_into(
         .ok_or_else(|| {
             exec_err(format!(
                 "Regulatory row missing required end in {}",
-                source_file.display()
+                source_file_str
             ))
         })?;
 
@@ -148,7 +167,7 @@ pub(crate) fn parse_regulatory_line_into(
         .ok_or_else(|| {
             exec_err(format!(
                 "Regulatory row missing required strand in {}",
-                source_file.display()
+                source_file_str
             ))
         })?;
 
@@ -220,7 +239,7 @@ pub(crate) fn parse_regulatory_line_into(
         }
     }
 
-    append_provenance(batch, col_map, cache_info, source_file);
+    provenance.write(batch, source_file_str);
 
     batch.finish_row();
     Ok(true)
