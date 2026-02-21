@@ -8,11 +8,13 @@ use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use flate2::read::MultiGzDecoder;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::sync::Arc;
+
+const IO_BUFFER_SIZE: usize = 64 * 1024;
 
 pub(crate) fn open_text_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     let file = File::open(path)
@@ -23,10 +25,10 @@ pub(crate) fn open_text_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
         .and_then(|v| v.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
     {
-        let decoder = MultiGzDecoder::new(file);
-        Ok(Box::new(BufReader::new(decoder)))
+        let decoder = MultiGzDecoder::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
+        Ok(Box::new(BufReader::with_capacity(IO_BUFFER_SIZE, decoder)))
     } else {
-        Ok(Box::new(BufReader::new(file)))
+        Ok(Box::new(BufReader::with_capacity(IO_BUFFER_SIZE, file)))
     }
 }
 
@@ -40,12 +42,12 @@ pub(crate) fn read_maybe_gzip_bytes(path: &Path) -> Result<Vec<u8>> {
         .and_then(|v| v.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
     {
-        let mut decoder = MultiGzDecoder::new(file);
+        let mut decoder = MultiGzDecoder::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
         decoder
             .read_to_end(&mut bytes)
             .map_err(|e| exec_err(format!("Failed decompressing {}: {}", path.display(), e)))?;
     } else {
-        let mut reader = BufReader::new(file);
+        let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
         reader
             .read_to_end(&mut bytes)
             .map_err(|e| exec_err(format!("Failed reading {}: {}", path.display(), e)))?;
@@ -63,9 +65,12 @@ pub(crate) fn read_maybe_gzip_prefix(path: &Path, prefix_len: usize) -> Result<V
         .and_then(|v| v.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
     {
-        Box::new(MultiGzDecoder::new(file))
+        Box::new(MultiGzDecoder::new(BufReader::with_capacity(
+            IO_BUFFER_SIZE,
+            file,
+        )))
     } else {
-        Box::new(BufReader::new(file))
+        Box::new(BufReader::with_capacity(IO_BUFFER_SIZE, file))
     };
 
     let mut bytes = vec![0u8; prefix_len];
@@ -96,18 +101,32 @@ pub(crate) fn normalize_nullable(raw: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn normalize_nullable_ref(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
 pub(crate) fn parse_i64(raw: Option<&str>) -> Option<i64> {
     raw.and_then(normalize_nullable)
         .and_then(|v| v.parse().ok())
 }
 
-pub(crate) fn parse_i8(raw: Option<&str>) -> Option<i8> {
-    raw.and_then(normalize_nullable)
+pub(crate) fn parse_i64_ref(raw: Option<&str>) -> Option<i64> {
+    raw.and_then(normalize_nullable_ref)
         .and_then(|v| v.parse().ok())
 }
 
-pub(crate) fn parse_f64(raw: Option<&str>) -> Option<f64> {
-    raw.and_then(normalize_nullable)
+pub(crate) fn parse_i8_ref(raw: Option<&str>) -> Option<i8> {
+    raw.and_then(normalize_nullable_ref)
+        .and_then(|v| v.parse().ok())
+}
+
+pub(crate) fn parse_f64_ref(raw: Option<&str>) -> Option<f64> {
+    raw.and_then(normalize_nullable_ref)
         .and_then(|v| v.parse().ok())
 }
 
@@ -215,6 +234,228 @@ pub(crate) fn json_bool(value: Option<&Value>) -> Option<bool> {
         _ => None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// ColumnMap – maps column names to builder indices for the projected schema
+// ---------------------------------------------------------------------------
+
+pub(crate) struct ColumnMap {
+    map: HashMap<String, usize>,
+}
+
+impl ColumnMap {
+    pub fn from_schema(schema: &SchemaRef) -> Self {
+        let mut map = HashMap::with_capacity(schema.fields().len());
+        for (idx, field) in schema.fields().iter().enumerate() {
+            map.insert(field.name().clone(), idx);
+        }
+        Self { map }
+    }
+
+    #[inline]
+    pub fn get(&self, name: &str) -> Option<usize> {
+        self.map.get(name).copied()
+    }
+
+    pub fn has_any(&self, names: &[&str]) -> bool {
+        names.iter().any(|n| self.map.contains_key(*n))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BatchBuilder – writes directly into Arrow column builders
+// ---------------------------------------------------------------------------
+
+pub(crate) struct BatchBuilder {
+    builders: Vec<AnyBuilder>,
+    schema: SchemaRef,
+    row_count: usize,
+    written: Vec<bool>,
+}
+
+impl BatchBuilder {
+    pub fn new(schema: SchemaRef, capacity: usize) -> Result<Self> {
+        let builders = schema
+            .fields()
+            .iter()
+            .map(|field| AnyBuilder::for_type(field.data_type(), capacity))
+            .collect::<Result<Vec<_>>>()?;
+        let num_cols = builders.len();
+        Ok(Self {
+            builders,
+            schema,
+            row_count: 0,
+            written: vec![false; num_cols],
+        })
+    }
+
+    #[inline]
+    pub fn set_utf8(&mut self, col: usize, value: &str) {
+        if let AnyBuilder::Utf8(b) = &mut self.builders[col] {
+            b.append_value(value);
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_opt_utf8(&mut self, col: usize, value: Option<&str>) {
+        match value {
+            Some(v) => self.set_utf8(col, v),
+            None => {
+                if let AnyBuilder::Utf8(b) = &mut self.builders[col] {
+                    b.append_null();
+                }
+                self.written[col] = true;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn set_opt_utf8_owned(&mut self, col: usize, value: Option<&String>) {
+        self.set_opt_utf8(col, value.map(String::as_str));
+    }
+
+    #[inline]
+    pub fn set_i64(&mut self, col: usize, value: i64) {
+        if let AnyBuilder::Int64(b) = &mut self.builders[col] {
+            b.append_value(value);
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_opt_i64(&mut self, col: usize, value: Option<i64>) {
+        if let AnyBuilder::Int64(b) = &mut self.builders[col] {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_opt_i32(&mut self, col: usize, value: Option<i32>) {
+        if let AnyBuilder::Int32(b) = &mut self.builders[col] {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_i8(&mut self, col: usize, value: i8) {
+        if let AnyBuilder::Int8(b) = &mut self.builders[col] {
+            b.append_value(value);
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_opt_i8(&mut self, col: usize, value: Option<i8>) {
+        if let AnyBuilder::Int8(b) = &mut self.builders[col] {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_opt_f64(&mut self, col: usize, value: Option<f64>) {
+        if let AnyBuilder::Float64(b) = &mut self.builders[col] {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_opt_bool(&mut self, col: usize, value: Option<bool>) {
+        if let AnyBuilder::Boolean(b) = &mut self.builders[col] {
+            match value {
+                Some(v) => b.append_value(v),
+                None => b.append_null(),
+            }
+        }
+        self.written[col] = true;
+    }
+
+    #[inline]
+    pub fn set_null(&mut self, col: usize) {
+        match &mut self.builders[col] {
+            AnyBuilder::Utf8(b) => b.append_null(),
+            AnyBuilder::Int64(b) => b.append_null(),
+            AnyBuilder::Int32(b) => b.append_null(),
+            AnyBuilder::Int8(b) => b.append_null(),
+            AnyBuilder::Float64(b) => b.append_null(),
+            AnyBuilder::Boolean(b) => b.append_null(),
+        }
+        self.written[col] = true;
+    }
+
+    pub fn finish_row(&mut self) {
+        for (idx, written) in self.written.iter_mut().enumerate() {
+            if !*written {
+                match &mut self.builders[idx] {
+                    AnyBuilder::Utf8(b) => b.append_null(),
+                    AnyBuilder::Int64(b) => b.append_null(),
+                    AnyBuilder::Int32(b) => b.append_null(),
+                    AnyBuilder::Int8(b) => b.append_null(),
+                    AnyBuilder::Float64(b) => b.append_null(),
+                    AnyBuilder::Boolean(b) => b.append_null(),
+                }
+            }
+            *written = false;
+        }
+        self.row_count += 1;
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.row_count
+    }
+
+    pub fn finish(&mut self) -> Result<RecordBatch> {
+        if self.schema.fields().is_empty() {
+            let count = self.row_count;
+            self.row_count = 0;
+            let options = RecordBatchOptions::new().with_row_count(Some(count));
+            return RecordBatch::try_new_with_options(self.schema.clone(), Vec::new(), &options)
+                .map_err(|e| {
+                    exec_err(format!(
+                        "Failed building zero-column Ensembl cache RecordBatch: {}",
+                        e
+                    ))
+                });
+        }
+
+        let capacity = self.row_count.max(64);
+        let old_builders = std::mem::replace(
+            &mut self.builders,
+            self.schema
+                .fields()
+                .iter()
+                .map(|f| AnyBuilder::for_type(f.data_type(), capacity))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        self.row_count = 0;
+        self.written.fill(false);
+
+        let arrays: Vec<ArrayRef> = old_builders.into_iter().map(AnyBuilder::finish).collect();
+        RecordBatch::try_new(self.schema.clone(), arrays)
+            .map_err(|e| exec_err(format!("Failed building Ensembl cache RecordBatch: {}", e)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AnyBuilder – type-erased Arrow column builder
+// ---------------------------------------------------------------------------
 
 enum AnyBuilder {
     Utf8(StringBuilder),

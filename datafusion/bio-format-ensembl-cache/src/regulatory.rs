@@ -7,9 +7,10 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::row::{CellValue, Row};
 use crate::util::{
-    canonical_json_string, json_f64, json_i32, json_i64, json_str, normalize_genomic_end,
-    normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
+    BatchBuilder, ColumnMap, canonical_json_string, json_f64, json_i32, json_i64, json_str,
+    normalize_genomic_end, normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
 };
+use crate::variation::append_provenance;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -32,17 +33,24 @@ struct RegulatoryRowContext<'a> {
     source_file: &'a Path,
 }
 
-pub(crate) fn parse_regulatory_line(
+// ---------------------------------------------------------------------------
+// Direct builder parser for text lines (Phase 1+2)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_regulatory_line_into(
     line: &str,
     source_file: &Path,
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
     target: RegulatoryTarget,
     coordinate_system_zero_based: bool,
-) -> Result<Option<Row>> {
+    batch: &mut BatchBuilder,
+    col_map: &ColumnMap,
+) -> Result<bool> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(None);
+        return Ok(false);
     }
 
     let parts: Vec<&str> = trimmed.splitn(4, '\t').collect();
@@ -52,6 +60,28 @@ pub(crate) fn parse_regulatory_line(
             source_file.display(),
             trimmed
         )));
+    }
+
+    // Early predicate check from prefix columns
+    let prefix_chrom = {
+        let c = parts[0].trim();
+        if c.is_empty() || c == "." {
+            None
+        } else {
+            Some(c)
+        }
+    };
+    let prefix_start = parse_i64(Some(parts[1]));
+    let prefix_end = parse_i64(Some(parts[2]));
+
+    if let (Some(chrom_ref), Some(raw_start), Some(raw_end)) =
+        (prefix_chrom, prefix_start, prefix_end)
+    {
+        let start = normalize_genomic_start(raw_start, coordinate_system_zero_based);
+        let end = normalize_genomic_end(raw_end, coordinate_system_zero_based);
+        if !predicate.matches(chrom_ref, start, end) {
+            return Ok(false);
+        }
     }
 
     let serializer = cache_info.serializer_type.as_deref().ok_or_else(|| {
@@ -74,11 +104,11 @@ pub(crate) fn parse_regulatory_line(
         && target != RegulatoryTarget::RegulatoryFeature)
         || (kind == RegulatoryTarget::MotifFeature && target != RegulatoryTarget::MotifFeature)
     {
-        return Ok(None);
+        return Ok(false);
     }
 
-    let chrom = if !parts[0].trim().is_empty() && parts[0].trim() != "." {
-        parts[0].trim().to_string()
+    let chrom = if let Some(c) = prefix_chrom {
+        c.to_string()
     } else {
         json_str(object.get("chr").or_else(|| object.get("chrom"))).ok_or_else(|| {
             exec_err(format!(
@@ -88,7 +118,7 @@ pub(crate) fn parse_regulatory_line(
         })?
     };
 
-    let source_start = parse_i64(Some(parts[1]))
+    let source_start = prefix_start
         .or_else(|| json_i64(object.get("start")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -97,7 +127,7 @@ pub(crate) fn parse_regulatory_line(
             ))
         })?;
 
-    let source_end = parse_i64(Some(parts[2]))
+    let source_end = prefix_end
         .or_else(|| json_i64(object.get("end")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -110,7 +140,7 @@ pub(crate) fn parse_regulatory_line(
     let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
     if !predicate.matches(&chrom, start, end) {
-        return Ok(None);
+        return Ok(false);
     }
 
     let strand = json_i64(object.get("strand"))
@@ -122,66 +152,83 @@ pub(crate) fn parse_regulatory_line(
             ))
         })?;
 
-    let canonical_json = canonical_json_string(&payload)?;
-    let object_hash = stable_hash(&canonical_json);
-
-    let mut row: Row = HashMap::new();
-    row.insert("chrom".to_string(), CellValue::Utf8(chrom));
-    row.insert("start".to_string(), CellValue::Int64(start));
-    row.insert("end".to_string(), CellValue::Int64(end));
-    row.insert("strand".to_string(), CellValue::Int8(strand));
-
-    if let Some(stable_id) = json_str(object.get("stable_id")) {
-        row.insert("stable_id".to_string(), CellValue::Utf8(stable_id));
+    // Write required columns
+    if let Some(idx) = col_map.get("chrom") {
+        batch.set_utf8(idx, &chrom);
     }
-
-    insert_opt_i64(&mut row, "db_id", json_i64(object.get("db_id")));
+    if let Some(idx) = col_map.get("start") {
+        batch.set_i64(idx, start);
+    }
+    if let Some(idx) = col_map.get("end") {
+        batch.set_i64(idx, end);
+    }
+    if let Some(idx) = col_map.get("strand") {
+        batch.set_i8(idx, strand);
+    }
+    if let Some(idx) = col_map.get("stable_id") {
+        batch.set_opt_utf8_owned(idx, json_str(object.get("stable_id")).as_ref());
+    }
+    if let Some(idx) = col_map.get("db_id") {
+        batch.set_opt_i64(idx, json_i64(object.get("db_id")));
+    }
 
     match target {
         RegulatoryTarget::RegulatoryFeature => {
-            insert_opt_utf8(
-                &mut row,
-                "feature_type",
-                json_str(object.get("feature_type")),
-            );
-            insert_opt_i32(
-                &mut row,
-                "epigenome_count",
-                json_i32(object.get("epigenome_count")),
-            );
-            insert_opt_i64(
-                &mut row,
-                "regulatory_build_id",
-                json_i64(object.get("regulatory_build_id")),
-            );
-            insert_opt_utf8(&mut row, "cell_types", json_str(object.get("cell_types")));
+            if let Some(idx) = col_map.get("feature_type") {
+                batch.set_opt_utf8_owned(idx, json_str(object.get("feature_type")).as_ref());
+            }
+            if let Some(idx) = col_map.get("epigenome_count") {
+                batch.set_opt_i32(idx, json_i32(object.get("epigenome_count")));
+            }
+            if let Some(idx) = col_map.get("regulatory_build_id") {
+                batch.set_opt_i64(idx, json_i64(object.get("regulatory_build_id")));
+            }
+            if let Some(idx) = col_map.get("cell_types") {
+                batch.set_opt_utf8_owned(idx, json_str(object.get("cell_types")).as_ref());
+            }
         }
         RegulatoryTarget::MotifFeature => {
-            insert_opt_f64(&mut row, "score", json_f64(object.get("score")));
-            insert_opt_utf8(
-                &mut row,
-                "binding_matrix",
-                json_str(object.get("binding_matrix")),
-            );
-            insert_opt_utf8(&mut row, "cell_types", json_str(object.get("cell_types")));
-            insert_opt_utf8(
-                &mut row,
-                "overlapping_regulatory_feature",
-                json_str(object.get("overlapping_regulatory_feature")),
-            );
+            if let Some(idx) = col_map.get("score") {
+                batch.set_opt_f64(idx, json_f64(object.get("score")));
+            }
+            if let Some(idx) = col_map.get("binding_matrix") {
+                batch.set_opt_utf8_owned(idx, json_str(object.get("binding_matrix")).as_ref());
+            }
+            if let Some(idx) = col_map.get("cell_types") {
+                batch.set_opt_utf8_owned(idx, json_str(object.get("cell_types")).as_ref());
+            }
+            if let Some(idx) = col_map.get("overlapping_regulatory_feature") {
+                batch.set_opt_utf8_owned(
+                    idx,
+                    json_str(object.get("overlapping_regulatory_feature")).as_ref(),
+                );
+            }
         }
     }
 
-    row.insert(
-        "raw_object_json".to_string(),
-        CellValue::Utf8(canonical_json),
-    );
-    row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
+    // Phase 2: Only compute canonical JSON + hash if projected
+    let need_json = col_map.get("raw_object_json").is_some();
+    let need_hash = col_map.get("object_hash").is_some();
+    if need_json || need_hash {
+        let canonical_json = canonical_json_string(&payload)?;
+        if let Some(idx) = col_map.get("object_hash") {
+            let hash = stable_hash(&canonical_json);
+            batch.set_utf8(idx, &hash);
+        }
+        if let Some(idx) = col_map.get("raw_object_json") {
+            batch.set_utf8(idx, &canonical_json);
+        }
+    }
 
-    append_provenance(&mut row, cache_info, source_file);
+    append_provenance(batch, col_map, cache_info, source_file);
 
-    Ok(Some(row))
+    batch.finish_row();
+    Ok(true)
 }
+
+// ---------------------------------------------------------------------------
+// Storable binary parser (kept with Vec<Row> for now)
+// ---------------------------------------------------------------------------
 
 pub(crate) fn parse_regulatory_storable_file(
     source_file: &Path,
@@ -413,7 +460,7 @@ fn build_regulatory_row_storable(
     );
     row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
 
-    append_provenance(&mut row, context.cache_info, context.source_file);
+    append_provenance_row(&mut row, context.cache_info, context.source_file);
     Ok(row)
 }
 
@@ -462,7 +509,7 @@ fn insert_opt_f64(row: &mut Row, key: &str, value: Option<f64>) {
     }
 }
 
-fn append_provenance(row: &mut Row, cache_info: &CacheInfo, source_file: &Path) {
+fn append_provenance_row(row: &mut Row, cache_info: &CacheInfo, source_file: &Path) {
     row.insert(
         "species".to_string(),
         CellValue::Utf8(cache_info.species.clone()),

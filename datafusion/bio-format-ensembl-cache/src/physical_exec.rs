@@ -2,11 +2,15 @@ use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
-use crate::regulatory::{RegulatoryTarget, parse_regulatory_line, parse_regulatory_storable_file};
+use crate::regulatory::{
+    RegulatoryTarget, parse_regulatory_line_into, parse_regulatory_storable_file,
+};
 use crate::row::Row;
-use crate::transcript::{parse_transcript_line, parse_transcript_storable_file};
-use crate::util::{is_storable_binary_payload, open_text_reader, rows_to_record_batch};
-use crate::variation::parse_variation_line;
+use crate::transcript::{parse_transcript_line_into, parse_transcript_storable_file};
+use crate::util::{
+    BatchBuilder, ColumnMap, is_storable_binary_payload, open_text_reader, rows_to_record_batch,
+};
+use crate::variation::{VariationContext, parse_variation_line_into};
 use async_stream::try_stream;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
@@ -19,7 +23,7 @@ use datafusion_execution::TaskContext;
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -99,6 +103,59 @@ impl EnsemblCacheExec {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 8: File-level predicate pruning for variation files
+// ---------------------------------------------------------------------------
+
+fn file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
+    // Variation files are named {chrom}_{start}-{end}_var.gz (e.g. 1_1-1000000_var.gz).
+    // We can prune files whose chrom/region can't match the predicate.
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return true; // can't parse, don't prune
+    };
+
+    let Some((file_chrom, file_start, file_end)) = parse_file_chrom_region(file_name) else {
+        return true; // can't parse, don't prune
+    };
+
+    // Check chromosome
+    if let Some(pred_chrom) = &predicate.chrom {
+        if pred_chrom != file_chrom {
+            return false;
+        }
+    }
+
+    // Check region range overlap
+    if let Some(start_min) = predicate.start_min {
+        if file_end < start_min {
+            return false;
+        }
+    }
+    if let Some(end_max) = predicate.end_max {
+        if file_start > end_max {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Parses `{chrom}_{start}-{end}_var.gz` → (chrom, start, end)
+fn parse_file_chrom_region(name: &str) -> Option<(&str, i64, i64)> {
+    let marker = name.find('_')?;
+    let chrom = &name[..marker];
+    let suffix = &name[marker + 1..];
+    let (start_raw, rest) = suffix.split_once('-')?;
+    let end_raw: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if end_raw.is_empty() {
+        return None;
+    }
+
+    let start = start_raw.parse::<i64>().ok()?;
+    let end = end_raw.parse::<i64>().ok()?;
+    Some((chrom, start, end))
+}
+
 impl ExecutionPlan for EnsemblCacheExec {
     fn name(&self) -> &str {
         "EnsemblCacheExec"
@@ -139,7 +196,10 @@ impl ExecutionPlan for EnsemblCacheExec {
         let stream_schema = schema.clone();
         let kind = self.kind;
         let cache_info = self.cache_info.clone();
-        let files = self
+        let predicate = self.predicate.clone();
+
+        // Phase 8: Apply file-level predicate pruning for variation files
+        let files: Vec<PathBuf> = self
             .files
             .iter()
             .enumerate()
@@ -150,8 +210,15 @@ impl ExecutionPlan for EnsemblCacheExec {
                     None
                 }
             })
-            .collect::<Vec<_>>();
-        let predicate = self.predicate.clone();
+            .filter(|path| {
+                if kind == EnsemblEntityKind::Variation {
+                    file_matches_predicate(path, &predicate)
+                } else {
+                    true
+                }
+            })
+            .collect();
+
         let limit = self.limit;
         let variation_region_size = self.variation_region_size.unwrap_or(1_000_000);
         let coordinate_system_zero_based = self.coordinate_system_zero_based;
@@ -160,7 +227,15 @@ impl ExecutionPlan for EnsemblCacheExec {
             .unwrap_or_else(|| context.session_config().batch_size());
 
         let stream = try_stream! {
-            let mut buffered_rows: Vec<Row> = Vec::with_capacity(batch_size.max(1));
+            let col_map = ColumnMap::from_schema(&stream_schema);
+            let variation_ctx = if kind == EnsemblEntityKind::Variation {
+                Some(VariationContext::new(&cache_info))
+            } else {
+                None
+            };
+
+            let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size.max(1))?;
+            let mut buffered_rows: Vec<Row> = Vec::new();
             let mut emitted_rows: usize = 0;
             let mut stop = false;
 
@@ -176,6 +251,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                     && is_storable_binary_payload(&source_file)?;
 
                 if use_native_storable {
+                    // Storable binary path: still uses Vec<Row> + rows_to_record_batch
                     let parsed_rows = match kind {
                         EnsemblEntityKind::Transcript => {
                             parse_transcript_storable_file(
@@ -223,6 +299,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                     continue;
                 }
 
+                // Text line path: uses BatchBuilder directly
                 let mut reader = open_text_reader(&source_file)?;
                 let mut line = String::new();
 
@@ -241,50 +318,56 @@ impl ExecutionPlan for EnsemblCacheExec {
                     }
 
                     let line_trimmed = line.trim_end_matches(['\n', '\r']);
-                    let maybe_row = match kind {
-                        EnsemblEntityKind::Variation => parse_variation_line(
+                    let added = match kind {
+                        EnsemblEntityKind::Variation => parse_variation_line_into(
                             line_trimmed,
                             &source_file,
                             &cache_info,
                             &predicate,
                             variation_region_size,
                             coordinate_system_zero_based,
+                            &mut batch_builder,
+                            &col_map,
+                            variation_ctx.as_ref().unwrap(),
                         )?,
                         EnsemblEntityKind::Transcript => {
-                            parse_transcript_line(
+                            parse_transcript_line_into(
                                 line_trimmed,
                                 &source_file,
                                 &cache_info,
                                 &predicate,
                                 coordinate_system_zero_based,
+                                &mut batch_builder,
+                                &col_map,
                             )?
                         }
-                        EnsemblEntityKind::RegulatoryFeature => parse_regulatory_line(
+                        EnsemblEntityKind::RegulatoryFeature => parse_regulatory_line_into(
                             line_trimmed,
                             &source_file,
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::RegulatoryFeature,
                             coordinate_system_zero_based,
+                            &mut batch_builder,
+                            &col_map,
                         )?,
-                        EnsemblEntityKind::MotifFeature => parse_regulatory_line(
+                        EnsemblEntityKind::MotifFeature => parse_regulatory_line_into(
                             line_trimmed,
                             &source_file,
                             &cache_info,
                             &predicate,
                             RegulatoryTarget::MotifFeature,
                             coordinate_system_zero_based,
+                            &mut batch_builder,
+                            &col_map,
                         )?,
                     };
 
-                    if let Some(row) = maybe_row {
-                        buffered_rows.push(row);
+                    if added {
                         emitted_rows += 1;
 
-                        if buffered_rows.len() >= batch_size.max(1) {
-                            let batch =
-                                rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
-                            buffered_rows.clear();
+                        if batch_builder.len() >= batch_size.max(1) {
+                            let batch = batch_builder.finish()?;
                             yield batch;
                         }
 
@@ -298,6 +381,13 @@ impl ExecutionPlan for EnsemblCacheExec {
                 }
             }
 
+            // Flush remaining rows from BatchBuilder
+            if batch_builder.len() > 0 {
+                let batch = batch_builder.finish()?;
+                yield batch;
+            }
+
+            // Flush remaining rows from storable path
             if !buffered_rows.is_empty() {
                 let batch = rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
                 yield batch;

@@ -1,26 +1,141 @@
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
-use crate::row::{CellValue, Row};
 use crate::util::{
-    normalize_genomic_end, normalize_genomic_start, normalize_nullable, parse_f64, parse_i8,
-    parse_i64,
+    BatchBuilder, ColumnMap, normalize_genomic_end, normalize_genomic_start,
+    normalize_nullable_ref, parse_f64_ref, parse_i8_ref, parse_i64_ref,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
-const OPTIONAL_CANONICAL_COLUMNS: [&str; 10] = [
-    "failed",
-    "somatic",
-    "strand",
-    "minor_allele",
-    "minor_allele_freq",
-    "clin_sig",
-    "phenotype_or_disease",
-    "clinical_impact",
-    "pubmed",
-    "var_synonyms",
-];
+// ---------------------------------------------------------------------------
+// VariationContext – pre-computed per-partition field mapping
+// ---------------------------------------------------------------------------
+
+pub(crate) struct VariationContext {
+    // Tab field index for required fields
+    chrom_tab: Option<usize>,
+    start_tab: Option<usize>,
+    end_tab: Option<usize>,
+    var_name_tab: Option<usize>,
+    allele_tab: Option<usize>,
+    // Tab field index for optional canonical columns
+    failed_tab: Option<usize>,
+    somatic_tab: Option<usize>,
+    strand_tab: Option<usize>,
+    minor_allele_tab: Option<usize>,
+    minor_allele_freq_tab: Option<usize>,
+    clin_sig_tab: Option<usize>,
+    phenotype_or_disease_tab: Option<usize>,
+    clinical_impact_tab: Option<usize>,
+    pubmed_tab: Option<usize>,
+    var_synonyms_tab: Option<usize>,
+    // Extra columns: (tab_idx, output_column_name)
+    extra_columns: Vec<(usize, String)>,
+    // Pre-computed source ID mapping: source_key -> ids_column_name
+    source_to_id_column: HashMap<String, String>,
+}
+
+impl VariationContext {
+    pub fn new(cache_info: &CacheInfo) -> Self {
+        let cols = &cache_info.variation_cols;
+
+        let find = |candidates: &[&str]| -> Option<usize> {
+            for candidate in candidates {
+                if let Some(idx) = cols.iter().position(|c| c == candidate) {
+                    return Some(idx);
+                }
+            }
+            None
+        };
+
+        let chrom_tab = find(&["chr", "chrom", "seq_region_name"]);
+        let start_tab = find(&["start", "pos", "position"]);
+        let end_tab = find(&["end"]);
+        let var_name_tab = find(&["variation_name", "id"]);
+        let allele_tab = find(&["allele_string", "alleles"]);
+
+        let find_exact = |name: &str| -> Option<usize> { cols.iter().position(|c| c == name) };
+
+        let failed_tab = find_exact("failed");
+        let somatic_tab = find_exact("somatic");
+        let strand_tab = find_exact("strand");
+        let minor_allele_tab = find_exact("minor_allele");
+        let minor_allele_freq_tab = find_exact("minor_allele_freq");
+        let clin_sig_tab = find_exact("clin_sig");
+        let phenotype_or_disease_tab = find_exact("phenotype_or_disease");
+        let clinical_impact_tab = find_exact("clinical_impact");
+        let pubmed_tab = find_exact("pubmed");
+        let var_synonyms_tab = find_exact("var_synonyms");
+
+        // Build known set for filtering extras
+        let mut known: std::collections::HashSet<&str> = [
+            "chr",
+            "chrom",
+            "seq_region_name",
+            "start",
+            "pos",
+            "position",
+            "end",
+            "variation_name",
+            "id",
+            "allele_string",
+            "alleles",
+            "failed",
+            "somatic",
+            "strand",
+            "minor_allele",
+            "minor_allele_freq",
+            "clin_sig",
+            "phenotype_or_disease",
+            "clinical_impact",
+            "pubmed",
+            "var_synonyms",
+        ]
+        .into_iter()
+        .collect();
+        for source in &cache_info.source_descriptors {
+            known.insert(&source.ids_column);
+        }
+
+        let extra_columns: Vec<(usize, String)> = cols
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| !known.contains(name.as_str()))
+            .map(|(idx, name)| (idx, name.clone()))
+            .collect();
+
+        let source_to_id_column: HashMap<String, String> = cache_info
+            .source_descriptors
+            .iter()
+            .map(|s| (s.source_key.clone(), s.ids_column.clone()))
+            .collect();
+
+        Self {
+            chrom_tab,
+            start_tab,
+            end_tab,
+            var_name_tab,
+            allele_tab,
+            failed_tab,
+            somatic_tab,
+            strand_tab,
+            minor_allele_tab,
+            minor_allele_freq_tab,
+            clin_sig_tab,
+            phenotype_or_disease_tab,
+            clinical_impact_tab,
+            pubmed_tab,
+            var_synonyms_tab,
+            extra_columns,
+            source_to_id_column,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public helpers
+// ---------------------------------------------------------------------------
 
 pub(crate) fn detect_region_size(
     cache_info: &CacheInfo,
@@ -44,179 +159,7 @@ pub(crate) fn detect_region_size(
     1_000_000
 }
 
-pub(crate) fn parse_variation_line(
-    line: &str,
-    source_file: &Path,
-    cache_info: &CacheInfo,
-    predicate: &SimplePredicate,
-    cache_region_size: i64,
-    coordinate_system_zero_based: bool,
-) -> Result<Option<Row>> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(None);
-    }
-
-    let fields: Vec<&str> = trimmed.split('\t').collect();
-    let mut source_values: HashMap<String, String> = HashMap::new();
-    for (idx, column_name) in cache_info.variation_cols.iter().enumerate() {
-        let value = fields.get(idx).copied().unwrap_or_default();
-        if let Some(normalized) = normalize_nullable(value) {
-            source_values.insert(column_name.clone(), normalized);
-        }
-    }
-
-    let chrom =
-        first_non_empty(&source_values, &["chr", "chrom", "seq_region_name"]).ok_or_else(|| {
-            exec_err(format!(
-                "Variation row missing required chrom in {}: {}",
-                source_file.display(),
-                trimmed
-            ))
-        })?;
-
-    let source_start =
-        parse_i64(first_non_empty(&source_values, &["start", "pos", "position"]).as_deref())
-            .ok_or_else(|| {
-                exec_err(format!(
-                    "Variation row missing required start in {}: {}",
-                    source_file.display(),
-                    trimmed
-                ))
-            })?;
-
-    let source_end =
-        parse_i64(first_non_empty(&source_values, &["end"]).as_deref()).unwrap_or(source_start);
-
-    let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
-    let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
-
-    if !predicate.matches(&chrom, start, end) {
-        return Ok(None);
-    }
-
-    let variation_name =
-        first_non_empty(&source_values, &["variation_name", "id"]).ok_or_else(|| {
-            exec_err(format!(
-                "Variation row missing required variation_name in {}: {}",
-                source_file.display(),
-                trimmed
-            ))
-        })?;
-
-    let allele_string =
-        first_non_empty(&source_values, &["allele_string", "alleles"]).ok_or_else(|| {
-            exec_err(format!(
-                "Variation row missing required allele_string in {}: {}",
-                source_file.display(),
-                trimmed
-            ))
-        })?;
-
-    let region_bin = ((source_start.saturating_sub(1)) / cache_region_size.max(1)).max(0);
-    let variation_name_for_ids = variation_name.clone();
-
-    let mut row: Row = HashMap::new();
-    row.insert("chrom".to_string(), CellValue::Utf8(chrom));
-    row.insert("start".to_string(), CellValue::Int64(start));
-    row.insert("end".to_string(), CellValue::Int64(end));
-    row.insert(
-        "variation_name".to_string(),
-        CellValue::Utf8(variation_name),
-    );
-    row.insert("allele_string".to_string(), CellValue::Utf8(allele_string));
-    row.insert("region_bin".to_string(), CellValue::Int64(region_bin));
-
-    if let Some(v) = parse_i8(source_values.get("failed").map(String::as_str)) {
-        row.insert("failed".to_string(), CellValue::Int8(v));
-    }
-    if let Some(v) = parse_i8(source_values.get("somatic").map(String::as_str)) {
-        row.insert("somatic".to_string(), CellValue::Int8(v));
-    }
-    if let Some(v) = parse_i8(source_values.get("strand").map(String::as_str)) {
-        row.insert("strand".to_string(), CellValue::Int8(v));
-    }
-    if let Some(v) = source_values.get("minor_allele") {
-        row.insert("minor_allele".to_string(), CellValue::Utf8(v.clone()));
-    }
-    if let Some(v) = parse_f64(source_values.get("minor_allele_freq").map(String::as_str)) {
-        row.insert("minor_allele_freq".to_string(), CellValue::Float64(v));
-    }
-    if let Some(v) = source_values.get("clin_sig") {
-        row.insert("clin_sig".to_string(), CellValue::Utf8(v.clone()));
-    }
-    if let Some(v) = parse_i8(
-        source_values
-            .get("phenotype_or_disease")
-            .map(String::as_str),
-    ) {
-        row.insert("phenotype_or_disease".to_string(), CellValue::Int8(v));
-    }
-    if let Some(v) = source_values.get("clinical_impact") {
-        row.insert("clinical_impact".to_string(), CellValue::Utf8(v.clone()));
-    }
-    if let Some(v) = source_values.get("pubmed") {
-        row.insert("pubmed".to_string(), CellValue::Utf8(v.clone()));
-    }
-    if let Some(v) = source_values.get("var_synonyms") {
-        row.insert("var_synonyms".to_string(), CellValue::Utf8(v.clone()));
-    }
-
-    let source_ids = extract_source_ids(
-        Some(variation_name_for_ids.as_str()),
-        source_values.get("var_synonyms"),
-        cache_info,
-    );
-    for (column, value) in source_ids {
-        row.insert(column, CellValue::Utf8(value));
-    }
-
-    let mut known: HashSet<String> = [
-        "chr",
-        "chrom",
-        "seq_region_name",
-        "start",
-        "pos",
-        "position",
-        "end",
-        "variation_name",
-        "id",
-        "allele_string",
-        "alleles",
-    ]
-    .into_iter()
-    .chain(OPTIONAL_CANONICAL_COLUMNS)
-    .map(ToString::to_string)
-    .collect();
-    for source in &cache_info.source_descriptors {
-        known.insert(source.ids_column.clone());
-    }
-
-    for column_name in &cache_info.variation_cols {
-        if known.contains(column_name.as_str()) {
-            continue;
-        }
-        if let Some(value) = source_values.get(column_name) {
-            row.insert(column_name.clone(), CellValue::Utf8(value.clone()));
-        }
-    }
-
-    append_provenance(&mut row, cache_info, source_file);
-    Ok(Some(row))
-}
-
-fn first_non_empty(values: &HashMap<String, String>, candidates: &[&str]) -> Option<String> {
-    for key in candidates {
-        if let Some(value) = values.get(*key) {
-            if !value.is_empty() {
-                return Some(value.clone());
-            }
-        }
-    }
-    None
-}
-
-fn parse_region_from_filename(name: &str) -> Option<i64> {
+pub(crate) fn parse_region_from_filename(name: &str) -> Option<i64> {
     let marker = name.find('_')?;
     let suffix = &name[marker + 1..];
     let (start_raw, rest) = suffix.split_once('-')?;
@@ -234,55 +177,249 @@ fn parse_region_from_filename(name: &str) -> Option<i64> {
     }
 }
 
-fn append_provenance(row: &mut Row, cache_info: &CacheInfo, source_file: &Path) {
-    row.insert(
-        "species".to_string(),
-        CellValue::Utf8(cache_info.species.clone()),
-    );
-    row.insert(
-        "assembly".to_string(),
-        CellValue::Utf8(cache_info.assembly.clone()),
-    );
-    row.insert(
-        "cache_version".to_string(),
-        CellValue::Utf8(cache_info.cache_version.clone()),
-    );
-    for source in &cache_info.source_descriptors {
-        row.insert(
-            source.source_column.clone(),
-            CellValue::Utf8(source.value.clone()),
+// ---------------------------------------------------------------------------
+// Direct builder parser
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_variation_line_into(
+    line: &str,
+    source_file: &Path,
+    cache_info: &CacheInfo,
+    predicate: &SimplePredicate,
+    cache_region_size: i64,
+    coordinate_system_zero_based: bool,
+    batch: &mut BatchBuilder,
+    col_map: &ColumnMap,
+    ctx: &VariationContext,
+) -> Result<bool> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with('#') {
+        return Ok(false);
+    }
+
+    let fields: Vec<&str> = trimmed.split('\t').collect();
+
+    // Helper to get a tab field by pre-computed index
+    let field_at =
+        |tab_idx: Option<usize>| -> Option<&str> { tab_idx.and_then(|i| fields.get(i).copied()) };
+
+    // Extract required fields using zero-copy refs
+    let chrom_ref = field_at(ctx.chrom_tab)
+        .and_then(normalize_nullable_ref)
+        .ok_or_else(|| {
+            exec_err(format!(
+                "Variation row missing required chrom in {}: {}",
+                source_file.display(),
+                trimmed
+            ))
+        })?;
+
+    let source_start = parse_i64_ref(field_at(ctx.start_tab)).ok_or_else(|| {
+        exec_err(format!(
+            "Variation row missing required start in {}: {}",
+            source_file.display(),
+            trimmed
+        ))
+    })?;
+
+    let source_end = parse_i64_ref(field_at(ctx.end_tab)).unwrap_or(source_start);
+
+    let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+    let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
+
+    if !predicate.matches(chrom_ref, start, end) {
+        return Ok(false);
+    }
+
+    let variation_name_ref = field_at(ctx.var_name_tab)
+        .and_then(normalize_nullable_ref)
+        .ok_or_else(|| {
+            exec_err(format!(
+                "Variation row missing required variation_name in {}: {}",
+                source_file.display(),
+                trimmed
+            ))
+        })?;
+
+    let allele_string_ref = field_at(ctx.allele_tab)
+        .and_then(normalize_nullable_ref)
+        .ok_or_else(|| {
+            exec_err(format!(
+                "Variation row missing required allele_string in {}: {}",
+                source_file.display(),
+                trimmed
+            ))
+        })?;
+
+    let region_bin = ((source_start.saturating_sub(1)) / cache_region_size.max(1)).max(0);
+
+    // Write required columns
+    if let Some(idx) = col_map.get("chrom") {
+        batch.set_utf8(idx, chrom_ref);
+    }
+    if let Some(idx) = col_map.get("start") {
+        batch.set_i64(idx, start);
+    }
+    if let Some(idx) = col_map.get("end") {
+        batch.set_i64(idx, end);
+    }
+    if let Some(idx) = col_map.get("variation_name") {
+        batch.set_utf8(idx, variation_name_ref);
+    }
+    if let Some(idx) = col_map.get("allele_string") {
+        batch.set_utf8(idx, allele_string_ref);
+    }
+    if let Some(idx) = col_map.get("region_bin") {
+        batch.set_i64(idx, region_bin);
+    }
+
+    // Write optional canonical columns (only if projected)
+    if let Some(idx) = col_map.get("failed") {
+        batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.failed_tab)));
+    }
+    if let Some(idx) = col_map.get("somatic") {
+        batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.somatic_tab)));
+    }
+    if let Some(idx) = col_map.get("strand") {
+        batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.strand_tab)));
+    }
+    if let Some(idx) = col_map.get("minor_allele") {
+        batch.set_opt_utf8(
+            idx,
+            field_at(ctx.minor_allele_tab).and_then(normalize_nullable_ref),
         );
     }
-    if let Some(serializer) = &cache_info.serializer_type {
-        row.insert(
-            "serializer_type".to_string(),
-            CellValue::Utf8(serializer.clone()),
+    if let Some(idx) = col_map.get("minor_allele_freq") {
+        batch.set_opt_f64(idx, parse_f64_ref(field_at(ctx.minor_allele_freq_tab)));
+    }
+    if let Some(idx) = col_map.get("clin_sig") {
+        batch.set_opt_utf8(
+            idx,
+            field_at(ctx.clin_sig_tab).and_then(normalize_nullable_ref),
         );
     }
-    row.insert(
-        "source_cache_path".to_string(),
-        CellValue::Utf8(cache_info.source_cache_path.clone()),
-    );
-    row.insert(
-        "source_file".to_string(),
-        CellValue::Utf8(source_file.to_string_lossy().to_string()),
-    );
+    if let Some(idx) = col_map.get("phenotype_or_disease") {
+        batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.phenotype_or_disease_tab)));
+    }
+    if let Some(idx) = col_map.get("clinical_impact") {
+        batch.set_opt_utf8(
+            idx,
+            field_at(ctx.clinical_impact_tab).and_then(normalize_nullable_ref),
+        );
+    }
+    if let Some(idx) = col_map.get("pubmed") {
+        batch.set_opt_utf8(
+            idx,
+            field_at(ctx.pubmed_tab).and_then(normalize_nullable_ref),
+        );
+    }
+    if let Some(idx) = col_map.get("var_synonyms") {
+        batch.set_opt_utf8(
+            idx,
+            field_at(ctx.var_synonyms_tab).and_then(normalize_nullable_ref),
+        );
+    }
+
+    // Source IDs: only compute if any source ID column is projected
+    let any_source_id_projected = cache_info
+        .source_descriptors
+        .iter()
+        .any(|s| col_map.get(&s.ids_column).is_some());
+    if any_source_id_projected {
+        let var_synonyms_ref = field_at(ctx.var_synonyms_tab).and_then(normalize_nullable_ref);
+        let source_ids = extract_source_ids(
+            Some(variation_name_ref),
+            var_synonyms_ref,
+            &ctx.source_to_id_column,
+        );
+        for source in &cache_info.source_descriptors {
+            if let Some(idx) = col_map.get(&source.ids_column) {
+                match source_ids.get(&source.ids_column) {
+                    Some(value) => batch.set_utf8(idx, value),
+                    None => batch.set_null(idx),
+                }
+            }
+        }
+    }
+
+    // Extra columns (dynamic, not in known set)
+    for (tab_idx, col_name) in &ctx.extra_columns {
+        if let Some(builder_idx) = col_map.get(col_name) {
+            batch.set_opt_utf8(
+                builder_idx,
+                fields
+                    .get(*tab_idx)
+                    .copied()
+                    .and_then(normalize_nullable_ref),
+            );
+        }
+    }
+
+    // Provenance columns
+    append_provenance(batch, col_map, cache_info, source_file);
+
+    batch.finish_row();
+    Ok(true)
 }
+
+// ---------------------------------------------------------------------------
+// Provenance – shared helper for appending constant provenance columns
+// ---------------------------------------------------------------------------
+
+pub(crate) fn append_provenance(
+    batch: &mut BatchBuilder,
+    col_map: &ColumnMap,
+    cache_info: &CacheInfo,
+    source_file: &Path,
+) {
+    if let Some(idx) = col_map.get("species") {
+        batch.set_utf8(idx, &cache_info.species);
+    }
+    if let Some(idx) = col_map.get("assembly") {
+        batch.set_utf8(idx, &cache_info.assembly);
+    }
+    if let Some(idx) = col_map.get("cache_version") {
+        batch.set_utf8(idx, &cache_info.cache_version);
+    }
+    for source in &cache_info.source_descriptors {
+        if let Some(idx) = col_map.get(&source.source_column) {
+            batch.set_utf8(idx, &source.value);
+        }
+    }
+    if let Some(idx) = col_map.get("serializer_type") {
+        match &cache_info.serializer_type {
+            Some(s) => batch.set_utf8(idx, s),
+            None => batch.set_null(idx),
+        }
+    }
+    if let Some(idx) = col_map.get("source_cache_path") {
+        batch.set_utf8(idx, &cache_info.source_cache_path);
+    }
+    if let Some(idx) = col_map.get("source_file") {
+        // Avoid String allocation when path is valid UTF-8
+        let path_str = source_file.to_str().unwrap_or_default();
+        if !path_str.is_empty() {
+            batch.set_utf8(idx, path_str);
+        } else {
+            batch.set_utf8(idx, &source_file.to_string_lossy());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source ID extraction
+// ---------------------------------------------------------------------------
 
 fn extract_source_ids(
     variation_name: Option<&str>,
-    var_synonyms: Option<&String>,
-    cache_info: &CacheInfo,
+    var_synonyms: Option<&str>,
+    source_to_id_column: &HashMap<String, String>,
 ) -> HashMap<String, String> {
-    let source_to_id_column: HashMap<String, String> = cache_info
-        .source_descriptors
-        .iter()
-        .map(|source| (source.source_key.clone(), source.ids_column.clone()))
-        .collect();
     let mut buckets: HashMap<String, Vec<String>> = HashMap::new();
 
     if let Some(variation_name) = variation_name {
-        assign_by_pattern(variation_name, &source_to_id_column, &mut buckets);
+        assign_by_pattern(variation_name, source_to_id_column, &mut buckets);
     }
 
     if let Some(var_synonyms) = var_synonyms {
@@ -300,7 +437,7 @@ fn extract_source_ids(
                 if let Some(column) = &current_source_column {
                     push_source_id(column, value.trim(), &mut buckets);
                 } else {
-                    assign_by_pattern(token, &source_to_id_column, &mut buckets);
+                    assign_by_pattern(token, source_to_id_column, &mut buckets);
                 }
                 continue;
             }
@@ -317,7 +454,7 @@ fn extract_source_ids(
             if let Some(column) = &current_source_column {
                 push_source_id(column, token, &mut buckets);
             } else {
-                assign_by_pattern(token, &source_to_id_column, &mut buckets);
+                assign_by_pattern(token, source_to_id_column, &mut buckets);
             }
         }
     }
