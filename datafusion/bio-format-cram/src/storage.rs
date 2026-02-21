@@ -57,13 +57,13 @@ impl ReferenceSequenceRepository {
             StorageType::LOCAL => {
                 // Local file path - use IndexedReader
                 let fasta_path = PathBuf::from(path);
-                let index_path = format!("{}.fai", path);
+                let index_path = format!("{path}.fai");
 
                 // Check if files exist
                 if !fasta_path.exists() {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        format!("FASTA file not found: {}", path),
+                        format!("FASTA file not found: {path}"),
                     ));
                 }
 
@@ -72,8 +72,7 @@ impl ReferenceSequenceRepository {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         format!(
-                            "FASTA index (.fai) not found: {}. Please create it using 'samtools faidx {}'",
-                            index_path, path
+                            "FASTA index (.fai) not found: {index_path}. Please create it using 'samtools faidx {path}'"
                         ),
                     ));
                 }
@@ -101,17 +100,13 @@ impl ReferenceSequenceRepository {
                 Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!(
-                        "Remote FASTA references from {:?} are not yet supported. Please use a local FASTA file or embedded reference.",
-                        storage_type
+                        "Remote FASTA references from {storage_type:?} are not yet supported. Please use a local FASTA file or embedded reference."
                     ),
                 ))
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "Unsupported storage type for FASTA reference: {:?}",
-                    storage_type
-                ),
+                format!("Unsupported storage type for FASTA reference: {storage_type:?}"),
             )),
         }
     }
@@ -187,7 +182,7 @@ pub async fn get_local_cram_reader(
             cram::io::reader::Builder::default()
                 .set_reference_sequence_repository(repo.clone())
                 .build_from_path(&file_path)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .map_err(io::Error::other)?
         }
         ReferenceSequenceRepository::Embedded | ReferenceSequenceRepository::None => {
             // Use Builder with default (empty) repository
@@ -195,7 +190,7 @@ pub async fn get_local_cram_reader(
             cram::io::reader::Builder::default()
                 .set_reference_sequence_repository(default_repo)
                 .build_from_path(&file_path)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
+                .map_err(io::Error::other)?
         }
     };
 
@@ -206,6 +201,7 @@ pub async fn get_local_cram_reader(
 ///
 /// Abstracts over the difference between local synchronous reads and
 /// remote asynchronous reads, allowing the same code to work with both.
+#[allow(clippy::large_enum_variant)]
 pub enum CramReader {
     /// Local CRAM file reader with embedded or local reference
     Local(Reader<File>, ReferenceSequenceRepository, Header),
@@ -254,7 +250,7 @@ impl CramReader {
                 let header = reader.read_header().await.unwrap();
                 CramReader::Remote(reader, reference_repo, header)
             }
-            _ => panic!("Unsupported storage type for CRAM file: {:?}", storage_type),
+            _ => panic!("Unsupported storage type for CRAM file: {storage_type:?}"),
         }
     }
 
@@ -467,7 +463,7 @@ impl IndexedCramReader {
 
         let mut reader = builder
             .build_from_path(file_path)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         let header = reader.read_header()?;
         Ok(Self { reader, header })
     }
@@ -509,7 +505,7 @@ pub fn estimate_sizes_from_crai(
     let records = match cram::crai::fs::read(index_path) {
         Ok(recs) => recs,
         Err(e) => {
-            log::debug!("Failed to read CRAI index for size estimation: {}", e);
+            log::debug!("Failed to read CRAI index for size estimation: {e}");
             return regions
                 .iter()
                 .map(|r| RegionSizeEstimate {

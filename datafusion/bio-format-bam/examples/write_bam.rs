@@ -98,8 +98,8 @@ async fn main() -> datafusion::error::Result<()> {
 
     println!("\n✓ BAM/SAM write examples completed successfully");
     println!("Output files:");
-    println!("  - {}", output_path_1);
-    println!("  - {}", output_path_2);
+    println!("  - {output_path_1}");
+    println!("  - {output_path_2}");
     println!("  - output/converted.bam");
 
     Ok(())

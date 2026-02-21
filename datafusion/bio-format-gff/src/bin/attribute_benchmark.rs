@@ -33,15 +33,12 @@ async fn benchmark_with_attributes(
 
         record_count += 1;
         if record_count % 500_000 == 0 {
-            println!("  Processed {} records", record_count);
+            println!("  Processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ WITH attributes: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ WITH attributes: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -67,15 +64,12 @@ async fn benchmark_without_attributes(
 
         record_count += 1;
         if record_count % 500_000 == 0 {
-            println!("  Processed {} records", record_count);
+            println!("  Processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ WITHOUT attributes: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ WITHOUT attributes: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -84,11 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("📊 GFF Attribute Processing Performance Analysis");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("============================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -107,19 +101,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_attr_records_per_sec = 3_148_136.0 / no_attr_time.as_secs_f64();
     let with_attr_records_per_sec = 3_148_136.0 / with_attr_time.as_secs_f64();
 
+    println!("🚀 WITHOUT attributes: {no_attr_time:?} ({no_attr_records_per_sec:.0} records/sec)");
     println!(
-        "🚀 WITHOUT attributes: {:?} ({:.0} records/sec)",
-        no_attr_time, no_attr_records_per_sec
-    );
-    println!(
-        "🐌 WITH attributes:    {:?} ({:.0} records/sec)",
-        with_attr_time, with_attr_records_per_sec
+        "🐌 WITH attributes:    {with_attr_time:?} ({with_attr_records_per_sec:.0} records/sec)"
     );
 
     let slowdown = with_attr_time.as_secs_f64() / no_attr_time.as_secs_f64();
     println!();
     println!("🎯 VERDICT:");
-    println!("Attribute processing is {:.1}x SLOWER", slowdown);
+    println!("Attribute processing is {slowdown:.1}x SLOWER");
 
     if slowdown > 5.0 {
         println!("❌ MAJOR BOTTLENECK: Attribute processing is the primary performance killer!");

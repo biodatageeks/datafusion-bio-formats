@@ -199,7 +199,7 @@ fn build_single_record(
             let ops =
                 datafusion_bio_format_core::alignment_utils::decode_binary_cigar_to_ops(bytes)
                     .map_err(|e| {
-                        DataFusionError::Execution(format!("Failed to decode binary CIGAR: {}", e))
+                        DataFusionError::Execution(format!("Failed to decode binary CIGAR: {e}"))
                     })?;
             Cigar::from(ops)
         }
@@ -285,7 +285,7 @@ fn parse_cigar_string(cigar_str: &str) -> Result<Cigar> {
     // Collect operations from the iterator
     let ops: std::result::Result<Vec<_>, _> = record_cigar.iter().collect();
     let ops = ops.map_err(|e| {
-        DataFusionError::Execution(format!("Failed to parse CIGAR '{}': {}", cigar_str, e))
+        DataFusionError::Execution(format!("Failed to parse CIGAR '{cigar_str}': {e}"))
     })?;
 
     Ok(Cigar::from(ops))
@@ -457,37 +457,37 @@ fn arrow_to_sam_tag_value(
 /// Gets a string column from the batch by name
 fn get_string_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
     let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
+        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
     batch
         .column(idx)
         .as_any()
         .downcast_ref::<StringArray>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' must be String type", name)))
+        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be String type")))
 }
 
 /// Gets a u32 column from the batch by name
 fn get_u32_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt32Array> {
     let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
+        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
     batch
         .column(idx)
         .as_any()
         .downcast_ref::<UInt32Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' must be UInt32 type", name)))
+        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be UInt32 type")))
 }
 
 /// Gets an i32 column from the batch by name
 fn get_i32_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
     let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
+        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
     batch
         .column(idx)
         .as_any()
         .downcast_ref::<Int32Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' must be Int32 type", name)))
+        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be Int32 type")))
 }
 
 /// Builds a map from tag name to column index

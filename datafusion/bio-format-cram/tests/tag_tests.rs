@@ -57,8 +57,7 @@ async fn test_cram_read_with_tags() {
     let nm_count: usize = results.iter().map(|b| b.num_rows()).sum();
     assert!(
         nm_count > 400,
-        "NM should be present in most reads, got {}",
-        nm_count
+        "NM should be present in most reads, got {nm_count}"
     );
 
     for batch in &results {
@@ -72,8 +71,7 @@ async fn test_cram_read_with_tags() {
                 let nm = nm_col.value(i);
                 assert!(
                     (0..100).contains(&nm),
-                    "NM={} should be a small non-negative integer",
-                    nm
+                    "NM={nm} should be a small non-negative integer"
                 );
             }
         }
@@ -89,8 +87,7 @@ async fn test_cram_read_with_tags() {
     let md_count: usize = results.iter().map(|b| b.num_rows()).sum();
     assert!(
         md_count > 400,
-        "MD should be present in most reads, got {}",
-        md_count
+        "MD should be present in most reads, got {md_count}"
     );
 
     for batch in &results {
@@ -115,8 +112,7 @@ async fn test_cram_read_with_tags() {
     let mq_count = count_rows(&ctx, "SELECT \"MQ\" FROM cram WHERE \"MQ\" IS NOT NULL").await;
     assert!(
         mq_count > 400,
-        "MQ should be present in most reads, got {}",
-        mq_count
+        "MQ should be present in most reads, got {mq_count}"
     );
 }
 
@@ -148,13 +144,11 @@ async fn test_cram_nullable_tags_with_mixed_presence() {
     // NM and MQ should be present in most reads
     assert!(
         nm_count > 400,
-        "NM should be present in most reads, got {}",
-        nm_count
+        "NM should be present in most reads, got {nm_count}"
     );
     assert!(
         mq_count > 400,
-        "MQ should be present in most reads, got {}",
-        mq_count
+        "MQ should be present in most reads, got {mq_count}"
     );
 
     // E2 may be present in some or all — just verify the query runs and count is reasonable

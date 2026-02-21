@@ -352,16 +352,10 @@ async fn test_xt_tag_character_values() {
 
     // All XT values should be single ASCII characters
     for val in &xt_values {
-        assert_eq!(
-            val.len(),
-            1,
-            "XT value '{}' should be single character",
-            val
-        );
+        assert_eq!(val.len(), 1, "XT value '{val}' should be single character");
         assert!(
             val.chars().next().unwrap().is_ascii(),
-            "XT value '{}' should be ASCII",
-            val,
+            "XT value '{val}' should be ASCII",
         );
     }
 }
@@ -405,8 +399,7 @@ async fn test_integer_tags_from_int8_encoding() {
                 let nm = nm_col.value(i);
                 assert!(
                     (0..100).contains(&nm),
-                    "NM={} should be a small non-negative integer",
-                    nm
+                    "NM={nm} should be a small non-negative integer"
                 );
             }
         }
@@ -491,26 +484,22 @@ async fn test_nullable_tags_with_mixed_presence() {
     // NM is present in most reads (12 of 14 mapped reads have it)
     assert!(
         nm_count >= 10,
-        "NM should be present in most reads, got {}",
-        nm_count
+        "NM should be present in most reads, got {nm_count}"
     );
     // XT is present in fewer reads (5 of 14)
     assert!(
         (3..14).contains(&xt_count),
-        "XT should be present in some reads, got {}",
-        xt_count
+        "XT should be present in some reads, got {xt_count}"
     );
     // XN is rare (2 of 14)
     assert!(
         (1..=5).contains(&xn_count),
-        "XN should be present in few reads, got {}",
-        xn_count
+        "XN should be present in few reads, got {xn_count}"
     );
     // OC is rare (2 of 14)
     assert!(
         (1..=5).contains(&oc_count),
-        "OC should be present in few reads, got {}",
-        oc_count
+        "OC should be present in few reads, got {oc_count}"
     );
 }
 
@@ -566,7 +555,7 @@ async fn test_describe_discovers_tags() {
         .filter(|&i| categories.value(i) == "tag")
         .count();
 
-    println!("Discovered {} tags in sample", tag_count);
+    println!("Discovered {tag_count} tags in sample");
     // Should discover at least some tags if present in data
 }
 

@@ -80,7 +80,7 @@ pub async fn new_local_reader(
         object_storage_options,
     )
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let file = File::open(file_path)?;
     match compression {
@@ -131,7 +131,7 @@ impl IndexedPairsReader {
         let reader = noodles_tabix::io::indexed_reader::Builder::default()
             .set_index(index)
             .build_from_path(Path::new(file_path))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         // Parse header from the BGZF file for column info
         let header = {
@@ -181,7 +181,7 @@ pub fn estimate_sizes_from_tbi(
     let index = match noodles_tabix::fs::read(index_path) {
         Ok(idx) => idx,
         Err(e) => {
-            log::debug!("Failed to read TBI index for size estimation: {}", e);
+            log::debug!("Failed to read TBI index for size estimation: {e}");
             return regions
                 .iter()
                 .map(|r| RegionSizeEstimate {

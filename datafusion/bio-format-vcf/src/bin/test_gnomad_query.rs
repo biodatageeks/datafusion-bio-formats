@@ -27,7 +27,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register the table
     let file_path = "gs://polars-bio-it/vep.vcf.bgz";
-    println!("Registering table from: {}", file_path);
+    println!("Registering table from: {file_path}");
 
     let table_provider = Arc::new(VcfTableProvider::new(
         file_path.to_string(),
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     "#;
 
     println!("Running query:");
-    println!("{}", sql);
+    println!("{sql}");
 
     let df = ctx.sql(sql).await?;
     let results = df.collect().await?;

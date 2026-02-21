@@ -17,7 +17,7 @@ chr1	300	.	G	A	50	PASS	DP=15;AF=0.7
 "#;
 
 async fn create_test_vcf_file(test_name: &str) -> std::io::Result<String> {
-    let temp_file = format!("/tmp/test_projection_{}.vcf", test_name);
+    let temp_file = format!("/tmp/test_projection_{test_name}.vcf");
     fs::write(&temp_file, SAMPLE_VCF_CONTENT).await?;
     Ok(temp_file)
 }
@@ -539,7 +539,7 @@ async fn test_vcf_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .value(0);
 
-    println!("COUNT(*) result: {}", count_star);
+    println!("COUNT(*) result: {count_star}");
 
     // Test COUNT(chrom) - this should work
     println!("Testing COUNT(chrom)...");
@@ -557,15 +557,14 @@ async fn test_vcf_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .value(0);
 
-    println!("COUNT(chrom) result: {}", count_chrom);
+    println!("COUNT(chrom) result: {count_chrom}");
 
     // They should be equal
     assert_eq!(
         count_star, count_chrom,
-        "COUNT(*) should equal COUNT(chrom) but got {} vs {}",
-        count_star, count_chrom
+        "COUNT(*) should equal COUNT(chrom) but got {count_star} vs {count_chrom}"
     );
-    assert_eq!(count_star, 3, "COUNT(*) should be 3 but got {}", count_star);
+    assert_eq!(count_star, 3, "COUNT(*) should be 3 but got {count_star}");
 
     Ok(())
 }

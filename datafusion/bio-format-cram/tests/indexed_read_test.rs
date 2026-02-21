@@ -91,13 +91,11 @@ async fn test_cram_multi_chromosome_query() -> datafusion::error::Result<()> {
 
     assert!(
         chroms.contains("chr1"),
-        "Expected chr1 in results: {:?}",
-        chroms
+        "Expected chr1 in results: {chroms:?}"
     );
     assert!(
         chroms.contains("chr2"),
-        "Expected chr2 in results: {:?}",
-        chroms
+        "Expected chr2 in results: {chroms:?}"
     );
 
     Ok(())
@@ -118,11 +116,7 @@ async fn test_cram_full_scan_total_count() -> datafusion::error::Result<()> {
     assert_eq!(
         total,
         chr1 + chr2 + chrx,
-        "Full scan total ({}) should equal sum of per-chrom counts (chr1={}, chr2={}, chrX={})",
-        total,
-        chr1,
-        chr2,
-        chrx
+        "Full scan total ({total}) should equal sum of per-chrom counts (chr1={chr1}, chr2={chr2}, chrX={chrx})"
     );
 
     Ok(())
@@ -142,9 +136,7 @@ async fn test_cram_record_level_filter() -> datafusion::error::Result<()> {
     );
     assert!(
         filtered <= total,
-        "Filtered count ({}) should be <= total ({})",
-        filtered,
-        total
+        "Filtered count ({filtered}) should be <= total ({total})"
     );
 
     Ok(())
@@ -165,9 +157,7 @@ async fn test_cram_combined_genomic_and_record_filter() -> datafusion::error::Re
     assert!(combined > 0, "Expected some reads matching combined filter");
     assert!(
         combined <= chr1_total,
-        "Combined filter count ({}) should be <= chr1 total ({})",
-        combined,
-        chr1_total
+        "Combined filter count ({combined}) should be <= chr1 total ({chr1_total})"
     );
 
     Ok(())
@@ -189,9 +179,7 @@ async fn test_cram_region_with_start_end() -> datafusion::error::Result<()> {
     assert!(region_count > 0, "Expected reads in the specified region");
     assert!(
         region_count <= chr1_total,
-        "Region count ({}) should be <= chr1 total ({})",
-        region_count,
-        chr1_total
+        "Region count ({region_count}) should be <= chr1 total ({chr1_total})"
     );
 
     Ok(())
@@ -222,8 +210,7 @@ async fn test_cram_indexed_vs_full_scan_correctness() -> datafusion::error::Resu
 
     assert_eq!(
         indexed_count, manual_count,
-        "Indexed chr1 count ({}) should equal manual count from full scan ({})",
-        indexed_count, manual_count
+        "Indexed chr1 count ({indexed_count}) should equal manual count from full scan ({manual_count})"
     );
 
     Ok(())

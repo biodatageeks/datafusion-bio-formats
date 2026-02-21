@@ -73,15 +73,12 @@ async fn benchmark_full_attribute_processing(
 
         record_count += 1;
         if record_count % 500_000 == 0 {
-            println!("  Processed {} records", record_count);
+            println!("  Processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ FULL processing: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ FULL processing: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -107,15 +104,12 @@ async fn benchmark_minimal_processing(
 
         record_count += 1;
         if record_count % 500_000 == 0 {
-            println!("  Processed {} records", record_count);
+            println!("  Processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ MINIMAL processing: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ MINIMAL processing: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -124,11 +118,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("🔬 GFF FULL PIPELINE Performance Analysis");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("=========================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -147,19 +141,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let minimal_records_per_sec = 3_148_136.0 / minimal_time.as_secs_f64();
     let full_records_per_sec = 3_148_136.0 / full_time.as_secs_f64();
 
-    println!(
-        "🚀 MINIMAL:     {:?} ({:.0} records/sec)",
-        minimal_time, minimal_records_per_sec
-    );
-    println!(
-        "🐌 FULL ATTRS:  {:?} ({:.0} records/sec)",
-        full_time, full_records_per_sec
-    );
+    println!("🚀 MINIMAL:     {minimal_time:?} ({minimal_records_per_sec:.0} records/sec)");
+    println!("🐌 FULL ATTRS:  {full_time:?} ({full_records_per_sec:.0} records/sec)");
 
     let slowdown = full_time.as_secs_f64() / minimal_time.as_secs_f64();
     println!();
     println!("📊 ATTRIBUTE PROCESSING IMPACT:");
-    println!("Full attribute processing is {:.1}x SLOWER", slowdown);
+    println!("Full attribute processing is {slowdown:.1}x SLOWER");
 
     if slowdown > 8.0 {
         println!("🚨 CRITICAL: This matches your 10x slowdown observation!");

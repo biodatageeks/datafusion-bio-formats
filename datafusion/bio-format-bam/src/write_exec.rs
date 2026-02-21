@@ -285,7 +285,7 @@ async fn write_bam_stream(
     schema_metadata_overrides: HashMap<String, String>,
     output_schema: SchemaRef,
 ) -> Result<RecordBatch> {
-    debug!("Starting BAM write to: {}", output_path);
+    debug!("Starting BAM write to: {output_path}");
 
     // Create writer
     let mut writer = BamLocalWriter::with_compression(&output_path, compression)?;
@@ -315,7 +315,7 @@ async fn write_bam_stream(
         let batch = batch_result?;
         let num_rows = batch.num_rows();
 
-        debug!("Writing batch with {} rows", num_rows);
+        debug!("Writing batch with {num_rows} rows");
 
         // Convert batch to BAM records
         let records =
@@ -329,7 +329,7 @@ async fn write_bam_stream(
     // Finish writing
     writer.finish(&header)?;
 
-    debug!("Wrote {} records to {}", total_count, output_path);
+    debug!("Wrote {total_count} records to {output_path}");
 
     // Return count as RecordBatch
     let count_array = Arc::new(UInt64Array::from(vec![total_count]));

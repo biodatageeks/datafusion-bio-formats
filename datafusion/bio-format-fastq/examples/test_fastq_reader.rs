@@ -22,6 +22,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ctx.register_table("example", Arc::new(table)).unwrap();
     let df = ctx.sql("SELECT * FROM example").await?;
     let results = df.count().await?;
-    println!("Count: {:?}", results);
+    println!("Count: {results:?}");
     Ok(())
 }

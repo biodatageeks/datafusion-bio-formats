@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             println!("For full testing, please ensure you have a BGZF compressed VCF file:");
             for file in &test_files {
-                println!("  - {}", file);
+                println!("  - {file}");
             }
             println!("\nTesting basic VCF table provider functionality...");
 
@@ -45,14 +45,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 true, // Use 0-based coordinates (default)
             ) {
                 Ok(_) => println!("✓ VcfTableProvider created successfully"),
-                Err(e) => println!("✗ Error creating VcfTableProvider: {}", e),
+                Err(e) => println!("✗ Error creating VcfTableProvider: {e}"),
             }
 
             return Ok(());
         }
     };
 
-    println!("Testing parallel BGZF reading with file: {}", file_path);
+    println!("Testing parallel BGZF reading with file: {file_path}");
 
     // Test 1: Basic functionality with auto thread detection
     println!("\n=== Test 1: Auto thread detection ===");
@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Records processed: {}", column.value(0));
         }
     }
-    println!("Time with auto threads: {:?}", duration);
+    println!("Time with auto threads: {duration:?}");
 
     // Test 2: Additional read test
     {
@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _results = df.collect().await?;
         let duration = start_time.elapsed();
 
-        println!("Time: {:?}", duration);
+        println!("Time: {duration:?}");
     }
 
     println!("\nParallel BGZF VCF reading tests completed successfully!");

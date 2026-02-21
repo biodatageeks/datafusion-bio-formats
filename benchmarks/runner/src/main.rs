@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
 
     println!("📊 DataFusion Bio-Formats Benchmark Runner");
     println!("==========================================\n");
-    println!("Config: {}", config_path);
+    println!("Config: {config_path}");
     println!("Output: {}\n", output_dir.display());
 
     // Load YAML configuration
@@ -257,8 +257,7 @@ async fn register_table(
         }
         _ => {
             anyhow::bail!(
-                "Unsupported format: {}. Supported formats: gff, vcf, fastq, bam, bed, fasta",
-                format
+                "Unsupported format: {format}. Supported formats: gff, vcf, fastq, bam, bed, fasta"
             );
         }
     }
@@ -286,7 +285,7 @@ async fn run_parallelism_benchmarks(
             ThreadCount::Max(_) => num_cpus::get(),
         };
 
-        println!("  Testing with {} threads...", thread_count);
+        println!("  Testing with {thread_count} threads...");
 
         let mut total_records = 0u64;
         let mut total_time = 0.0;
@@ -313,7 +312,7 @@ async fn run_parallelism_benchmarks(
         }
 
         // Build and write result
-        let benchmark_name = format!("{}_parallelism_{}threads", format, thread_count);
+        let benchmark_name = format!("{format}_parallelism_{thread_count}threads");
         let config_json = serde_json::json!({
             "threads": thread_count,
             "repetitions": config.repetitions,
@@ -336,7 +335,7 @@ async fn run_parallelism_benchmarks(
             avg_time,
             config.repetitions,
             speedup
-                .map(|s| format!(", {:.2}x speedup", s))
+                .map(|s| format!(", {s:.2}x speedup"))
                 .unwrap_or_default()
         );
     }

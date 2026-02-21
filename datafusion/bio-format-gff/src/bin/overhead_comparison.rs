@@ -33,7 +33,7 @@ fn main() {
     }
     let with_filter_duration = start.elapsed();
 
-    println!("Results for {} iterations:", iterations);
+    println!("Results for {iterations} iterations:");
     println!(
         "• No filters: {:?} ({:.1} ns per call)",
         no_filter_duration,
@@ -48,7 +48,7 @@ fn main() {
     let overhead_ns = (no_filter_duration.as_nanos() as f64) / (iterations as f64);
 
     println!("\n🎯 Overhead Analysis:");
-    println!("• Per-record overhead: {:.2} nanoseconds", overhead_ns);
+    println!("• Per-record overhead: {overhead_ns:.2} nanoseconds");
     println!(
         "• For 7.75M records: {:.3} milliseconds total overhead",
         (overhead_ns * 7_750_000.0) / 1_000_000.0
@@ -59,9 +59,6 @@ fn main() {
     } else if overhead_ns < 10.0 {
         println!("• ✅ Very low overhead - less than 10 nanoseconds per record");
     } else {
-        println!(
-            "• ⚠️  Measurable overhead - {} nanoseconds per record",
-            overhead_ns
-        );
+        println!("• ⚠️  Measurable overhead - {overhead_ns} nanoseconds per record");
     }
 }

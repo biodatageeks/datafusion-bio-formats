@@ -112,11 +112,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n🎯 QUICK TEST RESULTS");
     println!("======================");
     println!("Records tested: {}", test_data.len());
-    println!("OLD:        {:?}", old_time);
-    println!("OPTIMIZED:  {:?}", optimized_time);
+    println!("OLD:        {old_time:?}");
+    println!("OPTIMIZED:  {optimized_time:?}");
 
     let improvement = old_time.as_secs_f64() / optimized_time.as_secs_f64();
-    println!("Improvement: {:.1}x faster", improvement);
+    println!("Improvement: {improvement:.1}x faster");
 
     if improvement > 2.0 {
         println!("✅ GOOD! Optimization working");
@@ -131,8 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let estimated_optimized_full = (optimized_time.as_secs_f64() / 100_000.0) * 3_148_136.0;
 
     println!("\n📈 ESTIMATED FULL FILE PERFORMANCE:");
-    println!("OLD:        {:.1}s", estimated_old_full);
-    println!("OPTIMIZED:  {:.1}s", estimated_optimized_full);
+    println!("OLD:        {estimated_old_full:.1}s");
+    println!("OPTIMIZED:  {estimated_optimized_full:.1}s");
 
     if estimated_optimized_full < 20.0 {
         println!("🎉 EXCELLENT! Under 20 seconds");

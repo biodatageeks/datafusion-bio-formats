@@ -56,7 +56,7 @@ fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::R
         coordinate_system_zero_based.to_string(),
     );
     let schema = Schema::new_with_metadata(fields, metadata);
-    debug!("Schema: {:?}", schema);
+    debug!("Schema: {schema:?}");
     Ok(Arc::new(schema))
 }
 

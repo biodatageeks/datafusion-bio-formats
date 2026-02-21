@@ -142,12 +142,12 @@ impl GffTableProvider {
         let storage_type = get_storage_type(file_path.clone());
         let (index_path, contig_names) = if matches!(storage_type, StorageType::LOCAL) {
             if let Some((idx_path, idx_fmt)) = discover_gff_index(&file_path) {
-                debug!("Discovered GFF index: {} (format: {:?})", idx_path, idx_fmt);
+                debug!("Discovered GFF index: {idx_path} (format: {idx_fmt:?})");
                 // Read contig names from the index
                 let names = match IndexedGffReader::new(&file_path, &idx_path) {
                     Ok(reader) => reader.contig_names().to_vec(),
                     Err(e) => {
-                        debug!("Failed to read GFF index contig names: {}", e);
+                        debug!("Failed to read GFF index contig names: {e}");
                         Vec::new()
                     }
                 };
@@ -159,10 +159,7 @@ impl GffTableProvider {
             (None, Vec::new())
         };
 
-        debug!(
-            "GffTableProvider::new - constructed schema for file: {}",
-            file_path
-        );
+        debug!("GffTableProvider::new - constructed schema for file: {file_path}");
 
         Ok(Self {
             file_path,
@@ -205,13 +202,13 @@ impl TableProvider for GffTableProvider {
             .iter()
             .map(|expr| {
                 if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
-                    debug!("GFF filter can be pushed down (indexed): {:?}", expr);
+                    debug!("GFF filter can be pushed down (indexed): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else if can_push_down_filter(expr, &self.schema) {
-                    debug!("GFF filter can be pushed down (record-level): {:?}", expr);
+                    debug!("GFF filter can be pushed down (record-level): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else {
-                    debug!("GFF filter cannot be pushed down: {:?}", expr);
+                    debug!("GFF filter cannot be pushed down: {expr:?}");
                     TableProviderFilterPushDown::Unsupported
                 }
             })
@@ -234,7 +231,7 @@ impl TableProvider for GffTableProvider {
             self.contig_names
         );
         for (i, f) in filters.iter().enumerate() {
-            debug!("  filter[{}]: {:?}", i, f);
+            debug!("  filter[{i}]: {f:?}");
         }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {

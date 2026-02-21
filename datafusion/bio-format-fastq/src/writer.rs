@@ -106,7 +106,7 @@ impl FastqLocalWriter {
         compression: FastqCompressionType,
     ) -> Result<Self> {
         let file = File::create(path.as_ref()).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create output file: {}", e))
+            DataFusionError::Execution(format!("Failed to create output file: {e}"))
         })?;
         let buf_writer = BufWriter::new(file);
 
@@ -140,13 +140,13 @@ impl FastqLocalWriter {
     pub fn write_record(&mut self, record: &fastq::Record) -> Result<()> {
         match self {
             FastqLocalWriter::Plain(writer) => writer.write_record(record).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write FASTQ record: {}", e))
+                DataFusionError::Execution(format!("Failed to write FASTQ record: {e}"))
             }),
             FastqLocalWriter::Gzip(writer) => writer.write_record(record).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write FASTQ record: {}", e))
+                DataFusionError::Execution(format!("Failed to write FASTQ record: {e}"))
             }),
             FastqLocalWriter::Bgzf(writer) => writer.write_record(record).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write FASTQ record: {}", e))
+                DataFusionError::Execution(format!("Failed to write FASTQ record: {e}"))
             }),
         }
     }
@@ -180,15 +180,15 @@ impl FastqLocalWriter {
             FastqLocalWriter::Plain(writer) => writer
                 .get_mut()
                 .flush()
-                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {}", e))),
+                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}"))),
             FastqLocalWriter::Gzip(writer) => writer
                 .get_mut()
                 .flush()
-                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {}", e))),
+                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}"))),
             FastqLocalWriter::Bgzf(writer) => writer
                 .get_mut()
                 .flush()
-                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {}", e))),
+                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}"))),
         }
     }
 
@@ -204,21 +204,21 @@ impl FastqLocalWriter {
         match self {
             FastqLocalWriter::Plain(writer) => {
                 let mut buf_writer = writer.into_inner();
-                buf_writer.flush().map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to flush writer: {}", e))
-                })
+                buf_writer
+                    .flush()
+                    .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}")))
             }
             FastqLocalWriter::Gzip(writer) => {
                 let encoder = writer.into_inner();
                 encoder.finish().map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to finish GZIP stream: {}", e))
+                    DataFusionError::Execution(format!("Failed to finish GZIP stream: {e}"))
                 })?;
                 Ok(())
             }
             FastqLocalWriter::Bgzf(writer) => {
                 let bgzf_writer = writer.into_inner();
                 bgzf_writer.finish().map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to finish BGZF stream: {}", e))
+                    DataFusionError::Execution(format!("Failed to finish BGZF stream: {e}"))
                 })?;
                 Ok(())
             }

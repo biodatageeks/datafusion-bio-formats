@@ -21,8 +21,8 @@ async fn run_benchmark_query(
     query: &str,
     description: &str,
 ) -> Result<(u64, f64), Box<dyn std::error::Error>> {
-    println!("\n🔍 Running: {}", description);
-    println!("Query: {}", query);
+    println!("\n🔍 Running: {description}");
+    println!("Query: {query}");
 
     let start_time = Instant::now();
     let df = ctx.sql(query).await?;
@@ -52,12 +52,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check if file exists
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} does not exist!", file_path);
+        eprintln!("❌ Error: File {file_path} does not exist!");
         eprintln!("Please ensure the file is available for benchmarking.");
         return Ok(());
     }
 
-    println!("📁 File: {}", file_path);
+    println!("📁 File: {file_path}");
 
     // Create table provider
     let table = GffTableProvider::new(
@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 results.push((description.to_string(), rows, duration));
             }
             Err(e) => {
-                println!("❌ Query failed: {}", e);
+                println!("❌ Query failed: {e}");
             }
         }
 
@@ -150,10 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             0.0
         };
-        println!(
-            "{:<60} {:>10} {:>10.3} {:>15.0}",
-            description, rows, duration, throughput
-        );
+        println!("{description:<60} {rows:>10} {duration:>10.3} {throughput:>15.0}");
     }
 
     println!("\n🎯 Performance Analysis");
@@ -177,8 +174,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (filter_expr, description) in filter_tests {
-        let query = format!("SELECT COUNT(*) FROM gff WHERE {}", filter_expr);
-        println!("Testing: {} ({})", description, filter_expr);
+        let query = format!("SELECT COUNT(*) FROM gff WHERE {filter_expr}");
+        println!("Testing: {description} ({filter_expr})");
 
         match ctx.sql(&query).await {
             Ok(df) => {
@@ -187,12 +184,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(results) => {
                         let duration = start.elapsed();
                         let rows = results.iter().map(|b| b.num_rows()).sum::<usize>();
-                        println!("  ✅ Success: {} rows in {:?}", rows, duration);
+                        println!("  ✅ Success: {rows} rows in {duration:?}");
                     }
-                    Err(e) => println!("  ❌ Execution failed: {}", e),
+                    Err(e) => println!("  ❌ Execution failed: {e}"),
                 }
             }
-            Err(e) => println!("  ❌ Parse failed: {}", e),
+            Err(e) => println!("  ❌ Parse failed: {e}"),
         }
     }
 

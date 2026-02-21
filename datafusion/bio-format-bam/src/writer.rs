@@ -98,7 +98,7 @@ impl BamLocalWriter {
         compression: BamCompressionType,
     ) -> Result<Self> {
         let file = File::create(path.as_ref()).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create output file: {}", e))
+            DataFusionError::Execution(format!("Failed to create output file: {e}"))
         })?;
         let buf_writer = BufWriter::new(file);
 
@@ -125,10 +125,10 @@ impl BamLocalWriter {
     pub fn write_header(&mut self, header: &sam::Header) -> Result<()> {
         match self {
             BamLocalWriter::Sam(writer) => writer.write_header(header).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write SAM header: {}", e))
+                DataFusionError::Execution(format!("Failed to write SAM header: {e}"))
             }),
             BamLocalWriter::Bam(writer) => writer.write_header(header).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write BAM header: {}", e))
+                DataFusionError::Execution(format!("Failed to write BAM header: {e}"))
             }),
         }
     }
@@ -151,12 +151,12 @@ impl BamLocalWriter {
         match self {
             BamLocalWriter::Sam(writer) => {
                 writer.write_alignment_record(header, record).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to write SAM record: {}", e))
+                    DataFusionError::Execution(format!("Failed to write SAM record: {e}"))
                 })
             }
             BamLocalWriter::Bam(writer) => {
                 writer.write_alignment_record(header, record).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to write BAM record: {}", e))
+                    DataFusionError::Execution(format!("Failed to write BAM record: {e}"))
                 })
             }
         }
@@ -200,14 +200,14 @@ impl BamLocalWriter {
             BamLocalWriter::Sam(ref mut writer) => {
                 // SAM writer needs header for finish
                 writer.finish(header).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to finish SAM stream: {}", e))
+                    DataFusionError::Execution(format!("Failed to finish SAM stream: {e}"))
                 })?;
                 Ok(())
             }
             BamLocalWriter::Bam(ref mut writer) => {
                 // BAM writer needs header for finish
                 writer.finish(header).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to finish BAM stream: {}", e))
+                    DataFusionError::Execution(format!("Failed to finish BAM stream: {e}"))
                 })?;
                 Ok(())
             }

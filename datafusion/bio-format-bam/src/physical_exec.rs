@@ -79,7 +79,7 @@ impl DisplayAs for BamExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "BamExec: projection=[{}]", proj_str)
+        write!(f, "BamExec: projection=[{proj_str}]")
     }
 }
 
@@ -201,7 +201,7 @@ fn set_tag_builders(
                 }
             };
 
-            debug!("Creating builder for tag {}: {:?}", tag, arrow_type);
+            debug!("Creating builder for tag {tag}: {arrow_type:?}");
 
             if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
                 // Pre-parse tag to avoid parsing on every record
@@ -214,7 +214,7 @@ fn set_tag_builders(
                     tag_builders.3.push(parsed_tag);
                 }
             } else {
-                debug!("Failed to create builder for tag {}: {:?}", tag, arrow_type);
+                debug!("Failed to create builder for tag {tag}: {arrow_type:?}");
             }
         }
     }
@@ -591,7 +591,7 @@ async fn get_local_bam_sync(
     std::thread::spawn(move || {
         let read_and_send = || -> Result<(), DataFusionError> {
             let (mut reader, header) = open_local_bam_sync(&file_path)
-                .map_err(|e| DataFusionError::Execution(format!("Failed to open BAM: {}", e)))?;
+                .map_err(|e| DataFusionError::Execution(format!("Failed to open BAM: {e}")))?;
 
             let ref_sequences = header.reference_sequences();
             let names: Vec<_> = ref_sequences.keys().map(|k| k.to_string()).collect();
@@ -648,8 +648,7 @@ async fn get_local_bam_sync(
                                     let pos = start_pos
                                         .map_err(|e| {
                                             DataFusionError::Execution(format!(
-                                                "BAM position error: {}",
-                                                e
+                                                "BAM position error: {e}"
                                             ))
                                         })?
                                         .get() as u32;
@@ -670,8 +669,7 @@ async fn get_local_bam_sync(
                                         end_pos
                                             .map_err(|e| {
                                                 DataFusionError::Execution(format!(
-                                                    "BAM end pos error: {}",
-                                                    e
+                                                    "BAM end pos error: {e}"
                                                 ))
                                             })?
                                             .get() as u32,
@@ -730,8 +728,7 @@ async fn get_local_bam_sync(
                                     let pos = mate_start_pos
                                         .map_err(|e| {
                                             DataFusionError::Execution(format!(
-                                                "BAM mate pos error: {}",
-                                                e
+                                                "BAM mate pos error: {e}"
                                             ))
                                         })?
                                         .get() as u32;
@@ -786,7 +783,7 @@ async fn get_local_bam_sync(
                         }
                     }
                     Err(e) => {
-                        return Err(DataFusionError::Execution(format!("BAM read error: {}", e)));
+                        return Err(DataFusionError::Execution(format!("BAM read error: {e}")));
                     }
                 }
             }
@@ -811,7 +808,7 @@ async fn get_local_bam_sync(
                 let _ = futures::executor::block_on(tx.send(Ok(batch)));
             }
 
-            debug!("Local BAM sync scan: {} records", total_records);
+            debug!("Local BAM sync scan: {total_records} records");
             Ok(())
         };
         if let Err(e) = read_and_send() {
@@ -1048,8 +1045,7 @@ async fn get_stream(
         StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
             if is_sam_file(&file_path) {
                 return Err(DataFusionError::NotImplemented(format!(
-                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
-                    file_path
+                    "Remote SAM file reading is not supported ({file_path}). Use BAM format for remote storage."
                 )));
             }
             let stream = get_remote_bam_stream(
@@ -1079,7 +1075,7 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
     region_str
         .parse::<noodles_core::Region>()
-        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
+        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{region_str}': {e}")))
 }
 
 /// Get a streaming RecordBatch stream from an indexed BAM file for one or more regions.
@@ -1106,7 +1102,7 @@ async fn get_indexed_stream(
         let read_and_send = || -> Result<(), DataFusionError> {
             let mut indexed_reader =
                 IndexedBamReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed BAM: {}", e))
+                    DataFusionError::Execution(format!("Failed to open indexed BAM: {e}"))
                 })?;
 
             let names = indexed_reader.reference_names();
@@ -1256,8 +1252,7 @@ async fn get_indexed_stream(
                 if region.unmapped_tail {
                     let unmapped_index = bam::bai::fs::read(&index_path).map_err(|e| {
                         DataFusionError::Execution(format!(
-                            "Failed to read BAI for unmapped tail: {}",
-                            e
+                            "Failed to read BAI for unmapped tail: {e}"
                         ))
                     })?;
 
@@ -1277,8 +1272,7 @@ async fn get_indexed_stream(
                         .get(ref_idx)
                         .ok_or_else(|| {
                             DataFusionError::Execution(format!(
-                                "Reference index {} not found in BAI index",
-                                ref_idx
+                                "Reference index {ref_idx} not found in BAI index"
                             ))
                         })?;
 
@@ -1299,13 +1293,13 @@ async fn get_indexed_stream(
                         .set_index(unmapped_index)
                         .build_from_path(&file_path)
                         .map_err(|e| {
-                            DataFusionError::Execution(format!("Failed to open BAM file: {}", e))
+                            DataFusionError::Execution(format!("Failed to open BAM file: {e}"))
                         })?;
                     let _unmapped_header = unmapped_reader.read_header().map_err(|e| {
-                        DataFusionError::Execution(format!("Failed to read BAM header: {}", e))
+                        DataFusionError::Execution(format!("Failed to read BAM header: {e}"))
                     })?;
                     unmapped_reader.get_mut().seek(seek_pos).map_err(|e| {
-                        DataFusionError::Execution(format!("BGZF seek failed: {}", e))
+                        DataFusionError::Execution(format!("BGZF seek failed: {e}"))
                     })?;
 
                     let mut unmapped_buf = bam::Record::default();
@@ -1363,8 +1357,7 @@ async fn get_indexed_stream(
                             }
                             Err(e) => {
                                 return Err(DataFusionError::Execution(format!(
-                                    "Error reading unmapped BAM records: {}",
-                                    e
+                                    "Error reading unmapped BAM records: {e}"
                                 )));
                             }
                         }
@@ -1383,12 +1376,12 @@ async fn get_indexed_stream(
 
                 let noodles_region = build_noodles_region(region)?;
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("BAM region query failed: {}", e))
+                    DataFusionError::Execution(format!("BAM region query failed: {e}"))
                 })?;
 
                 for result in records {
                     let record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("BAM record read error: {}", e))
+                        DataFusionError::Execution(format!("BAM record read error: {e}"))
                     })?;
 
                     // Always decode chrom/start for sub-region dedup and residual filters
@@ -1399,7 +1392,7 @@ async fn get_indexed_stream(
                         Some(start_pos) => {
                             let pos = start_pos
                                 .map_err(|e| {
-                                    DataFusionError::Execution(format!("BAM position error: {}", e))
+                                    DataFusionError::Execution(format!("BAM position error: {e}"))
                                 })?
                                 .get() as u32;
                             Some(if coordinate_system_zero_based {
@@ -1436,7 +1429,7 @@ async fn get_indexed_stream(
                         Some(end_pos) => Some(
                             end_pos
                                 .map_err(|e| {
-                                    DataFusionError::Execution(format!("BAM end pos error: {}", e))
+                                    DataFusionError::Execution(format!("BAM end pos error: {e}"))
                                 })?
                                 .get() as u32,
                         ),

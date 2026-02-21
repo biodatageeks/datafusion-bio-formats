@@ -7,7 +7,7 @@ async fn benchmark_raw_parser(
     parser_type: GffParserType,
     parser_name: &str,
 ) -> Result<(usize, std::time::Duration), Box<dyn std::error::Error>> {
-    println!("Starting raw benchmark for {} parser...", parser_name);
+    println!("Starting raw benchmark for {parser_name} parser...");
 
     let start = Instant::now();
 
@@ -27,15 +27,12 @@ async fn benchmark_raw_parser(
         record_count += 1;
 
         if record_count % 100_000 == 0 {
-            println!("{} parser: processed {} records", parser_name, record_count);
+            println!("{parser_name} parser: processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "{} parser completed: {} records in {:?}",
-        parser_name, record_count, duration
-    );
+    println!("{parser_name} parser completed: {record_count} records in {duration:?}");
 
     Ok((record_count, duration))
 }
@@ -45,11 +42,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("🚀 Raw Parser Performance Benchmark (no field processing)");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("=========================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("Error: File {} not found", file_path);
+        eprintln!("Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -72,36 +69,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("RAW PARSER BENCHMARK RESULTS");
     println!("=============================");
-    println!("File: {}", file_path);
-    println!("Records processed: {}", std_count);
+    println!("File: {file_path}");
+    println!("Records processed: {std_count}");
     println!();
 
     let std_records_per_sec = std_count as f64 / std_time.as_secs_f64();
     let fast_records_per_sec = fast_count as f64 / fast_time.as_secs_f64();
     let simd_records_per_sec = simd_count as f64 / simd_time.as_secs_f64();
 
-    println!(
-        "Standard parser: {:?} ({:.0} records/sec)",
-        std_time, std_records_per_sec
-    );
-    println!(
-        "Fast parser:     {:?} ({:.0} records/sec)",
-        fast_time, fast_records_per_sec
-    );
-    println!(
-        "SIMD parser:     {:?} ({:.0} records/sec)",
-        simd_time, simd_records_per_sec
-    );
+    println!("Standard parser: {std_time:?} ({std_records_per_sec:.0} records/sec)");
+    println!("Fast parser:     {fast_time:?} ({fast_records_per_sec:.0} records/sec)");
+    println!("SIMD parser:     {simd_time:?} ({simd_records_per_sec:.0} records/sec)");
     println!();
 
     if std_time > fast_time {
         let speedup = std_time.as_secs_f64() / fast_time.as_secs_f64();
-        println!("🔥 Fast parser is {:.2}x faster than Standard", speedup);
+        println!("🔥 Fast parser is {speedup:.2}x faster than Standard");
     }
 
     if std_time > simd_time {
         let speedup = std_time.as_secs_f64() / simd_time.as_secs_f64();
-        println!("⚡ SIMD parser is {:.2}x faster than Standard", speedup);
+        println!("⚡ SIMD parser is {speedup:.2}x faster than Standard");
     }
 
     println!("\n🎯 Expected performance:");

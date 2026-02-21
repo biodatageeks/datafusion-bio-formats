@@ -30,10 +30,6 @@ async fn test_bgzf_fastq_table_provider_row_count() {
             .unwrap()
             .value(0);
 
-        assert_eq!(
-            count, 2000,
-            "Row count mismatch for {} target partitions",
-            i
-        );
+        assert_eq!(count, 2000, "Row count mismatch for {i} target partitions");
     }
 }
