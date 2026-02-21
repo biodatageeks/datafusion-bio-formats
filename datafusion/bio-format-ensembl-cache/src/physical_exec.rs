@@ -88,14 +88,17 @@ fn estimate_file_size(path: &Path) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
-/// Assign files to partitions greedily by descending size (least-loaded first).
+/// Sort files by descending size, then assign round-robin across partitions.
+/// This spreads large files across different partitions while keeping file
+/// counts even (±1), avoiding the greedy LPT pitfall where a few heavy
+/// partitions dominate wall-clock time.
 fn assign_files_balanced(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<PathBuf>> {
     let mut partition_files: Vec<Vec<PathBuf>> = (0..num_partitions).map(|_| Vec::new()).collect();
     if files.is_empty() {
         return partition_files;
     }
 
-    // Collect (size, path) pairs and sort descending by size
+    // Sort descending by size so large files land in different partitions
     let mut sized: Vec<(u64, PathBuf)> = files
         .into_iter()
         .map(|p| {
@@ -105,17 +108,9 @@ fn assign_files_balanced(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<
         .collect();
     sized.sort_unstable_by(|a, b| b.0.cmp(&a.0));
 
-    // Greedy: assign each file to the partition with the smallest total load
-    let mut loads: Vec<u64> = vec![0; num_partitions];
-    for (size, path) in sized {
-        let min_idx = loads
-            .iter()
-            .enumerate()
-            .min_by_key(|&(_, load)| load)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        partition_files[min_idx].push(path);
-        loads[min_idx] += size;
+    // Round-robin assignment after sorting
+    for (i, (_, path)) in sized.into_iter().enumerate() {
+        partition_files[i % num_partitions].push(path);
     }
 
     partition_files
