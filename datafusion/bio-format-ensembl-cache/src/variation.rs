@@ -7,6 +7,67 @@ use crate::util::{
 };
 use std::collections::HashMap;
 
+// ---------------------------------------------------------------------------
+// VariationColumnIndices – pre-computed builder indices from ColumnMap
+// ---------------------------------------------------------------------------
+
+pub(crate) struct VariationColumnIndices {
+    // Required columns
+    chrom: Option<usize>,
+    start: Option<usize>,
+    end: Option<usize>,
+    variation_name: Option<usize>,
+    allele_string: Option<usize>,
+    region_bin: Option<usize>,
+    // Optional canonical columns
+    failed: Option<usize>,
+    somatic: Option<usize>,
+    strand: Option<usize>,
+    minor_allele: Option<usize>,
+    minor_allele_freq: Option<usize>,
+    clin_sig: Option<usize>,
+    phenotype_or_disease: Option<usize>,
+    clinical_impact: Option<usize>,
+    pubmed: Option<usize>,
+    var_synonyms: Option<usize>,
+    // Extra columns: (tab_idx, builder_idx)
+    extras: Vec<(usize, usize)>,
+}
+
+impl VariationColumnIndices {
+    pub fn new(col_map: &ColumnMap, ctx: &VariationContext) -> Self {
+        let extras: Vec<(usize, usize)> = ctx
+            .extra_columns
+            .iter()
+            .filter_map(|(tab_idx, col_name)| {
+                col_map
+                    .get(col_name)
+                    .map(|builder_idx| (*tab_idx, builder_idx))
+            })
+            .collect();
+
+        Self {
+            chrom: col_map.get("chrom"),
+            start: col_map.get("start"),
+            end: col_map.get("end"),
+            variation_name: col_map.get("variation_name"),
+            allele_string: col_map.get("allele_string"),
+            region_bin: col_map.get("region_bin"),
+            failed: col_map.get("failed"),
+            somatic: col_map.get("somatic"),
+            strand: col_map.get("strand"),
+            minor_allele: col_map.get("minor_allele"),
+            minor_allele_freq: col_map.get("minor_allele_freq"),
+            clin_sig: col_map.get("clin_sig"),
+            phenotype_or_disease: col_map.get("phenotype_or_disease"),
+            clinical_impact: col_map.get("clinical_impact"),
+            pubmed: col_map.get("pubmed"),
+            var_synonyms: col_map.get("var_synonyms"),
+            extras,
+        }
+    }
+}
+
 // Maximum number of tab-separated fields we support per variation line.
 // Ensembl VEP variation lines typically have 20-30 fields.
 const MAX_VARIATION_FIELDS: usize = 48;
@@ -147,7 +208,9 @@ impl VariationContext {
 struct SourceIdSlot {
     builder_idx: usize,
     buffer: String,
-    count: usize,
+    /// (start_byte, len_bytes) into `buffer` for each value, enabling O(n) dedup
+    /// without re-splitting the comma-separated buffer.
+    offsets: Vec<(usize, usize)>,
 }
 
 pub(crate) struct SourceIdWriter {
@@ -166,7 +229,7 @@ impl SourceIdWriter {
                 slots.push(SourceIdSlot {
                     builder_idx,
                     buffer: String::with_capacity(64),
-                    count: 0,
+                    offsets: Vec::with_capacity(4),
                 });
                 key_to_slot.insert(source_key.clone(), slot_idx);
             }
@@ -186,7 +249,7 @@ impl SourceIdWriter {
     pub fn clear(&mut self) {
         for slot in &mut self.slots {
             slot.buffer.clear();
-            slot.count = 0;
+            slot.offsets.clear();
         }
     }
 
@@ -273,15 +336,20 @@ impl SourceIdWriter {
             return;
         }
         let slot = &mut self.slots[slot_idx];
-        // Dedup: check if value already present in comma-separated buffer
-        if slot.count > 0 && slot.buffer.split(',').any(|v| v == value) {
-            return;
+        // Dedup: check tracked offsets instead of re-splitting
+        for &(start, len) in &slot.offsets {
+            if &slot.buffer[start..start + len] == value {
+                return;
+            }
         }
-        if slot.count > 0 {
+        let start = if slot.offsets.is_empty() {
+            0
+        } else {
             slot.buffer.push(',');
-        }
+            slot.buffer.len()
+        };
         slot.buffer.push_str(value);
-        slot.count += 1;
+        slot.offsets.push((start, value.len()));
     }
 
     fn assign_by_pattern(&mut self, value: &str) {
@@ -310,7 +378,7 @@ impl SourceIdWriter {
 
     pub fn flush(&self, batch: &mut BatchBuilder) {
         for slot in &self.slots {
-            if slot.count > 0 {
+            if !slot.offsets.is_empty() {
                 batch.set_utf8(slot.builder_idx, &slot.buffer);
             } else {
                 batch.set_null(slot.builder_idx);
@@ -375,7 +443,7 @@ pub(crate) fn parse_variation_line_into(
     cache_region_size: i64,
     coordinate_system_zero_based: bool,
     batch: &mut BatchBuilder,
-    col_map: &ColumnMap,
+    col_idx: &VariationColumnIndices,
     ctx: &VariationContext,
     provenance: &ProvenanceWriter,
     source_id_writer: &mut SourceIdWriter,
@@ -446,67 +514,67 @@ pub(crate) fn parse_variation_line_into(
 
     let region_bin = ((source_start.saturating_sub(1)) / cache_region_size.max(1)).max(0);
 
-    // Write required columns
-    if let Some(idx) = col_map.get("chrom") {
+    // Write required columns (direct index access, no HashMap lookups)
+    if let Some(idx) = col_idx.chrom {
         batch.set_utf8(idx, chrom_ref);
     }
-    if let Some(idx) = col_map.get("start") {
+    if let Some(idx) = col_idx.start {
         batch.set_i64(idx, start);
     }
-    if let Some(idx) = col_map.get("end") {
+    if let Some(idx) = col_idx.end {
         batch.set_i64(idx, end);
     }
-    if let Some(idx) = col_map.get("variation_name") {
+    if let Some(idx) = col_idx.variation_name {
         batch.set_utf8(idx, variation_name_ref);
     }
-    if let Some(idx) = col_map.get("allele_string") {
+    if let Some(idx) = col_idx.allele_string {
         batch.set_utf8(idx, allele_string_ref);
     }
-    if let Some(idx) = col_map.get("region_bin") {
+    if let Some(idx) = col_idx.region_bin {
         batch.set_i64(idx, region_bin);
     }
 
     // Write optional canonical columns (only if projected)
-    if let Some(idx) = col_map.get("failed") {
+    if let Some(idx) = col_idx.failed {
         batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.failed_tab)));
     }
-    if let Some(idx) = col_map.get("somatic") {
+    if let Some(idx) = col_idx.somatic {
         batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.somatic_tab)));
     }
-    if let Some(idx) = col_map.get("strand") {
+    if let Some(idx) = col_idx.strand {
         batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.strand_tab)));
     }
-    if let Some(idx) = col_map.get("minor_allele") {
+    if let Some(idx) = col_idx.minor_allele {
         batch.set_opt_utf8(
             idx,
             field_at(ctx.minor_allele_tab).and_then(normalize_nullable_ref),
         );
     }
-    if let Some(idx) = col_map.get("minor_allele_freq") {
+    if let Some(idx) = col_idx.minor_allele_freq {
         batch.set_opt_f64(idx, parse_f64_ref(field_at(ctx.minor_allele_freq_tab)));
     }
-    if let Some(idx) = col_map.get("clin_sig") {
+    if let Some(idx) = col_idx.clin_sig {
         batch.set_opt_utf8(
             idx,
             field_at(ctx.clin_sig_tab).and_then(normalize_nullable_ref),
         );
     }
-    if let Some(idx) = col_map.get("phenotype_or_disease") {
+    if let Some(idx) = col_idx.phenotype_or_disease {
         batch.set_opt_i8(idx, parse_i8_ref(field_at(ctx.phenotype_or_disease_tab)));
     }
-    if let Some(idx) = col_map.get("clinical_impact") {
+    if let Some(idx) = col_idx.clinical_impact {
         batch.set_opt_utf8(
             idx,
             field_at(ctx.clinical_impact_tab).and_then(normalize_nullable_ref),
         );
     }
-    if let Some(idx) = col_map.get("pubmed") {
+    if let Some(idx) = col_idx.pubmed {
         batch.set_opt_utf8(
             idx,
             field_at(ctx.pubmed_tab).and_then(normalize_nullable_ref),
         );
     }
-    if let Some(idx) = col_map.get("var_synonyms") {
+    if let Some(idx) = col_idx.var_synonyms {
         batch.set_opt_utf8(
             idx,
             field_at(ctx.var_synonyms_tab).and_then(normalize_nullable_ref),
@@ -521,12 +589,10 @@ pub(crate) fn parse_variation_line_into(
         source_id_writer.flush(batch);
     }
 
-    // Extra columns (dynamic, not in known set)
-    for (tab_idx, col_name) in &ctx.extra_columns {
-        if let Some(builder_idx) = col_map.get(col_name) {
-            if *tab_idx < field_count {
-                batch.set_opt_utf8(builder_idx, normalize_nullable_ref(fields[*tab_idx]));
-            }
+    // Extra columns (pre-computed builder indices, no HashMap lookups)
+    for &(tab_idx, builder_idx) in &col_idx.extras {
+        if tab_idx < field_count {
+            batch.set_opt_utf8(builder_idx, normalize_nullable_ref(fields[tab_idx]));
         }
     }
 

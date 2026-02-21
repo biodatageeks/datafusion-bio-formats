@@ -3,15 +3,20 @@ use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::regulatory::{
-    RegulatoryTarget, parse_regulatory_line_into, parse_regulatory_storable_file,
+    RegulatoryColumnIndices, RegulatoryTarget, parse_regulatory_line_into,
+    parse_regulatory_storable_file,
 };
 use crate::row::Row;
-use crate::transcript::{parse_transcript_line_into, parse_transcript_storable_file};
+use crate::transcript::{
+    TranscriptColumnIndices, parse_transcript_line_into, parse_transcript_storable_file,
+};
 use crate::util::{
     BatchBuilder, ColumnMap, ProvenanceWriter, is_storable_binary_payload, open_text_reader,
     rows_to_record_batch,
 };
-use crate::variation::{SourceIdWriter, VariationContext, parse_variation_line_into};
+use crate::variation::{
+    SourceIdWriter, VariationColumnIndices, VariationContext, parse_variation_line_into,
+};
 use async_stream::try_stream;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
@@ -31,7 +36,7 @@ use std::sync::Arc;
 pub(crate) struct EnsemblCacheExec {
     pub(crate) kind: EnsemblEntityKind,
     pub(crate) cache_info: CacheInfo,
-    pub(crate) files: Vec<PathBuf>,
+    pub(crate) partition_files: Vec<Vec<PathBuf>>,
     pub(crate) schema: SchemaRef,
     pub(crate) predicate: SimplePredicate,
     pub(crate) limit: Option<usize>,
@@ -57,9 +62,10 @@ pub(crate) struct EnsemblCacheExecConfig {
 
 impl Debug for EnsemblCacheExec {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let total_files: usize = self.partition_files.iter().map(|p| p.len()).sum();
         f.debug_struct("EnsemblCacheExec")
             .field("kind", &self.kind)
-            .field("files", &self.files)
+            .field("total_files", &total_files)
             .field("num_partitions", &self.num_partitions)
             .field("limit", &self.limit)
             .finish()
@@ -68,14 +74,51 @@ impl Debug for EnsemblCacheExec {
 
 impl DisplayAs for EnsemblCacheExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let total_files: usize = self.partition_files.iter().map(|p| p.len()).sum();
         write!(
             f,
             "EnsemblCacheExec(kind={:?}, files={}, partitions={})",
-            self.kind,
-            self.files.len(),
-            self.num_partitions
+            self.kind, total_files, self.num_partitions
         )
     }
+}
+
+/// Estimate file size for partition balancing. Falls back to 0 on error.
+fn estimate_file_size(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Assign files to partitions greedily by descending size (least-loaded first).
+fn assign_files_balanced(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<PathBuf>> {
+    let mut partition_files: Vec<Vec<PathBuf>> = (0..num_partitions).map(|_| Vec::new()).collect();
+    if files.is_empty() {
+        return partition_files;
+    }
+
+    // Collect (size, path) pairs and sort descending by size
+    let mut sized: Vec<(u64, PathBuf)> = files
+        .into_iter()
+        .map(|p| {
+            let size = estimate_file_size(&p);
+            (size, p)
+        })
+        .collect();
+    sized.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+    // Greedy: assign each file to the partition with the smallest total load
+    let mut loads: Vec<u64> = vec![0; num_partitions];
+    for (size, path) in sized {
+        let min_idx = loads
+            .iter()
+            .enumerate()
+            .min_by_key(|&(_, load)| load)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        partition_files[min_idx].push(path);
+        loads[min_idx] += size;
+    }
+
+    partition_files
 }
 
 impl EnsemblCacheExec {
@@ -88,10 +131,12 @@ impl EnsemblCacheExec {
             Boundedness::Bounded,
         );
 
+        let partition_files = assign_files_balanced(config.files, num_partitions);
+
         Self {
             kind: config.kind,
             cache_info: config.cache_info,
-            files: config.files,
+            partition_files,
             schema: config.schema,
             predicate: config.predicate,
             limit: config.limit,
@@ -199,18 +244,9 @@ impl ExecutionPlan for EnsemblCacheExec {
         let cache_info = self.cache_info.clone();
         let predicate = self.predicate.clone();
 
-        // Phase 8: Apply file-level predicate pruning for variation files
-        let files: Vec<PathBuf> = self
-            .files
+        // Files for this partition (pre-balanced by size), with predicate pruning
+        let files: Vec<PathBuf> = self.partition_files[partition]
             .iter()
-            .enumerate()
-            .filter_map(|(idx, path)| {
-                if idx % self.num_partitions == partition {
-                    Some(path.clone())
-                } else {
-                    None
-                }
-            })
             .filter(|path| {
                 if kind == EnsemblEntityKind::Variation {
                     file_matches_predicate(path, &predicate)
@@ -218,6 +254,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                     true
                 }
             })
+            .cloned()
             .collect();
 
         let limit = self.limit;
@@ -235,10 +272,27 @@ impl ExecutionPlan for EnsemblCacheExec {
             } else {
                 None
             };
+            let variation_col_idx = if kind == EnsemblEntityKind::Variation {
+                Some(VariationColumnIndices::new(&col_map, variation_ctx.as_ref().unwrap()))
+            } else {
+                None
+            };
             let mut source_id_writer = if kind == EnsemblEntityKind::Variation {
                 let ctx = variation_ctx.as_ref().unwrap();
                 Some(SourceIdWriter::new(&col_map, ctx.source_to_id_column()))
                 } else {
+                None
+            };
+            let transcript_col_idx = if kind == EnsemblEntityKind::Transcript {
+                Some(TranscriptColumnIndices::new(&col_map))
+            } else {
+                None
+            };
+            let regulatory_col_idx = if kind == EnsemblEntityKind::RegulatoryFeature
+                || kind == EnsemblEntityKind::MotifFeature
+            {
+                Some(RegulatoryColumnIndices::new(&col_map))
+            } else {
                 None
             };
 
@@ -342,7 +396,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                             variation_region_size,
                             coordinate_system_zero_based,
                             &mut batch_builder,
-                            &col_map,
+                            variation_col_idx.as_ref().unwrap(),
                             variation_ctx.as_ref().unwrap(),
                             &provenance,
                             source_id_writer.as_mut().unwrap(),
@@ -355,7 +409,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                                 &predicate,
                                 coordinate_system_zero_based,
                                 &mut batch_builder,
-                                &col_map,
+                                transcript_col_idx.as_ref().unwrap(),
                                 &provenance,
                             )?
                         }
@@ -367,7 +421,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                             RegulatoryTarget::RegulatoryFeature,
                             coordinate_system_zero_based,
                             &mut batch_builder,
-                            &col_map,
+                            regulatory_col_idx.as_ref().unwrap(),
                             &provenance,
                         )?,
                         EnsemblEntityKind::MotifFeature => parse_regulatory_line_into(
@@ -378,7 +432,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                             RegulatoryTarget::MotifFeature,
                             coordinate_system_zero_based,
                             &mut batch_builder,
-                            &col_map,
+                            regulatory_col_idx.as_ref().unwrap(),
                             &provenance,
                         )?,
                     };

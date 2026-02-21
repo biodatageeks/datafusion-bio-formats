@@ -256,10 +256,6 @@ impl ColumnMap {
     pub fn get(&self, name: &str) -> Option<usize> {
         self.map.get(name).copied()
     }
-
-    pub fn has_any(&self, names: &[&str]) -> bool {
-        names.iter().any(|n| self.map.contains_key(*n))
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +345,7 @@ pub(crate) struct BatchBuilder {
     schema: SchemaRef,
     row_count: usize,
     written: Vec<bool>,
+    written_count: usize,
 }
 
 impl BatchBuilder {
@@ -364,7 +361,16 @@ impl BatchBuilder {
             schema,
             row_count: 0,
             written: vec![false; num_cols],
+            written_count: 0,
         })
+    }
+
+    #[inline]
+    fn mark_written(&mut self, col: usize) {
+        if !self.written[col] {
+            self.written[col] = true;
+            self.written_count += 1;
+        }
     }
 
     #[inline]
@@ -372,7 +378,7 @@ impl BatchBuilder {
         if let AnyBuilder::Utf8(b) = &mut self.builders[col] {
             b.append_value(value);
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
@@ -383,7 +389,7 @@ impl BatchBuilder {
                 if let AnyBuilder::Utf8(b) = &mut self.builders[col] {
                     b.append_null();
                 }
-                self.written[col] = true;
+                self.mark_written(col);
             }
         }
     }
@@ -398,7 +404,7 @@ impl BatchBuilder {
         if let AnyBuilder::Int64(b) = &mut self.builders[col] {
             b.append_value(value);
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
@@ -409,7 +415,7 @@ impl BatchBuilder {
                 None => b.append_null(),
             }
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
@@ -420,7 +426,7 @@ impl BatchBuilder {
                 None => b.append_null(),
             }
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
@@ -428,7 +434,7 @@ impl BatchBuilder {
         if let AnyBuilder::Int8(b) = &mut self.builders[col] {
             b.append_value(value);
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
@@ -439,7 +445,7 @@ impl BatchBuilder {
                 None => b.append_null(),
             }
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
@@ -450,7 +456,7 @@ impl BatchBuilder {
                 None => b.append_null(),
             }
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
@@ -461,36 +467,30 @@ impl BatchBuilder {
                 None => b.append_null(),
             }
         }
-        self.written[col] = true;
+        self.mark_written(col);
     }
 
     #[inline]
     pub fn set_null(&mut self, col: usize) {
-        match &mut self.builders[col] {
-            AnyBuilder::Utf8(b) => b.append_null(),
-            AnyBuilder::Int64(b) => b.append_null(),
-            AnyBuilder::Int32(b) => b.append_null(),
-            AnyBuilder::Int8(b) => b.append_null(),
-            AnyBuilder::Float64(b) => b.append_null(),
-            AnyBuilder::Boolean(b) => b.append_null(),
-        }
-        self.written[col] = true;
+        self.builders[col].append_null();
+        self.mark_written(col);
     }
 
     pub fn finish_row(&mut self) {
-        for (idx, written) in self.written.iter_mut().enumerate() {
-            if !*written {
-                match &mut self.builders[idx] {
-                    AnyBuilder::Utf8(b) => b.append_null(),
-                    AnyBuilder::Int64(b) => b.append_null(),
-                    AnyBuilder::Int32(b) => b.append_null(),
-                    AnyBuilder::Int8(b) => b.append_null(),
-                    AnyBuilder::Float64(b) => b.append_null(),
-                    AnyBuilder::Boolean(b) => b.append_null(),
+        let num_cols = self.written.len();
+        if self.written_count == num_cols {
+            // Fast path: all columns written, just reset flags
+            self.written.fill(false);
+        } else {
+            // Slow path: null-fill unwritten columns, then reset
+            for idx in 0..num_cols {
+                if !self.written[idx] {
+                    self.builders[idx].append_null();
                 }
             }
-            *written = false;
+            self.written.fill(false);
         }
+        self.written_count = 0;
         self.row_count += 1;
     }
 
@@ -524,6 +524,7 @@ impl BatchBuilder {
         );
         self.row_count = 0;
         self.written.fill(false);
+        self.written_count = 0;
 
         let arrays: Vec<ArrayRef> = old_builders.into_iter().map(AnyBuilder::finish).collect();
         RecordBatch::try_new(self.schema.clone(), arrays)
@@ -545,6 +546,18 @@ enum AnyBuilder {
 }
 
 impl AnyBuilder {
+    #[inline]
+    fn append_null(&mut self) {
+        match self {
+            Self::Utf8(b) => b.append_null(),
+            Self::Int64(b) => b.append_null(),
+            Self::Int32(b) => b.append_null(),
+            Self::Int8(b) => b.append_null(),
+            Self::Float64(b) => b.append_null(),
+            Self::Boolean(b) => b.append_null(),
+        }
+    }
+
     fn for_type(data_type: &DataType, capacity: usize) -> Result<Self> {
         match data_type {
             DataType::Utf8 => Ok(Self::Utf8(StringBuilder::with_capacity(
