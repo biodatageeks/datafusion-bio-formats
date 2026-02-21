@@ -7,9 +7,10 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::row::{CellValue, Row};
 use crate::util::{
-    canonical_json_string, json_bool, json_i32, json_i64, json_str, normalize_genomic_end,
-    normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
+    BatchBuilder, ColumnMap, canonical_json_string, json_bool, json_i32, json_i64, json_str,
+    normalize_genomic_end, normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
 };
+use crate::variation::append_provenance;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,16 +29,22 @@ struct TranscriptRowContext<'a> {
     source_file: &'a Path,
 }
 
-pub(crate) fn parse_transcript_line(
+// ---------------------------------------------------------------------------
+// Direct builder parser for text lines (Phase 1+2+6)
+// ---------------------------------------------------------------------------
+
+pub(crate) fn parse_transcript_line_into(
     line: &str,
     source_file: &Path,
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
     coordinate_system_zero_based: bool,
-) -> Result<Option<Row>> {
+    batch: &mut BatchBuilder,
+    col_map: &ColumnMap,
+) -> Result<bool> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(None);
+        return Ok(false);
     }
 
     let parts: Vec<&str> = trimmed.splitn(4, '\t').collect();
@@ -47,6 +54,30 @@ pub(crate) fn parse_transcript_line(
             source_file.display(),
             trimmed
         )));
+    }
+
+    // Phase 6: Earlier predicate evaluation BEFORE expensive decode_payload.
+    // Extract chrom/start/end from the TSV prefix columns first.
+    let prefix_chrom = {
+        let c = parts[0].trim();
+        if c.is_empty() || c == "." {
+            None
+        } else {
+            Some(c)
+        }
+    };
+    let prefix_start = parse_i64(Some(parts[1]));
+    let prefix_end = parse_i64(Some(parts[2]));
+
+    // If we have enough info from the prefix, check predicate early
+    if let (Some(chrom_ref), Some(raw_start), Some(raw_end)) =
+        (prefix_chrom, prefix_start, prefix_end)
+    {
+        let start = normalize_genomic_start(raw_start, coordinate_system_zero_based);
+        let end = normalize_genomic_end(raw_end, coordinate_system_zero_based);
+        if !predicate.matches(chrom_ref, start, end) {
+            return Ok(false);
+        }
     }
 
     let serializer = cache_info.serializer_type.as_deref().ok_or_else(|| {
@@ -64,8 +95,8 @@ pub(crate) fn parse_transcript_line(
         ))
     })?;
 
-    let chrom = if !parts[0].trim().is_empty() && parts[0].trim() != "." {
-        parts[0].trim().to_string()
+    let chrom = if let Some(c) = prefix_chrom {
+        c.to_string()
     } else {
         json_str(object.get("chr").or_else(|| object.get("chrom"))).ok_or_else(|| {
             exec_err(format!(
@@ -76,7 +107,7 @@ pub(crate) fn parse_transcript_line(
         })?
     };
 
-    let source_start = parse_i64(Some(parts[1]))
+    let source_start = prefix_start
         .or_else(|| json_i64(object.get("start")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -86,7 +117,7 @@ pub(crate) fn parse_transcript_line(
             ))
         })?;
 
-    let source_end = parse_i64(Some(parts[2]))
+    let source_end = prefix_end
         .or_else(|| json_i64(object.get("end")))
         .ok_or_else(|| {
             exec_err(format!(
@@ -99,8 +130,9 @@ pub(crate) fn parse_transcript_line(
     let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
     let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
+    // Full predicate check (covers fallback case where prefix was incomplete)
     if !predicate.matches(&chrom, start, end) {
-        return Ok(None);
+        return Ok(false);
     }
 
     let strand = json_i64(object.get("strand"))
@@ -119,23 +151,161 @@ pub(crate) fn parse_transcript_line(
         ))
     })?;
 
-    let core = TranscriptRowCore {
-        chrom,
-        start,
-        end,
-        strand,
-        stable_id,
-    };
-    let context = TranscriptRowContext {
-        coordinate_system_zero_based,
-        cache_info,
-        source_file,
-    };
+    // Write required columns
+    if let Some(idx) = col_map.get("chrom") {
+        batch.set_utf8(idx, &chrom);
+    }
+    if let Some(idx) = col_map.get("start") {
+        batch.set_i64(idx, start);
+    }
+    if let Some(idx) = col_map.get("end") {
+        batch.set_i64(idx, end);
+    }
+    if let Some(idx) = col_map.get("strand") {
+        batch.set_i8(idx, strand);
+    }
+    if let Some(idx) = col_map.get("stable_id") {
+        batch.set_utf8(idx, &stable_id);
+    }
 
-    Ok(Some(build_transcript_row(
-        &payload, object, core, &context,
-    )?))
+    // Optional columns
+    if let Some(idx) = col_map.get("version") {
+        batch.set_opt_i32(idx, json_i32(object.get("version")));
+    }
+    if let Some(idx) = col_map.get("biotype") {
+        batch.set_opt_utf8_owned(idx, json_str(object.get("biotype")).as_ref());
+    }
+    if let Some(idx) = col_map.get("source") {
+        batch.set_opt_utf8_owned(
+            idx,
+            json_str(object.get("source").or_else(|| object.get("_source_cache"))).as_ref(),
+        );
+    }
+    if let Some(idx) = col_map.get("is_canonical") {
+        batch.set_opt_bool(idx, json_bool(object.get("is_canonical")));
+    }
+    if let Some(idx) = col_map.get("gene_stable_id") {
+        batch.set_opt_utf8_owned(
+            idx,
+            json_str(
+                object
+                    .get("gene_stable_id")
+                    .or_else(|| object.get("_gene_stable_id")),
+            )
+            .as_ref(),
+        );
+    }
+    if let Some(idx) = col_map.get("gene_symbol") {
+        batch.set_opt_utf8_owned(
+            idx,
+            json_str(
+                object
+                    .get("gene_symbol")
+                    .or_else(|| object.get("_gene_symbol")),
+            )
+            .as_ref(),
+        );
+    }
+    if let Some(idx) = col_map.get("gene_symbol_source") {
+        batch.set_opt_utf8_owned(
+            idx,
+            json_str(
+                object
+                    .get("gene_symbol_source")
+                    .or_else(|| object.get("_gene_symbol_source")),
+            )
+            .as_ref(),
+        );
+    }
+    if let Some(idx) = col_map.get("gene_hgnc_id") {
+        batch.set_opt_utf8_owned(idx, json_str(object.get("gene_hgnc_id")).as_ref());
+    }
+    if let Some(idx) = col_map.get("refseq_id") {
+        let refseq_id = json_str(object.get("refseq_id").or_else(|| object.get("_refseq")))
+            .filter(|v| v != "-");
+        batch.set_opt_utf8_owned(idx, refseq_id.as_ref());
+    }
+    if let Some(idx) = col_map.get("coding_region_start") {
+        batch.set_opt_i64(
+            idx,
+            json_i64(object.get("coding_region_start"))
+                .map(|v| normalize_genomic_start(v, coordinate_system_zero_based)),
+        );
+    }
+    if let Some(idx) = col_map.get("coding_region_end") {
+        batch.set_opt_i64(
+            idx,
+            json_i64(object.get("coding_region_end"))
+                .map(|v| normalize_genomic_end(v, coordinate_system_zero_based)),
+        );
+    }
+    if let Some(idx) = col_map.get("cdna_coding_start") {
+        batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_start")));
+    }
+    if let Some(idx) = col_map.get("cdna_coding_end") {
+        batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_end")));
+    }
+
+    // Translation sub-object
+    let translation_projected = col_map.has_any(&[
+        "translation_stable_id",
+        "translation_start",
+        "translation_end",
+    ]);
+    if translation_projected {
+        if let Some(translation_obj) = object
+            .get("translation")
+            .and_then(unwrap_blessed_object_optional)
+        {
+            if let Some(idx) = col_map.get("translation_stable_id") {
+                batch.set_opt_utf8_owned(idx, json_str(translation_obj.get("stable_id")).as_ref());
+            }
+            if let Some(idx) = col_map.get("translation_start") {
+                batch.set_opt_i64(idx, json_i64(translation_obj.get("start")));
+            }
+            if let Some(idx) = col_map.get("translation_end") {
+                batch.set_opt_i64(idx, json_i64(translation_obj.get("end")));
+            }
+        }
+        // If translation is null, finish_row() will append nulls for these columns
+    }
+
+    if let Some(idx) = col_map.get("exon_count") {
+        let exon_count = object
+            .get("exon_count")
+            .and_then(|v| json_i32(Some(v)))
+            .or_else(|| {
+                object
+                    .get("_trans_exon_array")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| i32::try_from(arr.len()).ok())
+            });
+        batch.set_opt_i32(idx, exon_count);
+    }
+
+    // Phase 2: Only compute canonical JSON + hash if projected
+    let need_json = col_map.get("raw_object_json").is_some();
+    let need_hash = col_map.get("object_hash").is_some();
+    if need_json || need_hash {
+        let canonical_json = canonical_json_string(&payload)?;
+        if let Some(idx) = col_map.get("object_hash") {
+            let hash = stable_hash(&canonical_json);
+            batch.set_utf8(idx, &hash);
+        }
+        if let Some(idx) = col_map.get("raw_object_json") {
+            batch.set_utf8(idx, &canonical_json);
+        }
+    }
+
+    append_provenance(batch, col_map, cache_info, source_file);
+
+    batch.finish_row();
+    Ok(true)
 }
+
+// ---------------------------------------------------------------------------
+// Storable binary parser (kept with Vec<Row> for now)
+// ---------------------------------------------------------------------------
 
 pub(crate) fn parse_transcript_storable_file(
     source_file: &Path,
@@ -233,222 +403,6 @@ pub(crate) fn parse_transcript_storable_file(
     }
 
     Ok(rows)
-}
-
-fn build_transcript_row(
-    payload: &Value,
-    object: &serde_json::Map<String, Value>,
-    core: TranscriptRowCore,
-    context: &TranscriptRowContext<'_>,
-) -> Result<Row> {
-    let TranscriptRowCore {
-        chrom,
-        start,
-        end,
-        strand,
-        stable_id,
-    } = core;
-    let canonical_json = canonical_json_string(payload)?;
-    let object_hash = stable_hash(&canonical_json);
-
-    let mut row: Row = HashMap::new();
-    row.insert("chrom".to_string(), CellValue::Utf8(chrom));
-    row.insert("start".to_string(), CellValue::Int64(start));
-    row.insert("end".to_string(), CellValue::Int64(end));
-    row.insert("strand".to_string(), CellValue::Int8(strand));
-    row.insert("stable_id".to_string(), CellValue::Utf8(stable_id));
-
-    insert_opt_i32(&mut row, "version", json_i32(object.get("version")));
-    insert_opt_utf8(&mut row, "biotype", json_str(object.get("biotype")));
-    insert_opt_utf8(
-        &mut row,
-        "source",
-        json_str(object.get("source").or_else(|| object.get("_source_cache"))),
-    );
-    insert_opt_bool(
-        &mut row,
-        "is_canonical",
-        json_bool(object.get("is_canonical")),
-    );
-    insert_opt_utf8(
-        &mut row,
-        "gene_stable_id",
-        json_str(
-            object
-                .get("gene_stable_id")
-                .or_else(|| object.get("_gene_stable_id")),
-        ),
-    );
-    insert_opt_utf8(
-        &mut row,
-        "gene_symbol",
-        json_str(
-            object
-                .get("gene_symbol")
-                .or_else(|| object.get("_gene_symbol")),
-        ),
-    );
-    insert_opt_utf8(
-        &mut row,
-        "gene_symbol_source",
-        json_str(
-            object
-                .get("gene_symbol_source")
-                .or_else(|| object.get("_gene_symbol_source")),
-        ),
-    );
-    insert_opt_utf8(
-        &mut row,
-        "gene_hgnc_id",
-        json_str(object.get("gene_hgnc_id")),
-    );
-    if let Some(refseq_id) =
-        json_str(object.get("refseq_id").or_else(|| object.get("_refseq"))).filter(|v| v != "-")
-    {
-        row.insert("refseq_id".to_string(), CellValue::Utf8(refseq_id));
-    }
-    insert_opt_i64(
-        &mut row,
-        "coding_region_start",
-        json_i64(object.get("coding_region_start"))
-            .map(|value| normalize_genomic_start(value, context.coordinate_system_zero_based)),
-    );
-    insert_opt_i64(
-        &mut row,
-        "coding_region_end",
-        json_i64(object.get("coding_region_end"))
-            .map(|value| normalize_genomic_end(value, context.coordinate_system_zero_based)),
-    );
-    insert_opt_i64(
-        &mut row,
-        "cdna_coding_start",
-        json_i64(object.get("cdna_coding_start")),
-    );
-    insert_opt_i64(
-        &mut row,
-        "cdna_coding_end",
-        json_i64(object.get("cdna_coding_end")),
-    );
-
-    if let Some(translation_obj) = object
-        .get("translation")
-        .and_then(unwrap_blessed_object_optional)
-    {
-        insert_opt_utf8(
-            &mut row,
-            "translation_stable_id",
-            json_str(translation_obj.get("stable_id")),
-        );
-        insert_opt_i64(
-            &mut row,
-            "translation_start",
-            json_i64(translation_obj.get("start")),
-        );
-        insert_opt_i64(
-            &mut row,
-            "translation_end",
-            json_i64(translation_obj.get("end")),
-        );
-    }
-
-    let exon_count = object
-        .get("exon_count")
-        .and_then(|v| json_i32(Some(v)))
-        .or_else(|| {
-            object
-                .get("_trans_exon_array")
-                .and_then(Value::as_array)
-                .and_then(|arr| i32::try_from(arr.len()).ok())
-        });
-    insert_opt_i32(&mut row, "exon_count", exon_count);
-
-    row.insert(
-        "raw_object_json".to_string(),
-        CellValue::Utf8(canonical_json),
-    );
-    row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
-
-    append_provenance(&mut row, context.cache_info, context.source_file);
-    Ok(row)
-}
-
-fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
-    let mut current = value;
-    for _ in 0..4 {
-        if let Some(obj) = current.as_object() {
-            if let Some(inner) = obj.get("__value") {
-                current = inner;
-                continue;
-            }
-            return Ok(obj);
-        }
-        break;
-    }
-
-    Err(exec_err("Expected storable object payload"))
-}
-
-fn unwrap_blessed_object_optional(value: &Value) -> Option<&serde_json::Map<String, Value>> {
-    unwrap_blessed_object(value).ok()
-}
-
-fn insert_opt_utf8(row: &mut Row, key: &str, value: Option<String>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Utf8(value));
-    }
-}
-
-fn insert_opt_i64(row: &mut Row, key: &str, value: Option<i64>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Int64(value));
-    }
-}
-
-fn insert_opt_i32(row: &mut Row, key: &str, value: Option<i32>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Int32(value));
-    }
-}
-
-fn insert_opt_bool(row: &mut Row, key: &str, value: Option<bool>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Boolean(value));
-    }
-}
-
-fn append_provenance(row: &mut Row, cache_info: &CacheInfo, source_file: &Path) {
-    row.insert(
-        "species".to_string(),
-        CellValue::Utf8(cache_info.species.clone()),
-    );
-    row.insert(
-        "assembly".to_string(),
-        CellValue::Utf8(cache_info.assembly.clone()),
-    );
-    row.insert(
-        "cache_version".to_string(),
-        CellValue::Utf8(cache_info.cache_version.clone()),
-    );
-    for source in &cache_info.source_descriptors {
-        row.insert(
-            source.source_column.clone(),
-            CellValue::Utf8(source.value.clone()),
-        );
-    }
-    if let Some(serializer) = &cache_info.serializer_type {
-        row.insert(
-            "serializer_type".to_string(),
-            CellValue::Utf8(serializer.clone()),
-        );
-    }
-    row.insert(
-        "source_cache_path".to_string(),
-        CellValue::Utf8(cache_info.source_cache_path.clone()),
-    );
-    row.insert(
-        "source_file".to_string(),
-        CellValue::Utf8(source_file.to_string_lossy().to_string()),
-    );
 }
 
 fn build_transcript_row_storable(
@@ -580,8 +534,87 @@ fn build_transcript_row_storable(
     );
     row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
 
-    append_provenance(&mut row, context.cache_info, context.source_file);
+    append_provenance_row(&mut row, context.cache_info, context.source_file);
     Ok(row)
+}
+
+fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
+    let mut current = value;
+    for _ in 0..4 {
+        if let Some(obj) = current.as_object() {
+            if let Some(inner) = obj.get("__value") {
+                current = inner;
+                continue;
+            }
+            return Ok(obj);
+        }
+        break;
+    }
+
+    Err(exec_err("Expected storable object payload"))
+}
+
+fn unwrap_blessed_object_optional(value: &Value) -> Option<&serde_json::Map<String, Value>> {
+    unwrap_blessed_object(value).ok()
+}
+
+fn insert_opt_utf8(row: &mut Row, key: &str, value: Option<String>) {
+    if let Some(value) = value {
+        row.insert(key.to_string(), CellValue::Utf8(value));
+    }
+}
+
+fn insert_opt_i64(row: &mut Row, key: &str, value: Option<i64>) {
+    if let Some(value) = value {
+        row.insert(key.to_string(), CellValue::Int64(value));
+    }
+}
+
+fn insert_opt_i32(row: &mut Row, key: &str, value: Option<i32>) {
+    if let Some(value) = value {
+        row.insert(key.to_string(), CellValue::Int32(value));
+    }
+}
+
+fn insert_opt_bool(row: &mut Row, key: &str, value: Option<bool>) {
+    if let Some(value) = value {
+        row.insert(key.to_string(), CellValue::Boolean(value));
+    }
+}
+
+fn append_provenance_row(row: &mut Row, cache_info: &CacheInfo, source_file: &Path) {
+    row.insert(
+        "species".to_string(),
+        CellValue::Utf8(cache_info.species.clone()),
+    );
+    row.insert(
+        "assembly".to_string(),
+        CellValue::Utf8(cache_info.assembly.clone()),
+    );
+    row.insert(
+        "cache_version".to_string(),
+        CellValue::Utf8(cache_info.cache_version.clone()),
+    );
+    for source in &cache_info.source_descriptors {
+        row.insert(
+            source.source_column.clone(),
+            CellValue::Utf8(source.value.clone()),
+        );
+    }
+    if let Some(serializer) = &cache_info.serializer_type {
+        row.insert(
+            "serializer_type".to_string(),
+            CellValue::Utf8(serializer.clone()),
+        );
+    }
+    row.insert(
+        "source_cache_path".to_string(),
+        CellValue::Utf8(cache_info.source_cache_path.clone()),
+    );
+    row.insert(
+        "source_file".to_string(),
+        CellValue::Utf8(source_file.to_string_lossy().to_string()),
+    );
 }
 
 fn sv_str(value: Option<&SValue>) -> Option<String> {
