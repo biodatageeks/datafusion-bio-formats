@@ -20,6 +20,53 @@ pub(crate) enum RegulatoryTarget {
     MotifFeature,
 }
 
+// ---------------------------------------------------------------------------
+// RegulatoryColumnIndices – pre-computed builder indices from ColumnMap
+// ---------------------------------------------------------------------------
+
+pub(crate) struct RegulatoryColumnIndices {
+    chrom: Option<usize>,
+    start: Option<usize>,
+    end: Option<usize>,
+    strand: Option<usize>,
+    stable_id: Option<usize>,
+    db_id: Option<usize>,
+    // RegulatoryFeature-specific
+    feature_type: Option<usize>,
+    epigenome_count: Option<usize>,
+    regulatory_build_id: Option<usize>,
+    // MotifFeature-specific
+    score: Option<usize>,
+    binding_matrix: Option<usize>,
+    overlapping_regulatory_feature: Option<usize>,
+    // Shared
+    cell_types: Option<usize>,
+    raw_object_json: Option<usize>,
+    object_hash: Option<usize>,
+}
+
+impl RegulatoryColumnIndices {
+    pub fn new(col_map: &ColumnMap) -> Self {
+        Self {
+            chrom: col_map.get("chrom"),
+            start: col_map.get("start"),
+            end: col_map.get("end"),
+            strand: col_map.get("strand"),
+            stable_id: col_map.get("stable_id"),
+            db_id: col_map.get("db_id"),
+            feature_type: col_map.get("feature_type"),
+            epigenome_count: col_map.get("epigenome_count"),
+            regulatory_build_id: col_map.get("regulatory_build_id"),
+            score: col_map.get("score"),
+            binding_matrix: col_map.get("binding_matrix"),
+            overlapping_regulatory_feature: col_map.get("overlapping_regulatory_feature"),
+            cell_types: col_map.get("cell_types"),
+            raw_object_json: col_map.get("raw_object_json"),
+            object_hash: col_map.get("object_hash"),
+        }
+    }
+}
+
 struct RegulatoryRowCore {
     chrom: String,
     start: i64,
@@ -46,7 +93,7 @@ pub(crate) fn parse_regulatory_line_into(
     target: RegulatoryTarget,
     coordinate_system_zero_based: bool,
     batch: &mut BatchBuilder,
-    col_map: &ColumnMap,
+    col_idx: &RegulatoryColumnIndices,
     provenance: &ProvenanceWriter,
 ) -> Result<bool> {
     let trimmed = line.trim();
@@ -171,52 +218,52 @@ pub(crate) fn parse_regulatory_line_into(
             ))
         })?;
 
-    // Write required columns
-    if let Some(idx) = col_map.get("chrom") {
+    // Write required columns (direct index access, no HashMap lookups)
+    if let Some(idx) = col_idx.chrom {
         batch.set_utf8(idx, &chrom);
     }
-    if let Some(idx) = col_map.get("start") {
+    if let Some(idx) = col_idx.start {
         batch.set_i64(idx, start);
     }
-    if let Some(idx) = col_map.get("end") {
+    if let Some(idx) = col_idx.end {
         batch.set_i64(idx, end);
     }
-    if let Some(idx) = col_map.get("strand") {
+    if let Some(idx) = col_idx.strand {
         batch.set_i8(idx, strand);
     }
-    if let Some(idx) = col_map.get("stable_id") {
+    if let Some(idx) = col_idx.stable_id {
         batch.set_opt_utf8_owned(idx, json_str(object.get("stable_id")).as_ref());
     }
-    if let Some(idx) = col_map.get("db_id") {
+    if let Some(idx) = col_idx.db_id {
         batch.set_opt_i64(idx, json_i64(object.get("db_id")));
     }
 
     match target {
         RegulatoryTarget::RegulatoryFeature => {
-            if let Some(idx) = col_map.get("feature_type") {
+            if let Some(idx) = col_idx.feature_type {
                 batch.set_opt_utf8_owned(idx, json_str(object.get("feature_type")).as_ref());
             }
-            if let Some(idx) = col_map.get("epigenome_count") {
+            if let Some(idx) = col_idx.epigenome_count {
                 batch.set_opt_i32(idx, json_i32(object.get("epigenome_count")));
             }
-            if let Some(idx) = col_map.get("regulatory_build_id") {
+            if let Some(idx) = col_idx.regulatory_build_id {
                 batch.set_opt_i64(idx, json_i64(object.get("regulatory_build_id")));
             }
-            if let Some(idx) = col_map.get("cell_types") {
+            if let Some(idx) = col_idx.cell_types {
                 batch.set_opt_utf8_owned(idx, json_str(object.get("cell_types")).as_ref());
             }
         }
         RegulatoryTarget::MotifFeature => {
-            if let Some(idx) = col_map.get("score") {
+            if let Some(idx) = col_idx.score {
                 batch.set_opt_f64(idx, json_f64(object.get("score")));
             }
-            if let Some(idx) = col_map.get("binding_matrix") {
+            if let Some(idx) = col_idx.binding_matrix {
                 batch.set_opt_utf8_owned(idx, json_str(object.get("binding_matrix")).as_ref());
             }
-            if let Some(idx) = col_map.get("cell_types") {
+            if let Some(idx) = col_idx.cell_types {
                 batch.set_opt_utf8_owned(idx, json_str(object.get("cell_types")).as_ref());
             }
-            if let Some(idx) = col_map.get("overlapping_regulatory_feature") {
+            if let Some(idx) = col_idx.overlapping_regulatory_feature {
                 batch.set_opt_utf8_owned(
                     idx,
                     json_str(object.get("overlapping_regulatory_feature")).as_ref(),
@@ -225,16 +272,16 @@ pub(crate) fn parse_regulatory_line_into(
         }
     }
 
-    // Phase 2: Only compute canonical JSON + hash if projected
-    let need_json = col_map.get("raw_object_json").is_some();
-    let need_hash = col_map.get("object_hash").is_some();
+    // Only compute canonical JSON + hash if projected
+    let need_json = col_idx.raw_object_json.is_some();
+    let need_hash = col_idx.object_hash.is_some();
     if need_json || need_hash {
         let canonical_json = canonical_json_string(&payload)?;
-        if let Some(idx) = col_map.get("object_hash") {
+        if let Some(idx) = col_idx.object_hash {
             let hash = stable_hash(&canonical_json);
             batch.set_utf8(idx, &hash);
         }
-        if let Some(idx) = col_map.get("raw_object_json") {
+        if let Some(idx) = col_idx.raw_object_json {
             batch.set_utf8(idx, &canonical_json);
         }
     }

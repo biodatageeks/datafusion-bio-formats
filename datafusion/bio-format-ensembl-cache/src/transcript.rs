@@ -15,6 +15,77 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 
+// ---------------------------------------------------------------------------
+// TranscriptColumnIndices – pre-computed builder indices from ColumnMap
+// ---------------------------------------------------------------------------
+
+pub(crate) struct TranscriptColumnIndices {
+    chrom: Option<usize>,
+    start: Option<usize>,
+    end: Option<usize>,
+    strand: Option<usize>,
+    stable_id: Option<usize>,
+    version: Option<usize>,
+    biotype: Option<usize>,
+    source: Option<usize>,
+    is_canonical: Option<usize>,
+    gene_stable_id: Option<usize>,
+    gene_symbol: Option<usize>,
+    gene_symbol_source: Option<usize>,
+    gene_hgnc_id: Option<usize>,
+    refseq_id: Option<usize>,
+    coding_region_start: Option<usize>,
+    coding_region_end: Option<usize>,
+    cdna_coding_start: Option<usize>,
+    cdna_coding_end: Option<usize>,
+    translation_stable_id: Option<usize>,
+    translation_start: Option<usize>,
+    translation_end: Option<usize>,
+    translation_projected: bool,
+    exon_count: Option<usize>,
+    raw_object_json: Option<usize>,
+    object_hash: Option<usize>,
+}
+
+impl TranscriptColumnIndices {
+    pub fn new(col_map: &ColumnMap) -> Self {
+        let translation_stable_id = col_map.get("translation_stable_id");
+        let translation_start = col_map.get("translation_start");
+        let translation_end = col_map.get("translation_end");
+        let translation_projected = translation_stable_id.is_some()
+            || translation_start.is_some()
+            || translation_end.is_some();
+
+        Self {
+            chrom: col_map.get("chrom"),
+            start: col_map.get("start"),
+            end: col_map.get("end"),
+            strand: col_map.get("strand"),
+            stable_id: col_map.get("stable_id"),
+            version: col_map.get("version"),
+            biotype: col_map.get("biotype"),
+            source: col_map.get("source"),
+            is_canonical: col_map.get("is_canonical"),
+            gene_stable_id: col_map.get("gene_stable_id"),
+            gene_symbol: col_map.get("gene_symbol"),
+            gene_symbol_source: col_map.get("gene_symbol_source"),
+            gene_hgnc_id: col_map.get("gene_hgnc_id"),
+            refseq_id: col_map.get("refseq_id"),
+            coding_region_start: col_map.get("coding_region_start"),
+            coding_region_end: col_map.get("coding_region_end"),
+            cdna_coding_start: col_map.get("cdna_coding_start"),
+            cdna_coding_end: col_map.get("cdna_coding_end"),
+            translation_stable_id,
+            translation_start,
+            translation_end,
+            translation_projected,
+            exon_count: col_map.get("exon_count"),
+            raw_object_json: col_map.get("raw_object_json"),
+            object_hash: col_map.get("object_hash"),
+        }
+    }
+}
+
 struct TranscriptRowCore {
     chrom: String,
     start: i64,
@@ -41,7 +112,7 @@ pub(crate) fn parse_transcript_line_into(
     predicate: &SimplePredicate,
     coordinate_system_zero_based: bool,
     batch: &mut BatchBuilder,
-    col_map: &ColumnMap,
+    col_idx: &TranscriptColumnIndices,
     provenance: &ProvenanceWriter,
 ) -> Result<bool> {
     let trimmed = line.trim();
@@ -168,40 +239,40 @@ pub(crate) fn parse_transcript_line_into(
         ))
     })?;
 
-    // Write required columns
-    if let Some(idx) = col_map.get("chrom") {
+    // Write required columns (direct index access, no HashMap lookups)
+    if let Some(idx) = col_idx.chrom {
         batch.set_utf8(idx, &chrom);
     }
-    if let Some(idx) = col_map.get("start") {
+    if let Some(idx) = col_idx.start {
         batch.set_i64(idx, start);
     }
-    if let Some(idx) = col_map.get("end") {
+    if let Some(idx) = col_idx.end {
         batch.set_i64(idx, end);
     }
-    if let Some(idx) = col_map.get("strand") {
+    if let Some(idx) = col_idx.strand {
         batch.set_i8(idx, strand);
     }
-    if let Some(idx) = col_map.get("stable_id") {
+    if let Some(idx) = col_idx.stable_id {
         batch.set_utf8(idx, &stable_id);
     }
 
     // Optional columns
-    if let Some(idx) = col_map.get("version") {
+    if let Some(idx) = col_idx.version {
         batch.set_opt_i32(idx, json_i32(object.get("version")));
     }
-    if let Some(idx) = col_map.get("biotype") {
+    if let Some(idx) = col_idx.biotype {
         batch.set_opt_utf8_owned(idx, json_str(object.get("biotype")).as_ref());
     }
-    if let Some(idx) = col_map.get("source") {
+    if let Some(idx) = col_idx.source {
         batch.set_opt_utf8_owned(
             idx,
             json_str(object.get("source").or_else(|| object.get("_source_cache"))).as_ref(),
         );
     }
-    if let Some(idx) = col_map.get("is_canonical") {
+    if let Some(idx) = col_idx.is_canonical {
         batch.set_opt_bool(idx, json_bool(object.get("is_canonical")));
     }
-    if let Some(idx) = col_map.get("gene_stable_id") {
+    if let Some(idx) = col_idx.gene_stable_id {
         batch.set_opt_utf8_owned(
             idx,
             json_str(
@@ -212,7 +283,7 @@ pub(crate) fn parse_transcript_line_into(
             .as_ref(),
         );
     }
-    if let Some(idx) = col_map.get("gene_symbol") {
+    if let Some(idx) = col_idx.gene_symbol {
         batch.set_opt_utf8_owned(
             idx,
             json_str(
@@ -223,7 +294,7 @@ pub(crate) fn parse_transcript_line_into(
             .as_ref(),
         );
     }
-    if let Some(idx) = col_map.get("gene_symbol_source") {
+    if let Some(idx) = col_idx.gene_symbol_source {
         batch.set_opt_utf8_owned(
             idx,
             json_str(
@@ -234,60 +305,55 @@ pub(crate) fn parse_transcript_line_into(
             .as_ref(),
         );
     }
-    if let Some(idx) = col_map.get("gene_hgnc_id") {
+    if let Some(idx) = col_idx.gene_hgnc_id {
         batch.set_opt_utf8_owned(idx, json_str(object.get("gene_hgnc_id")).as_ref());
     }
-    if let Some(idx) = col_map.get("refseq_id") {
+    if let Some(idx) = col_idx.refseq_id {
         let refseq_id = json_str(object.get("refseq_id").or_else(|| object.get("_refseq")))
             .filter(|v| v != "-");
         batch.set_opt_utf8_owned(idx, refseq_id.as_ref());
     }
-    if let Some(idx) = col_map.get("coding_region_start") {
+    if let Some(idx) = col_idx.coding_region_start {
         batch.set_opt_i64(
             idx,
             json_i64(object.get("coding_region_start"))
                 .map(|v| normalize_genomic_start(v, coordinate_system_zero_based)),
         );
     }
-    if let Some(idx) = col_map.get("coding_region_end") {
+    if let Some(idx) = col_idx.coding_region_end {
         batch.set_opt_i64(
             idx,
             json_i64(object.get("coding_region_end"))
                 .map(|v| normalize_genomic_end(v, coordinate_system_zero_based)),
         );
     }
-    if let Some(idx) = col_map.get("cdna_coding_start") {
+    if let Some(idx) = col_idx.cdna_coding_start {
         batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_start")));
     }
-    if let Some(idx) = col_map.get("cdna_coding_end") {
+    if let Some(idx) = col_idx.cdna_coding_end {
         batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_end")));
     }
 
     // Translation sub-object
-    let translation_projected = col_map.has_any(&[
-        "translation_stable_id",
-        "translation_start",
-        "translation_end",
-    ]);
-    if translation_projected {
+    if col_idx.translation_projected {
         if let Some(translation_obj) = object
             .get("translation")
             .and_then(unwrap_blessed_object_optional)
         {
-            if let Some(idx) = col_map.get("translation_stable_id") {
+            if let Some(idx) = col_idx.translation_stable_id {
                 batch.set_opt_utf8_owned(idx, json_str(translation_obj.get("stable_id")).as_ref());
             }
-            if let Some(idx) = col_map.get("translation_start") {
+            if let Some(idx) = col_idx.translation_start {
                 batch.set_opt_i64(idx, json_i64(translation_obj.get("start")));
             }
-            if let Some(idx) = col_map.get("translation_end") {
+            if let Some(idx) = col_idx.translation_end {
                 batch.set_opt_i64(idx, json_i64(translation_obj.get("end")));
             }
         }
         // If translation is null, finish_row() will append nulls for these columns
     }
 
-    if let Some(idx) = col_map.get("exon_count") {
+    if let Some(idx) = col_idx.exon_count {
         let exon_count = object
             .get("exon_count")
             .and_then(|v| json_i32(Some(v)))
@@ -300,16 +366,16 @@ pub(crate) fn parse_transcript_line_into(
         batch.set_opt_i32(idx, exon_count);
     }
 
-    // Phase 2: Only compute canonical JSON + hash if projected
-    let need_json = col_map.get("raw_object_json").is_some();
-    let need_hash = col_map.get("object_hash").is_some();
+    // Only compute canonical JSON + hash if projected
+    let need_json = col_idx.raw_object_json.is_some();
+    let need_hash = col_idx.object_hash.is_some();
     if need_json || need_hash {
         let canonical_json = canonical_json_string(&payload)?;
-        if let Some(idx) = col_map.get("object_hash") {
+        if let Some(idx) = col_idx.object_hash {
             let hash = stable_hash(&canonical_json);
             batch.set_utf8(idx, &hash);
         }
-        if let Some(idx) = col_map.get("raw_object_json") {
+        if let Some(idx) = col_idx.raw_object_json {
             batch.set_utf8(idx, &canonical_json);
         }
     }
