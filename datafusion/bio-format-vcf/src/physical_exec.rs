@@ -2663,9 +2663,23 @@ async fn get_indexed_vcf_stream(
 
                 let noodles_region = build_noodles_region(region)?;
 
-                let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("VCF region query failed: {e}"))
-                })?;
+                let records = match indexed_reader.query(&noodles_region) {
+                    Ok(records) => records,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("does not exist in reference sequences") {
+                            debug!(
+                                "Skipping region {:?}: chromosome not in VCF reference sequences",
+                                region.chrom
+                            );
+                            continue;
+                        }
+                        return Err(DataFusionError::Execution(format!(
+                            "VCF region query failed: {}",
+                            e
+                        )));
+                    }
+                };
 
                 for result in records {
                     let record = result.map_err(|e| {
