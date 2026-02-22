@@ -8,6 +8,8 @@ pub(crate) enum CellValue {
     Int8(i8),
     Float64(f64),
     Boolean(bool),
+    /// Exon list: Vec of (start, end, phase) tuples.
+    ExonList(Vec<(i64, i64, i8)>),
 }
 
 pub(crate) type Row = HashMap<String, CellValue>;

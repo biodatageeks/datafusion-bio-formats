@@ -357,12 +357,17 @@ fn process_partition(
         if use_native_storable {
             // Storable binary path: still uses Vec<Row> + rows_to_record_batch
             let parsed_rows = match kind {
-                EnsemblEntityKind::Transcript => parse_transcript_storable_file(
-                    source_file,
-                    &cache_info,
-                    &predicate,
-                    coordinate_system_zero_based,
-                )?,
+                EnsemblEntityKind::Transcript => {
+                    let col_idx = transcript_col_idx.as_ref().unwrap();
+                    parse_transcript_storable_file(
+                        source_file,
+                        &cache_info,
+                        &predicate,
+                        coordinate_system_zero_based,
+                        col_idx.exons_projected(),
+                        col_idx.sequences_projected(),
+                    )?
+                }
                 EnsemblEntityKind::RegulatoryFeature => parse_regulatory_storable_file(
                     source_file,
                     &cache_info,

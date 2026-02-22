@@ -24,6 +24,24 @@ DataFusion `TableProvider` implementations for raw Ensembl VEP cache directories
   - `storable`: `JSON:{...}`
   - `sereal`: `SRL1{...}`
 
+## Transcript VEP Columns
+
+The transcript schema includes structured columns for VEP consequence prediction:
+
+| Column | Type | Description |
+|---|---|---|
+| `exons` | `List<Struct<start:Int64, end:Int64, phase:Int8>>` | Exon boundaries with reading frame phase |
+| `cdna_seq` | `Utf8` | Translatable cDNA sequence |
+| `peptide_seq` | `Utf8` | Protein sequence |
+| `codon_table` | `Int32` | NCBI genetic code table ID (1 = standard) |
+| `tsl` | `Int32` | Transcript support level |
+| `mane_select` | `Utf8` | MANE Select transcript identifier |
+| `mane_plus_clinical` | `Utf8` | MANE Plus Clinical transcript identifier |
+
+These columns support projection pushdown — when not selected in a query,
+the parser skips extracting exon arrays and sequences, significantly reducing
+parse overhead.
+
 ## Parallel Scanning
 
 - By default, parallelism follows DataFusion session `target_partitions`.

@@ -21,4 +21,5 @@ log = "0.4.27"
 
 [dev-dependencies]
 tokio.workspace = true
+futures.workspace = true
 hex = "0.4"

@@ -43,11 +43,29 @@ pub(crate) struct TranscriptColumnIndices {
     translation_end: Option<usize>,
     translation_projected: bool,
     exon_count: Option<usize>,
+    // VEP-related columns
+    exons: Option<usize>,
+    exons_projected: bool,
+    cdna_seq: Option<usize>,
+    peptide_seq: Option<usize>,
+    sequences_projected: bool,
+    codon_table: Option<usize>,
+    tsl: Option<usize>,
+    mane_select: Option<usize>,
+    mane_plus_clinical: Option<usize>,
     raw_object_json: Option<usize>,
     object_hash: Option<usize>,
 }
 
 impl TranscriptColumnIndices {
+    pub fn exons_projected(&self) -> bool {
+        self.exons_projected
+    }
+
+    pub fn sequences_projected(&self) -> bool {
+        self.sequences_projected
+    }
+
     pub fn new(col_map: &ColumnMap) -> Self {
         let translation_stable_id = col_map.get("translation_stable_id");
         let translation_start = col_map.get("translation_start");
@@ -55,6 +73,13 @@ impl TranscriptColumnIndices {
         let translation_projected = translation_stable_id.is_some()
             || translation_start.is_some()
             || translation_end.is_some();
+
+        let exons = col_map.get("exons");
+        let exons_projected = exons.is_some();
+
+        let cdna_seq = col_map.get("cdna_seq");
+        let peptide_seq = col_map.get("peptide_seq");
+        let sequences_projected = cdna_seq.is_some() || peptide_seq.is_some();
 
         Self {
             chrom: col_map.get("chrom"),
@@ -80,6 +105,15 @@ impl TranscriptColumnIndices {
             translation_end,
             translation_projected,
             exon_count: col_map.get("exon_count"),
+            exons,
+            exons_projected,
+            cdna_seq,
+            peptide_seq,
+            sequences_projected,
+            codon_table: col_map.get("codon_table"),
+            tsl: col_map.get("tsl"),
+            mane_select: col_map.get("mane_select"),
+            mane_plus_clinical: col_map.get("mane_plus_clinical"),
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
@@ -366,6 +400,67 @@ pub(crate) fn parse_transcript_line_into(
         batch.set_opt_i32(idx, exon_count);
     }
 
+    // Exon structured array — only parse when projected
+    if col_idx.exons_projected {
+        if let Some(idx) = col_idx.exons {
+            let exon_tuples = object
+                .get("_trans_exon_array")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|exon_val| {
+                            let exon_obj = unwrap_blessed_object_optional(exon_val)?;
+                            let start = json_i64(exon_obj.get("start")).map(|v| {
+                                normalize_genomic_start(v, coordinate_system_zero_based)
+                            })?;
+                            let end = json_i64(exon_obj.get("end"))
+                                .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
+                            let phase = json_i64(exon_obj.get("phase"))
+                                .and_then(|v| i8::try_from(v).ok())
+                                .unwrap_or(-1);
+                            Some((start, end, phase))
+                        })
+                        .collect::<Vec<(i64, i64, i8)>>()
+                });
+            batch.set_exon_list(idx, exon_tuples.as_deref());
+        }
+    }
+
+    // Sequences from _variation_effect_feature_cache — only parse when projected
+    if col_idx.sequences_projected {
+        let vef_cache = object
+            .get("_variation_effect_feature_cache")
+            .and_then(unwrap_blessed_object_optional);
+        if let Some(idx) = col_idx.cdna_seq {
+            batch.set_opt_utf8_owned(
+                idx,
+                vef_cache
+                    .and_then(|c| json_str(c.get("translateable_seq")))
+                    .as_ref(),
+            );
+        }
+        if let Some(idx) = col_idx.peptide_seq {
+            batch.set_opt_utf8_owned(
+                idx,
+                vef_cache.and_then(|c| json_str(c.get("peptide"))).as_ref(),
+            );
+        }
+    }
+
+    // Simple scalar VEP fields
+    if let Some(idx) = col_idx.codon_table {
+        batch.set_opt_i32(idx, json_i32(object.get("codon_table")));
+    }
+    if let Some(idx) = col_idx.tsl {
+        batch.set_opt_i32(idx, json_i32(object.get("tsl")));
+    }
+    if let Some(idx) = col_idx.mane_select {
+        batch.set_opt_utf8_owned(idx, json_str(object.get("mane_select")).as_ref());
+    }
+    if let Some(idx) = col_idx.mane_plus_clinical {
+        batch.set_opt_utf8_owned(idx, json_str(object.get("mane_plus_clinical")).as_ref());
+    }
+
     // Only compute canonical JSON + hash if projected
     let need_json = col_idx.raw_object_json.is_some();
     let need_hash = col_idx.object_hash.is_some();
@@ -395,6 +490,8 @@ pub(crate) fn parse_transcript_storable_file(
     cache_info: &CacheInfo,
     predicate: &SimplePredicate,
     coordinate_system_zero_based: bool,
+    exons_projected: bool,
+    sequences_projected: bool,
 ) -> Result<Vec<Row>> {
     let bytes = read_maybe_gzip_bytes(source_file)?;
     if !bytes.starts_with(b"pst0") {
@@ -481,7 +578,14 @@ pub(crate) fn parse_transcript_storable_file(
                 source_file,
             };
 
-            rows.push(build_transcript_row_storable(item, obj, core, &context)?);
+            rows.push(build_transcript_row_storable(
+                item,
+                obj,
+                core,
+                &context,
+                exons_projected,
+                sequences_projected,
+            )?);
         }
     }
 
@@ -493,6 +597,8 @@ fn build_transcript_row_storable(
     object: &std::collections::BTreeMap<String, SValue>,
     core: TranscriptRowCore,
     context: &TranscriptRowContext<'_>,
+    exons_projected: bool,
+    sequences_projected: bool,
 ) -> Result<Row> {
     let TranscriptRowCore {
         chrom,
@@ -610,6 +716,61 @@ fn build_transcript_row_storable(
                 .and_then(|arr| i32::try_from(arr.len()).ok())
         });
     insert_opt_i32(&mut row, "exon_count", exon_count);
+
+    // Exon structured array (skip when not projected)
+    if exons_projected {
+        if let Some(exon_arr) = object.get("_trans_exon_array").and_then(SValue::as_array) {
+            let exon_tuples: Vec<(i64, i64, i8)> = exon_arr
+                .iter()
+                .filter_map(|exon_val| {
+                    let exon_obj = exon_val.as_hash()?;
+                    let start = sv_i64(exon_obj.get("start")).map(|v| {
+                        normalize_genomic_start(v, context.coordinate_system_zero_based)
+                    })?;
+                    let end = sv_i64(exon_obj.get("end"))
+                        .map(|v| normalize_genomic_end(v, context.coordinate_system_zero_based))?;
+                    let phase = sv_i64(exon_obj.get("phase"))
+                        .and_then(|v| i8::try_from(v).ok())
+                        .unwrap_or(-1);
+                    Some((start, end, phase))
+                })
+                .collect();
+            row.insert("exons".to_string(), CellValue::ExonList(exon_tuples));
+        }
+    }
+
+    // Sequences from _variation_effect_feature_cache (skip when not projected)
+    if sequences_projected {
+        if let Some(vef_cache) = object
+            .get("_variation_effect_feature_cache")
+            .and_then(SValue::as_hash)
+        {
+            insert_opt_utf8(
+                &mut row,
+                "cdna_seq",
+                sv_str(vef_cache.get("translateable_seq")),
+            );
+            insert_opt_utf8(&mut row, "peptide_seq", sv_str(vef_cache.get("peptide")));
+        }
+    }
+
+    // Simple scalar VEP fields
+    insert_opt_i32(
+        &mut row,
+        "codon_table",
+        sv_i64(object.get("codon_table")).and_then(|v| i32::try_from(v).ok()),
+    );
+    insert_opt_i32(
+        &mut row,
+        "tsl",
+        sv_i64(object.get("tsl")).and_then(|v| i32::try_from(v).ok()),
+    );
+    insert_opt_utf8(&mut row, "mane_select", sv_str(object.get("mane_select")));
+    insert_opt_utf8(
+        &mut row,
+        "mane_plus_clinical",
+        sv_str(object.get("mane_plus_clinical")),
+    );
 
     row.insert(
         "raw_object_json".to_string(),
