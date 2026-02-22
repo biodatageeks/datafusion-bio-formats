@@ -768,7 +768,7 @@ pub(crate) fn rows_to_record_batch(schema: SchemaRef, rows: &[Row]) -> Result<Re
 mod tests {
     use super::*;
     use datafusion::arrow::array::{Array, Int8Array, Int64Array, ListArray, StructArray};
-    use datafusion::arrow::datatypes::{Field, Fields, Schema};
+    use datafusion::arrow::datatypes::{Field, Schema};
 
     fn exon_only_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![Field::new(
