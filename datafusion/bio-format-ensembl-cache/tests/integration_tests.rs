@@ -1,4 +1,7 @@
-use datafusion::arrow::array::{Array, Int64Array, StringArray};
+use datafusion::arrow::array::{
+    Array, Int32Array, Int64Array, ListArray, StringArray, StructArray,
+};
+use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
 use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -431,6 +434,215 @@ async fn regulatory_and_motif_coordinate_system_metadata_and_values_work()
         .collect()
         .await?;
     assert_eq!(first_i64_at(&motif_rows, 0), 7049);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// VEP column tests (Phase 2)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+    let schema = provider.schema();
+
+    // Verify new columns exist with correct types
+    let exons_field = schema
+        .field_with_name("exons")
+        .expect("exons column missing");
+    assert!(
+        matches!(exons_field.data_type(), DataType::List(_)),
+        "exons should be List type, got {:?}",
+        exons_field.data_type()
+    );
+    assert!(exons_field.is_nullable());
+
+    assert!(schema.field_with_name("cdna_seq").is_ok());
+    assert!(schema.field_with_name("peptide_seq").is_ok());
+    assert!(schema.field_with_name("codon_table").is_ok());
+    assert!(schema.field_with_name("tsl").is_ok());
+    assert!(schema.field_with_name("mane_select").is_ok());
+    assert!(schema.field_with_name("mane_plus_clinical").is_ok());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_storable_exons_query_returns_structured_data() -> datafusion::common::Result<()>
+{
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // Query exons column — should return List<Struct<start, end, phase>>
+    let batches = ctx
+        .sql("SELECT stable_id, exons, exon_count FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let batch = &batches[0];
+    assert!(batch.num_rows() > 0);
+
+    // The exons column should be a ListArray
+    let exons_col = batch.column_by_name("exons").expect("exons column missing");
+    let list_array = exons_col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("exons column should be ListArray");
+
+    // Check any non-null exon lists have the right structure
+    for row in 0..list_array.len() {
+        if !list_array.is_null(row) {
+            let exon_list = list_array.value(row);
+            let struct_array = exon_list
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("exon list values should be StructArray");
+            if struct_array.len() > 0 {
+                // Verify struct fields exist
+                assert!(struct_array.column_by_name("start").is_some());
+                assert!(struct_array.column_by_name("end").is_some());
+                assert!(struct_array.column_by_name("phase").is_some());
+
+                // Verify exon_count matches
+                let exon_count_col = batch
+                    .column_by_name("exon_count")
+                    .expect("exon_count column missing");
+                let counts = exon_count_col
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .expect("expected Int32Array");
+                if !counts.is_null(row) {
+                    assert_eq!(
+                        counts.value(row) as usize,
+                        struct_array.len(),
+                        "exon_count should match exons array length"
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_sereal_exons_query_returns_structured_data() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("transcript_sereal")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT stable_id, exons FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let batch = &batches[0];
+
+    // The exons column should exist and be queryable
+    let exons_col = batch.column_by_name("exons").expect("exons column missing");
+    assert_eq!(batch.num_rows(), 1);
+
+    // Exon column should be a ListArray (may be null if fixture lacks exon data)
+    let _list_array = exons_col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("exons column should be ListArray");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_vep_sequences_queryable() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // Query sequence columns — should not error
+    let batches = ctx
+        .sql("SELECT stable_id, cdna_seq, peptide_seq, codon_table FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let batch = &batches[0];
+    assert!(batch.num_rows() > 0);
+
+    // Verify columns exist in output
+    assert!(batch.column_by_name("cdna_seq").is_some());
+    assert!(batch.column_by_name("peptide_seq").is_some());
+    assert!(batch.column_by_name("codon_table").is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_projection_pushdown_excludes_vep_columns() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // Query only core columns — VEP columns should NOT appear in output
+    let batches = ctx
+        .sql("SELECT stable_id, chrom, start FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let batch = &batches[0];
+    assert_eq!(batch.num_columns(), 3);
+    assert!(batch.column_by_name("exons").is_none());
+    assert!(batch.column_by_name("cdna_seq").is_none());
+    assert!(batch.column_by_name("peptide_seq").is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_backward_compat_existing_queries_work() -> datafusion::common::Result<()> {
+    // Ensure existing queries from before the VEP columns were added still produce
+    // the same results.
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx.sql("SELECT COUNT(*) FROM tx").await?.collect().await?;
+    assert_eq!(first_i64(&batches), 2);
+
+    let batches = ctx
+        .sql("SELECT stable_id FROM tx WHERE is_canonical = true")
+        .await?
+        .collect()
+        .await?;
+    let stable_ids = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("expected StringArray");
+    assert_eq!(stable_ids.value(0), "ENST000001");
 
     Ok(())
 }

@@ -1053,6 +1053,7 @@ dependencies = [
  "datafusion-bio-format-core",
  "datafusion-execution",
  "flate2",
+ "futures",
  "hex",
  "log",
  "serde_json",

@@ -1,9 +1,24 @@
 use crate::errors::{Result, exec_err};
 use crate::info::CacheInfo;
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Returns the Arrow `DataType` for the exons column:
+/// `List<Struct<start:Int64, end:Int64, phase:Int8>>`.
+pub(crate) fn exon_list_data_type() -> DataType {
+    let exon_fields = Fields::from(vec![
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+        Field::new("phase", DataType::Int8, false),
+    ]);
+    DataType::List(Arc::new(Field::new(
+        "item",
+        DataType::Struct(exon_fields),
+        true,
+    )))
+}
 
 const REQUIRED_VARIATION_COLUMNS: [&str; 6] = [
     "chrom",
@@ -110,6 +125,14 @@ pub(crate) fn transcript_schema(
         Field::new("translation_start", DataType::Int64, true),
         Field::new("translation_end", DataType::Int64, true),
         Field::new("exon_count", DataType::Int32, true),
+        // VEP-related structured columns
+        Field::new("exons", exon_list_data_type(), true),
+        Field::new("cdna_seq", DataType::Utf8, true),
+        Field::new("peptide_seq", DataType::Utf8, true),
+        Field::new("codon_table", DataType::Int32, true),
+        Field::new("tsl", DataType::Int32, true),
+        Field::new("mane_select", DataType::Utf8, true),
+        Field::new("mane_plus_clinical", DataType::Utf8, true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];
