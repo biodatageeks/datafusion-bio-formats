@@ -1045,6 +1045,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-bio-format-ensembl-cache"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "datafusion",
+ "datafusion-bio-format-core",
+ "datafusion-execution",
+ "flate2",
+ "futures",
+ "hex",
+ "log",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "datafusion-bio-format-fasta"
 version = "0.5.2"
 dependencies = [

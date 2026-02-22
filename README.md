@@ -22,6 +22,7 @@ This workspace provides a collection of Rust crates that implement DataFusion `T
 | **[datafusion-bio-format-fasta](datafusion/bio-format-fasta)** | FASTA biological sequences | ❌ | ❌  | ❌ | ❌ | ✅ |
 | **[datafusion-bio-format-cram](datafusion/bio-format-cram)** | CRAM compressed alignments | ✅ (CRAI) | ✅ | ✅ (indexed) | ✅ | ✅ |
 | **[datafusion-bio-format-pairs](datafusion/bio-format-pairs)** | Pairs (Hi-C) chromatin contacts | ✅ (TBI/px2) | ✅ | ✅ (indexed) | ❌ | ✅ |
+| **[datafusion-bio-format-ensembl-cache](datafusion/bio-format-ensembl-cache)** | Raw Ensembl VEP cache entities | ✅ (basic chr/start/end) | ✅ | ✅ (streaming) | ❌ | 🚧 |
 
 ## Features
 
