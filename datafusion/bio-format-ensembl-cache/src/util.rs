@@ -1,8 +1,8 @@
 use crate::errors::{Result, exec_err};
 use crate::schema::exon_list_data_type;
 use datafusion::arrow::array::{
-    ArrayRef, BooleanBuilder, Float64Builder, Int8Builder, Int32Builder, Int64Builder, ListBuilder,
-    StringBuilder, StructBuilder,
+    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int8Builder, Int32Builder,
+    Int64Builder, ListBuilder, StringBuilder, StructBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -32,28 +32,22 @@ pub(crate) fn open_text_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     }
 }
 
-pub(crate) fn read_maybe_gzip_bytes(path: &Path) -> Result<Vec<u8>> {
+pub(crate) fn open_binary_reader(path: &Path) -> Result<Box<dyn Read + Send>> {
     let file = File::open(path)
         .map_err(|e| exec_err(format!("Failed opening {}: {}", path.display(), e)))?;
-    let mut bytes = Vec::new();
 
     if path
         .extension()
         .and_then(|v| v.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
     {
-        let mut decoder = MultiGzDecoder::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
-        decoder
-            .read_to_end(&mut bytes)
-            .map_err(|e| exec_err(format!("Failed decompressing {}: {}", path.display(), e)))?;
+        Ok(Box::new(MultiGzDecoder::new(BufReader::with_capacity(
+            IO_BUFFER_SIZE,
+            file,
+        ))))
     } else {
-        let mut reader = BufReader::with_capacity(IO_BUFFER_SIZE, file);
-        reader
-            .read_to_end(&mut bytes)
-            .map_err(|e| exec_err(format!("Failed reading {}: {}", path.display(), e)))?;
+        Ok(Box::new(BufReader::with_capacity(IO_BUFFER_SIZE, file)))
     }
-
-    Ok(bytes)
 }
 
 pub(crate) fn read_maybe_gzip_prefix(path: &Path, prefix_len: usize) -> Result<Vec<u8>> {
@@ -346,6 +340,7 @@ pub(crate) struct BatchBuilder {
     row_count: usize,
     written: Vec<bool>,
     written_count: usize,
+    pending_error: Option<String>,
 }
 
 impl BatchBuilder {
@@ -362,7 +357,30 @@ impl BatchBuilder {
             row_count: 0,
             written: vec![false; num_cols],
             written_count: 0,
+            pending_error: None,
         })
+    }
+
+    #[inline]
+    fn set_pending_error_once(&mut self, message: String) {
+        if self.pending_error.is_none() {
+            self.pending_error = Some(message);
+        }
+    }
+
+    pub fn take_error(&mut self) -> Option<datafusion::common::DataFusionError> {
+        self.pending_error.take().map(exec_err)
+    }
+
+    pub fn max_utf8_bytes(&self) -> usize {
+        self.builders
+            .iter()
+            .filter_map(|b| match b {
+                AnyBuilder::Utf8(builder) => Some(builder.values_slice().len()),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     #[inline]
@@ -375,8 +393,24 @@ impl BatchBuilder {
 
     #[inline]
     pub fn set_utf8(&mut self, col: usize, value: &str) {
+        let mut overflow: Option<(usize, usize)> = None;
         if let AnyBuilder::Utf8(b) = &mut self.builders[col] {
-            b.append_value(value);
+            let current = b.values_slice().len();
+            let next = current.saturating_add(value.len());
+            if next > i32::MAX as usize {
+                overflow = Some((current, value.len()));
+                b.append_null();
+            } else {
+                b.append_value(value);
+            }
+        }
+        if let Some((current, value_len)) = overflow {
+            let col_name = self.schema.field(col).name().clone();
+            self.set_pending_error_once(format!(
+                "Arrow UTF-8 offset overflow in column '{}' ({} + {} bytes exceeds i32::MAX). \
+                 Reduce batch_size_hint or avoid projecting very large text columns.",
+                col_name, current, value_len
+            ));
         }
         self.mark_written(col);
     }
@@ -472,31 +506,49 @@ impl BatchBuilder {
 
     /// Append a list of exon (start, end, phase) tuples to a `List<Struct>` column.
     pub fn set_exon_list(&mut self, col: usize, exons: Option<&[(i64, i64, i8)]>) {
+        let mut overflow: Option<(usize, usize)> = None;
         if let AnyBuilder::ExonList(list_builder) = &mut self.builders[col] {
             match exons {
                 Some(exon_slice) => {
-                    let struct_builder = list_builder.values();
-                    for &(start, end, phase) in exon_slice {
-                        struct_builder
-                            .field_builder::<Int64Builder>(0)
-                            .unwrap()
-                            .append_value(start);
-                        struct_builder
-                            .field_builder::<Int64Builder>(1)
-                            .unwrap()
-                            .append_value(end);
-                        struct_builder
-                            .field_builder::<Int8Builder>(2)
-                            .unwrap()
-                            .append_value(phase);
-                        struct_builder.append(true);
+                    let current_child_len = list_builder.values().len();
+                    let next_child_len = current_child_len.saturating_add(exon_slice.len());
+                    if next_child_len > i32::MAX as usize {
+                        overflow = Some((current_child_len, exon_slice.len()));
+                        list_builder.append(false);
+                        self.mark_written(col);
+                    } else {
+                        let struct_builder = list_builder.values();
+                        for &(start, end, phase) in exon_slice {
+                            struct_builder
+                                .field_builder::<Int64Builder>(0)
+                                .unwrap()
+                                .append_value(start);
+                            struct_builder
+                                .field_builder::<Int64Builder>(1)
+                                .unwrap()
+                                .append_value(end);
+                            struct_builder
+                                .field_builder::<Int8Builder>(2)
+                                .unwrap()
+                                .append_value(phase);
+                            struct_builder.append(true);
+                        }
+                        list_builder.append(true);
                     }
-                    list_builder.append(true);
                 }
                 None => {
                     list_builder.append(false);
                 }
             }
+        }
+        if let Some((current_child_len, added)) = overflow {
+            let col_name = self.schema.field(col).name().clone();
+            self.set_pending_error_once(format!(
+                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
+                 Reduce batch_size_hint.",
+                col_name, current_child_len, added
+            ));
+            return;
         }
         self.mark_written(col);
     }

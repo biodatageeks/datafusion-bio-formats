@@ -150,11 +150,18 @@ impl ProviderInner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let projected_schema = project_schema(&self.schema, projection);
         let predicate = extract_simple_predicate(filters);
-        let requested_partitions = self
-            .options
-            .target_partitions
-            .unwrap_or_else(|| state.config().target_partitions())
-            .max(1);
+        let requested_partitions = match self.options.target_partitions {
+            Some(target) => target,
+            None => {
+                let session_target = state.config().target_partitions();
+                // Native storable decoding still materializes substantial in-memory state
+                // per file. Cap default parallelism unless user explicitly overrides.
+                let use_storable = self.kind != EnsemblEntityKind::Variation
+                    && self.cache_info.serializer_type.as_deref() == Some("storable");
+                if use_storable { 1 } else { session_target }
+            }
+        }
+        .max(1);
         let num_partitions = requested_partitions.min(self.files.len().max(1));
 
         Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {

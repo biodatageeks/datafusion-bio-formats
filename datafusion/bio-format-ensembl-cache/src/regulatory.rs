@@ -1,6 +1,7 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
-    SValue, canonical_json_string as canonical_storable_json_string, decode_nstore,
+    SValue, canonical_json_string as canonical_storable_json_string,
+    stream_nstore_top_hash_entries_from_reader,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -8,7 +9,7 @@ use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
 use crate::util::{
     BatchBuilder, ColumnMap, canonical_json_string, json_f64, json_i32, json_i64, json_str,
-    normalize_genomic_end, normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
+    normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
 use std::path::Path;
 
@@ -304,26 +305,10 @@ pub(crate) fn parse_regulatory_storable_file_into<F>(
 where
     F: FnMut(&mut BatchBuilder) -> Result<bool>,
 {
-    let bytes = read_maybe_gzip_bytes(source_file)?;
-    if !bytes.starts_with(b"pst0") {
-        return Err(exec_err(format!(
-            "File {} is not a storable payload",
-            source_file.display()
-        )));
-    }
-
-    let root = decode_nstore(&bytes)?;
-    drop(bytes);
-    let root_obj = root.as_hash().ok_or_else(|| {
-        exec_err(format!(
-            "Decoded storable root must be object for {}",
-            source_file.display()
-        ))
-    })?;
-
-    for (region_chr, region_payload) in root_obj {
+    let reader = open_binary_reader(source_file)?;
+    stream_nstore_top_hash_entries_from_reader(reader, |region_chr, region_payload| {
         let Some(region_obj) = region_payload.as_hash() else {
-            continue;
+            return Ok(true);
         };
 
         for (container_name, features_payload) in region_obj {
@@ -399,11 +384,20 @@ where
                 )?;
 
                 if !on_row_added(batch)? {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
-    }
+
+        Ok(true)
+    })
+    .map_err(|e| {
+        exec_err(format!(
+            "Failed streaming storable regulatory payload from {}: {}",
+            source_file.display(),
+            e
+        ))
+    })?;
 
     Ok(())
 }

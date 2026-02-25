@@ -1,6 +1,10 @@
 use crate::errors::{Result, exec_err};
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::sync::Arc;
+
+#[cfg(test)]
+use std::io::Cursor;
 
 #[derive(Debug, Clone)]
 pub(crate) enum SValue {
@@ -76,10 +80,55 @@ impl SValue {
 ///
 /// This parser intentionally supports only the opcode subset currently observed in
 /// Ensembl VEP cache files.
+#[cfg(test)]
 pub(crate) fn decode_nstore(bytes: &[u8]) -> Result<SValue> {
-    let mut parser = Parser::new(bytes);
+    decode_nstore_from_reader(Cursor::new(bytes))
+}
+
+#[cfg(test)]
+pub(crate) fn decode_nstore_from_reader<R: Read>(reader: R) -> Result<SValue> {
+    let mut parser = Parser::new(reader);
     parser.consume_header()?;
     parser.parse_value()
+}
+
+/// Streams top-level hash entries from an nstore payload.
+///
+/// Callback returns `Ok(true)` to continue or `Ok(false)` to stop early.
+pub(crate) fn stream_nstore_top_hash_entries_from_reader<R, F>(
+    reader: R,
+    mut on_entry: F,
+) -> Result<()>
+where
+    R: Read,
+    F: FnMut(String, SValue) -> Result<bool>,
+{
+    let mut parser = Parser::new(reader);
+    parser.consume_header()?;
+    parser.stream_top_hash_entries(&mut on_entry)
+}
+
+pub(crate) enum TopHashArrayEvent {
+    Item(SValue),
+    EntryKey(String),
+}
+
+/// Streams top-level hash entries where each value is expected to be an array.
+///
+/// Events are emitted in sequence as:
+/// `Item(...)` repeated for each entry value, then `EntryKey(...)` for that entry.
+/// Callback can return `Ok(false)` to stop early.
+pub(crate) fn stream_nstore_top_hash_array_items_from_reader<R, F>(
+    reader: R,
+    mut on_event: F,
+) -> Result<()>
+where
+    R: Read,
+    F: FnMut(TopHashArrayEvent) -> Result<bool>,
+{
+    let mut parser = Parser::new(reader);
+    parser.consume_header()?;
+    parser.stream_top_hash_array_items(&mut on_event)
 }
 
 pub(crate) fn canonical_json_string(value: &SValue) -> String {
@@ -152,17 +201,17 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
     out
 }
 
-struct Parser<'a> {
-    bytes: &'a [u8],
+struct Parser<R> {
+    reader: R,
     pos: usize,
     classes: Vec<Arc<str>>,
-    refs: Vec<SValue>,
+    refs: Vec<Option<SValue>>,
 }
 
-impl<'a> Parser<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+impl<R: Read> Parser<R> {
+    fn new(reader: R) -> Self {
         Self {
-            bytes,
+            reader,
             pos: 0,
             classes: Vec::new(),
             refs: Vec::new(),
@@ -170,21 +219,20 @@ impl<'a> Parser<'a> {
     }
 
     fn consume_header(&mut self) -> Result<()> {
-        if self.bytes.len() < 6 {
-            return Err(exec_err("Storable payload too short"));
-        }
+        let mut header = [0u8; 6];
+        self.read_exact_into(&mut header)?;
 
-        if &self.bytes[0..4] != b"pst0" {
+        if &header[0..4] != b"pst0" {
             return Err(exec_err(
                 "Unsupported storable payload (missing pst0 header)",
             ));
         }
 
         // Byte 4 encodes (major << 1 | netorder). We currently support major=2 netorder=1.
-        let version_and_order = self.bytes[4];
+        let version_and_order = header[4];
         let major = version_and_order >> 1;
         let netorder = (version_and_order & 0x01) == 1;
-        let minor = self.bytes[5];
+        let minor = header[5];
 
         if major != 2 {
             return Err(exec_err(format!(
@@ -206,32 +254,198 @@ impl<'a> Parser<'a> {
             )));
         }
 
-        self.pos = 6;
         Ok(())
+    }
+
+    fn stream_top_hash_entries<F>(&mut self, on_entry: &mut F) -> Result<()>
+    where
+        F: FnMut(String, SValue) -> Result<bool>,
+    {
+        let opcode = self.read_u8()?;
+        if opcode != 0x03 {
+            return Err(exec_err(format!(
+                "Decoded storable root must be hash for streaming path (opcode 0x{opcode:02x})"
+            )));
+        }
+
+        // Keep root slot semantics consistent with parse_value() for alias indexing.
+        let root_slot = self.refs.len();
+        self.refs.push(Some(SValue::Null));
+
+        let len = self.read_u32()? as usize;
+        // Keep one previous entry alive so immediate-sibling aliases can resolve.
+        let mut previous_range: Option<(usize, usize)> = None;
+
+        for _ in 0..len {
+            let subtree_start = self.refs.len();
+            let value = self.parse_value()?;
+            let subtree_end = self.refs.len();
+
+            let key = self.parse_hash_key()?;
+            let should_continue = on_entry(key, value)?;
+
+            if let Some((start, end)) = previous_range.take() {
+                self.evict_refs_range(start, end);
+            }
+            previous_range = Some((subtree_start, subtree_end));
+
+            if !should_continue {
+                break;
+            }
+        }
+
+        if let Some((start, end)) = previous_range.take() {
+            self.evict_refs_range(start, end);
+        }
+        self.refs[root_slot] = None;
+
+        Ok(())
+    }
+
+    fn stream_top_hash_array_items<F>(&mut self, on_event: &mut F) -> Result<()>
+    where
+        F: FnMut(TopHashArrayEvent) -> Result<bool>,
+    {
+        let opcode = self.read_u8()?;
+        if opcode != 0x03 {
+            return Err(exec_err(format!(
+                "Decoded storable root must be hash for streaming array path (opcode 0x{opcode:02x})"
+            )));
+        }
+
+        // Keep root slot semantics consistent with parse_value() for alias indexing.
+        let root_slot = self.refs.len();
+        self.refs.push(Some(SValue::Null));
+
+        let len = self.read_u32()? as usize;
+        for _ in 0..len {
+            if !self
+                .stream_array_value_items(&mut |item| on_event(TopHashArrayEvent::Item(item)))?
+            {
+                break;
+            }
+
+            let key = self.parse_hash_key()?;
+            if !on_event(TopHashArrayEvent::EntryKey(key))? {
+                break;
+            }
+        }
+        self.refs[root_slot] = None;
+
+        Ok(())
+    }
+
+    fn stream_array_value_items<F>(&mut self, on_item: &mut F) -> Result<bool>
+    where
+        F: FnMut(SValue) -> Result<bool>,
+    {
+        let opcode = self.read_u8()?;
+        self.stream_array_value_items_with_opcode(opcode, on_item)
+    }
+
+    fn stream_array_value_items_with_opcode<F>(
+        &mut self,
+        opcode: u8,
+        on_item: &mut F,
+    ) -> Result<bool>
+    where
+        F: FnMut(SValue) -> Result<bool>,
+    {
+        if opcode == 0x00 {
+            let idx = self.read_u32()? as usize;
+            let aliased = self.resolve_alias(idx)?;
+            let Some(items) = aliased.as_array() else {
+                return Err(exec_err(format!(
+                    "Expected aliased array value in streaming mode at byte offset {}",
+                    self.pos.saturating_sub(1)
+                )));
+            };
+            for item in items {
+                if !on_item(item.clone())? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+
+        let slot = self.refs.len();
+        self.refs.push(Some(SValue::Null));
+
+        let should_continue = match opcode {
+            0x02 => {
+                let len = self.read_u32()? as usize;
+                // Keep one previous item alive so immediate-sibling aliases can resolve.
+                let mut previous_range: Option<(usize, usize)> = None;
+                for _ in 0..len {
+                    let item_start = self.refs.len();
+                    let item = self.parse_value()?;
+                    let item_end = self.refs.len();
+
+                    let keep_going = on_item(item)?;
+                    if let Some((start, end)) = previous_range.take() {
+                        self.evict_refs_range(start, end);
+                    }
+                    previous_range = Some((item_start, item_end));
+
+                    if !keep_going {
+                        if let Some((start, end)) = previous_range.take() {
+                            self.evict_refs_range(start, end);
+                        }
+                        self.refs[slot] = None;
+                        return Ok(false);
+                    }
+                }
+                if let Some((start, end)) = previous_range.take() {
+                    self.evict_refs_range(start, end);
+                }
+                true
+            }
+            0x04 | 0x1b => {
+                let inner = self.read_u8()?;
+                self.stream_array_value_items_with_opcode(inner, on_item)?
+            }
+            other => {
+                let value = self.parse_value_from_opcode(other)?;
+                let Some(items) = value.as_array() else {
+                    return Err(exec_err(format!(
+                        "Expected array value in streaming mode, found opcode 0x{other:02x} at byte offset {}",
+                        self.pos.saturating_sub(1)
+                    )));
+                };
+                for item in items {
+                    if !on_item(item.clone())? {
+                        self.refs[slot] = None;
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+        };
+
+        // The streamed array container can be evicted once items were dispatched.
+        self.refs[slot] = None;
+        Ok(should_continue)
     }
 
     fn parse_value(&mut self) -> Result<SValue> {
         let opcode = self.read_u8()?;
+        self.parse_value_from_opcode(opcode)
+    }
 
+    fn parse_value_from_opcode(&mut self, opcode: u8) -> Result<SValue> {
         if opcode == 0x00 {
             let idx = self.read_u32()? as usize;
-            return self.refs.get(idx).cloned().ok_or_else(|| {
-                exec_err(format!(
-                    "Invalid storable reference alias index {} at byte offset {}",
-                    idx,
-                    self.pos.saturating_sub(1)
-                ))
-            });
+            return self.resolve_alias(idx);
         }
 
         let slot = self.refs.len();
-        self.refs.push(SValue::Null);
+        self.refs.push(Some(SValue::Null));
 
         let value = match opcode {
             0x01 => {
                 let len = self.read_u32()? as usize;
                 let bytes = self.read_bytes(len)?;
-                SValue::String(String::from_utf8_lossy(bytes).into_owned().into())
+                SValue::String(String::from_utf8_lossy(&bytes).into_owned().into())
             }
             0x02 => {
                 let len = self.read_u32()? as usize;
@@ -261,13 +475,12 @@ impl<'a> Parser<'a> {
             0x0a => {
                 let len = self.read_u8()? as usize;
                 let bytes = self.read_bytes(len)?;
-                SValue::String(String::from_utf8_lossy(bytes).into_owned().into())
+                SValue::String(String::from_utf8_lossy(&bytes).into_owned().into())
             }
             0x11 => {
                 let class_len = self.read_u8()? as usize;
-                let class: Arc<str> = String::from_utf8_lossy(self.read_bytes(class_len)?)
-                    .into_owned()
-                    .into();
+                let class_bytes = self.read_bytes(class_len)?;
+                let class: Arc<str> = String::from_utf8_lossy(&class_bytes).into_owned().into();
                 let class_idx = self.classes.len();
                 self.classes.push(class.clone());
                 let value = self.parse_value()?;
@@ -301,46 +514,81 @@ impl<'a> Parser<'a> {
             }
         };
 
-        self.refs[slot] = value.clone();
+        self.refs[slot] = Some(value.clone());
         Ok(value)
+    }
+
+    fn resolve_alias(&self, idx: usize) -> Result<SValue> {
+        match self.refs.get(idx) {
+            Some(Some(value)) => Ok(value.clone()),
+            Some(None) => Err(exec_err(format!(
+                "Storable reference alias index {} at byte offset {} points to an evicted value in streaming mode",
+                idx,
+                self.pos.saturating_sub(1)
+            ))),
+            None => Err(exec_err(format!(
+                "Invalid storable reference alias index {} at byte offset {}",
+                idx,
+                self.pos.saturating_sub(1)
+            ))),
+        }
     }
 
     fn parse_hash_key(&mut self) -> Result<String> {
         let len = self.read_u32()? as usize;
         let bytes = self.read_bytes(len)?;
-        Ok(String::from_utf8_lossy(bytes).to_string())
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn read_u8(&mut self) -> Result<u8> {
-        if self.pos >= self.bytes.len() {
-            return Err(exec_err("Unexpected EOF while decoding storable payload"));
-        }
-        let value = self.bytes[self.pos];
-        self.pos += 1;
-        Ok(value)
+        let mut buf = [0u8; 1];
+        self.read_exact_into(&mut buf)?;
+        Ok(buf[0])
     }
 
     fn read_u32(&mut self) -> Result<u32> {
-        let bytes = self.read_bytes(4)?;
-        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        let mut buf = [0u8; 4];
+        self.read_exact_into(&mut buf)?;
+        Ok(u32::from_be_bytes(buf))
     }
 
     fn read_i32(&mut self) -> Result<i32> {
-        let bytes = self.read_bytes(4)?;
-        Ok(i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        let mut buf = [0u8; 4];
+        self.read_exact_into(&mut buf)?;
+        Ok(i32::from_be_bytes(buf))
     }
 
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
-        let end = self.pos.saturating_add(len);
-        if end > self.bytes.len() {
-            return Err(exec_err(format!(
-                "Unexpected EOF while decoding storable payload at offset {}",
-                self.pos
-            )));
+    fn read_bytes(&mut self, len: usize) -> Result<Vec<u8>> {
+        let mut bytes = vec![0u8; len];
+        self.read_exact_into(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    fn read_exact_into(&mut self, buf: &mut [u8]) -> Result<()> {
+        self.reader.read_exact(buf).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                exec_err(format!(
+                    "Unexpected EOF while decoding storable payload at offset {}",
+                    self.pos
+                ))
+            } else {
+                exec_err(format!(
+                    "Failed reading storable payload at offset {}: {}",
+                    self.pos, e
+                ))
+            }
+        })?;
+        self.pos = self.pos.saturating_add(buf.len());
+        Ok(())
+    }
+
+    fn evict_refs_range(&mut self, start: usize, end: usize) {
+        if start >= end || end > self.refs.len() {
+            return;
         }
-        let slice = &self.bytes[self.pos..end];
-        self.pos = end;
-        Ok(slice)
+        for entry in &mut self.refs[start..end] {
+            *entry = None;
+        }
     }
 }
 
@@ -382,5 +630,65 @@ mod tests {
             b.get("q").and_then(SValue::as_string),
             Some("x".to_string())
         );
+    }
+
+    #[test]
+    fn streams_top_hash_entries() {
+        // Generated via Perl Storable::nstore({a=>1,b=>'x'})
+        let hex = "70737430050b03000000020a0178000000016208810000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let mut seen = BTreeMap::new();
+        stream_nstore_top_hash_entries_from_reader(Cursor::new(bytes), |key, value| {
+            seen.insert(key, value.as_string());
+            Ok(true)
+        })
+        .expect("stream entries");
+
+        assert_eq!(seen.get("a").cloned().flatten(), Some("1".to_string()));
+        assert_eq!(seen.get("b").cloned().flatten(), Some("x".to_string()));
+    }
+
+    #[test]
+    fn streams_immediate_sibling_alias_entries() {
+        // Generated via Perl:
+        // my $v = { q => "x" };
+        // nstore({ a => $v, b => $v });
+        let hex =
+            "70737430050b03000000020403000000010a0178000000017100000001620400000000020000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let mut keys = Vec::new();
+        stream_nstore_top_hash_entries_from_reader(Cursor::new(bytes), |key, value| {
+            keys.push(key);
+            assert!(value.as_hash().is_some());
+            Ok(true)
+        })
+        .expect("stream entries");
+
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"a".to_string()));
+        assert!(keys.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn streams_top_hash_array_items() {
+        // Generated shape: { a => [1] } with an indirection opcode before the array.
+        let hex = "70737430050b030000000104020000000108810000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let mut seen_items = Vec::new();
+        let mut seen_keys = Vec::new();
+        stream_nstore_top_hash_array_items_from_reader(Cursor::new(bytes), |event| {
+            match event {
+                TopHashArrayEvent::Item(item) => seen_items.push(item.as_i64()),
+                TopHashArrayEvent::EntryKey(key) => seen_keys.push(key),
+            }
+            Ok(true)
+        })
+        .expect("stream array events");
+
+        assert_eq!(seen_items, vec![Some(1)]);
+        assert_eq!(seen_keys, vec!["a".to_string()]);
     }
 }
