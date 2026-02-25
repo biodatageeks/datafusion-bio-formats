@@ -31,6 +31,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
+const UTF8_FLUSH_THRESHOLD_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Clone)]
 pub(crate) struct EnsemblCacheExec {
     pub(crate) kind: EnsemblEntityKind,
@@ -296,7 +298,9 @@ fn dispatch_row(
 ) -> Result<RowDispatchState> {
     *emitted_rows += 1;
 
-    if batch_builder.len() >= batch_size {
+    if batch_builder.len() >= batch_size
+        || batch_builder.max_utf8_bytes() >= UTF8_FLUSH_THRESHOLD_BYTES
+    {
         let batch = batch_builder.finish()?;
         if tx.blocking_send(Ok(batch)).is_err() {
             return Ok(RowDispatchState::ConsumerDropped);
@@ -397,21 +401,26 @@ fn process_partition(
                         &mut batch_builder,
                         transcript_col_idx.as_ref().unwrap(),
                         &provenance,
-                        |batch_builder| match dispatch_row(
-                            &tx,
-                            batch_builder,
-                            &mut emitted_rows,
-                            limit,
-                            batch_size,
-                        )? {
-                            RowDispatchState::Continue => Ok(true),
-                            RowDispatchState::Stop => {
-                                reached_limit = true;
-                                Ok(false)
+                        |batch_builder| {
+                            if let Some(err) = batch_builder.take_error() {
+                                return Err(err);
                             }
-                            RowDispatchState::ConsumerDropped => {
-                                consumer_dropped = true;
-                                Ok(false)
+                            match dispatch_row(
+                                &tx,
+                                batch_builder,
+                                &mut emitted_rows,
+                                limit,
+                                batch_size,
+                            )? {
+                                RowDispatchState::Continue => Ok(true),
+                                RowDispatchState::Stop => {
+                                    reached_limit = true;
+                                    Ok(false)
+                                }
+                                RowDispatchState::ConsumerDropped => {
+                                    consumer_dropped = true;
+                                    Ok(false)
+                                }
                             }
                         },
                     )?;
@@ -426,21 +435,26 @@ fn process_partition(
                         &mut batch_builder,
                         regulatory_col_idx.as_ref().unwrap(),
                         &provenance,
-                        |batch_builder| match dispatch_row(
-                            &tx,
-                            batch_builder,
-                            &mut emitted_rows,
-                            limit,
-                            batch_size,
-                        )? {
-                            RowDispatchState::Continue => Ok(true),
-                            RowDispatchState::Stop => {
-                                reached_limit = true;
-                                Ok(false)
+                        |batch_builder| {
+                            if let Some(err) = batch_builder.take_error() {
+                                return Err(err);
                             }
-                            RowDispatchState::ConsumerDropped => {
-                                consumer_dropped = true;
-                                Ok(false)
+                            match dispatch_row(
+                                &tx,
+                                batch_builder,
+                                &mut emitted_rows,
+                                limit,
+                                batch_size,
+                            )? {
+                                RowDispatchState::Continue => Ok(true),
+                                RowDispatchState::Stop => {
+                                    reached_limit = true;
+                                    Ok(false)
+                                }
+                                RowDispatchState::ConsumerDropped => {
+                                    consumer_dropped = true;
+                                    Ok(false)
+                                }
                             }
                         },
                     )?;
@@ -455,21 +469,26 @@ fn process_partition(
                         &mut batch_builder,
                         regulatory_col_idx.as_ref().unwrap(),
                         &provenance,
-                        |batch_builder| match dispatch_row(
-                            &tx,
-                            batch_builder,
-                            &mut emitted_rows,
-                            limit,
-                            batch_size,
-                        )? {
-                            RowDispatchState::Continue => Ok(true),
-                            RowDispatchState::Stop => {
-                                reached_limit = true;
-                                Ok(false)
+                        |batch_builder| {
+                            if let Some(err) = batch_builder.take_error() {
+                                return Err(err);
                             }
-                            RowDispatchState::ConsumerDropped => {
-                                consumer_dropped = true;
-                                Ok(false)
+                            match dispatch_row(
+                                &tx,
+                                batch_builder,
+                                &mut emitted_rows,
+                                limit,
+                                batch_size,
+                            )? {
+                                RowDispatchState::Continue => Ok(true),
+                                RowDispatchState::Stop => {
+                                    reached_limit = true;
+                                    Ok(false)
+                                }
+                                RowDispatchState::ConsumerDropped => {
+                                    consumer_dropped = true;
+                                    Ok(false)
+                                }
                             }
                         },
                     )?;
@@ -551,6 +570,10 @@ fn process_partition(
                     &provenance,
                 )?,
             };
+
+            if let Some(err) = batch_builder.take_error() {
+                return Err(err);
+            }
 
             if added {
                 match dispatch_row(

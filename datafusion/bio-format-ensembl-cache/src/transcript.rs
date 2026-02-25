@@ -1,6 +1,7 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
-    SValue, canonical_json_string as canonical_storable_json_string, decode_nstore,
+    SValue, TopHashArrayEvent, canonical_json_string as canonical_storable_json_string,
+    stream_nstore_top_hash_array_items_from_reader,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -8,7 +9,7 @@ use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
 use crate::util::{
     BatchBuilder, ColumnMap, canonical_json_string, json_bool, json_i32, json_i64, json_str,
-    normalize_genomic_end, normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
+    normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -483,101 +484,121 @@ pub(crate) fn parse_transcript_storable_file_into<F>(
 where
     F: FnMut(&mut BatchBuilder) -> Result<bool>,
 {
-    let bytes = read_maybe_gzip_bytes(source_file)?;
-    if !bytes.starts_with(b"pst0") {
-        return Err(exec_err(format!(
-            "File {} is not a storable payload",
-            source_file.display()
-        )));
-    }
+    let mut pending_without_chrom: Vec<SValue> = Vec::new();
+    let mut process_item = |item: &SValue, fallback_region_chrom: Option<&str>| -> Result<bool> {
+        let obj = item.as_hash().ok_or_else(|| {
+            exec_err(format!(
+                "Transcript storable object payload must be a hash in {}",
+                source_file.display()
+            ))
+        })?;
 
-    let root = decode_nstore(&bytes)?;
-    drop(bytes);
-    let root_obj = root.as_hash().ok_or_else(|| {
-        exec_err(format!(
-            "Decoded storable root must be object for {}",
-            source_file.display()
-        ))
-    })?;
+        let chrom = sv_str(obj.get("chr").or_else(|| obj.get("chrom")))
+            .or_else(|| {
+                obj.get("slice")
+                    .and_then(SValue::as_hash)
+                    .and_then(|slice| sv_str(slice.get("seq_region_name")))
+            })
+            .or_else(|| fallback_region_chrom.map(|value| value.to_string()))
+            .ok_or_else(|| {
+                exec_err(format!(
+                    "Transcript storable object missing chrom in {}",
+                    source_file.display()
+                ))
+            })?;
 
-    for (region_chr, region_value) in root_obj {
-        let Some(items) = region_value.as_array() else {
-            continue;
+        let source_start = sv_i64(obj.get("start")).ok_or_else(|| {
+            exec_err(format!(
+                "Transcript storable object missing start in {}",
+                source_file.display()
+            ))
+        })?;
+        let source_end = sv_i64(obj.get("end")).ok_or_else(|| {
+            exec_err(format!(
+                "Transcript storable object missing end in {}",
+                source_file.display()
+            ))
+        })?;
+        let strand = sv_i64(obj.get("strand"))
+            .and_then(|v| i8::try_from(v).ok())
+            .ok_or_else(|| {
+                exec_err(format!(
+                    "Transcript storable object missing strand in {}",
+                    source_file.display()
+                ))
+            })?;
+        let stable_id = sv_str(obj.get("stable_id")).ok_or_else(|| {
+            exec_err(format!(
+                "Transcript storable object missing stable_id in {}",
+                source_file.display()
+            ))
+        })?;
+
+        let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+        let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
+
+        if !predicate.matches(&chrom, start, end) {
+            return Ok(true);
+        }
+
+        let core = TranscriptRowCore {
+            chrom,
+            start,
+            end,
+            strand,
+            stable_id,
         };
+        append_transcript_storable_row_into(
+            item,
+            obj,
+            core,
+            coordinate_system_zero_based,
+            source_file_str,
+            batch,
+            col_idx,
+            provenance,
+        )?;
 
-        for item in items {
-            let obj = item.as_hash().ok_or_else(|| {
-                exec_err(format!(
-                    "Transcript storable object payload must be a hash in {}",
-                    source_file.display()
-                ))
-            })?;
+        on_row_added(batch)
+    };
 
-            let chrom = sv_str(obj.get("chr").or_else(|| obj.get("chrom")))
-                .or_else(|| {
-                    obj.get("slice")
-                        .and_then(SValue::as_hash)
-                        .and_then(|slice| sv_str(slice.get("seq_region_name")))
+    let reader = open_binary_reader(source_file)?;
+    stream_nstore_top_hash_array_items_from_reader(reader, |event| match event {
+        TopHashArrayEvent::Item(item) => {
+            let chrom_present = item
+                .as_hash()
+                .and_then(|obj| {
+                    sv_str(obj.get("chr").or_else(|| obj.get("chrom"))).or_else(|| {
+                        obj.get("slice")
+                            .and_then(SValue::as_hash)
+                            .and_then(|slice| sv_str(slice.get("seq_region_name")))
+                    })
                 })
-                .unwrap_or_else(|| region_chr.clone());
+                .is_some();
 
-            let source_start = sv_i64(obj.get("start")).ok_or_else(|| {
-                exec_err(format!(
-                    "Transcript storable object missing start in {}",
-                    source_file.display()
-                ))
-            })?;
-            let source_end = sv_i64(obj.get("end")).ok_or_else(|| {
-                exec_err(format!(
-                    "Transcript storable object missing end in {}",
-                    source_file.display()
-                ))
-            })?;
-            let strand = sv_i64(obj.get("strand"))
-                .and_then(|v| i8::try_from(v).ok())
-                .ok_or_else(|| {
-                    exec_err(format!(
-                        "Transcript storable object missing strand in {}",
-                        source_file.display()
-                    ))
-                })?;
-            let stable_id = sv_str(obj.get("stable_id")).ok_or_else(|| {
-                exec_err(format!(
-                    "Transcript storable object missing stable_id in {}",
-                    source_file.display()
-                ))
-            })?;
-
-            let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
-            let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
-
-            if !predicate.matches(&chrom, start, end) {
-                continue;
-            }
-
-            let core = TranscriptRowCore {
-                chrom,
-                start,
-                end,
-                strand,
-                stable_id,
-            };
-            append_transcript_storable_row_into(
-                item,
-                obj,
-                core,
-                coordinate_system_zero_based,
-                source_file_str,
-                batch,
-                col_idx,
-                provenance,
-            )?;
-
-            if !on_row_added(batch)? {
-                return Ok(());
+            if chrom_present {
+                process_item(&item, None)
+            } else {
+                pending_without_chrom.push(item);
+                Ok(true)
             }
         }
-    }
+        TopHashArrayEvent::EntryKey(region_chr) => {
+            for item in pending_without_chrom.drain(..) {
+                if !process_item(&item, Some(region_chr.as_str()))? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+    })
+    .map_err(|e| {
+        exec_err(format!(
+            "Failed streaming storable transcript payload from {}: {}",
+            source_file.display(),
+            e
+        ))
+    })?;
 
     Ok(())
 }
