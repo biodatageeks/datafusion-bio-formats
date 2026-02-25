@@ -37,6 +37,11 @@ pub struct EnsemblCacheOptions {
     pub target_partitions: Option<usize>,
     /// Optional batch-size override used by the execution plan.
     pub batch_size_hint: Option<usize>,
+    /// Maximum partition parallelism for Storable-format entities (transcript,
+    /// regulatory). Each partition holds a full streaming parser, so memory
+    /// scales linearly with the number of concurrent partitions. Defaults to 4
+    /// when unset.
+    pub max_storable_partitions: Option<usize>,
 }
 
 impl EnsemblCacheOptions {
@@ -52,6 +57,7 @@ impl EnsemblCacheOptions {
             coordinate_system_zero_based: false,
             target_partitions: None,
             batch_size_hint: None,
+            max_storable_partitions: None,
         }
     }
 }
@@ -152,7 +158,17 @@ impl ProviderInner {
         let predicate = extract_simple_predicate(filters);
         let requested_partitions = match self.options.target_partitions {
             Some(target) => target,
-            None => state.config().target_partitions(),
+            None => {
+                let session_target = state.config().target_partitions();
+                let use_storable = self.kind != EnsemblEntityKind::Variation
+                    && self.cache_info.serializer_type.as_deref() == Some("storable");
+                if use_storable {
+                    let cap = self.options.max_storable_partitions.unwrap_or(4);
+                    session_target.min(cap)
+                } else {
+                    session_target
+                }
+            }
         }
         .max(1);
         let num_partitions = requested_partitions.min(self.files.len().max(1));
