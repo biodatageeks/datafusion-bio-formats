@@ -383,6 +383,21 @@ impl BatchBuilder {
             .unwrap_or(0)
     }
 
+    /// Sum of UTF-8 bytes across all string columns.
+    ///
+    /// Used for memory-aware batch flushing when many string columns are
+    /// projected. A batch with 10 columns each at 30 MB uses 300 MB even
+    /// though no single column exceeds the per-column threshold.
+    pub fn total_utf8_bytes(&self) -> usize {
+        self.builders
+            .iter()
+            .filter_map(|b| match b {
+                AnyBuilder::Utf8(builder) => Some(builder.values_slice().len()),
+                _ => None,
+            })
+            .sum()
+    }
+
     #[inline]
     fn mark_written(&mut self, col: usize) {
         if !self.written[col] {
