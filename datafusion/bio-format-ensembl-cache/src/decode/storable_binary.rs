@@ -1,14 +1,15 @@
 use crate::errors::{Result, exec_err};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(crate) enum SValue {
     Null,
     Int(i64),
-    String(String),
-    Array(Vec<SValue>),
-    Hash(BTreeMap<String, SValue>),
-    Blessed { class: String, value: Box<SValue> },
+    String(Arc<str>),
+    Array(Arc<Vec<SValue>>),
+    Hash(Arc<BTreeMap<String, SValue>>),
+    Blessed { class: Arc<str>, value: Arc<SValue> },
 }
 
 impl SValue {
@@ -55,7 +56,7 @@ impl SValue {
 
     pub(crate) fn as_string(&self) -> Option<String> {
         match self.unbless() {
-            Self::String(v) => Some(v.clone()),
+            Self::String(v) => Some(v.to_string()),
             Self::Int(v) => Some(v.to_string()),
             Self::Array(items) => {
                 let values: Vec<String> = items.iter().filter_map(SValue::as_string).collect();
@@ -121,7 +122,7 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
             SValue::Hash(map) => {
                 out.push('{');
                 let mut first = true;
-                for (k, v) in map {
+                for (k, v) in map.iter() {
                     if !first {
                         out.push(',');
                     }
@@ -154,7 +155,7 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
-    classes: Vec<String>,
+    classes: Vec<Arc<str>>,
     refs: Vec<SValue>,
 }
 
@@ -230,7 +231,7 @@ impl<'a> Parser<'a> {
             0x01 => {
                 let len = self.read_u32()? as usize;
                 let bytes = self.read_bytes(len)?;
-                SValue::String(String::from_utf8_lossy(bytes).to_string())
+                SValue::String(String::from_utf8_lossy(bytes).into_owned().into())
             }
             0x02 => {
                 let len = self.read_u32()? as usize;
@@ -238,7 +239,7 @@ impl<'a> Parser<'a> {
                 for _ in 0..len {
                     values.push(self.parse_value()?);
                 }
-                SValue::Array(values)
+                SValue::Array(Arc::new(values))
             }
             0x03 => {
                 let len = self.read_u32()? as usize;
@@ -248,7 +249,7 @@ impl<'a> Parser<'a> {
                     let key = self.parse_hash_key()?;
                     map.insert(key, value);
                 }
-                SValue::Hash(map)
+                SValue::Hash(Arc::new(map))
             }
             0x04 => self.parse_value()?,
             0x05 => SValue::Null,
@@ -260,11 +261,13 @@ impl<'a> Parser<'a> {
             0x0a => {
                 let len = self.read_u8()? as usize;
                 let bytes = self.read_bytes(len)?;
-                SValue::String(String::from_utf8_lossy(bytes).to_string())
+                SValue::String(String::from_utf8_lossy(bytes).into_owned().into())
             }
             0x11 => {
                 let class_len = self.read_u8()? as usize;
-                let class = String::from_utf8_lossy(self.read_bytes(class_len)?).to_string();
+                let class: Arc<str> = String::from_utf8_lossy(self.read_bytes(class_len)?)
+                    .into_owned()
+                    .into();
                 let class_idx = self.classes.len();
                 self.classes.push(class.clone());
                 let value = self.parse_value()?;
@@ -273,7 +276,7 @@ impl<'a> Parser<'a> {
                 }
                 SValue::Blessed {
                     class,
-                    value: Box::new(value),
+                    value: Arc::new(value),
                 }
             }
             0x12 => {
@@ -284,7 +287,7 @@ impl<'a> Parser<'a> {
                 let value = self.parse_value()?;
                 SValue::Blessed {
                     class,
-                    value: Box::new(value),
+                    value: Arc::new(value),
                 }
             }
             // weak references can appear in cached object graphs; for tabular extraction
