@@ -201,11 +201,16 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
     out
 }
 
+const STREAM_WARMUP_ITEMS: usize = 64;
+const STREAM_PINNED_REF_PREFIX: usize = 8_192;
+
 struct Parser<R> {
     reader: R,
     pos: usize,
     classes: Vec<Arc<str>>,
     refs: Vec<Option<SValue>>,
+    alias_pinned: Vec<bool>,
+    streamed_items: usize,
 }
 
 impl<R: Read> Parser<R> {
@@ -215,7 +220,16 @@ impl<R: Read> Parser<R> {
             pos: 0,
             classes: Vec::new(),
             refs: Vec::new(),
+            alias_pinned: Vec::new(),
+            streamed_items: 0,
         }
+    }
+
+    fn push_ref(&mut self, value: Option<SValue>) -> usize {
+        let slot = self.refs.len();
+        self.refs.push(value);
+        self.alias_pinned.push(false);
+        slot
     }
 
     fn consume_header(&mut self) -> Result<()> {
@@ -269,8 +283,7 @@ impl<R: Read> Parser<R> {
         }
 
         // Keep root slot semantics consistent with parse_value() for alias indexing.
-        let root_slot = self.refs.len();
-        self.refs.push(Some(SValue::Null));
+        let root_slot = self.push_ref(Some(SValue::Null));
 
         let len = self.read_u32()? as usize;
 
@@ -302,8 +315,7 @@ impl<R: Read> Parser<R> {
         }
 
         // Keep root slot semantics consistent with parse_value() for alias indexing.
-        let root_slot = self.refs.len();
-        self.refs.push(Some(SValue::Null));
+        let root_slot = self.push_ref(Some(SValue::Null));
 
         let len = self.read_u32()? as usize;
         for _ in 0..len {
@@ -356,43 +368,24 @@ impl<R: Read> Parser<R> {
             return Ok(true);
         }
 
-        let slot = self.refs.len();
-        self.refs.push(Some(SValue::Null));
+        let slot = self.push_ref(Some(SValue::Null));
 
         let should_continue = match opcode {
             0x02 => {
                 let len = self.read_u32()? as usize;
-                let mut values = Vec::with_capacity(len);
-                for _ in 0..len {
-                    let item = self.parse_value()?;
-                    values.push(item.clone());
-
-                    let keep_going = on_item(item)?;
-                    if !keep_going {
-                        self.refs[slot] = Some(SValue::Array(Arc::new(values)));
-                        return Ok(false);
-                    }
-                }
-                self.refs[slot] = Some(SValue::Array(Arc::new(values)));
-                true
+                let keep_going = self.stream_inline_array_items(len, on_item)?;
+                // Do not materialize streamed arrays in refs. We keep slot numbering,
+                // but aliases to this slot are unsupported and will surface clearly.
+                self.refs[slot] = None;
+                keep_going
             }
             0x04 | 0x1b => {
                 let inner = self.read_u8()?;
                 if inner == 0x02 {
                     let len = self.read_u32()? as usize;
-                    let mut values = Vec::with_capacity(len);
-                    for _ in 0..len {
-                        let item = self.parse_value()?;
-                        values.push(item.clone());
-
-                        let keep_going = on_item(item)?;
-                        if !keep_going {
-                            self.refs[slot] = Some(SValue::Array(Arc::new(values)));
-                            return Ok(false);
-                        }
-                    }
-                    self.refs[slot] = Some(SValue::Array(Arc::new(values)));
-                    true
+                    let keep_going = self.stream_inline_array_items(len, on_item)?;
+                    self.refs[slot] = None;
+                    keep_going
                 } else {
                     let value = self.parse_value_from_opcode(inner)?;
                     let Some(items) = value.as_array() else {
@@ -433,6 +426,40 @@ impl<R: Read> Parser<R> {
         Ok(should_continue)
     }
 
+    fn stream_inline_array_items<F>(&mut self, len: usize, on_item: &mut F) -> Result<bool>
+    where
+        F: FnMut(SValue) -> Result<bool>,
+    {
+        let mut previous_range: Option<(usize, usize)> = None;
+
+        for _ in 0..len {
+            let item_start = self.refs.len();
+            let item = self.parse_value()?;
+            let item_end = self.refs.len();
+
+            let keep_going = on_item(item)?;
+            self.streamed_items = self.streamed_items.saturating_add(1);
+
+            if let Some((start, end)) = previous_range.take() {
+                self.evict_stream_range(start, end);
+            }
+            previous_range = Some((item_start, item_end));
+
+            if !keep_going {
+                if let Some((start, end)) = previous_range.take() {
+                    self.evict_stream_range(start, end);
+                }
+                return Ok(false);
+            }
+        }
+
+        if let Some((start, end)) = previous_range.take() {
+            self.evict_stream_range(start, end);
+        }
+
+        Ok(true)
+    }
+
     fn parse_value(&mut self) -> Result<SValue> {
         let opcode = self.read_u8()?;
         self.parse_value_from_opcode(opcode)
@@ -444,8 +471,7 @@ impl<R: Read> Parser<R> {
             return self.resolve_alias(idx);
         }
 
-        let slot = self.refs.len();
-        self.refs.push(Some(SValue::Null));
+        let slot = self.push_ref(Some(SValue::Null));
 
         let value = match opcode {
             0x01 => {
@@ -524,7 +550,11 @@ impl<R: Read> Parser<R> {
         Ok(value)
     }
 
-    fn resolve_alias(&self, idx: usize) -> Result<SValue> {
+    fn resolve_alias(&mut self, idx: usize) -> Result<SValue> {
+        if let Some(flag) = self.alias_pinned.get_mut(idx) {
+            *flag = true;
+        }
+
         match self.refs.get(idx) {
             Some(Some(value)) => Ok(value.clone()),
             Some(None) => Err(exec_err(format!(
@@ -537,6 +567,25 @@ impl<R: Read> Parser<R> {
                 idx,
                 self.pos.saturating_sub(1)
             ))),
+        }
+    }
+
+    fn evict_stream_range(&mut self, start: usize, end: usize) {
+        if self.streamed_items < STREAM_WARMUP_ITEMS {
+            return;
+        }
+        if start >= end || end > self.refs.len() {
+            return;
+        }
+
+        for idx in start..end {
+            if idx < STREAM_PINNED_REF_PREFIX {
+                continue;
+            }
+            if self.alias_pinned.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
+            self.refs[idx] = None;
         }
     }
 
