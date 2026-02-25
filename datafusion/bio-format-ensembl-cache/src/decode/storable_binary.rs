@@ -103,6 +103,20 @@ pub(crate) fn collect_nstore_alias_counts_from_reader<R: Read>(
     Ok(collector.alias_counts)
 }
 
+/// Collect alias reference counts and top-level hash keys in a single pass.
+///
+/// Returns `(alias_counts, entry_keys)` where `entry_keys` is the ordered list
+/// of top-level hash keys. This avoids a second file read when keyed streaming
+/// is used.
+pub(crate) fn collect_nstore_alias_counts_and_top_keys_from_reader<R: Read>(
+    reader: R,
+) -> Result<(HashMap<usize, usize>, Vec<String>)> {
+    let mut collector = AliasCollector::new(reader);
+    collector.consume_header()?;
+    let keys = collector.collect_top_hash_with_keys()?;
+    Ok((collector.alias_counts, keys))
+}
+
 /// Collect all alias slots (`REFP` / opcode `0x00` targets) referenced in an
 /// nstore payload. This is used by streaming decoders to retain only slots that
 /// can be addressed by future aliases.
@@ -146,6 +160,7 @@ where
     parser.stream_top_hash_entries(&mut on_entry)
 }
 
+#[cfg(test)]
 pub(crate) enum TopHashArrayEvent {
     Item(SValue),
     EntryKey(String),
@@ -191,20 +206,25 @@ where
     parser.stream_top_hash_array_items(&mut on_event)
 }
 
-/// Same as `stream_nstore_top_hash_array_items_with_alias_slots_from_reader`,
-/// but also tracks alias use counts and evicts retained references after last use.
-pub(crate) fn stream_nstore_top_hash_array_items_with_alias_counts_from_reader<R, F>(
+/// Streams top-level hash array items with pre-collected keys and alias counts.
+///
+/// Unlike `stream_nstore_top_hash_array_items_with_alias_counts_from_reader`,
+/// the callback receives `(&str, SValue)` — the entry key is known before
+/// items are streamed, eliminating the need to buffer items until the key
+/// arrives.
+pub(crate) fn stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader<R, F>(
     reader: R,
     alias_counts: HashMap<usize, usize>,
-    mut on_event: F,
+    entry_keys: Vec<String>,
+    mut on_item: F,
 ) -> Result<()>
 where
     R: Read,
-    F: FnMut(TopHashArrayEvent) -> Result<bool>,
+    F: FnMut(&str, SValue) -> Result<bool>,
 {
     let mut parser = Parser::with_alias_ref_counts(reader, alias_counts);
     parser.consume_header()?;
-    parser.stream_top_hash_array_items(&mut on_event)
+    parser.stream_top_hash_array_items_with_known_keys(&entry_keys, &mut on_item)
 }
 
 pub(crate) fn canonical_json_string(value: &SValue) -> String {
@@ -428,6 +448,7 @@ impl<R: Read> Parser<R> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn stream_top_hash_array_items<F>(&mut self, on_event: &mut F) -> Result<()>
     where
         F: FnMut(TopHashArrayEvent) -> Result<bool>,
@@ -451,6 +472,48 @@ impl<R: Read> Parser<R> {
 
             let key = self.parse_hash_key()?;
             if !on_event(TopHashArrayEvent::EntryKey(key))? {
+                break;
+            }
+        }
+
+        self.finish_slot(root_slot, None);
+        Ok(())
+    }
+
+    fn stream_top_hash_array_items_with_known_keys<F>(
+        &mut self,
+        entry_keys: &[String],
+        on_item: &mut F,
+    ) -> Result<()>
+    where
+        F: FnMut(&str, SValue) -> Result<bool>,
+    {
+        let opcode = self.read_u8()?;
+        if opcode != 0x03 {
+            return Err(exec_err(format!(
+                "Decoded storable root must be hash for keyed streaming path (opcode 0x{opcode:02x})"
+            )));
+        }
+
+        let root_slot = self.push_ref(Some(SValue::Null));
+        let len = self.read_u32()? as usize;
+
+        if len != entry_keys.len() {
+            return Err(exec_err(format!(
+                "Keyed streaming: pre-scanned {} keys but hash has {} entries",
+                entry_keys.len(),
+                len
+            )));
+        }
+
+        for key in entry_keys.iter().take(len) {
+            let should_continue =
+                self.stream_array_value_items(&mut |item| on_item(key.as_str(), item))?;
+
+            // Read and discard the key bytes to advance the stream position
+            let _key = self.parse_hash_key()?;
+
+            if !should_continue {
                 break;
             }
         }
@@ -929,6 +992,33 @@ impl<R: Read> AliasCollector<R> {
         self.skip_bytes(len)
     }
 
+    fn collect_hash_key_string(&mut self) -> Result<String> {
+        let len = self.read_u32()? as usize;
+        let mut bytes = vec![0u8; len];
+        self.read_exact_into(&mut bytes)?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    fn collect_top_hash_with_keys(&mut self) -> Result<Vec<String>> {
+        let opcode = self.read_u8()?;
+        if opcode != 0x03 {
+            return Err(exec_err(format!(
+                "Decoded storable root must be hash for key collection (opcode 0x{opcode:02x})"
+            )));
+        }
+
+        let len = self.read_u32()? as usize;
+        let mut keys = Vec::with_capacity(len);
+
+        for _ in 0..len {
+            self.collect_value()?;
+            let key = self.collect_hash_key_string()?;
+            keys.push(key);
+        }
+
+        Ok(keys)
+    }
+
     fn read_u8(&mut self) -> Result<u8> {
         let mut buf = [0u8; 1];
         self.read_exact_into(&mut buf)?;
@@ -1131,5 +1221,73 @@ mod tests {
 
         assert_eq!(seen_items, vec![Some(1), Some(1)]);
         assert_eq!(seen_keys, vec!["b".to_string(), "a".to_string()]);
+    }
+
+    #[test]
+    fn collects_alias_counts_and_top_keys() {
+        // Shape: { b => [2], a => [1] }
+        let hex = "70737430050b03000000020402000000010882000000016204020000000108810000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let (counts, keys) =
+            collect_nstore_alias_counts_and_top_keys_from_reader(Cursor::new(bytes))
+                .expect("collect");
+        // No aliases in this payload
+        assert!(counts.is_empty());
+        // Keys must be in Storable iteration order (b first, then a)
+        assert_eq!(keys, vec!["b".to_string(), "a".to_string()]);
+    }
+
+    #[test]
+    fn streams_keyed_top_hash_array_items() {
+        // Shape: { b => [2], a => [1] }
+        let hex = "70737430050b03000000020402000000010882000000016204020000000108810000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let (alias_counts, entry_keys) =
+            collect_nstore_alias_counts_and_top_keys_from_reader(Cursor::new(bytes.clone()))
+                .expect("collect");
+
+        let mut seen: Vec<(String, i64)> = Vec::new();
+        stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader(
+            Cursor::new(bytes),
+            alias_counts,
+            entry_keys,
+            |key, item| {
+                seen.push((key.to_string(), item.as_i64().unwrap()));
+                Ok(true)
+            },
+        )
+        .expect("keyed stream");
+
+        assert_eq!(seen, vec![("b".to_string(), 2), ("a".to_string(), 1),]);
+    }
+
+    #[test]
+    fn streams_keyed_with_wrapped_alias() {
+        // Shape: { b => [1], a => same array (aliased through wrapped ref) }
+        let hex = "70737430050b0300000002040200000001088100000001620400000000020000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let (alias_counts, entry_keys) =
+            collect_nstore_alias_counts_and_top_keys_from_reader(Cursor::new(bytes.clone()))
+                .expect("collect");
+        assert_eq!(entry_keys, vec!["b".to_string(), "a".to_string()]);
+
+        let mut seen: Vec<(String, i64)> = Vec::new();
+        stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader(
+            Cursor::new(bytes),
+            alias_counts,
+            entry_keys,
+            |key, item| {
+                seen.push((key.to_string(), item.as_i64().unwrap()));
+                Ok(true)
+            },
+        )
+        .expect("keyed stream");
+
+        // Both entries yield items with value 1 (aliased array), each tagged
+        // with the correct key known upfront.
+        assert_eq!(seen, vec![("b".to_string(), 1), ("a".to_string(), 1),]);
     }
 }

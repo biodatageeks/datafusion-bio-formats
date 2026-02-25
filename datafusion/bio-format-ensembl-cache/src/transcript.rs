@@ -1,8 +1,8 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
-    SValue, TopHashArrayEvent, canonical_json_string as canonical_storable_json_string,
-    collect_nstore_alias_counts_from_reader,
-    stream_nstore_top_hash_array_items_with_alias_counts_from_reader,
+    SValue, canonical_json_string as canonical_storable_json_string,
+    collect_nstore_alias_counts_and_top_keys_from_reader,
+    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -485,8 +485,7 @@ pub(crate) fn parse_transcript_storable_file_into<F>(
 where
     F: FnMut(&mut BatchBuilder) -> Result<bool>,
 {
-    let mut pending_without_chrom: Vec<SValue> = Vec::new();
-    let mut process_item = |item: &SValue, fallback_region_chrom: Option<&str>| -> Result<bool> {
+    let mut process_item = |item: &SValue, region_key: &str| -> Result<bool> {
         let obj = item.as_hash().ok_or_else(|| {
             exec_err(format!(
                 "Transcript storable object payload must be a hash in {}",
@@ -500,13 +499,7 @@ where
                     .and_then(SValue::as_hash)
                     .and_then(|slice| sv_str(slice.get("seq_region_name")))
             })
-            .or_else(|| fallback_region_chrom.map(|value| value.to_string()))
-            .ok_or_else(|| {
-                exec_err(format!(
-                    "Transcript storable object missing chrom in {}",
-                    source_file.display()
-                ))
-            })?;
+            .unwrap_or_else(|| region_key.to_string());
 
         let source_start = sv_i64(obj.get("start")).ok_or_else(|| {
             exec_err(format!(
@@ -563,48 +556,22 @@ where
         on_row_added(batch)
     };
 
-    let alias_counts = collect_nstore_alias_counts_from_reader(open_binary_reader(source_file)?)
-        .map_err(|e| {
-            exec_err(format!(
-                "Failed collecting storable alias references from {}: {}",
-                source_file.display(),
-                e
-            ))
-        })?;
+    let (alias_counts, entry_keys) =
+        collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
+            .map_err(|e| {
+                exec_err(format!(
+                    "Failed collecting storable alias references from {}: {}",
+                    source_file.display(),
+                    e
+                ))
+            })?;
 
     let reader = open_binary_reader(source_file)?;
-    stream_nstore_top_hash_array_items_with_alias_counts_from_reader(
+    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader(
         reader,
         alias_counts,
-        |event| match event {
-            TopHashArrayEvent::Item(item) => {
-                let chrom_present = item
-                    .as_hash()
-                    .and_then(|obj| {
-                        sv_str(obj.get("chr").or_else(|| obj.get("chrom"))).or_else(|| {
-                            obj.get("slice")
-                                .and_then(SValue::as_hash)
-                                .and_then(|slice| sv_str(slice.get("seq_region_name")))
-                        })
-                    })
-                    .is_some();
-
-                if chrom_present {
-                    process_item(&item, None)
-                } else {
-                    pending_without_chrom.push(item);
-                    Ok(true)
-                }
-            }
-            TopHashArrayEvent::EntryKey(region_chr) => {
-                for item in pending_without_chrom.drain(..) {
-                    if !process_item(&item, Some(region_chr.as_str()))? {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            }
-        },
+        entry_keys,
+        |region_key, item| process_item(&item, region_key),
     )
     .map_err(|e| {
         exec_err(format!(
