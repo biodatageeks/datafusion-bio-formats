@@ -612,6 +612,41 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
         },
     );
 
+    // 10X Genomics Cell Ranger tags
+    tags.insert(
+        "RE".to_string(),
+        TagDefinition {
+            sam_type: 'A',
+            arrow_type: DataType::Utf8,
+            description: "10X: read type indicator (I=intronic, N=intergenic, E=exonic)"
+                .to_string(),
+        },
+    );
+    tags.insert(
+        "xf".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "10X: extra alignment flags".to_string(),
+        },
+    );
+    tags.insert(
+        "nM".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Number of mismatches per (nM:i tag, lowercase)".to_string(),
+        },
+    );
+    tags.insert(
+        "ts".to_string(),
+        TagDefinition {
+            sam_type: 'i',
+            arrow_type: DataType::Int32,
+            description: "Number of trimmed bases at transcript start".to_string(),
+        },
+    );
+
     // BAM-specific
     tags.insert(
         "CG".to_string(),
@@ -754,8 +789,8 @@ mod tests {
         assert!(tags.contains_key("CB"));
         assert!(tags.contains_key("UB"));
 
-        // Should have ~70 tags (40 original + 30 from SAM spec)
-        assert!(tags.len() >= 70);
+        // Should have ~75 tags (40 original + 30 from SAM spec + 10X tags)
+        assert!(tags.len() >= 75);
     }
 
     #[test]
