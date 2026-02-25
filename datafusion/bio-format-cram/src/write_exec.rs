@@ -281,7 +281,7 @@ async fn write_cram_stream(
     schema_metadata_overrides: HashMap<String, String>,
     output_schema: SchemaRef,
 ) -> Result<RecordBatch> {
-    debug!("Starting CRAM write to: {}", output_path);
+    debug!("Starting CRAM write to: {output_path}");
 
     // Create writer with reference
     let reference_path_ref = reference_path.as_ref();
@@ -322,7 +322,7 @@ async fn write_cram_stream(
         let batch = batch_result?;
         let num_rows = batch.num_rows();
 
-        debug!("Writing batch with {} rows", num_rows);
+        debug!("Writing batch with {num_rows} rows");
 
         // Convert batch to CRAM records
         let records =
@@ -336,7 +336,7 @@ async fn write_cram_stream(
     // Finish writing
     writer.finish(&header)?;
 
-    debug!("Wrote {} records to {}", total_count, output_path);
+    debug!("Wrote {total_count} records to {output_path}");
 
     // Return count as RecordBatch
     let count_array = Arc::new(UInt64Array::from(vec![total_count]));

@@ -77,7 +77,7 @@ impl CompressionType {
             "bgz" => CompressionType::BGZF,
             "none" => CompressionType::NONE,
             "auto" => CompressionType::AUTO,
-            _ => panic!("Invalid compression type: {}", compression_type),
+            _ => panic!("Invalid compression type: {compression_type}"),
         }
     }
 }
@@ -168,8 +168,7 @@ pub async fn get_compression_type(
     object_storage_options: ObjectStorageOptions,
 ) -> Result<CompressionType, opendal::Error> {
     debug!(
-        "get_compression_type called with file_path: {}, compression_type: {:?}",
-        file_path, compression_type
+        "get_compression_type called with file_path: {file_path}, compression_type: {compression_type:?}"
     );
     if let Some(ct) = compression_type {
         if ct != CompressionType::AUTO {
@@ -208,10 +207,7 @@ pub async fn get_compression_type(
                 buffer
             }
             Err(e) => {
-                log::error!(
-                    "Failed to get remote stream for compression detection: {}",
-                    e
-                );
+                log::error!("Failed to get remote stream for compression detection: {e}");
                 return Ok(CompressionType::NONE);
             }
         }
@@ -357,7 +353,7 @@ fn extract_account_and_container(url_str: &str) -> BlobInfo {
     let host = url.host_str().ok_or("URL is missing a host").unwrap();
     // If there’s an explicit port (e.g. emulator), include it; otherwise, empty.
     let port = match url.port() {
-        Some(p) => format!("{}", p),
+        Some(p) => format!("{p}"),
         None => String::new(),
     };
     let mut segments = url
@@ -395,9 +391,9 @@ fn extract_account_and_container(url_str: &str) -> BlobInfo {
     };
     let endpoint = if !host.ends_with(".blob.core.windows.net") {
         // For Azure Blob Storage, the endpoint is the full URL without the path
-        format!("{}://{}:{}/{}", scheme, host, port, account)
+        format!("{scheme}://{host}:{port}/{account}")
     } else {
-        format!("{}://{}:{}", scheme, host, port)
+        format!("{scheme}://{host}:{port}")
     };
     let remaining: Vec<&str> = segments.collect();
     // Join by "/" (no leading slash). If empty, relative_path = ""
@@ -475,16 +471,11 @@ pub async fn get_remote_stream(
         StorageType::S3 => {
             log::info!(
                 "Using S3 storage type with parameters: \
-                bucket_name: {}, \
-                allow_anonymous: {}, \
-                enable_request_payer: {}, \
-                max_retries: {}, \
-                timeout: {}",
-                bucket_name,
-                allow_anonymous,
-                enable_request_payer,
-                max_retries,
-                timeout
+                bucket_name: {bucket_name}, \
+                allow_anonymous: {allow_anonymous}, \
+                enable_request_payer: {enable_request_payer}, \
+                max_retries: {max_retries}, \
+                timeout: {timeout}"
             );
             let mut builder = S3::default()
                 .region(
@@ -600,18 +591,12 @@ pub async fn get_remote_stream(
         StorageType::GCS => {
             log::info!(
                 "Using GCS storage type with parameters: \
-                bucket_name: {}, \
-                chunk_size: {}, \
-                concurrent_fetches: {}, \
-                allow_anonymous: {}, \
-                max_retries: {}, \
-                timeout: {}",
-                bucket_name,
-                chunk_size,
-                concurrent_fetches,
-                allow_anonymous,
-                max_retries,
-                timeout,
+                bucket_name: {bucket_name}, \
+                chunk_size: {chunk_size}, \
+                concurrent_fetches: {concurrent_fetches}, \
+                allow_anonymous: {allow_anonymous}, \
+                max_retries: {max_retries}, \
+                timeout: {timeout}",
             );
             let mut builder = Gcs::default().bucket(bucket_name.as_str());
             if allow_anonymous {

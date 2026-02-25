@@ -157,8 +157,7 @@ impl OptionalField {
                 Ok(())
             }
             other => Err(ArrowError::SchemaError(format!(
-                "Expected ArrayStructBuilder, found {:?}",
-                other
+                "Expected ArrayStructBuilder, found {other:?}"
             ))),
         }
     }

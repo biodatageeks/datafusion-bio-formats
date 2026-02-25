@@ -48,8 +48,7 @@ fn get_string_column<'a>(
     }
 
     Err(DataFusionError::Execution(format!(
-        "Column {} ({}) must be Utf8 or LargeUtf8 type",
-        index, name
+        "Column {index} ({name}) must be Utf8 or LargeUtf8 type"
     )))
 }
 
@@ -81,8 +80,7 @@ pub fn batch_to_fastq_records(batch: &RecordBatch) -> Result<Vec<fastq::Record>>
     // Validate schema - we need at least 4 columns (name, description, sequence, quality_scores)
     if num_columns < 4 {
         return Err(DataFusionError::Execution(format!(
-            "FASTQ batch must have at least 4 columns, got {}",
-            num_columns
+            "FASTQ batch must have at least 4 columns, got {num_columns}"
         )));
     }
 
@@ -100,8 +98,7 @@ pub fn batch_to_fastq_records(batch: &RecordBatch) -> Result<Vec<fastq::Record>>
         let name = names.value(i);
         if name.is_empty() {
             return Err(DataFusionError::Execution(format!(
-                "Row {}: name cannot be empty",
-                i
+                "Row {i}: name cannot be empty"
             )));
         }
 
@@ -116,8 +113,7 @@ pub fn batch_to_fastq_records(batch: &RecordBatch) -> Result<Vec<fastq::Record>>
         let sequence = sequences.value(i);
         if sequence.is_empty() {
             return Err(DataFusionError::Execution(format!(
-                "Row {}: sequence cannot be empty",
-                i
+                "Row {i}: sequence cannot be empty"
             )));
         }
 
@@ -125,8 +121,7 @@ pub fn batch_to_fastq_records(batch: &RecordBatch) -> Result<Vec<fastq::Record>>
         let quality = quality_scores.value(i);
         if quality.is_empty() {
             return Err(DataFusionError::Execution(format!(
-                "Row {}: quality_scores cannot be empty",
-                i
+                "Row {i}: quality_scores cannot be empty"
             )));
         }
 

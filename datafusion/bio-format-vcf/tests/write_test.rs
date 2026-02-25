@@ -35,7 +35,7 @@ chr1	200	rs2	G	C	40	PASS	DP=60
 "#;
 
 async fn create_test_vcf(name: &str, content: &str) -> std::io::Result<String> {
-    let path = format!("/tmp/test_write_{}.vcf", name);
+    let path = format!("/tmp/test_write_{name}.vcf");
     fs::write(&path, content).await?;
     Ok(path)
 }
@@ -149,8 +149,7 @@ async fn test_write_vcf_preserves_info_description() {
     let content = fs::read_to_string(output_path).await.unwrap();
     assert!(
         content.contains("Description=\"Read Depth\""),
-        "Output should preserve original INFO description. Got: {}",
-        content
+        "Output should preserve original INFO description. Got: {content}"
     );
 
     cleanup_files(&[&input_path, output_path]).await;

@@ -189,7 +189,7 @@ impl FastaRemoteReader {
         let compression_type =
             get_compression_type(file_path.clone(), None, object_storage_options.clone())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
         match compression_type {
             CompressionType::BGZF => {
                 let reader =
@@ -235,6 +235,7 @@ impl FastaRemoteReader {
 /// - `BGZF`: Reads BGZF-compressed files with multithreaded decompression
 /// - `GZIP`: Reads GZIP-compressed files asynchronously
 /// - `PLAIN`: Reads uncompressed files synchronously
+#[allow(clippy::large_enum_variant)]
 pub enum FastaLocalReader {
     /// BGZF-compressed reader variant
     BGZF(fasta::io::Reader<bgzf::Reader<std::fs::File>>),
@@ -269,7 +270,7 @@ impl FastaLocalReader {
             object_storage_options.clone(),
         )
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
         match compression_type {
             CompressionType::BGZF => {
                 let reader = get_local_fasta_bgzf_reader(file_path)?;
@@ -349,10 +350,7 @@ pub fn open_local_fasta_sync(
         )?)),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            format!(
-                "Sync FASTA reader does not support compression: {:?}",
-                compression_type
-            ),
+            format!("Sync FASTA reader does not support compression: {compression_type:?}"),
         )),
     }
 }

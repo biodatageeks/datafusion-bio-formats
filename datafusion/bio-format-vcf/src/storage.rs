@@ -95,7 +95,7 @@ pub async fn get_remote_vcf_reader(
 ) -> Result<vcf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>, std::io::Error> {
     let stream = get_remote_stream(file_path.clone(), object_storage_options, None)
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     let inner = StreamReader::new(stream);
     Ok(vcf::r#async::io::Reader::new(inner))
 }
@@ -197,7 +197,7 @@ pub async fn get_local_vcf_header(
         object_storage_options.clone(),
     )
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
     let header = match compression_type {
         CompressionType::BGZF => {
             let mut reader = get_local_vcf_bgzf_reader(file_path)?;
@@ -234,17 +234,14 @@ pub async fn get_remote_vcf_header(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<vcf::Header, Error> {
-    info!(
-        "Getting remote VCF header with options: {}",
-        object_storage_options
-    );
+    info!("Getting remote VCF header with options: {object_storage_options}");
     let compression_type = get_compression_type(
         file_path.clone(),
         object_storage_options.clone().compression_type,
         object_storage_options.clone(),
     )
     .await
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    .map_err(std::io::Error::other)?;
     let header = match compression_type {
         CompressionType::BGZF => {
             let mut reader = get_remote_vcf_bgzf_reader(file_path, object_storage_options).await;
@@ -315,7 +312,7 @@ impl VcfRemoteReader {
     ///
     /// A `VcfRemoteReader` instance with the appropriate variant for the detected compression
     pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
-        info!("Creating remote VCF reader: {}", object_storage_options);
+        info!("Creating remote VCF reader: {object_storage_options}");
         let compression_type = get_compression_type(
             file_path.clone(),
             object_storage_options.clone().compression_type,
@@ -405,6 +402,7 @@ impl VcfRemoteReader {
 ///
 /// This enum handles BGZF (multithreaded), GZIP, and uncompressed local VCF files.
 /// The appropriate variant is created based on the detected compression type.
+#[allow(clippy::large_enum_variant)]
 pub enum VcfLocalReader {
     /// Reader for BGZF-compressed local VCF files.
     BGZF(Reader<BgzfReader<File>>),
@@ -552,10 +550,7 @@ pub fn open_local_vcf_sync(
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                format!(
-                    "Sync VCF reader does not support compression: {:?}",
-                    compression_type
-                ),
+                format!("Sync VCF reader does not support compression: {compression_type:?}"),
             ));
         }
     };
@@ -629,10 +624,7 @@ impl VcfReader {
         object_storage_options: Option<ObjectStorageOptions>,
     ) -> Self {
         let storage_type = get_storage_type(file_path.clone());
-        info!(
-            "Storage type for VCF file {}: {:?}",
-            file_path, storage_type
-        );
+        info!("Storage type for VCF file {file_path}: {storage_type:?}");
         let opts = object_storage_options.unwrap_or_default();
         match storage_type {
             StorageType::LOCAL => VcfReader::Local(VcfLocalReader::new(file_path, opts).await),
@@ -705,7 +697,7 @@ impl IndexedVcfReader {
         let mut reader = vcf::io::indexed_reader::Builder::default()
             .set_index(index)
             .build_from_path(file_path)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
         let header = reader.read_header()?;
         Ok(Self { reader, header })
     }
@@ -756,7 +748,7 @@ pub fn estimate_sizes_from_tbi(
     let index = match noodles_tabix::fs::read(index_path) {
         Ok(idx) => idx,
         Err(e) => {
-            log::debug!("Failed to read TBI index for size estimation: {}", e);
+            log::debug!("Failed to read TBI index for size estimation: {e}");
             return regions
                 .iter()
                 .map(|r| RegionSizeEstimate {

@@ -268,15 +268,12 @@ async fn write_vcf_stream(
 
     writer.finish()?;
 
-    debug!(
-        "VcfWriteExec: wrote {} records to {}",
-        total_count, output_path
-    );
+    debug!("VcfWriteExec: wrote {total_count} records to {output_path}");
 
     // Return a batch with the count
     let count_array = Arc::new(UInt64Array::from(vec![total_count]));
     RecordBatch::try_new(output_schema, vec![count_array])
-        .map_err(|e| DataFusionError::Execution(format!("Failed to create result batch: {}", e)))
+        .map_err(|e| DataFusionError::Execution(format!("Failed to create result batch: {e}")))
 }
 
 #[cfg(test)]

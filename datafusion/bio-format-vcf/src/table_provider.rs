@@ -169,7 +169,7 @@ async fn determine_schema_from_header(
                 let field_name = if single_sample {
                     tag.clone()
                 } else {
-                    format!("{}_{}", sample_name, tag)
+                    format!("{sample_name}_{tag}")
                 };
                 // Store VCF header metadata in field metadata for round-trip preservation
                 let mut field_metadata = HashMap::new();
@@ -272,10 +272,7 @@ pub fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
             }
         }
         None => {
-            log::warn!(
-                "VCF FORMAT tag '{}' not found in header; defaulting to Utf8",
-                field
-            );
+            log::warn!("VCF FORMAT tag '{field}' not found in header; defaulting to Utf8");
             DataType::Utf8
         }
     }
@@ -362,7 +359,7 @@ impl VcfTableProvider {
         let storage_type = get_storage_type(file_path.clone());
         let index_path = if matches!(storage_type, StorageType::LOCAL) {
             discover_vcf_index(&file_path).map(|(path, fmt)| {
-                debug!("Discovered VCF index: {} (format: {:?})", path, fmt);
+                debug!("Discovered VCF index: {path} (format: {fmt:?})");
                 path
             })
         } else {
@@ -396,7 +393,7 @@ impl VcfTableProvider {
                         (names, lengths)
                     }
                     Err(e) => {
-                        debug!("Failed to read TBI for contig name fallback: {}", e);
+                        debug!("Failed to read TBI for contig name fallback: {e}");
                         (contig_names, contig_lengths)
                     }
                 }
@@ -494,13 +491,13 @@ impl TableProvider for VcfTableProvider {
             .iter()
             .map(|expr| {
                 if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
-                    debug!("VCF filter can be pushed down (indexed): {:?}", expr);
+                    debug!("VCF filter can be pushed down (indexed): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else if can_push_down_record_filter(expr, &self.schema) {
-                    debug!("VCF filter can be pushed down (record-level): {:?}", expr);
+                    debug!("VCF filter can be pushed down (record-level): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else {
-                    debug!("VCF filter cannot be pushed down: {:?}", expr);
+                    debug!("VCF filter cannot be pushed down: {expr:?}");
                     TableProviderFilterPushDown::Unsupported
                 }
             })
@@ -522,7 +519,7 @@ impl TableProvider for VcfTableProvider {
             self.contig_names
         );
         for (i, f) in filters.iter().enumerate() {
-            debug!("  filter[{}]: {:?}", i, f);
+            debug!("  filter[{i}]: {f:?}");
         }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -729,10 +726,7 @@ pub fn info_to_arrow_type(infos: &Infos, field: &str) -> DataType {
             }
         }
         None => {
-            log::warn!(
-                "VCF tag '{}' not found in header; defaulting to Utf8",
-                field
-            );
+            log::warn!("VCF tag '{field}' not found in header; defaulting to Utf8");
             DataType::Utf8
         }
     }

@@ -50,7 +50,7 @@ where
             buf.push(sep);
         }
         first = false;
-        let _ = write!(buf, "{}", item);
+        let _ = write!(buf, "{item}");
     }
 }
 
@@ -301,10 +301,10 @@ fn build_record_batch_from_builders(
         let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
             .with_row_count(Some(record_count));
         RecordBatch::try_new_with_options(schema, arrays, &options)
-            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
     } else {
         RecordBatch::try_new(schema, arrays)
-            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
     }
 }
 
@@ -330,8 +330,7 @@ fn load_infos_single_pass(
     for result in info.iter(header) {
         let (key, value) = result.map_err(|e| {
             datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
-                "Error reading INFO field: {}",
-                e
+                "Error reading INFO field: {e}"
             ))
         })?;
 
@@ -378,7 +377,7 @@ fn load_infos_single_pass(
                 }
                 _ => {
                     return Err(datafusion::arrow::error::ArrowError::InvalidArgumentError(
-                        format!("Unsupported INFO value type for field '{}'", key),
+                        format!("Unsupported INFO value type for field '{key}'"),
                     ));
                 }
             }
@@ -569,7 +568,7 @@ async fn get_local_vcf(
             }
 
             if batch_row_count == batch_size {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
                 } else {
@@ -592,7 +591,7 @@ async fn get_local_vcf(
                 )?;
                 batch_num += 1;
                 batch_row_count = 0;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
             }
         }
@@ -650,7 +649,7 @@ async fn get_local_vcf_sync(
     std::thread::spawn(move || {
         let read_and_send = || -> Result<(), DataFusionError> {
             let (mut reader, header) = open_local_vcf_sync(&file_path, compression_type)
-                .map_err(|e| DataFusionError::Execution(format!("Failed to open VCF: {}", e)))?;
+                .map_err(|e| DataFusionError::Execution(format!("Failed to open VCF: {e}")))?;
 
             let infos = header.infos();
             let formats = header.formats();
@@ -717,7 +716,7 @@ async fn get_local_vcf_sync(
                                     DataFusionError::Execution("Missing variant start".to_string())
                                 })?
                                 .map_err(|e| {
-                                    DataFusionError::Execution(format!("VCF position error: {}", e))
+                                    DataFusionError::Execution(format!("VCF position error: {e}"))
                                 })?
                                 .get() as u32;
                             Some(if coordinate_system_zero_based {
@@ -785,7 +784,7 @@ async fn get_local_vcf_sync(
                                     .quality_score()
                                     .transpose()
                                     .map_err(|e| {
-                                        DataFusionError::Execution(format!("VCF qual error: {}", e))
+                                        DataFusionError::Execution(format!("VCF qual error: {e}"))
                                     })?
                                     .map(|v| v as f64),
                             );
@@ -831,7 +830,7 @@ async fn get_local_vcf_sync(
                         }
 
                         if batch_row_count == batch_size {
-                            debug!("Record number: {}", record_num);
+                            debug!("Record number: {record_num}");
                             let info_arrays = if flags.any_info {
                                 Some(builders_to_arrays(&mut info_builders.2))
                             } else {
@@ -869,7 +868,7 @@ async fn get_local_vcf_sync(
                         }
                     }
                     Err(e) => {
-                        return Err(DataFusionError::Execution(format!("VCF read error: {}", e)));
+                        return Err(DataFusionError::Execution(format!("VCF read error: {e}")));
                     }
                 }
             }
@@ -909,7 +908,7 @@ async fn get_local_vcf_sync(
                 }
             }
 
-            debug!("Local VCF sync scan: {} records", record_num);
+            debug!("Local VCF sync scan: {record_num} records");
             Ok(())
         };
         if let Err(e) = read_and_send() {
@@ -1070,7 +1069,7 @@ async fn get_remote_vcf_stream(
             }
 
             if batch_row_count == batch_size {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
                 } else {
@@ -1093,7 +1092,7 @@ async fn get_remote_vcf_stream(
                 )?;
                 batch_num += 1;
                 batch_row_count = 0;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
             }
         }
@@ -1209,8 +1208,7 @@ fn load_formats_single_pass(
         for result in sample.iter(header) {
             let (key, value) = result.map_err(|e| {
                 datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
-                    "Error reading FORMAT field: {}",
-                    e
+                    "Error reading FORMAT field: {e}"
                 ))
             })?;
 
@@ -1240,7 +1238,7 @@ fn load_formats_single_pass(
                             first = false;
                             match allele {
                                 Some(a) => {
-                                    let _ = write!(gt_str, "{}", a);
+                                    let _ = write!(gt_str, "{a}");
                                 }
                                 None => gt_str.push('.'),
                             }
@@ -1384,7 +1382,7 @@ async fn get_stream(
             )
             .await
             .map_err(|e| {
-                DataFusionError::Execution(format!("Failed to detect compression: {}", e))
+                DataFusionError::Execution(format!("Failed to detect compression: {e}"))
             })?;
 
             if matches!(compression_type, CompressionType::GZIP) {
@@ -1486,7 +1484,7 @@ impl DisplayAs for VcfExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "VcfExec: projection=[{}]", proj_str)
+        write!(f, "VcfExec: projection=[{proj_str}]")
     }
 }
 
@@ -1603,7 +1601,7 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
     region_str
         .parse::<noodles_core::Region>()
-        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
+        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{region_str}': {e}")))
 }
 
 /// Get a streaming RecordBatch stream from an indexed VCF file for one or more regions.
@@ -1635,7 +1633,7 @@ async fn get_indexed_vcf_stream(
         let read_and_send = || -> Result<(), DataFusionError> {
             let mut indexed_reader =
                 IndexedVcfReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed VCF: {}", e))
+                    DataFusionError::Execution(format!("Failed to open indexed VCF: {e}"))
                 })?;
 
             let header = indexed_reader.header().clone();
@@ -1705,12 +1703,12 @@ async fn get_indexed_vcf_stream(
                 let noodles_region = build_noodles_region(region)?;
 
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("VCF region query failed: {}", e))
+                    DataFusionError::Execution(format!("VCF region query failed: {e}"))
                 })?;
 
                 for result in records {
                     let record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("VCF record read error: {}", e))
+                        DataFusionError::Execution(format!("VCF record read error: {e}"))
                     })?;
 
                     let needs_start_for_region =
@@ -1723,7 +1721,7 @@ async fn get_indexed_vcf_stream(
                                 DataFusionError::Execution("Missing variant start".to_string())
                             })?
                             .map_err(|e| {
-                                DataFusionError::Execution(format!("VCF position error: {}", e))
+                                DataFusionError::Execution(format!("VCF position error: {e}"))
                             })?
                             .get() as u32;
                         let start_val = if coordinate_system_zero_based {
@@ -1803,7 +1801,7 @@ async fn get_indexed_vcf_stream(
                                 .quality_score()
                                 .transpose()
                                 .map_err(|e| {
-                                    DataFusionError::Execution(format!("VCF qual error: {}", e))
+                                    DataFusionError::Execution(format!("VCF qual error: {e}"))
                                 })?
                                 .map(|v| v as f64),
                         );

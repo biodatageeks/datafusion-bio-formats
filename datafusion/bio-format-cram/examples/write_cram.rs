@@ -124,9 +124,9 @@ async fn main() -> datafusion::error::Result<()> {
 
     println!("\n✓ CRAM write examples completed successfully");
     println!("Output files:");
-    println!("  - {}", output_path_1);
-    println!("  - {}", output_path_2);
-    println!("  - {}", output_path_3);
+    println!("  - {output_path_1}");
+    println!("  - {output_path_2}");
+    println!("  - {output_path_3}");
     println!("  - output/converted.cram");
     println!("\nNote: Create .fai index for reference with: samtools faidx reference/genome.fasta");
 

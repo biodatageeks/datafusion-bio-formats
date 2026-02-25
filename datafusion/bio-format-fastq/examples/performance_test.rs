@@ -42,7 +42,7 @@ async fn main() -> datafusion::common::Result<()> {
     }
     let file_path = &args[1];
 
-    println!("Using file: {}", file_path);
+    println!("Using file: {file_path}");
 
     // Create a SessionContext with 16 target partitions for parallel reading
     let config = SessionConfig::new().with_target_partitions(16);
@@ -59,7 +59,7 @@ async fn main() -> datafusion::common::Result<()> {
     println!("{}", batches.len());
     let elapsed = start_time.elapsed();
 
-    println!("Query executed in: {:?}", elapsed);
+    println!("Query executed in: {elapsed:?}");
 
     Ok(())
 }

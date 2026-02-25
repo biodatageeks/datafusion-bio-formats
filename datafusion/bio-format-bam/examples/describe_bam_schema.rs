@@ -52,10 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for sample_size in [10, 50, 200] {
         let schema_df = provider.describe(&ctx, Some(sample_size)).await?;
         let count = schema_df.count().await?;
-        println!(
-            "Sample size {}: {} total columns discovered",
-            sample_size, count
-        );
+        println!("Sample size {sample_size}: {count} total columns discovered");
     }
 
     Ok(())

@@ -399,8 +399,7 @@ mod tests {
         let total_regions: usize = result.iter().map(|b| b.regions.len()).sum();
         assert!(
             total_regions > 2,
-            "Expected splitting, got {} regions",
-            total_regions
+            "Expected splitting, got {total_regions} regions"
         );
         assert!(result.len() <= 4, "Should not exceed target_partitions");
     }
@@ -567,8 +566,7 @@ mod tests {
         let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
         assert_eq!(
             result_total, total,
-            "Total bytes should be exactly preserved: {} vs {}",
-            result_total, total
+            "Total bytes should be exactly preserved: {result_total} vs {total}"
         );
 
         // Linear scan guarantees near-perfect balance
@@ -585,9 +583,7 @@ mod tests {
         // With linear scan, max/min ratio should be very close to 1
         assert!(
             max_bytes <= min_bytes * 2,
-            "Partitions too imbalanced: max={} min={}",
-            max_bytes,
-            min_bytes
+            "Partitions too imbalanced: max={max_bytes} min={min_bytes}"
         );
     }
 
@@ -728,8 +724,7 @@ mod tests {
             let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
             assert_eq!(
                 result_total, total,
-                "Total bytes not preserved for target={}: {} vs {}",
-                target, result_total, total
+                "Total bytes not preserved for target={target}: {result_total} vs {total}"
             );
         }
     }
@@ -778,8 +773,7 @@ mod tests {
             if let Some(end) = region.end {
                 assert!(
                     end < 2_000_000,
-                    "Split end {} should be near data (< 2M), not spread across full contig",
-                    end
+                    "Split end {end} should be near data (< 2M), not spread across full contig"
                 );
             }
         }
@@ -803,8 +797,7 @@ mod tests {
             let result_total: u64 = result.iter().map(|b| b.total_estimated_bytes).sum();
             assert_eq!(
                 result_total, total,
-                "Bin-aware: total bytes not preserved for target={}: {} vs {}",
-                target, result_total, total
+                "Bin-aware: total bytes not preserved for target={target}: {result_total} vs {total}"
             );
         }
     }
@@ -877,8 +870,7 @@ mod tests {
                 || (200_000_000..=201_000_000).contains(&end);
             assert!(
                 near_cluster,
-                "Split at {} should be near a data cluster, not in empty genomic space",
-                end
+                "Split at {end} should be near a data cluster, not in empty genomic space"
             );
         }
     }
@@ -916,7 +908,7 @@ mod tests {
         ];
         // Add 60 zero-estimate alt/decoy contigs (like chrUn_*, chr*_random, HLA-*)
         for i in 0..60 {
-            estimates.push(estimate(&format!("alt_contig_{}", i), 0, None));
+            estimates.push(estimate(&format!("alt_contig_{i}"), 0, None));
         }
 
         let result = balance_partitions(estimates, 8);
@@ -925,8 +917,7 @@ mod tests {
         let total_regions: usize = result.iter().map(|b| b.regions.len()).sum();
         assert!(
             total_regions >= 84,
-            "Expected at least 84 regions (24 chroms + 60 alts), got {}",
-            total_regions
+            "Expected at least 84 regions (24 chroms + 60 alts), got {total_regions}"
         );
 
         // Total estimated bytes preserved
@@ -949,17 +940,14 @@ mod tests {
         // Allow up to 15 (< 2x ideal share) to account for uneven data-region counts.
         assert!(
             max_zero <= 15,
-            "Max zero-est regions on one partition = {}, expected <= 15. Distribution: {:?}",
-            max_zero,
-            zero_est_per_partition
+            "Max zero-est regions on one partition = {max_zero}, expected <= 15. Distribution: {zero_est_per_partition:?}"
         );
 
         // No partition should have 0 zero-estimate regions (all should get some)
         let min_zero = *zero_est_per_partition.iter().min().unwrap();
         assert!(
             min_zero >= 1,
-            "Every partition should get at least 1 zero-est region. Distribution: {:?}",
-            zero_est_per_partition
+            "Every partition should get at least 1 zero-est region. Distribution: {zero_est_per_partition:?}"
         );
     }
 
@@ -973,7 +961,7 @@ mod tests {
             estimate("chr3", 60, Some(198_000_000)),
         ];
         for i in 0..20 {
-            estimates.push(estimate(&format!("scaffold_{}", i), 0, None));
+            estimates.push(estimate(&format!("scaffold_{i}"), 0, None));
         }
 
         let result = balance_partitions(estimates, 4);
@@ -982,8 +970,7 @@ mod tests {
         let total_regions: usize = result.iter().map(|b| b.regions.len()).sum();
         assert!(
             total_regions >= 23,
-            "Expected at least 23 regions, got {}",
-            total_regions
+            "Expected at least 23 regions, got {total_regions}"
         );
 
         // Total bytes preserved
@@ -1005,17 +992,13 @@ mod tests {
         let max_scaffolds = *scaffold_per_partition.iter().max().unwrap();
         assert!(
             max_scaffolds < 20,
-            "One partition got all {} scaffolds — not distributed! {:?}",
-            max_scaffolds,
-            scaffold_per_partition
+            "One partition got all {max_scaffolds} scaffolds — not distributed! {scaffold_per_partition:?}"
         );
 
         // With 20 scaffolds across 4 partitions, max should be <= 8 (generous threshold)
         assert!(
             max_scaffolds <= 8,
-            "Max scaffolds on one partition = {}, expected <= 8. Distribution: {:?}",
-            max_scaffolds,
-            scaffold_per_partition
+            "Max scaffolds on one partition = {max_scaffolds}, expected <= 8. Distribution: {scaffold_per_partition:?}"
         );
     }
 }

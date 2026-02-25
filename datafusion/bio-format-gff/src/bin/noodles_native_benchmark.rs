@@ -96,15 +96,12 @@ async fn benchmark_custom_parsing(
 
         record_count += 1;
         if record_count % 500_000 == 0 {
-            println!("  Custom: {} records", record_count);
+            println!("  Custom: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ CUSTOM parsing: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ CUSTOM parsing: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -132,15 +129,12 @@ async fn benchmark_optimized_parsing(
 
         record_count += 1;
         if record_count % 500_000 == 0 {
-            println!("  Optimized: {} records", record_count);
+            println!("  Optimized: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ OPTIMIZED parsing: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ OPTIMIZED parsing: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -168,12 +162,12 @@ async fn benchmark_minimal_parsing(
 
         record_count += 1;
         if record_count % 500_000 == 0 {
-            println!("  Minimal: {} records", record_count);
+            println!("  Minimal: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!("✅ MINIMAL: {} records in {:?}", record_count, duration);
+    println!("✅ MINIMAL: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -182,11 +176,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("🔬 ATTRIBUTE PARSING OPTIMIZATION Benchmark");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("===========================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -209,18 +203,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let custom_rps = 3_148_136.0 / custom_time.as_secs_f64();
     let optimized_rps = 3_148_136.0 / optimized_time.as_secs_f64();
 
-    println!(
-        "🚀 MINIMAL:    {:?} ({:.0} records/sec)",
-        minimal_time, minimal_rps
-    );
-    println!(
-        "🐌 CUSTOM:     {:?} ({:.0} records/sec)",
-        custom_time, custom_rps
-    );
-    println!(
-        "⚡ OPTIMIZED:  {:?} ({:.0} records/sec)",
-        optimized_time, optimized_rps
-    );
+    println!("🚀 MINIMAL:    {minimal_time:?} ({minimal_rps:.0} records/sec)");
+    println!("🐌 CUSTOM:     {custom_time:?} ({custom_rps:.0} records/sec)");
+    println!("⚡ OPTIMIZED:  {optimized_time:?} ({optimized_rps:.0} records/sec)");
 
     let custom_slowdown = custom_time.as_secs_f64() / minimal_time.as_secs_f64();
     let optimized_slowdown = optimized_time.as_secs_f64() / minimal_time.as_secs_f64();
@@ -228,9 +213,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("🎯 ANALYSIS:");
-    println!("• Custom parsing slowdown:    {:.1}x", custom_slowdown);
-    println!("• Optimized parsing slowdown: {:.1}x", optimized_slowdown);
-    println!("• Improvement factor:         {:.1}x faster", improvement);
+    println!("• Custom parsing slowdown:    {custom_slowdown:.1}x");
+    println!("• Optimized parsing slowdown: {optimized_slowdown:.1}x");
+    println!("• Improvement factor:         {improvement:.1}x faster");
 
     if improvement > 2.0 {
         println!("✅ SIGNIFICANT IMPROVEMENT! Optimization is working.");

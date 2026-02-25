@@ -47,7 +47,7 @@ chr1	200	.	G	C	40	PASS	.	GT:DP	1|0:30
 "#;
 
 async fn create_test_vcf_file(test_name: &str, content: &str) -> std::io::Result<String> {
-    let temp_file = format!("/tmp/test_format_{}.vcf", test_name);
+    let temp_file = format!("/tmp/test_format_{test_name}.vcf");
     fs::write(&temp_file, content).await?;
     Ok(temp_file)
 }

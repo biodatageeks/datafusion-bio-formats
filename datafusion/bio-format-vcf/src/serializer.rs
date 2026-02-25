@@ -137,8 +137,7 @@ pub fn batch_to_vcf_lines(
 
         // Build the VCF line
         let mut line = format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            chrom, pos, id_str, ref_str, alt_str, qual_str, filter_str, info_str
+            "{chrom}\t{pos}\t{id_str}\t{ref_str}\t{alt_str}\t{qual_str}\t{filter_str}\t{info_str}"
         );
 
         if !format_str.is_empty() {
@@ -162,7 +161,7 @@ fn get_string_column_by_name<'a>(
     name: &str,
 ) -> Result<StringColumnRef<'a>> {
     let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
+        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
     let column = batch.column(idx);
 
@@ -175,21 +174,20 @@ fn get_string_column_by_name<'a>(
     }
 
     Err(DataFusionError::Execution(format!(
-        "Column '{}' must be Utf8 or LargeUtf8 type",
-        name
+        "Column '{name}' must be Utf8 or LargeUtf8 type"
     )))
 }
 
 /// Gets a u32 column from the batch by name
 fn get_u32_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt32Array> {
     let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
+        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
     batch
         .column(idx)
         .as_any()
         .downcast_ref::<UInt32Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{}' must be UInt32 type", name)))
+        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be UInt32 type")))
 }
 
 /// Gets an optional f64 column from the batch by name
@@ -198,15 +196,13 @@ fn get_optional_f64_column_by_name<'a>(
     name: &str,
 ) -> Result<&'a Float64Array> {
     let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{}' not found in batch", name))
+        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
     batch
         .column(idx)
         .as_any()
         .downcast_ref::<Float64Array>()
-        .ok_or_else(|| {
-            DataFusionError::Execution(format!("Column '{}' must be Float64 type", name))
-        })
+        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be Float64 type")))
 }
 
 /// Builds a map from INFO field name to column index
@@ -238,7 +234,7 @@ fn build_format_column_map(
             let column_name = if single_sample {
                 format_field.clone()
             } else {
-                format!("{}_{}", sample_name, format_field)
+                format!("{sample_name}_{format_field}")
             };
 
             if let Ok(idx) = batch.schema().index_of(&column_name) {
@@ -274,7 +270,7 @@ fn build_info_string(
                 // Flag type - just include the name
                 info_parts.push(field_name.clone());
             } else if value_str != "false" {
-                info_parts.push(format!("{}={}", field_name, value_str));
+                info_parts.push(format!("{field_name}={value_str}"));
             }
         }
     }

@@ -65,7 +65,7 @@ impl DisplayAs for BedExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "BedExec: projection=[{}]", proj_str)
+        write!(f, "BedExec: projection=[{proj_str}]")
     }
 }
 
@@ -203,7 +203,7 @@ async fn get_remote_bed_stream(
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
                     &chroms,
@@ -213,7 +213,7 @@ async fn get_remote_bed_stream(
                     projection.clone(),
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 // Clear vectors for the next batch.
                 chroms.clear();
@@ -294,7 +294,7 @@ async fn get_local_bed(
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
                     &chroms,
@@ -304,7 +304,7 @@ async fn get_local_bed(
                    projection.clone(),
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 // Clear vectors for the next batch.
                 chroms.clear();
@@ -380,7 +380,7 @@ fn build_record_batch(
         }
     };
     RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
 }
 
 /// Routes to appropriate reader based on storage backend and creates a record batch stream

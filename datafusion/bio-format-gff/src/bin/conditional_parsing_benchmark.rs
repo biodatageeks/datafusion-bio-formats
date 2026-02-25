@@ -84,15 +84,12 @@ async fn benchmark_always_parse(
 
         record_count += 1;
         if record_count % 300_000 == 0 {
-            println!("  OLD: {} records", record_count);
+            println!("  OLD: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ OLD (always parse): {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ OLD (always parse): {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -125,15 +122,12 @@ async fn benchmark_conditional_parse(
 
         record_count += 1;
         if record_count % 300_000 == 0 {
-            println!("  NEW: {} records", record_count);
+            println!("  NEW: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ NEW (conditional): {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ NEW (conditional): {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -161,15 +155,12 @@ async fn benchmark_never_parse(
 
         record_count += 1;
         if record_count % 300_000 == 0 {
-            println!("  BASELINE: {} records", record_count);
+            println!("  BASELINE: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ BASELINE (never parse): {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ BASELINE (never parse): {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -178,11 +169,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("🎯 CONDITIONAL ATTRIBUTE PARSING Benchmark");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("===========================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -210,21 +201,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conditional_0_rps = 3_148_136.0 / conditional_0_time.as_secs_f64();
     let conditional_50_rps = 3_148_136.0 / conditional_50_time.as_secs_f64();
 
+    println!("🚀 BASELINE (no parsing):    {baseline_time:?} ({baseline_rps:.0} records/sec)");
+    println!("🐌 OLD (always parse):       {always_time:?} ({always_rps:.0} records/sec)");
     println!(
-        "🚀 BASELINE (no parsing):    {:?} ({:.0} records/sec)",
-        baseline_time, baseline_rps
+        "⚡ NEW (conditional 0%):     {conditional_0_time:?} ({conditional_0_rps:.0} records/sec)"
     );
     println!(
-        "🐌 OLD (always parse):       {:?} ({:.0} records/sec)",
-        always_time, always_rps
-    );
-    println!(
-        "⚡ NEW (conditional 0%):     {:?} ({:.0} records/sec)",
-        conditional_0_time, conditional_0_rps
-    );
-    println!(
-        "⚡ NEW (conditional 50%):    {:?} ({:.0} records/sec)",
-        conditional_50_time, conditional_50_rps
+        "⚡ NEW (conditional 50%):    {conditional_50_time:?} ({conditional_50_rps:.0} records/sec)"
     );
 
     let always_slowdown = always_time.as_secs_f64() / baseline_time.as_secs_f64();
@@ -236,28 +219,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("📊 PERFORMANCE ANALYSIS:");
-    println!(
-        "• Always parsing slowdown:     {:.1}x vs baseline",
-        always_slowdown
-    );
-    println!(
-        "• Conditional 0% slowdown:     {:.1}x vs baseline",
-        conditional_0_slowdown
-    );
-    println!(
-        "• Conditional 50% slowdown:    {:.1}x vs baseline",
-        conditional_50_slowdown
-    );
+    println!("• Always parsing slowdown:     {always_slowdown:.1}x vs baseline");
+    println!("• Conditional 0% slowdown:     {conditional_0_slowdown:.1}x vs baseline");
+    println!("• Conditional 50% slowdown:    {conditional_50_slowdown:.1}x vs baseline");
     println!();
     println!("🎉 OPTIMIZATION IMPACT:");
-    println!(
-        "• Skip all attributes:   {:.1}x FASTER than always parsing",
-        optimization_0
-    );
-    println!(
-        "• Parse 50% attributes:  {:.1}x FASTER than always parsing",
-        optimization_50
-    );
+    println!("• Skip all attributes:   {optimization_0:.1}x FASTER than always parsing");
+    println!("• Parse 50% attributes:  {optimization_50:.1}x FASTER than always parsing");
 
     if optimization_0 > 2.0 {
         println!("✅ EXCELLENT! Major speedup when attributes not needed");

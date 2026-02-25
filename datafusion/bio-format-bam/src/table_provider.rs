@@ -92,7 +92,7 @@ fn determine_schema(
         metadata.insert(BAM_BINARY_CIGAR_KEY.to_string(), "true".to_string());
     }
     let schema = Schema::new_with_metadata(fields, metadata);
-    debug!("Schema: {:?}", schema);
+    debug!("Schema: {schema:?}");
     Ok(Arc::new(schema))
 }
 
@@ -140,8 +140,7 @@ async fn determine_schema_from_file(
         let storage_type = get_storage_type(file_path.clone());
         if !matches!(storage_type, StorageType::LOCAL) {
             return Err(DataFusionError::NotImplemented(format!(
-                "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
-                file_path
+                "Remote SAM file reading is not supported ({file_path}). Use BAM format for remote storage."
             )));
         }
         let reader = SamReader::new(file_path.clone());
@@ -192,8 +191,7 @@ async fn determine_schema_from_file(
                                     let (sam_type, arrow_type) =
                                         infer_type_from_noodles_value(&value);
                                     debug!(
-                                        "Found tag {} in record {}: sam_type={}, arrow_type={:?}",
-                                        tag_name, count, sam_type, arrow_type
+                                        "Found tag {tag_name} in record {count}: sam_type={sam_type}, arrow_type={arrow_type:?}"
                                     );
                                     discovered_tags
                                         .insert(tag_name.clone(), (sam_type, arrow_type));
@@ -203,28 +201,24 @@ async fn determine_schema_from_file(
                         count += 1;
                     }
                     Err(e) => {
-                        debug!("Error reading record during schema inference: {:?}", e);
+                        debug!("Error reading record during schema inference: {e:?}");
                         continue;
                     }
                 }
             }
-            debug!("Schema inference completed after {} records", count);
+            debug!("Schema inference completed after {count} records");
             discovered_tags
         }
 
-        debug!(
-            "Starting schema inference by sampling {} records",
-            sample_size
-        );
-        debug!("Looking for tags: {:?}", tags);
+        debug!("Starting schema inference by sampling {sample_size} records");
+        debug!("Looking for tags: {tags:?}");
 
         let discovered_tags = if is_sam_file(&file_path) {
             use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
             let storage_type = get_storage_type(file_path.clone());
             if !matches!(storage_type, StorageType::LOCAL) {
                 return Err(DataFusionError::NotImplemented(format!(
-                    "Remote SAM file reading is not supported ({}). Use BAM format for remote storage.",
-                    file_path
+                    "Remote SAM file reading is not supported ({file_path}). Use BAM format for remote storage."
                 )));
             }
             let mut reader = SamReader::new(file_path);
@@ -254,11 +248,8 @@ async fn determine_schema_from_file(
                     let desc = known_tags
                         .get(tag)
                         .map(|t| t.description.clone())
-                        .unwrap_or_else(|| format!("Tag type discovered from file ({})", sam_t));
-                    debug!(
-                        "Using discovered type for {}: {} -> {:?}",
-                        tag, sam_t, arrow_t
-                    );
+                        .unwrap_or_else(|| format!("Tag type discovered from file ({sam_t})"));
+                    debug!("Using discovered type for {tag}: {sam_t} -> {arrow_t:?}");
                     (*sam_t, arrow_t.clone(), desc)
                 } else if let Some(tag_def) = known_tags.get(tag) {
                     // Fall back to registry definition
@@ -273,7 +264,7 @@ async fn determine_schema_from_file(
                     )
                 } else {
                     // Default for unknown tags
-                    debug!("Using default type for {}: Z -> Utf8", tag);
+                    debug!("Using default type for {tag}: Z -> Utf8");
                     ('Z', DataType::Utf8, "Unknown tag".to_string())
                 };
 
@@ -296,7 +287,7 @@ async fn determine_schema_from_file(
         metadata.insert(BAM_BINARY_CIGAR_KEY.to_string(), "true".to_string());
     }
     let schema = Schema::new_with_metadata(fields, metadata);
-    debug!("Schema (from file): {:?}", schema);
+    debug!("Schema (from file): {schema:?}");
     Ok(Arc::new(schema))
 }
 
@@ -387,7 +378,7 @@ impl BamTableProvider {
                 let reader = SamReader::new(file_path.clone());
                 extract_header_metadata(reader.get_header())
             } else {
-                debug!("Skipping header read for remote SAM file: {}", file_path);
+                debug!("Skipping header read for remote SAM file: {file_path}");
                 HashMap::new()
             }
         } else if matches!(storage_type, StorageType::LOCAL) {
@@ -403,10 +394,7 @@ impl BamTableProvider {
             {
                 Ok(header) => extract_header_metadata(&header),
                 Err(e) => {
-                    debug!(
-                        "Failed to read BAM header from {}: {}, using empty metadata",
-                        file_path, e
-                    );
+                    debug!("Failed to read BAM header from {file_path}: {e}, using empty metadata");
                     HashMap::new()
                 }
             }
@@ -437,7 +425,7 @@ impl BamTableProvider {
         // Auto-discover index file for local files
         let index_path = if matches!(storage_type, StorageType::LOCAL) && !is_sam_file(&file_path) {
             discover_bam_index(&file_path).map(|(path, fmt)| {
-                debug!("Discovered BAM index: {} (format: {:?})", path, fmt);
+                debug!("Discovered BAM index: {path} (format: {fmt:?})");
                 path
             })
         } else {
@@ -714,7 +702,7 @@ impl BamTableProvider {
                 DataType::Float32 => "Float32".to_string(),
                 DataType::Boolean => "Boolean".to_string(),
                 DataType::List(f) => format!("List<{}>", datatype_to_string(f.data_type())),
-                _ => format!("{:?}", dtype),
+                _ => format!("{dtype:?}"),
             }
         }
 
@@ -814,7 +802,7 @@ impl BamTableProvider {
             let desc = if let Some(tag_def) = known_tags.get(&tag_name) {
                 tag_def.description.clone()
             } else {
-                format!("Custom/unknown tag ({})", sam_type)
+                format!("Custom/unknown tag ({sam_type})")
             };
             descriptions.append_value(desc);
         }
@@ -880,13 +868,13 @@ impl TableProvider for BamTableProvider {
             .map(|expr| {
                 // Genomic coordinate filters get Inexact when index is available
                 if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
-                    debug!("BAM filter can be pushed down (indexed): {:?}", expr);
+                    debug!("BAM filter can be pushed down (indexed): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else if can_push_down_record_filter(expr, &self.schema) {
-                    debug!("BAM filter can be pushed down (record-level): {:?}", expr);
+                    debug!("BAM filter can be pushed down (record-level): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else {
-                    debug!("BAM filter cannot be pushed down: {:?}", expr);
+                    debug!("BAM filter cannot be pushed down: {expr:?}");
                     TableProviderFilterPushDown::Unsupported
                 }
             })
@@ -908,7 +896,7 @@ impl TableProvider for BamTableProvider {
             self.reference_names
         );
         for (i, f) in filters.iter().enumerate() {
-            debug!("  filter[{}]: {:?}", i, f);
+            debug!("  filter[{i}]: {f:?}");
         }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {

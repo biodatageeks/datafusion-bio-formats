@@ -89,7 +89,7 @@ fn determine_schema(
         metadata.insert(BAM_BINARY_CIGAR_KEY.to_string(), "true".to_string());
     }
     let schema = Schema::new_with_metadata(fields, metadata);
-    debug!("CRAM Schema: {:?}", schema);
+    debug!("CRAM Schema: {schema:?}");
     Ok(Arc::new(schema))
 }
 
@@ -178,15 +178,12 @@ impl CramTableProvider {
             match cram::io::reader::Builder::default()
                 .set_reference_sequence_repository(fasta::Repository::default())
                 .build_from_path(&file_path)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                .map_err(std::io::Error::other)
                 .and_then(|mut reader| reader.read_header())
             {
                 Ok(header) => extract_header_metadata(&header),
                 Err(e) => {
-                    warn!(
-                        "Failed to read CRAM header from {}: {}, using empty metadata",
-                        file_path, e
-                    );
+                    warn!("Failed to read CRAM header from {file_path}: {e}, using empty metadata");
                     HashMap::new()
                 }
             }
@@ -220,7 +217,7 @@ impl CramTableProvider {
         // Auto-discover index file for local files
         let index_path = if matches!(storage_type, StorageType::LOCAL) {
             discover_cram_index(&file_path).map(|(path, fmt)| {
-                debug!("Discovered CRAM index: {} (format: {:?})", path, fmt);
+                debug!("Discovered CRAM index: {path} (format: {fmt:?})");
                 path
             })
         } else {
@@ -509,7 +506,7 @@ impl CramTableProvider {
         let known_tags = get_known_tags();
         for (tag_name, (sam_type, arrow_type)) in discovered_tags {
             column_names.append_value(&tag_name);
-            data_types.append_value(format!("{:?}", arrow_type));
+            data_types.append_value(format!("{arrow_type:?}"));
             nullable.append_value(true);
             category.append_value("tag");
             sam_types.append_value(sam_type.to_string());
@@ -571,13 +568,13 @@ impl TableProvider for CramTableProvider {
             .map(|expr| {
                 // Genomic coordinate filters get Inexact when index is available
                 if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
-                    debug!("CRAM filter can be pushed down (indexed): {:?}", expr);
+                    debug!("CRAM filter can be pushed down (indexed): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else if can_push_down_record_filter(expr, &self.schema) {
-                    debug!("CRAM filter can be pushed down (record-level): {:?}", expr);
+                    debug!("CRAM filter can be pushed down (record-level): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else {
-                    debug!("CRAM filter cannot be pushed down: {:?}", expr);
+                    debug!("CRAM filter cannot be pushed down: {expr:?}");
                     TableProviderFilterPushDown::Unsupported
                 }
             })
@@ -599,7 +596,7 @@ impl TableProvider for CramTableProvider {
             self.reference_names
         );
         for (i, f) in filters.iter().enumerate() {
-            debug!("  filter[{}]: {:?}", i, f);
+            debug!("  filter[{i}]: {f:?}");
         }
 
         fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {

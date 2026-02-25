@@ -22,8 +22,8 @@ async fn run_benchmark_multiple_times(
     description: &str,
     runs: usize,
 ) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-    println!("\n🔍 {}", description);
-    println!("Query: {}", query);
+    println!("\n🔍 {description}");
+    println!("Query: {query}");
     print!("Runs: ");
 
     let mut times = Vec::new();
@@ -40,7 +40,7 @@ async fn run_benchmark_multiple_times(
         // Verify we got results (sanity check)
         let total_rows: usize = results.iter().map(|batch| batch.num_rows()).sum();
         if i == 0 {
-            println!(" ({} rows)", total_rows);
+            println!(" ({total_rows} rows)");
         }
 
         times.push(duration);
@@ -57,8 +57,8 @@ async fn run_benchmark_multiple_times(
         variance.sqrt()
     };
 
-    println!("  Average: {:.3}s", avg);
-    println!("  Range: {:.3}s - {:.3}s", min, max);
+    println!("  Average: {avg:.3}s");
+    println!("  Range: {min:.3}s - {max:.3}s");
     println!(
         "  Std Dev: {:.3}s ({:.1}%)",
         std_dev,
@@ -78,11 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let object_storage_options = create_object_storage_options();
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} does not exist!", file_path);
+        eprintln!("❌ Error: File {file_path} does not exist!");
         return Ok(());
     }
 
-    println!("📁 File: {} (~146MB, 7.75M records)", file_path);
+    println!("📁 File: {file_path} (~146MB, 7.75M records)");
 
     let table = GffTableProvider::new(
         file_path.to_string(),
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 all_results.push((description.to_string(), times));
             }
             Err(e) => {
-                println!("❌ Query failed: {}", e);
+                println!("❌ Query failed: {e}");
             }
         }
     }
@@ -150,10 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let cv_percent = (std_dev / avg) * 100.0;
 
-        println!(
-            "{:<50} {:>10.3} {:>10.3} {:>10.3} {:>9.1}%",
-            description, avg, min, max, cv_percent
-        );
+        println!("{description:<50} {avg:>10.3} {min:>10.3} {max:>10.3} {cv_percent:>9.1}%");
     }
 
     println!("\n🔍 Overhead Assessment");
@@ -171,10 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             variance.sqrt()
         };
 
-        println!(
-            "• Baseline COUNT(*) performance: {:.3}s ± {:.3}s",
-            baseline_avg, baseline_std
-        );
+        println!("• Baseline COUNT(*) performance: {baseline_avg:.3}s ± {baseline_std:.3}s");
         println!(
             "• Coefficient of variation: {:.1}% (should be <5% for consistent performance)",
             (baseline_std / baseline_avg) * 100.0
@@ -210,7 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if (std_dev / avg) > 0.1 {
             // >10% coefficient of variation
-            println!("  ⚠️  High variability detected in: {}", description);
+            println!("  ⚠️  High variability detected in: {description}");
             has_overhead = true;
         }
     }

@@ -386,7 +386,7 @@ impl GffRemoteReader {
         let compression_type =
             get_compression_type(file_path.clone(), None, object_storage_options.clone())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
 
         match (compression_type.clone(), parser_type) {
             // GZIP variants
@@ -660,7 +660,7 @@ impl GffLocalReader {
             object_storage_options.clone(),
         )
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
 
         match (compression_type.clone(), parser_type) {
             // GZIP variants - using sync readers
@@ -929,7 +929,7 @@ pub fn estimate_sizes_from_tbi(
     let index = match noodles_tabix::fs::read(index_path) {
         Ok(idx) => idx,
         Err(e) => {
-            log::debug!("Failed to read TBI index for size estimation: {}", e);
+            log::debug!("Failed to read TBI index for size estimation: {e}");
             return regions
                 .iter()
                 .map(|r| RegionSizeEstimate {
@@ -1088,7 +1088,7 @@ impl IndexedGffReader {
         let reader = noodles_tabix::io::indexed_reader::Builder::default()
             .set_index(index)
             .build_from_path(Path::new(file_path))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(std::io::Error::other)?;
 
         Ok(Self {
             reader,

@@ -76,7 +76,7 @@ impl DisplayAs for CramExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "CramExec: projection=[{}]", proj_str)
+        write!(f, "CramExec: projection=[{proj_str}]")
     }
 }
 
@@ -201,7 +201,7 @@ fn set_tag_builders(
                 }
             };
 
-            debug!("Creating builder for tag {}: {:?}", tag, arrow_type);
+            debug!("Creating builder for tag {tag}: {arrow_type:?}");
 
             if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
                 let tag_bytes = tag.as_bytes();
@@ -211,12 +211,12 @@ fn set_tag_builders(
                     tag_builders.1.push(arrow_type.clone());
                     tag_builders.2.push(builder);
                     tag_builders.3.push(parsed_tag);
-                    debug!("Successfully created builder for tag {}", tag);
+                    debug!("Successfully created builder for tag {tag}");
                 } else {
-                    debug!("Invalid tag name length for {}", tag);
+                    debug!("Invalid tag name length for {tag}");
                 }
             } else {
-                debug!("Failed to create builder for tag {}: {:?}", tag, arrow_type);
+                debug!("Failed to create builder for tag {tag}: {arrow_type:?}");
             }
         }
     }
@@ -619,7 +619,7 @@ async fn get_remote_cram_stream(
 
             record_num += 1;
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let tag_arrays = if num_tag_fields > 0 {
                     Some(builders_to_arrays(&mut tag_builders.2)?)
                 } else {
@@ -646,7 +646,7 @@ async fn get_remote_cram_stream(
                     batch_size,
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 name.clear();
                 chrom.clear();
@@ -892,7 +892,7 @@ async fn get_local_cram(
 
             record_num += 1;
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let tag_arrays = if num_tag_fields > 0 {
                     Some(builders_to_arrays(&mut tag_builders.2)?)
                 } else {
@@ -919,7 +919,7 @@ async fn get_local_cram(
                     batch_size,
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 // Clear vectors for the next batch.
                 name.clear();
@@ -1027,7 +1027,7 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
     region_str
         .parse::<noodles_core::Region>()
-        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
+        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{region_str}': {e}")))
 }
 
 /// Get a streaming RecordBatch stream from an indexed CRAM file for one or more regions.
@@ -1056,7 +1056,7 @@ async fn get_indexed_stream(
             let mut indexed_reader =
                 IndexedCramReader::new(&file_path, &index_path, reference_path.as_deref())
                     .map_err(|e| {
-                        DataFusionError::Execution(format!("Failed to open indexed CRAM: {}", e))
+                        DataFusionError::Execution(format!("Failed to open indexed CRAM: {e}"))
                     })?;
 
             let names = indexed_reader.reference_names();
@@ -1120,12 +1120,12 @@ async fn get_indexed_stream(
 
                 let noodles_region = build_noodles_region(region)?;
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("CRAM region query failed: {}", e))
+                    DataFusionError::Execution(format!("CRAM region query failed: {e}"))
                 })?;
 
                 for result in records {
                     let record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("CRAM record read error: {}", e))
+                        DataFusionError::Execution(format!("CRAM record read error: {e}"))
                     })?;
 
                     let chrom_name =

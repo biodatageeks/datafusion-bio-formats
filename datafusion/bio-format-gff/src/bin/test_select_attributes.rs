@@ -6,11 +6,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("🔍 Testing SELECT attributes FROM X behavior");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("============================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
 
             if !attributes_str.is_empty() && attributes_str != "." {
-                println!("   📋 Raw attributes: {}", attributes_str);
+                println!("   📋 Raw attributes: {attributes_str}");
 
                 // Show how attributes would be parsed in order
                 let mut ordered_attrs = Vec::new();
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             value
                         };
 
-                        ordered_attrs.push(format!("{{\"{}\":\"{}\"}}", key, decoded_value));
+                        ordered_attrs.push(format!("{{\"{key}\":\"{decoded_value}\"}}"));
                     }
                 }
                 println!("   ✅ Ordered as: [{}]", ordered_attrs.join(", "));

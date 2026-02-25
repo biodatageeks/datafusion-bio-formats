@@ -28,13 +28,13 @@ MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM
 "#;
 
 async fn create_test_file(content: &str, filename: &str) -> std::io::Result<String> {
-    let file_path = format!("/tmp/{}", filename);
+    let file_path = format!("/tmp/{filename}");
 
     // Create a larger file by repeating the content
     let mut large_content = String::new();
     for i in 0..1000 {
         // Repeat 1000 times for performance testing
-        let modified_content = content.replace("@read", &format!("@read_{}", i));
+        let modified_content = content.replace("@read", &format!("@read_{i}"));
         large_content.push_str(&modified_content);
     }
 
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "   Rows: {}",
         results.iter().map(|b| b.num_rows()).sum::<usize>()
     );
-    println!("   Time: {:?}\n", all_columns_time);
+    println!("   Time: {all_columns_time:?}\n");
 
     // Test 2: Query only name column (should benefit from projection pushdown)
     println!("Test 2: Querying ONLY 'name' column (projection pushdown)");
@@ -86,11 +86,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "   Rows: {}",
         results.iter().map(|b| b.num_rows()).sum::<usize>()
     );
-    println!("   Time: {:?}", name_only_time);
+    println!("   Time: {name_only_time:?}");
 
     // Calculate speedup
     let speedup = all_columns_time.as_nanos() as f64 / name_only_time.as_nanos() as f64;
-    println!("   Speedup: {:.2}x faster\n", speedup);
+    println!("   Speedup: {speedup:.2}x faster\n");
 
     // Test 3: Query name and sequence (partial projection)
     println!("Test 3: Querying 'name' and 'sequence' columns");
@@ -106,10 +106,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "   Rows: {}",
         results.iter().map(|b| b.num_rows()).sum::<usize>()
     );
-    println!("   Time: {:?}", two_columns_time);
+    println!("   Time: {two_columns_time:?}");
 
     let speedup = all_columns_time.as_nanos() as f64 / two_columns_time.as_nanos() as f64;
-    println!("   Speedup vs all columns: {:.2}x faster\n", speedup);
+    println!("   Speedup vs all columns: {speedup:.2}x faster\n");
 
     // Test 4: COUNT query (should skip all field parsing)
     println!("Test 4: COUNT query (maximum optimization)");
@@ -127,10 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap()
             .value(0)
     );
-    println!("   Time: {:?}", count_time);
+    println!("   Time: {count_time:?}");
 
     let speedup = all_columns_time.as_nanos() as f64 / count_time.as_nanos() as f64;
-    println!("   Speedup vs all columns: {:.2}x faster\n", speedup);
+    println!("   Speedup vs all columns: {speedup:.2}x faster\n");
 
     // Test 5: Demonstrate projection with complex query
     println!("Test 5: Complex query with projection");
@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             results.iter().map(|b| b.num_rows()).sum::<usize>()
         );
     }
-    println!("   Time: {:?}\n", complex_time);
+    println!("   Time: {complex_time:?}\n");
 
     // Show sample data
     println!("Sample data from projection query:");

@@ -25,9 +25,9 @@ async fn run_timing_test(
     let mut times = Vec::new();
     let mut total_rows = 0;
 
-    println!("\n🔍 {}", description);
-    println!("Query: {}", query);
-    print!("Running {} times: ", runs);
+    println!("\n🔍 {description}");
+    println!("Query: {query}");
+    print!("Running {runs} times: ");
 
     for i in 0..runs {
         print!("{}.", i + 1);
@@ -52,9 +52,9 @@ async fn run_timing_test(
     let min_time = times.iter().cloned().fold(f64::INFINITY, f64::min);
 
     println!(" Done!");
-    println!("  Rows: {}", total_rows);
-    println!("  Average time: {:.3}s", avg_time);
-    println!("  Best time: {:.3}s", min_time);
+    println!("  Rows: {total_rows}");
+    println!("  Average time: {avg_time:.3}s");
+    println!("  Best time: {min_time:.3}s");
     println!(
         "  Throughput: {:.0} rows/sec (avg)",
         total_rows as f64 / avg_time
@@ -72,11 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let object_storage_options = create_object_storage_options();
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} does not exist!", file_path);
+        eprintln!("❌ Error: File {file_path} does not exist!");
         return Ok(());
     }
 
-    println!("📁 File: {} (~146MB, 7.75M records)", file_path);
+    println!("📁 File: {file_path} (~146MB, 7.75M records)");
 
     let table = GffTableProvider::new(
         file_path.to_string(),
@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 results.push((description.to_string(), avg_time, min_time, rows));
             }
             Err(e) => {
-                println!("❌ Query failed: {}", e);
+                println!("❌ Query failed: {e}");
             }
         }
     }
@@ -159,10 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             baseline_time / avg_time
         };
-        println!(
-            "{:<65} {:>10.3} {:>10.3} {:>14.1}x",
-            description, avg_time, min_time, speedup
-        );
+        println!("{description:<65} {avg_time:>10.3} {min_time:>10.3} {speedup:>14.1}x");
     }
 
     println!("\n🎯 Key Performance Insights");
@@ -174,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let chr1_efficiency =
                 (*chr1_rows as f64 / *baseline_rows as f64) / (chr1_avg / baseline_avg);
 
-            println!("• chr1 filter shows {:.1}x speedup", chr1_speedup);
+            println!("• chr1 filter shows {chr1_speedup:.1}x speedup");
             println!(
                 "• chr1 processes {:.1}% of data in {:.1}% of time (efficiency: {:.1}x)",
                 (*chr1_rows as f64 / *baseline_rows as f64) * 100.0,
@@ -188,7 +185,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gene_efficiency =
                 (*gene_rows as f64 / *baseline_rows as f64) / (gene_avg / baseline_avg);
 
-            println!("• chr1+gene filter shows {:.1}x speedup", gene_speedup);
+            println!("• chr1+gene filter shows {gene_speedup:.1}x speedup");
             println!(
                 "• chr1+gene processes {:.3}% of data in {:.1}% of time (efficiency: {:.1}x)",
                 (*gene_rows as f64 / *baseline_rows as f64) * 100.0,

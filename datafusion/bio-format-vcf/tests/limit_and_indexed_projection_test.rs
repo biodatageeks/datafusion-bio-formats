@@ -29,7 +29,7 @@ chr1	1000	rs10	C	A	120	PASS	DP=55
 "#;
 
 async fn create_test_vcf_file(test_name: &str) -> std::io::Result<String> {
-    let temp_file = format!("/tmp/test_limit_{}.vcf", test_name);
+    let temp_file = format!("/tmp/test_limit_{test_name}.vcf");
     fs::write(&temp_file, SAMPLE_VCF_CONTENT).await?;
     Ok(temp_file)
 }

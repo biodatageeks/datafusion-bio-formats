@@ -18,7 +18,7 @@ async fn create_test_gff_file_with_attributes() -> std::io::Result<String> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let temp_file = format!("/tmp/test_attribute_projection_{}.gff", nanos);
+    let temp_file = format!("/tmp/test_attribute_projection_{nanos}.gff");
     fs::write(&temp_file, SAMPLE_GFF_CONTENT_WITH_ATTRIBUTES).await?;
     Ok(temp_file)
 }

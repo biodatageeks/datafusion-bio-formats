@@ -70,7 +70,7 @@ pub fn build_vcf_header_lines(
         .get(VCF_FILE_FORMAT_KEY)
         .map(|s| s.as_str())
         .unwrap_or("VCFv4.3");
-    lines.push(format!("##fileformat={}", file_format));
+    lines.push(format!("##fileformat={file_format}"));
 
     // Add FILTER definitions from metadata using shared utilities
     if let Some(filters_json) = schema_metadata.get(VCF_FILTERS_KEY) {
@@ -93,7 +93,7 @@ pub fn build_vcf_header_lines(
             for contig in contigs {
                 let mut line = format!("##contig=<ID={}", contig.id);
                 if let Some(length) = contig.length {
-                    line.push_str(&format!(",length={}", length));
+                    line.push_str(&format!(",length={length}"));
                 }
                 line.push('>');
                 lines.push(line);
@@ -121,8 +121,7 @@ pub fn build_vcf_header_lines(
             let (vcf_type, number, description) = get_info_field_metadata(field, info_name);
 
             lines.push(format!(
-                "##INFO=<ID={},Number={},Type={},Description=\"{}\">",
-                info_name, number, vcf_type, description
+                "##INFO=<ID={info_name},Number={number},Type={vcf_type},Description=\"{description}\">"
             ));
         }
     }
@@ -136,8 +135,7 @@ pub fn build_vcf_header_lines(
             let (vcf_type, number, description) = get_format_field_metadata(field, format_name);
 
             lines.push(format!(
-                "##FORMAT=<ID={},Number={},Type={},Description=\"{}\">",
-                format_name, number, vcf_type, description
+                "##FORMAT=<ID={format_name},Number={number},Type={vcf_type},Description=\"{description}\">"
             ));
         }
     }
@@ -166,7 +164,7 @@ fn get_info_field_metadata(field: &Field, field_name: &str) -> (String, String, 
     let description = metadata
         .get(VCF_FIELD_DESCRIPTION_KEY)
         .cloned()
-        .unwrap_or_else(|| format!("{} field", field_name));
+        .unwrap_or_else(|| format!("{field_name} field"));
 
     (vcf_type, number, description)
 }
@@ -199,7 +197,7 @@ fn get_format_field_metadata(field: &Field, format_name: &str) -> (String, Strin
     let description = metadata
         .get(VCF_FIELD_DESCRIPTION_KEY)
         .cloned()
-        .unwrap_or_else(|| format!("{} format field", format_name));
+        .unwrap_or_else(|| format!("{format_name} format field"));
 
     (vcf_type, number, description)
 }
@@ -217,7 +215,7 @@ fn find_format_field<'a>(
 
     // Try multi-sample naming convention: {sample}_{format}
     for sample_name in sample_names {
-        let column_name = format!("{}_{}", sample_name, format_name);
+        let column_name = format!("{sample_name}_{format_name}");
         if let Ok(idx) = schema.index_of(&column_name) {
             return Some(schema.field(idx));
         }

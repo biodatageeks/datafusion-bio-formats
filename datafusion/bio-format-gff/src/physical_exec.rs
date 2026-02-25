@@ -68,7 +68,7 @@ impl DisplayAs for GffExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "GffExec: projection=[{}]", proj_str)
+        write!(f, "GffExec: projection=[{proj_str}]")
     }
 }
 
@@ -371,7 +371,7 @@ fn load_attributes(
     let mut vec_attributes: Vec<Attribute> = Vec::with_capacity(estimated_capacity);
 
     for (tag, value) in attributes.as_ref().iter() {
-        debug!("Loading attribute: {} with value: {:?}", tag, value);
+        debug!("Loading attribute: {tag} with value: {value:?}");
         match value {
             Value::String(v) => vec_attributes.push(Attribute {
                 tag: tag.to_string(),       // Still need owned string for Attribute struct
@@ -511,8 +511,7 @@ async fn get_remote_gff_stream(
     let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
 
     debug!(
-        "GFF remote projection {:?}: needs_chrom={}, needs_end={}, needs_type={}, needs_source={}",
-        projection, needs_chrom, needs_end, needs_type, needs_source
+        "GFF remote projection {projection:?}: needs_chrom={needs_chrom}, needs_end={needs_end}, needs_type={needs_type}, needs_source={needs_source}"
     );
 
     //unnest builder
@@ -627,7 +626,7 @@ async fn get_remote_gff_stream(
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let attribute_arrays = if unnest_enable {
                     Some(builders_to_arrays(&mut attribute_builders.2))
                 } else {
@@ -656,7 +655,7 @@ async fn get_remote_gff_stream(
                     batch_size,
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 // Clear vectors for the next batch.
                 chroms.clear();
@@ -883,7 +882,7 @@ async fn get_local_gff(
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let batch = build_record_batch_optimized(
                     Arc::clone(&schema.clone()),
                     &chroms,
@@ -911,7 +910,7 @@ async fn get_local_gff(
                     batch_size,
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 // Clear vectors for the next batch.
                 chroms.clear();
@@ -1129,13 +1128,12 @@ fn build_record_batch_optimized(
         )
         .map_err(|e| {
             DataFusionError::Execution(format!(
-                "Error creating empty GFF batch for COUNT(*): {:?}",
-                e
+                "Error creating empty GFF batch for COUNT(*): {e:?}"
             ))
         })
     } else {
         RecordBatch::try_new(schema, arrays).map_err(|e| {
-            DataFusionError::Execution(format!("Error creating optimized GFF batch: {:?}", e))
+            DataFusionError::Execution(format!("Error creating optimized GFF batch: {e:?}"))
         })
     }
 }
@@ -1201,7 +1199,7 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
     region_str
         .parse::<noodles_core::Region>()
-        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
+        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{region_str}': {e}")))
 }
 
 /// Get a streaming RecordBatch stream from an indexed GFF file for one or more regions.
@@ -1230,7 +1228,7 @@ async fn get_indexed_gff_stream(
         let mut read_and_send = || -> Result<(), DataFusionError> {
             let mut indexed_reader =
                 IndexedGffReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed GFF: {}", e))
+                    DataFusionError::Execution(format!("Failed to open indexed GFF: {e}"))
                 })?;
 
             // Determine which fields are needed
@@ -1291,12 +1289,12 @@ async fn get_indexed_gff_stream(
                 let noodles_region = build_noodles_region(region)?;
 
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("GFF region query failed: {}", e))
+                    DataFusionError::Execution(format!("GFF region query failed: {e}"))
                 })?;
 
                 for result in records {
                     let raw_record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("GFF indexed record read error: {}", e))
+                        DataFusionError::Execution(format!("GFF indexed record read error: {e}"))
                     })?;
 
                     // Parse the raw GFF line (tab-separated, 9 fields)
