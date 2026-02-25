@@ -247,6 +247,187 @@ async fn test_empty_tag_list() {
     assert_eq!(schema.fields().len(), 12);
 }
 
+/// All 14 tags present in the 10x_pbmc_tags.bam test file
+const TENX_TAGS: [&str; 14] = [
+    "NH", "HI", "AS", "nM", "ts", "RG", "RE", "xf", "CR", "CY", "CB", "UR", "UY", "UB",
+];
+
+#[tokio::test]
+async fn test_read_10x_genomics_tags() {
+    // Tests reading all 14 tags from a 10X Genomics Cell Ranger BAM file.
+    // This file contains 10 reads with single-cell barcodes, UMIs, and 10X-specific tags.
+    // Key characteristics:
+    // - RG values start with "10k_..." (numeric prefix that can cause SQL parsing issues)
+    // - RE tag is type 'A' (character) with values like 'I' (intronic)
+    // - ts tag is only present in some reads (5 of 10), testing nullable handling
+    // - nM and xf are lowercase/mixed-case tag names (10X-specific)
+    let tag_fields: Vec<String> = TENX_TAGS.iter().map(|s| s.to_string()).collect();
+
+    let provider = BamTableProvider::new(
+        "tests/10x_pbmc_tags.bam".to_string(),
+        None,
+        true, // 0-based coordinates
+        Some(tag_fields),
+        false,
+    )
+    .await
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+
+    // Verify schema: 12 core + 14 tags = 26 fields
+    let df = ctx.table("bam").await.unwrap();
+    let schema = df.schema();
+    assert_eq!(
+        schema.fields().len(),
+        26,
+        "Expected 12 core + 14 tag fields = 26"
+    );
+
+    // Verify tag field types
+    use datafusion::arrow::datatypes::DataType;
+
+    // Integer tags
+    for tag in &["NH", "HI", "AS", "nM", "ts", "xf"] {
+        let field = schema.field_with_name(None, tag).unwrap();
+        assert_eq!(
+            field.data_type(),
+            &DataType::Int32,
+            "Tag {tag} should be Int32"
+        );
+    }
+
+    // String tags
+    for tag in &["RG", "CR", "CY", "CB", "UR", "UY", "UB"] {
+        let field = schema.field_with_name(None, tag).unwrap();
+        assert_eq!(
+            field.data_type(),
+            &DataType::Utf8,
+            "Tag {tag} should be Utf8"
+        );
+    }
+
+    // Character tag (RE) → stored as Utf8
+    let re_field = schema.field_with_name(None, "RE").unwrap();
+    assert_eq!(re_field.data_type(), &DataType::Utf8);
+
+    // Read all records with all tags projected
+    let df = ctx
+        .sql(
+            "SELECT name, chrom, start, \
+             \"NH\", \"HI\", \"AS\", \"nM\", \"ts\", \
+             \"RG\", \"RE\", \"xf\", \
+             \"CR\", \"CY\", \"CB\", \"UR\", \"UY\", \"UB\" \
+             FROM bam",
+        )
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 10, "Should have 10 reads");
+
+    // Verify RG values contain the "10k_..." prefix (the problematic pattern from polars-bio#319)
+    use datafusion::arrow::array::StringArray;
+    for batch in &results {
+        let rg_col = batch
+            .column_by_name("RG")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..rg_col.len() {
+            if !rg_col.is_null(i) {
+                let rg_val = rg_col.value(i);
+                assert!(
+                    rg_val.starts_with("10k_"),
+                    "RG value '{rg_val}' should start with '10k_'"
+                );
+            }
+        }
+    }
+
+    // Verify CB/CR barcode values are non-null and look like barcodes (16bp + suffix)
+    for batch in &results {
+        let cb_col = batch
+            .column_by_name("CB")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let cr_col = batch
+            .column_by_name("CR")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            if !cb_col.is_null(i) {
+                let cb = cb_col.value(i);
+                assert!(cb.len() >= 16, "CB '{cb}' should be at least 16 chars");
+                assert!(
+                    cb.chars()
+                        .all(|c| c.is_ascii_alphabetic() || c == '-' || c.is_ascii_digit()),
+                    "CB '{cb}' should contain only ACGT and barcode suffix chars"
+                );
+            }
+            if !cr_col.is_null(i) {
+                let cr = cr_col.value(i);
+                assert!(cr.len() >= 16, "CR '{cr}' should be at least 16 chars");
+            }
+        }
+    }
+
+    // Verify RE character tag values are readable single characters
+    for batch in &results {
+        let re_col = batch
+            .column_by_name("RE")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..re_col.len() {
+            if !re_col.is_null(i) {
+                let re_val = re_col.value(i);
+                assert_eq!(
+                    re_val.len(),
+                    1,
+                    "RE value '{re_val}' should be a single character"
+                );
+                assert!(
+                    re_val.chars().next().unwrap().is_ascii_alphabetic(),
+                    "RE value '{re_val}' should be an ASCII letter"
+                );
+            }
+        }
+    }
+
+    // Verify ts tag is nullable (present in only some reads)
+    use datafusion::arrow::array::Int32Array;
+    let mut ts_non_null = 0;
+    let mut ts_null = 0;
+    for batch in &results {
+        let ts_col = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..ts_col.len() {
+            if ts_col.is_null(i) {
+                ts_null += 1;
+            } else {
+                ts_non_null += 1;
+            }
+        }
+    }
+    assert!(
+        ts_non_null > 0 && ts_null > 0,
+        "ts tag should be present in some reads ({ts_non_null}) and absent in others ({ts_null})"
+    );
+}
+
 /// All 13 tags present in the bam_with_tags.bam test file
 const ALL_TAGS: [&str; 13] = [
     "E2", "MD", "MQ", "NM", "OC", "OP", "OQ", "PG", "RG", "UQ", "XN", "XT", "ZQ",
