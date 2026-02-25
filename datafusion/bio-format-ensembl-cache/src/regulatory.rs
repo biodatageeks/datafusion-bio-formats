@@ -313,6 +313,7 @@ where
     }
 
     let root = decode_nstore(&bytes)?;
+    drop(bytes);
     let root_obj = root.as_hash().ok_or_else(|| {
         exec_err(format!(
             "Decoded storable root must be object for {}",
