@@ -154,11 +154,15 @@ impl ProviderInner {
             Some(target) => target,
             None => {
                 let session_target = state.config().target_partitions();
-                // Native storable decoding still materializes substantial in-memory state
-                // per file. Cap default parallelism unless user explicitly overrides.
+                // Storable transcript/regulatory decoding can still retain substantial
+                // object graph state due alias references. Default to modest parallelism.
                 let use_storable = self.kind != EnsemblEntityKind::Variation
                     && self.cache_info.serializer_type.as_deref() == Some("storable");
-                if use_storable { 1 } else { session_target }
+                if use_storable {
+                    session_target.min(2)
+                } else {
+                    session_target
+                }
             }
         }
         .max(1);
