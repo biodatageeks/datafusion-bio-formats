@@ -1,5 +1,4 @@
 use crate::errors::{Result, exec_err};
-use crate::row::{CellValue, Row};
 use crate::schema::exon_list_data_type;
 use datafusion::arrow::array::{
     ArrayRef, BooleanBuilder, Float64Builder, Int8Builder, Int32Builder, Int64Builder, ListBuilder,
@@ -625,104 +624,6 @@ impl AnyBuilder {
         }
     }
 
-    fn append(&mut self, value: Option<&CellValue>) {
-        match self {
-            Self::Utf8(builder) => match value {
-                Some(CellValue::Utf8(v)) => builder.append_value(v),
-                Some(CellValue::Int64(v)) => builder.append_value(v.to_string()),
-                Some(CellValue::Int32(v)) => builder.append_value(v.to_string()),
-                Some(CellValue::Int8(v)) => builder.append_value(v.to_string()),
-                Some(CellValue::Float64(v)) => builder.append_value(v.to_string()),
-                Some(CellValue::Boolean(v)) => builder.append_value(v.to_string()),
-                _ => builder.append_null(),
-            },
-            Self::Int64(builder) => match value {
-                Some(CellValue::Int64(v)) => builder.append_value(*v),
-                Some(CellValue::Int32(v)) => builder.append_value(*v as i64),
-                Some(CellValue::Int8(v)) => builder.append_value(*v as i64),
-                Some(CellValue::Utf8(v)) => match v.parse::<i64>() {
-                    Ok(parsed) => builder.append_value(parsed),
-                    Err(_) => builder.append_null(),
-                },
-                _ => builder.append_null(),
-            },
-            Self::Int32(builder) => match value {
-                Some(CellValue::Int64(v)) => match i32::try_from(*v) {
-                    Ok(parsed) => builder.append_value(parsed),
-                    Err(_) => builder.append_null(),
-                },
-                Some(CellValue::Int32(v)) => builder.append_value(*v),
-                Some(CellValue::Int8(v)) => builder.append_value(*v as i32),
-                Some(CellValue::Utf8(v)) => match v.parse::<i32>() {
-                    Ok(parsed) => builder.append_value(parsed),
-                    Err(_) => builder.append_null(),
-                },
-                _ => builder.append_null(),
-            },
-            Self::Int8(builder) => match value {
-                Some(CellValue::Int64(v)) => match i8::try_from(*v) {
-                    Ok(parsed) => builder.append_value(parsed),
-                    Err(_) => builder.append_null(),
-                },
-                Some(CellValue::Int32(v)) => match i8::try_from(*v) {
-                    Ok(parsed) => builder.append_value(parsed),
-                    Err(_) => builder.append_null(),
-                },
-                Some(CellValue::Int8(v)) => builder.append_value(*v),
-                Some(CellValue::Utf8(v)) => match v.parse::<i8>() {
-                    Ok(parsed) => builder.append_value(parsed),
-                    Err(_) => builder.append_null(),
-                },
-                _ => builder.append_null(),
-            },
-            Self::Float64(builder) => match value {
-                Some(CellValue::Float64(v)) => builder.append_value(*v),
-                Some(CellValue::Int64(v)) => builder.append_value(*v as f64),
-                Some(CellValue::Int32(v)) => builder.append_value(*v as f64),
-                Some(CellValue::Int8(v)) => builder.append_value(*v as f64),
-                Some(CellValue::Utf8(v)) => match v.parse::<f64>() {
-                    Ok(parsed) => builder.append_value(parsed),
-                    Err(_) => builder.append_null(),
-                },
-                _ => builder.append_null(),
-            },
-            Self::Boolean(builder) => match value {
-                Some(CellValue::Boolean(v)) => builder.append_value(*v),
-                Some(CellValue::Int64(v)) => builder.append_value(*v != 0),
-                Some(CellValue::Int32(v)) => builder.append_value(*v != 0),
-                Some(CellValue::Int8(v)) => builder.append_value(*v != 0),
-                Some(CellValue::Utf8(v)) => match v.to_ascii_lowercase().as_str() {
-                    "true" | "1" | "yes" => builder.append_value(true),
-                    "false" | "0" | "no" => builder.append_value(false),
-                    _ => builder.append_null(),
-                },
-                _ => builder.append_null(),
-            },
-            Self::ExonList(list_builder) => match value {
-                Some(CellValue::ExonList(exons)) => {
-                    let struct_builder = list_builder.values();
-                    for &(start, end, phase) in exons {
-                        struct_builder
-                            .field_builder::<Int64Builder>(0)
-                            .unwrap()
-                            .append_value(start);
-                        struct_builder
-                            .field_builder::<Int64Builder>(1)
-                            .unwrap()
-                            .append_value(end);
-                        struct_builder
-                            .field_builder::<Int8Builder>(2)
-                            .unwrap()
-                            .append_value(phase);
-                        struct_builder.append(true);
-                    }
-                    list_builder.append(true);
-                }
-                _ => list_builder.append(false),
-            },
-        }
-    }
-
     fn finish(self) -> ArrayRef {
         match self {
             Self::Utf8(mut builder) => Arc::new(builder.finish()),
@@ -734,34 +635,6 @@ impl AnyBuilder {
             Self::ExonList(mut builder) => Arc::new(builder.finish()),
         }
     }
-}
-
-pub(crate) fn rows_to_record_batch(schema: SchemaRef, rows: &[Row]) -> Result<RecordBatch> {
-    if schema.fields().is_empty() {
-        let options = RecordBatchOptions::new().with_row_count(Some(rows.len()));
-        return RecordBatch::try_new_with_options(schema, Vec::new(), &options).map_err(|e| {
-            exec_err(format!(
-                "Failed building zero-column Ensembl cache RecordBatch: {}",
-                e
-            ))
-        });
-    }
-
-    let mut builders: Vec<AnyBuilder> = schema
-        .fields()
-        .iter()
-        .map(|field| AnyBuilder::for_type(field.data_type(), rows.len()))
-        .collect::<Result<Vec<_>>>()?;
-
-    for row in rows {
-        for (field, builder) in schema.fields().iter().zip(builders.iter_mut()) {
-            builder.append(row.get(field.name().as_str()));
-        }
-    }
-
-    let arrays: Vec<ArrayRef> = builders.into_iter().map(AnyBuilder::finish).collect();
-    RecordBatch::try_new(schema, arrays)
-        .map_err(|e| exec_err(format!("Failed building Ensembl cache RecordBatch: {}", e)))
 }
 
 #[cfg(test)]

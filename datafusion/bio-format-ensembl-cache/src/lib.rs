@@ -13,7 +13,6 @@ mod filter;
 mod info;
 mod physical_exec;
 mod regulatory;
-mod row;
 mod schema;
 mod table_provider;
 mod transcript;

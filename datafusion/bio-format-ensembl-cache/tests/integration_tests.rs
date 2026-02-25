@@ -277,6 +277,28 @@ async fn transcript_storable_query_works() -> datafusion::common::Result<()> {
 }
 
 #[tokio::test]
+async fn transcript_storable_streams_with_small_batch_size() -> datafusion::common::Result<()> {
+    let mut options = EnsemblCacheOptions::new(fixture_path("transcript_storable"));
+    options.batch_size_hint = Some(1);
+    let provider = TranscriptTableProvider::new(options)?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx.sql("SELECT stable_id FROM tx").await?.collect().await?;
+    let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+
+    assert_eq!(total_rows, 2);
+    assert!(
+        batches.len() >= 2,
+        "expected multiple batches with batch_size_hint=1, got {}",
+        batches.len()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn transcript_sereal_query_works() -> datafusion::common::Result<()> {
     let provider =
         TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("transcript_sereal")))?;
