@@ -32,12 +32,10 @@ datafusion = { version = "52.1.0", default-features = false, features = [
 datafusion-execution = "52.1.0"
 async-trait = "0.1.85"
 opendal = { version = "0.53.3", features = ["services-gcs", "services-s3","layers-blocking", "services-azblob", "services-http"] }
-noodles = { version = "0.93.0",  features = ["bam", "vcf", "bgzf", "cram", "async"]}
-
-noodles-bgzf = { version = "0.36.0",features = ["libdeflate"] }
-noodles-cram  = { git = "https://github.com/biodatageeks/noodles.git",rev = "da905fff4909ada93e407c780456332fe113858b", features = ["async"] }
-noodles-sam = { git = "https://github.com/biodatageeks/noodles.git",rev = "da905fff4909ada93e407c780456332fe113858b" }
-noodles-fasta = { git = "https://github.com/biodatageeks/noodles.git",rev = "da905fff4909ada93e407c780456332fe113858b", features = ["async"] }
+noodles-bgzf = { version = "0.36.0",features = ["libdeflate", "async"] }
+noodles-cram  = { git = "https://github.com/biodatageeks/noodles.git",rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db", features = ["async"] }
+noodles-sam = { git = "https://github.com/biodatageeks/noodles.git",rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db" }
+noodles-fasta = { git = "https://github.com/biodatageeks/noodles.git",rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db", features = ["async"] }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "rt", "macros"] }
 tokio-util = {  version="0.7.13", features = ["io-util", "compat"] }
 bytes = "1.10.0"

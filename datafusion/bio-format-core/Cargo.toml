@@ -13,7 +13,6 @@ readme = "README.md"
 datafusion-execution.workspace = true
 datafusion.workspace = true
 opendal.workspace = true
-noodles.workspace = true
 noodles-bgzf.workspace = true
 noodles-sam.workspace = true
 tokio-util.workspace = true
@@ -28,4 +27,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile = "3.10.1"
-noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b" }
+noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db" }
