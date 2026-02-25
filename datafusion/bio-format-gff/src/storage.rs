@@ -6,7 +6,7 @@ use datafusion_bio_format_core::object_storage::{
 };
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
-use noodles::bgzf;
+use noodles_bgzf as bgzf;
 use noodles_gff as gff;
 use noodles_gff::feature::RecordBuf;
 use noodles_gff::feature::record_buf::Attributes;

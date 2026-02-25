@@ -12,7 +12,7 @@ use datafusion_bio_format_core::object_storage::{
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
-use noodles::bgzf;
+use noodles_bgzf as bgzf;
 use noodles_fastq as fastq;
 use noodles_fastq::Record;
 use noodles_fastq::io::Reader;

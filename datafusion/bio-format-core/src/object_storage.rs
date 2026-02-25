@@ -2,7 +2,7 @@ use async_compression::tokio::bufread::GzipDecoder;
 use futures::StreamExt;
 use log;
 use log::debug;
-use noodles::bgzf;
+use noodles_bgzf as bgzf;
 use noodles_bgzf::AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use opendal::services::{Azblob, Gcs, S3};

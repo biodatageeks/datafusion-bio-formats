@@ -13,7 +13,6 @@ readme = "README.md"
 datafusion.workspace = true
 opendal.workspace = true
 tokio-util.workspace = true
-noodles = { workspace = true }
 noodles-bgzf.workspace = true
 tokio.workspace = true
 bytes.workspace = true
