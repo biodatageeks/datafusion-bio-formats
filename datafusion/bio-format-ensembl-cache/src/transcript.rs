@@ -1,7 +1,8 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, TopHashArrayEvent, canonical_json_string as canonical_storable_json_string,
-    stream_nstore_top_hash_array_items_from_reader,
+    collect_nstore_alias_slots_from_reader,
+    stream_nstore_top_hash_array_items_with_alias_slots_from_reader,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -562,34 +563,45 @@ where
         on_row_added(batch)
     };
 
-    let reader = open_binary_reader(source_file)?;
-    stream_nstore_top_hash_array_items_from_reader(reader, |event| match event {
-        TopHashArrayEvent::Item(item) => {
-            let chrom_present = item
-                .as_hash()
-                .and_then(|obj| {
-                    sv_str(obj.get("chr").or_else(|| obj.get("chrom"))).or_else(|| {
-                        obj.get("slice")
-                            .and_then(SValue::as_hash)
-                            .and_then(|slice| sv_str(slice.get("seq_region_name")))
-                    })
-                })
-                .is_some();
+    let alias_slots = collect_nstore_alias_slots_from_reader(open_binary_reader(source_file)?)
+        .map_err(|e| {
+            exec_err(format!(
+                "Failed collecting storable alias slots from {}: {}",
+                source_file.display(),
+                e
+            ))
+        })?;
 
-            if chrom_present {
-                process_item(&item, None)
-            } else {
-                pending_without_chrom.push(item);
-                Ok(true)
-            }
-        }
-        TopHashArrayEvent::EntryKey(region_chr) => {
-            for item in pending_without_chrom.drain(..) {
-                if !process_item(&item, Some(region_chr.as_str()))? {
-                    return Ok(false);
+    let reader = open_binary_reader(source_file)?;
+    stream_nstore_top_hash_array_items_with_alias_slots_from_reader(reader, alias_slots, |event| {
+        match event {
+            TopHashArrayEvent::Item(item) => {
+                let chrom_present = item
+                    .as_hash()
+                    .and_then(|obj| {
+                        sv_str(obj.get("chr").or_else(|| obj.get("chrom"))).or_else(|| {
+                            obj.get("slice")
+                                .and_then(SValue::as_hash)
+                                .and_then(|slice| sv_str(slice.get("seq_region_name")))
+                        })
+                    })
+                    .is_some();
+
+                if chrom_present {
+                    process_item(&item, None)
+                } else {
+                    pending_without_chrom.push(item);
+                    Ok(true)
                 }
             }
-            Ok(true)
+            TopHashArrayEvent::EntryKey(region_chr) => {
+                for item in pending_without_chrom.drain(..) {
+                    if !process_item(&item, Some(region_chr.as_str()))? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
         }
     })
     .map_err(|e| {

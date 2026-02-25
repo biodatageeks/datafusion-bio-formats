@@ -1,7 +1,8 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, canonical_json_string as canonical_storable_json_string,
-    stream_nstore_top_hash_entries_from_reader,
+    collect_nstore_alias_slots_from_reader,
+    stream_nstore_top_hash_entries_with_alias_slots_from_reader,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -305,92 +306,105 @@ pub(crate) fn parse_regulatory_storable_file_into<F>(
 where
     F: FnMut(&mut BatchBuilder) -> Result<bool>,
 {
-    let reader = open_binary_reader(source_file)?;
-    stream_nstore_top_hash_entries_from_reader(reader, |region_chr, region_payload| {
-        let Some(region_obj) = region_payload.as_hash() else {
-            return Ok(true);
-        };
+    let alias_slots = collect_nstore_alias_slots_from_reader(open_binary_reader(source_file)?)
+        .map_err(|e| {
+            exec_err(format!(
+                "Failed collecting storable alias slots from {}: {}",
+                source_file.display(),
+                e
+            ))
+        })?;
 
-        for (container_name, features_payload) in region_obj {
-            let container_kind = infer_kind_from_name(container_name);
-            let Some(items) = features_payload.as_array() else {
-                continue;
+    let reader = open_binary_reader(source_file)?;
+    stream_nstore_top_hash_entries_with_alias_slots_from_reader(
+        reader,
+        alias_slots,
+        |region_chr, region_payload| {
+            let Some(region_obj) = region_payload.as_hash() else {
+                return Ok(true);
             };
 
-            for item in items {
-                let obj = item.as_hash().ok_or_else(|| {
-                    exec_err(format!(
-                        "Regulatory storable object payload must be a hash in {}",
-                        source_file.display()
-                    ))
-                })?;
-
-                let kind = container_kind.unwrap_or_else(|| infer_kind_storable(obj));
-                if kind != target {
+            for (container_name, features_payload) in region_obj {
+                let container_kind = infer_kind_from_name(container_name);
+                let Some(items) = features_payload.as_array() else {
                     continue;
-                }
+                };
 
-                let chrom = sv_str(obj.get("chr").or_else(|| obj.get("chrom")))
-                    .or_else(|| {
-                        obj.get("slice")
-                            .and_then(SValue::as_hash)
-                            .and_then(|slice| sv_str(slice.get("seq_region_name")))
-                    })
-                    .unwrap_or_else(|| region_chr.clone());
-
-                let source_start = sv_i64(obj.get("start")).ok_or_else(|| {
-                    exec_err(format!(
-                        "Regulatory storable object missing start in {}",
-                        source_file.display()
-                    ))
-                })?;
-                let source_end = sv_i64(obj.get("end")).ok_or_else(|| {
-                    exec_err(format!(
-                        "Regulatory storable object missing end in {}",
-                        source_file.display()
-                    ))
-                })?;
-                let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
-                let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
-                if !predicate.matches(&chrom, start, end) {
-                    continue;
-                }
-
-                let strand = sv_i64(obj.get("strand"))
-                    .and_then(|v| i8::try_from(v).ok())
-                    .ok_or_else(|| {
+                for item in items {
+                    let obj = item.as_hash().ok_or_else(|| {
                         exec_err(format!(
-                            "Regulatory storable object missing strand in {}",
+                            "Regulatory storable object payload must be a hash in {}",
                             source_file.display()
                         ))
                     })?;
 
-                let core = RegulatoryRowCore {
-                    chrom,
-                    start,
-                    end,
-                    strand,
-                    target,
-                };
+                    let kind = container_kind.unwrap_or_else(|| infer_kind_storable(obj));
+                    if kind != target {
+                        continue;
+                    }
 
-                append_regulatory_storable_row_into(
-                    item,
-                    obj,
-                    core,
-                    source_file_str,
-                    batch,
-                    col_idx,
-                    provenance,
-                )?;
+                    let chrom = sv_str(obj.get("chr").or_else(|| obj.get("chrom")))
+                        .or_else(|| {
+                            obj.get("slice")
+                                .and_then(SValue::as_hash)
+                                .and_then(|slice| sv_str(slice.get("seq_region_name")))
+                        })
+                        .unwrap_or_else(|| region_chr.clone());
 
-                if !on_row_added(batch)? {
-                    return Ok(false);
+                    let source_start = sv_i64(obj.get("start")).ok_or_else(|| {
+                        exec_err(format!(
+                            "Regulatory storable object missing start in {}",
+                            source_file.display()
+                        ))
+                    })?;
+                    let source_end = sv_i64(obj.get("end")).ok_or_else(|| {
+                        exec_err(format!(
+                            "Regulatory storable object missing end in {}",
+                            source_file.display()
+                        ))
+                    })?;
+                    let start = normalize_genomic_start(source_start, coordinate_system_zero_based);
+                    let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
+                    if !predicate.matches(&chrom, start, end) {
+                        continue;
+                    }
+
+                    let strand = sv_i64(obj.get("strand"))
+                        .and_then(|v| i8::try_from(v).ok())
+                        .ok_or_else(|| {
+                            exec_err(format!(
+                                "Regulatory storable object missing strand in {}",
+                                source_file.display()
+                            ))
+                        })?;
+
+                    let core = RegulatoryRowCore {
+                        chrom,
+                        start,
+                        end,
+                        strand,
+                        target,
+                    };
+
+                    append_regulatory_storable_row_into(
+                        item,
+                        obj,
+                        core,
+                        source_file_str,
+                        batch,
+                        col_idx,
+                        provenance,
+                    )?;
+
+                    if !on_row_added(batch)? {
+                        return Ok(false);
+                    }
                 }
             }
-        }
 
-        Ok(true)
-    })
+            Ok(true)
+        },
+    )
     .map_err(|e| {
         exec_err(format!(
             "Failed streaming storable regulatory payload from {}: {}",
