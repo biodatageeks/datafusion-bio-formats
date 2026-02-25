@@ -152,18 +152,7 @@ impl ProviderInner {
         let predicate = extract_simple_predicate(filters);
         let requested_partitions = match self.options.target_partitions {
             Some(target) => target,
-            None => {
-                let session_target = state.config().target_partitions();
-                // Storable transcript/regulatory decoding can still retain substantial
-                // object graph state due alias references. Default to modest parallelism.
-                let use_storable = self.kind != EnsemblEntityKind::Variation
-                    && self.cache_info.serializer_type.as_deref() == Some("storable");
-                if use_storable {
-                    session_target.min(2)
-                } else {
-                    session_target
-                }
-            }
+            None => state.config().target_partitions(),
         }
         .max(1);
         let num_partitions = requested_partitions.min(self.files.len().max(1));

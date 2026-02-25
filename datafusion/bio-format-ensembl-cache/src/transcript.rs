@@ -1,8 +1,8 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, TopHashArrayEvent, canonical_json_string as canonical_storable_json_string,
-    collect_nstore_alias_slots_from_reader,
-    stream_nstore_top_hash_array_items_with_alias_slots_from_reader,
+    collect_nstore_alias_counts_from_reader,
+    stream_nstore_top_hash_array_items_with_alias_counts_from_reader,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -563,18 +563,20 @@ where
         on_row_added(batch)
     };
 
-    let alias_slots = collect_nstore_alias_slots_from_reader(open_binary_reader(source_file)?)
+    let alias_counts = collect_nstore_alias_counts_from_reader(open_binary_reader(source_file)?)
         .map_err(|e| {
             exec_err(format!(
-                "Failed collecting storable alias slots from {}: {}",
+                "Failed collecting storable alias references from {}: {}",
                 source_file.display(),
                 e
             ))
         })?;
 
     let reader = open_binary_reader(source_file)?;
-    stream_nstore_top_hash_array_items_with_alias_slots_from_reader(reader, alias_slots, |event| {
-        match event {
+    stream_nstore_top_hash_array_items_with_alias_counts_from_reader(
+        reader,
+        alias_counts,
+        |event| match event {
             TopHashArrayEvent::Item(item) => {
                 let chrom_present = item
                     .as_hash()
@@ -602,8 +604,8 @@ where
                 }
                 Ok(true)
             }
-        }
-    })
+        },
+    )
     .map_err(|e| {
         exec_err(format!(
             "Failed streaming storable transcript payload from {}: {}",
