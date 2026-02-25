@@ -31,7 +31,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::Sender;
 
+/// Per-column UTF-8 threshold. A batch is flushed when any single string
+/// column exceeds this limit, preventing Arrow i32 offset overflow.
 const UTF8_FLUSH_THRESHOLD_BYTES: usize = 64 * 1024 * 1024;
+
+/// Total UTF-8 threshold across all string columns combined.  This bounds
+/// per-batch memory when many large text columns are projected (e.g.
+/// `SELECT *` including raw_object_json, cdna_seq, peptide_seq).
+const UTF8_TOTAL_FLUSH_THRESHOLD_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct EnsemblCacheExec {
@@ -300,6 +307,7 @@ fn dispatch_row(
 
     if batch_builder.len() >= batch_size
         || batch_builder.max_utf8_bytes() >= UTF8_FLUSH_THRESHOLD_BYTES
+        || batch_builder.total_utf8_bytes() >= UTF8_TOTAL_FLUSH_THRESHOLD_BYTES
     {
         let batch = batch_builder.finish()?;
         if tx.blocking_send(Ok(batch)).is_err() {

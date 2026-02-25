@@ -227,6 +227,13 @@ where
     parser.stream_top_hash_array_items_with_known_keys(&entry_keys, &mut on_item)
 }
 
+/// Maximum byte length for canonical JSON output before truncation.
+///
+/// Alias-resolved SValue trees can expand shared sub-trees multiple times,
+/// causing pathological JSON blowup for objects with many internal aliases.
+/// This cap prevents a single object from consuming gigabytes of memory.
+const CANONICAL_JSON_MAX_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+
 pub(crate) fn canonical_json_string(value: &SValue) -> String {
     fn write_escaped_str(out: &mut String, value: &str) {
         out.push('"');
@@ -249,7 +256,11 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
         out.push('"');
     }
 
-    fn write_value(out: &mut String, value: &SValue) {
+    /// Returns `false` if the output exceeded the limit and was truncated.
+    fn write_value(out: &mut String, value: &SValue, limit: usize) -> bool {
+        if out.len() >= limit {
+            return false;
+        }
         match value {
             SValue::Null => out.push_str("null"),
             SValue::Int(v) => out.push_str(&v.to_string()),
@@ -260,7 +271,9 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
                     if idx > 0 {
                         out.push(',');
                     }
-                    write_value(out, item);
+                    if !write_value(out, item, limit) {
+                        return false;
+                    }
                 }
                 out.push(']');
             }
@@ -274,7 +287,9 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
                     first = false;
                     write_escaped_str(out, k);
                     out.push(':');
-                    write_value(out, v);
+                    if !write_value(out, v, limit) {
+                        return false;
+                    }
                 }
                 out.push('}');
             }
@@ -286,14 +301,25 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
                 out.push(',');
                 write_escaped_str(out, "__value");
                 out.push(':');
-                write_value(out, value);
+                if !write_value(out, value, limit) {
+                    return false;
+                }
                 out.push('}');
             }
         }
+        true
     }
 
     let mut out = String::new();
-    write_value(&mut out, value);
+    if !write_value(&mut out, value, CANONICAL_JSON_MAX_BYTES) {
+        // Find the nearest char boundary at or before the limit.
+        let mut truncate_at = CANONICAL_JSON_MAX_BYTES.min(out.len());
+        while truncate_at > 0 && !out.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
+        }
+        out.truncate(truncate_at);
+        out.push_str("...<truncated>");
+    }
     out
 }
 
