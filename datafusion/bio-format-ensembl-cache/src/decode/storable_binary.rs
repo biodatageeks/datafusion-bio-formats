@@ -1,5 +1,5 @@
 use crate::errors::{Result, exec_err};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 
@@ -92,9 +92,20 @@ pub(crate) fn decode_nstore_from_reader<R: Read>(reader: R) -> Result<SValue> {
     parser.parse_value()
 }
 
+/// Collect all alias slots (`REFP` / opcode `0x00` targets) referenced in an
+/// nstore payload. This is used by streaming decoders to retain only slots that
+/// can be addressed by future aliases.
+pub(crate) fn collect_nstore_alias_slots_from_reader<R: Read>(reader: R) -> Result<HashSet<usize>> {
+    let mut collector = AliasCollector::new(reader);
+    collector.consume_header()?;
+    collector.collect_value()?;
+    Ok(collector.alias_slots)
+}
+
 /// Streams top-level hash entries from an nstore payload.
 ///
 /// Callback returns `Ok(true)` to continue or `Ok(false)` to stop early.
+#[cfg(test)]
 pub(crate) fn stream_nstore_top_hash_entries_from_reader<R, F>(
     reader: R,
     mut on_entry: F,
@@ -104,6 +115,22 @@ where
     F: FnMut(String, SValue) -> Result<bool>,
 {
     let mut parser = Parser::new(reader);
+    parser.consume_header()?;
+    parser.stream_top_hash_entries(&mut on_entry)
+}
+
+/// Same as `stream_nstore_top_hash_entries_from_reader`, but keeps only slots
+/// present in `alias_slots` in the internal reference table.
+pub(crate) fn stream_nstore_top_hash_entries_with_alias_slots_from_reader<R, F>(
+    reader: R,
+    alias_slots: HashSet<usize>,
+    mut on_entry: F,
+) -> Result<()>
+where
+    R: Read,
+    F: FnMut(String, SValue) -> Result<bool>,
+{
+    let mut parser = Parser::with_alias_slots(reader, alias_slots);
     parser.consume_header()?;
     parser.stream_top_hash_entries(&mut on_entry)
 }
@@ -118,6 +145,7 @@ pub(crate) enum TopHashArrayEvent {
 /// Events are emitted in sequence as:
 /// `Item(...)` repeated for each entry value, then `EntryKey(...)` for that entry.
 /// Callback can return `Ok(false)` to stop early.
+#[cfg(test)]
 pub(crate) fn stream_nstore_top_hash_array_items_from_reader<R, F>(
     reader: R,
     mut on_event: F,
@@ -127,6 +155,22 @@ where
     F: FnMut(TopHashArrayEvent) -> Result<bool>,
 {
     let mut parser = Parser::new(reader);
+    parser.consume_header()?;
+    parser.stream_top_hash_array_items(&mut on_event)
+}
+
+/// Same as `stream_nstore_top_hash_array_items_from_reader`, but keeps only
+/// slots present in `alias_slots` in the internal reference table.
+pub(crate) fn stream_nstore_top_hash_array_items_with_alias_slots_from_reader<R, F>(
+    reader: R,
+    alias_slots: HashSet<usize>,
+    mut on_event: F,
+) -> Result<()>
+where
+    R: Read,
+    F: FnMut(TopHashArrayEvent) -> Result<bool>,
+{
+    let mut parser = Parser::with_alias_slots(reader, alias_slots);
     parser.consume_header()?;
     parser.stream_top_hash_array_items(&mut on_event)
 }
@@ -201,35 +245,47 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
     out
 }
 
-const STREAM_WARMUP_ITEMS: usize = 64;
-const STREAM_PINNED_REF_PREFIX: usize = 8_192;
-
 struct Parser<R> {
     reader: R,
     pos: usize,
     classes: Vec<Arc<str>>,
     refs: Vec<Option<SValue>>,
-    alias_pinned: Vec<bool>,
-    streamed_items: usize,
+    alias_slots: Option<HashSet<usize>>,
 }
 
 impl<R: Read> Parser<R> {
+    #[cfg(test)]
     fn new(reader: R) -> Self {
         Self {
             reader,
             pos: 0,
             classes: Vec::new(),
             refs: Vec::new(),
-            alias_pinned: Vec::new(),
-            streamed_items: 0,
+            alias_slots: None,
+        }
+    }
+
+    fn with_alias_slots(reader: R, alias_slots: HashSet<usize>) -> Self {
+        Self {
+            reader,
+            pos: 0,
+            classes: Vec::new(),
+            refs: Vec::new(),
+            alias_slots: Some(alias_slots),
         }
     }
 
     fn push_ref(&mut self, value: Option<SValue>) -> usize {
         let slot = self.refs.len();
         self.refs.push(value);
-        self.alias_pinned.push(false);
         slot
+    }
+
+    fn should_retain_slot(&self, slot: usize) -> bool {
+        match &self.alias_slots {
+            Some(slots) => slots.contains(&slot),
+            None => true,
+        }
     }
 
     fn consume_header(&mut self) -> Result<()> {
@@ -282,24 +338,18 @@ impl<R: Read> Parser<R> {
             )));
         }
 
-        // Keep root slot semantics consistent with parse_value() for alias indexing.
         let root_slot = self.push_ref(Some(SValue::Null));
-
         let len = self.read_u32()? as usize;
 
         for _ in 0..len {
             let value = self.parse_value()?;
-
             let key = self.parse_hash_key()?;
-            let should_continue = on_entry(key, value)?;
-
-            if !should_continue {
+            if !on_entry(key, value)? {
                 break;
             }
         }
 
         self.refs[root_slot] = None;
-
         Ok(())
     }
 
@@ -314,10 +364,9 @@ impl<R: Read> Parser<R> {
             )));
         }
 
-        // Keep root slot semantics consistent with parse_value() for alias indexing.
         let root_slot = self.push_ref(Some(SValue::Null));
-
         let len = self.read_u32()? as usize;
+
         for _ in 0..len {
             if !self
                 .stream_array_value_items(&mut |item| on_event(TopHashArrayEvent::Item(item)))?
@@ -330,8 +379,8 @@ impl<R: Read> Parser<R> {
                 break;
             }
         }
-        self.refs[root_slot] = None;
 
+        self.refs[root_slot] = None;
         Ok(())
     }
 
@@ -368,24 +417,19 @@ impl<R: Read> Parser<R> {
             return Ok(true);
         }
 
-        let slot = self.push_ref(Some(SValue::Null));
+        let slot = self.push_ref(None);
+        let keep_slot = self.should_retain_slot(slot);
 
         let should_continue = match opcode {
             0x02 => {
                 let len = self.read_u32()? as usize;
-                let keep_going = self.stream_inline_array_items(len, on_item)?;
-                // Do not materialize streamed arrays in refs. We keep slot numbering,
-                // but aliases to this slot are unsupported and will surface clearly.
-                self.refs[slot] = None;
-                keep_going
+                self.stream_inline_array_items(slot, len, keep_slot, on_item)?
             }
             0x04 | 0x1b => {
                 let inner = self.read_u8()?;
                 if inner == 0x02 {
                     let len = self.read_u32()? as usize;
-                    let keep_going = self.stream_inline_array_items(len, on_item)?;
-                    self.refs[slot] = None;
-                    keep_going
+                    self.stream_inline_array_items(slot, len, keep_slot, on_item)?
                 } else {
                     let value = self.parse_value_from_opcode(inner)?;
                     let Some(items) = value.as_array() else {
@@ -396,11 +440,15 @@ impl<R: Read> Parser<R> {
                     };
                     for item in items {
                         if !on_item(item.clone())? {
-                            self.refs[slot] = Some(value.clone());
+                            if keep_slot {
+                                self.refs[slot] = Some(value.clone());
+                            }
                             return Ok(false);
                         }
                     }
-                    self.refs[slot] = Some(value);
+                    if keep_slot {
+                        self.refs[slot] = Some(value);
+                    }
                     true
                 }
             }
@@ -414,11 +462,15 @@ impl<R: Read> Parser<R> {
                 };
                 for item in items {
                     if !on_item(item.clone())? {
-                        self.refs[slot] = Some(value.clone());
+                        if keep_slot {
+                            self.refs[slot] = Some(value.clone());
+                        }
                         return Ok(false);
                     }
                 }
-                self.refs[slot] = Some(value);
+                if keep_slot {
+                    self.refs[slot] = Some(value);
+                }
                 true
             }
         };
@@ -426,35 +478,37 @@ impl<R: Read> Parser<R> {
         Ok(should_continue)
     }
 
-    fn stream_inline_array_items<F>(&mut self, len: usize, on_item: &mut F) -> Result<bool>
+    fn stream_inline_array_items<F>(
+        &mut self,
+        slot: usize,
+        len: usize,
+        keep_slot: bool,
+        on_item: &mut F,
+    ) -> Result<bool>
     where
         F: FnMut(SValue) -> Result<bool>,
     {
-        let mut previous_range: Option<(usize, usize)> = None;
+        let mut retained_values = if keep_slot {
+            Some(Vec::with_capacity(len))
+        } else {
+            None
+        };
 
         for _ in 0..len {
-            let item_start = self.refs.len();
             let item = self.parse_value()?;
-            let item_end = self.refs.len();
-
-            let keep_going = on_item(item)?;
-            self.streamed_items = self.streamed_items.saturating_add(1);
-
-            if let Some((start, end)) = previous_range.take() {
-                self.evict_stream_range(start, end);
+            if let Some(values) = retained_values.as_mut() {
+                values.push(item.clone());
             }
-            previous_range = Some((item_start, item_end));
-
-            if !keep_going {
-                if let Some((start, end)) = previous_range.take() {
-                    self.evict_stream_range(start, end);
+            if !on_item(item)? {
+                if let Some(values) = retained_values {
+                    self.refs[slot] = Some(SValue::Array(Arc::new(values)));
                 }
                 return Ok(false);
             }
         }
 
-        if let Some((start, end)) = previous_range.take() {
-            self.evict_stream_range(start, end);
+        if let Some(values) = retained_values {
+            self.refs[slot] = Some(SValue::Array(Arc::new(values)));
         }
 
         Ok(true)
@@ -471,7 +525,7 @@ impl<R: Read> Parser<R> {
             return self.resolve_alias(idx);
         }
 
-        let slot = self.push_ref(Some(SValue::Null));
+        let slot = self.push_ref(None);
 
         let value = match opcode {
             0x01 => {
@@ -513,12 +567,8 @@ impl<R: Read> Parser<R> {
                 let class_len = self.read_u8()? as usize;
                 let class_bytes = self.read_bytes(class_len)?;
                 let class: Arc<str> = String::from_utf8_lossy(&class_bytes).into_owned().into();
-                let class_idx = self.classes.len();
                 self.classes.push(class.clone());
                 let value = self.parse_value()?;
-                if self.classes.get(class_idx).is_none() {
-                    return Err(exec_err("Storable class table corruption detected"));
-                }
                 SValue::Blessed {
                     class,
                     value: Arc::new(value),
@@ -546,15 +596,14 @@ impl<R: Read> Parser<R> {
             }
         };
 
-        self.refs[slot] = Some(value.clone());
+        if self.should_retain_slot(slot) {
+            self.refs[slot] = Some(value.clone());
+        }
+
         Ok(value)
     }
 
-    fn resolve_alias(&mut self, idx: usize) -> Result<SValue> {
-        if let Some(flag) = self.alias_pinned.get_mut(idx) {
-            *flag = true;
-        }
-
+    fn resolve_alias(&self, idx: usize) -> Result<SValue> {
         match self.refs.get(idx) {
             Some(Some(value)) => Ok(value.clone()),
             Some(None) => Err(exec_err(format!(
@@ -567,25 +616,6 @@ impl<R: Read> Parser<R> {
                 idx,
                 self.pos.saturating_sub(1)
             ))),
-        }
-    }
-
-    fn evict_stream_range(&mut self, start: usize, end: usize) {
-        if self.streamed_items < STREAM_WARMUP_ITEMS {
-            return;
-        }
-        if start >= end || end > self.refs.len() {
-            return;
-        }
-
-        for idx in start..end {
-            if idx < STREAM_PINNED_REF_PREFIX {
-                continue;
-            }
-            if self.alias_pinned.get(idx).copied().unwrap_or(false) {
-                continue;
-            }
-            self.refs[idx] = None;
         }
     }
 
@@ -617,6 +647,172 @@ impl<R: Read> Parser<R> {
         let mut bytes = vec![0u8; len];
         self.read_exact_into(&mut bytes)?;
         Ok(bytes)
+    }
+
+    fn read_exact_into(&mut self, buf: &mut [u8]) -> Result<()> {
+        self.reader.read_exact(buf).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                exec_err(format!(
+                    "Unexpected EOF while decoding storable payload at offset {}",
+                    self.pos
+                ))
+            } else {
+                exec_err(format!(
+                    "Failed reading storable payload at offset {}: {}",
+                    self.pos, e
+                ))
+            }
+        })?;
+        self.pos = self.pos.saturating_add(buf.len());
+        Ok(())
+    }
+}
+
+struct AliasCollector<R> {
+    reader: R,
+    pos: usize,
+    class_count: usize,
+    alias_slots: HashSet<usize>,
+}
+
+impl<R: Read> AliasCollector<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            pos: 0,
+            class_count: 0,
+            alias_slots: HashSet::new(),
+        }
+    }
+
+    fn consume_header(&mut self) -> Result<()> {
+        let mut header = [0u8; 6];
+        self.read_exact_into(&mut header)?;
+
+        if &header[0..4] != b"pst0" {
+            return Err(exec_err(
+                "Unsupported storable payload (missing pst0 header)",
+            ));
+        }
+
+        let version_and_order = header[4];
+        let major = version_and_order >> 1;
+        let netorder = (version_and_order & 0x01) == 1;
+        let minor = header[5];
+
+        if major != 2 {
+            return Err(exec_err(format!(
+                "Unsupported storable major version: {}",
+                major
+            )));
+        }
+        if !netorder {
+            return Err(exec_err(
+                "Unsupported non-network-order storable payload in v1 decoder",
+            ));
+        }
+        if minor < 7 {
+            return Err(exec_err(format!(
+                "Unsupported storable minor version: {}",
+                minor
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn collect_value(&mut self) -> Result<()> {
+        let opcode = self.read_u8()?;
+
+        if opcode == 0x00 {
+            let idx = self.read_u32()? as usize;
+            self.alias_slots.insert(idx);
+            return Ok(());
+        }
+
+        match opcode {
+            0x01 => {
+                let len = self.read_u32()? as usize;
+                self.skip_bytes(len)?;
+            }
+            0x02 => {
+                let len = self.read_u32()? as usize;
+                for _ in 0..len {
+                    self.collect_value()?;
+                }
+            }
+            0x03 => {
+                let len = self.read_u32()? as usize;
+                for _ in 0..len {
+                    self.collect_value()?;
+                    self.collect_hash_key()?;
+                }
+            }
+            0x04 | 0x1b => self.collect_value()?,
+            0x05 => {}
+            0x08 => {
+                self.skip_bytes(1)?;
+            }
+            0x09 => {
+                self.skip_bytes(4)?;
+            }
+            0x0a => {
+                let len = self.read_u8()? as usize;
+                self.skip_bytes(len)?;
+            }
+            0x11 => {
+                let class_len = self.read_u8()? as usize;
+                self.skip_bytes(class_len)?;
+                self.class_count = self.class_count.saturating_add(1);
+                self.collect_value()?;
+            }
+            0x12 => {
+                let class_idx = self.read_u8()? as usize;
+                if class_idx >= self.class_count {
+                    return Err(exec_err(format!(
+                        "Invalid storable class index: {}",
+                        class_idx
+                    )));
+                }
+                self.collect_value()?;
+            }
+            other => {
+                return Err(exec_err(format!(
+                    "Unsupported storable opcode 0x{other:02x} at byte offset {}",
+                    self.pos.saturating_sub(1)
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn collect_hash_key(&mut self) -> Result<()> {
+        let len = self.read_u32()? as usize;
+        self.skip_bytes(len)
+    }
+
+    fn read_u8(&mut self) -> Result<u8> {
+        let mut buf = [0u8; 1];
+        self.read_exact_into(&mut buf)?;
+        Ok(buf[0])
+    }
+
+    fn read_u32(&mut self) -> Result<u32> {
+        let mut buf = [0u8; 4];
+        self.read_exact_into(&mut buf)?;
+        Ok(u32::from_be_bytes(buf))
+    }
+
+    fn skip_bytes(&mut self, len: usize) -> Result<()> {
+        let mut remaining = len;
+        let mut scratch = [0u8; 8192];
+        while remaining > 0 {
+            let take = remaining.min(scratch.len());
+            self.read_exact_into(&mut scratch[..take])?;
+            remaining -= take;
+        }
+        Ok(())
     }
 
     fn read_exact_into(&mut self, buf: &mut [u8]) -> Result<()> {
@@ -736,5 +932,18 @@ mod tests {
 
         assert_eq!(seen_items, vec![Some(1)]);
         assert_eq!(seen_keys, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn collects_alias_slots() {
+        // Generated via Perl:
+        // my $v = { q => "x" };
+        // nstore({ a => $v, b => $v });
+        let hex =
+            "70737430050b03000000020403000000010a0178000000017100000001620400000000020000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let slots = collect_nstore_alias_slots_from_reader(Cursor::new(bytes)).expect("collect");
+        assert!(slots.contains(&2));
     }
 }
