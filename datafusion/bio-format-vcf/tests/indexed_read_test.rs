@@ -83,16 +83,8 @@ async fn test_vcf_multi_chromosome_query() -> datafusion::error::Result<()> {
     )
     .await;
 
-    assert!(
-        chroms.contains("21"),
-        "Expected 21 in results: {:?}",
-        chroms
-    );
-    assert!(
-        chroms.contains("22"),
-        "Expected 22 in results: {:?}",
-        chroms
-    );
+    assert!(chroms.contains("21"), "Expected 21 in results: {chroms:?}");
+    assert!(chroms.contains("22"), "Expected 22 in results: {chroms:?}");
 
     let count = count_rows(&ctx, "SELECT chrom FROM vcf WHERE chrom IN ('21', '22')").await;
     assert_eq!(count, 500 + 500, "Expected 1000 variants on chr 21 + 22");
@@ -114,10 +106,7 @@ async fn test_vcf_full_scan_total_count() -> datafusion::error::Result<()> {
     assert_eq!(
         total,
         chr21 + chr22,
-        "Full scan total ({}) should equal sum of per-chrom counts (21={}, 22={})",
-        total,
-        chr21,
-        chr22
+        "Full scan total ({total}) should equal sum of per-chrom counts (21={chr21}, 22={chr22})"
     );
 
     Ok(())
@@ -134,9 +123,7 @@ async fn test_vcf_record_level_filter() -> datafusion::error::Result<()> {
     assert!(filtered > 0, "Expected some variants with quality >= 50");
     assert!(
         filtered < total,
-        "Filtered count ({}) should be < total ({})",
-        filtered,
-        total
+        "Filtered count ({filtered}) should be < total ({total})"
     );
 
     Ok(())
@@ -160,9 +147,7 @@ async fn test_vcf_combined_filters() -> datafusion::error::Result<()> {
     );
     assert!(
         combined <= chr21_total,
-        "Combined filter count ({}) should be <= chr21 total ({})",
-        combined,
-        chr21_total
+        "Combined filter count ({combined}) should be <= chr21 total ({chr21_total})"
     );
 
     Ok(())
@@ -187,9 +172,7 @@ async fn test_vcf_region_with_positions() -> datafusion::error::Result<()> {
     );
     assert!(
         region_count < chr21_total,
-        "Region count ({}) should be < chr21 total ({})",
-        region_count,
-        chr21_total
+        "Region count ({region_count}) should be < chr21 total ({chr21_total})"
     );
 
     Ok(())
@@ -220,8 +203,7 @@ async fn test_vcf_indexed_correctness() -> datafusion::error::Result<()> {
 
     assert_eq!(
         indexed_count, manual_count,
-        "Indexed chr21 count ({}) should equal manual count from full scan ({})",
-        indexed_count, manual_count
+        "Indexed chr21 count ({indexed_count}) should equal manual count from full scan ({manual_count})"
     );
 
     Ok(())

@@ -128,7 +128,7 @@ impl FastqRemoteReader {
         let compression_type =
             get_compression_type(file_path.clone(), None, object_storage_options.clone())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
         match compression_type {
             CompressionType::BGZF => {
                 let reader =
@@ -161,6 +161,7 @@ impl FastqRemoteReader {
 }
 
 /// A FASTQ reader that automatically detects and handles local file compression
+#[allow(clippy::large_enum_variant)]
 pub enum FastqLocalReader {
     /// BGZF-compressed local FASTQ file reader
     BGZF(fastq::io::Reader<bgzf::Reader<std::fs::File>>),
@@ -193,7 +194,7 @@ impl FastqLocalReader {
                 opts.clone(),
             )
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?,
+            .map_err(std::io::Error::other)?,
             None => {
                 // Detect compression from magic bytes synchronously
                 let detected = crate::physical_exec::detect_compression_sync(&file_path)?;

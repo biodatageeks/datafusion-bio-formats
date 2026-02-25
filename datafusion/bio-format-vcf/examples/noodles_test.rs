@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish();
 
     let setup_time = start_time.elapsed();
-    println!("Setup time: {:?}", setup_time);
+    println!("Setup time: {setup_time:?}");
 
     let stream_start = std::time::Instant::now();
     let stream = operator
@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_bytes_stream(..)
         .await?;
     let stream_time = stream_start.elapsed();
-    println!("Stream setup time: {:?}", stream_time);
+    println!("Stream setup time: {stream_time:?}");
 
     let inner = bgzf::r#async::Reader::new(StreamReader::new(stream));
     let mut reader = vcf::r#async::io::Reader::new(inner);
@@ -78,8 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let batch_time = batch_start.elapsed();
             let records_per_sec = BATCH_SIZE as f64 / batch_time.as_secs_f64();
             println!(
-                "Processed batch of {} records in {:?} ({:.2} records/sec). Total records: {}",
-                BATCH_SIZE, batch_time, records_per_sec, count
+                "Processed batch of {BATCH_SIZE} records in {batch_time:?} ({records_per_sec:.2} records/sec). Total records: {count}"
             );
             batch_count = 0;
             batch_start = std::time::Instant::now();
@@ -88,9 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_time = start_time.elapsed();
     let avg_speed = count as f64 / total_time.as_secs_f64();
-    println!("Total records processed: {}", count);
-    println!("Total time: {:?}", total_time);
-    println!("Average speed: {:.2} records/sec", avg_speed);
+    println!("Total records processed: {count}");
+    println!("Total time: {total_time:?}");
+    println!("Average speed: {avg_speed:.2} records/sec");
     Ok(())
 }
 

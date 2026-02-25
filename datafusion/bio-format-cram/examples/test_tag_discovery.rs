@@ -6,7 +6,7 @@ use std::sync::Arc;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_file = "/Users/mwiewior/research/git/polars-bio/tests/data/io/cram/test.cram";
 
-    println!("Testing CRAM tag discovery with file: {}", test_file);
+    println!("Testing CRAM tag discovery with file: {test_file}");
     println!("{}", "=".repeat(80));
 
     // Test 1: Using try_new_with_inferred_schema (should discover tags)
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             df.show().await?;
         }
         Err(e) => {
-            println!("Query failed as expected: {}", e);
+            println!("Query failed as expected: {e}");
         }
     }
 

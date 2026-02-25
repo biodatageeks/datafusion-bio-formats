@@ -59,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (query, description) in queries {
-        println!("\n{}: {}", description, query);
+        println!("\n{description}: {query}");
         let start = Instant::now();
         let df = ctx.sql(query).await?;
         let results = df.collect().await?;

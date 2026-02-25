@@ -107,7 +107,7 @@ pub(crate) fn detect_local_strategy(
     match compression {
         DetectedCompression::Bgzf => {
             // Try to read GZI index
-            let gzi_path = format!("{}.gzi", file_path);
+            let gzi_path = format!("{file_path}.gzi");
             match gzi::fs::read(&gzi_path) {
                 Ok(index) => {
                     let partitions = get_bgzf_partition_bounds(&index, target_partitions);
@@ -291,7 +291,7 @@ impl DisplayAs for FastqExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "FastqExec: projection=[{}]", proj_str)
+        write!(f, "FastqExec: projection=[{proj_str}]")
     }
 }
 
@@ -589,7 +589,7 @@ fn execute_bgzf_partition(
     Ok(Box::pin(RecordBatchStreamAdapter::new(
         schema.clone(),
         rx.map(move |(item, count)| {
-            debug!("Partition {}: processed {} rows", partition, count);
+            debug!("Partition {partition}: processed {count} rows");
             item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
         }),
     )))
@@ -653,7 +653,7 @@ fn execute_byte_range_partition(
     Ok(Box::pin(RecordBatchStreamAdapter::new(
         schema.clone(),
         rx.map(move |(item, count)| {
-            debug!("Partition {}: processed {} rows", partition, count);
+            debug!("Partition {partition}: processed {count} rows");
             item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
         }),
     )))
@@ -768,7 +768,7 @@ async fn get_remote_fastq_stream(
                 count,
             )?;
             batch_num += 1;
-            debug!("Batch {}: {} records (total: {})", batch_num, count, record_num);
+            debug!("Batch {batch_num}: {count} records (total: {record_num})");
             yield batch;
         }
     };
@@ -839,7 +839,7 @@ async fn get_local_fastq(
                 count,
             )?;
             batch_num += 1;
-            debug!("Batch {}: {} records (total: {})", batch_num, count, record_num);
+            debug!("Batch {batch_num}: {count} records (total: {record_num})");
             yield batch;
         }
     };

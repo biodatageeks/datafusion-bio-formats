@@ -115,10 +115,7 @@ impl PairsTableProvider {
         let storage_type = get_storage_type(file_path.clone());
         if !matches!(storage_type, StorageType::LOCAL) {
             return Err(datafusion::common::DataFusionError::NotImplemented(
-                format!(
-                    "Remote Pairs file reading is not yet supported: {}",
-                    file_path
-                ),
+                format!("Remote Pairs file reading is not yet supported: {file_path}"),
             ));
         }
 
@@ -128,8 +125,7 @@ impl PairsTableProvider {
         let header =
             crate::storage::get_local_pairs_header(&file_path, &storage_opts).map_err(|e| {
                 datafusion::common::DataFusionError::Execution(format!(
-                    "Failed to read Pairs header from {}: {}",
-                    file_path, e
+                    "Failed to read Pairs header from {file_path}: {e}"
                 ))
             })?;
 
@@ -138,14 +134,11 @@ impl PairsTableProvider {
         // Auto-discover index file
         let (index_path, contig_names) =
             if let Some((idx_path, idx_fmt)) = discover_pairs_index(&file_path) {
-                debug!(
-                    "Discovered Pairs index: {} (format: {:?})",
-                    idx_path, idx_fmt
-                );
+                debug!("Discovered Pairs index: {idx_path} (format: {idx_fmt:?})");
                 let names = match IndexedPairsReader::new(&file_path, &idx_path) {
                     Ok(reader) => reader.contig_names().to_vec(),
                     Err(e) => {
-                        debug!("Failed to read Pairs index contig names: {}", e);
+                        debug!("Failed to read Pairs index contig names: {e}");
                         Vec::new()
                     }
                 };
@@ -195,13 +188,13 @@ impl TableProvider for PairsTableProvider {
             .iter()
             .map(|expr| {
                 if self.index_path.is_some() && is_pairs_index_filter(expr) {
-                    debug!("Pairs filter can be pushed down (indexed): {:?}", expr);
+                    debug!("Pairs filter can be pushed down (indexed): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else if can_push_down_record_filter(expr, &self.schema) {
-                    debug!("Pairs filter can be pushed down (record-level): {:?}", expr);
+                    debug!("Pairs filter can be pushed down (record-level): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else {
-                    debug!("Pairs filter cannot be pushed down: {:?}", expr);
+                    debug!("Pairs filter cannot be pushed down: {expr:?}");
                     TableProviderFilterPushDown::Unsupported
                 }
             })

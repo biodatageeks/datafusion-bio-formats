@@ -19,7 +19,7 @@ KKKKKKKKKKKK
 "#;
 
 async fn create_test_fastq_file(test_name: &str) -> std::io::Result<String> {
-    let temp_file = format!("/tmp/test_projection_{}.fastq", test_name);
+    let temp_file = format!("/tmp/test_projection_{test_name}.fastq");
     fs::write(&temp_file, SAMPLE_FASTQ_CONTENT).await?;
     Ok(temp_file)
 }

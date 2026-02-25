@@ -11,16 +11,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vcf_file = "/tmp/homo_sapiens-chr1.vcf.bgz";
 
     if !std::path::Path::new(vcf_file).exists() {
-        eprintln!("❌ VCF file not found: {}", vcf_file);
+        eprintln!("❌ VCF file not found: {vcf_file}");
         return Ok(());
     }
 
     println!("🧬 Baseline VCF Performance Test (Regular VcfTableProvider)");
-    println!("📁 File: {}", vcf_file);
+    println!("📁 File: {vcf_file}");
 
     let metadata = std::fs::metadata(vcf_file)?;
     let file_size_mb = metadata.len() as f64 / (1024.0 * 1024.0);
-    println!("💾 File size: {:.2} MB", file_size_mb);
+    println!("💾 File size: {file_size_mb:.2} MB");
     println!();
 
     {
@@ -76,13 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|batch| batch.num_rows())
             .sum::<usize>();
 
-        println!("   📊 Records: {}", record_count);
-        println!("   🎯 Projection rows: {}", projection_rows);
-        println!("   ⏱️  COUNT time: {:?}", count_duration);
-        println!("   🔍 Projection time: {:?}", projection_duration);
+        println!("   📊 Records: {record_count}");
+        println!("   🎯 Projection rows: {projection_rows}");
+        println!("   ⏱️  COUNT time: {count_duration:?}");
+        println!("   🔍 Projection time: {projection_duration:?}");
 
         let records_per_sec = record_count as f64 / count_duration.as_secs_f64();
-        println!("   🚀 Throughput: {:.0} records/sec", records_per_sec);
+        println!("   🚀 Throughput: {records_per_sec:.0} records/sec");
 
         // Show sample data
         if let Some(batch) = proj_result.first() {

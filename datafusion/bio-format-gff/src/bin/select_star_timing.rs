@@ -35,10 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     let batches_count = batches.len();
 
-    println!("File: {}", file_path);
-    println!("Batches: {}", batches_count);
-    println!("Rows: {}", rows);
-    println!("Elapsed: {:?}", elapsed);
+    println!("File: {file_path}");
+    println!("Batches: {batches_count}");
+    println!("Rows: {rows}");
+    println!("Elapsed: {elapsed:?}");
     if elapsed.as_secs_f64() > 0.0 {
         println!(
             "Throughput: {:.0} rows/sec",

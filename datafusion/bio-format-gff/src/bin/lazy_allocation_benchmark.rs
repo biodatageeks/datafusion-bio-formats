@@ -114,15 +114,12 @@ async fn benchmark_eager_allocation(
 
         record_count += 1;
         if record_count % 300_000 == 0 {
-            println!("  OLD: {} records", record_count);
+            println!("  OLD: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ OLD (eager allocation): {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ OLD (eager allocation): {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -151,15 +148,12 @@ async fn benchmark_lazy_allocation(
 
         record_count += 1;
         if record_count % 300_000 == 0 {
-            println!("  NEW: {} records", record_count);
+            println!("  NEW: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ NEW (lazy allocation): {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ NEW (lazy allocation): {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -168,11 +162,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("🧠 LAZY HASHMAP ALLOCATION Benchmark");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("====================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -190,20 +184,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let eager_rps = 3_148_136.0 / eager_time.as_secs_f64();
     let lazy_rps = 3_148_136.0 / lazy_time.as_secs_f64();
 
-    println!(
-        "🐌 OLD (eager):     {:?} ({:.0} records/sec)",
-        eager_time, eager_rps
-    );
-    println!(
-        "⚡ NEW (lazy):      {:?} ({:.0} records/sec)",
-        lazy_time, lazy_rps
-    );
+    println!("🐌 OLD (eager):     {eager_time:?} ({eager_rps:.0} records/sec)");
+    println!("⚡ NEW (lazy):      {lazy_time:?} ({lazy_rps:.0} records/sec)");
 
     let improvement = eager_time.as_secs_f64() / lazy_time.as_secs_f64();
 
     println!();
     println!("📊 OPTIMIZATION IMPACT:");
-    println!("Lazy allocation is {:.2}x FASTER", improvement);
+    println!("Lazy allocation is {improvement:.2}x FASTER");
 
     if improvement > 1.2 {
         println!("✅ GOOD! Lazy allocation provides measurable benefit");

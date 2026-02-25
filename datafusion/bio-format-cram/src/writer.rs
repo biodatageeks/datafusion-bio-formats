@@ -63,9 +63,8 @@ impl CramLocalWriter {
             }
         }
 
-        let file = File::create(path.as_ref()).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create CRAM file: {}", e))
-        })?;
+        let file = File::create(path.as_ref())
+            .map_err(|e| DataFusionError::Execution(format!("Failed to create CRAM file: {e}")))?;
         let buf_writer = BufWriter::new(file);
 
         // Build writer with reference repository if available
@@ -82,13 +81,12 @@ impl CramLocalWriter {
             let fai_path = format!("{}.fai", ref_path.display());
             let index_file = File::open(&fai_path).map_err(|e| {
                 DataFusionError::Execution(format!(
-                    "Failed to open reference index {}: {}",
-                    fai_path, e
+                    "Failed to open reference index {fai_path}: {e}"
                 ))
             })?;
             let mut index_reader = fasta::fai::io::Reader::new(std::io::BufReader::new(index_file));
             let index = index_reader.read_index().map_err(|e| {
-                DataFusionError::Execution(format!("Failed to read FASTA index: {}", e))
+                DataFusionError::Execution(format!("Failed to read FASTA index: {e}"))
             })?;
 
             let indexed_reader = fasta::io::IndexedReader::new(fasta_reader, index);
@@ -127,7 +125,7 @@ impl CramLocalWriter {
     pub fn write_header(&mut self, header: &sam::Header) -> Result<()> {
         self.writer
             .write_header(header)
-            .map_err(|e| DataFusionError::Execution(format!("Failed to write CRAM header: {}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Failed to write CRAM header: {e}")))
     }
 
     /// Writes a single alignment record to the file
@@ -147,7 +145,7 @@ impl CramLocalWriter {
     ) -> Result<()> {
         self.writer
             .write_alignment_record(header, record)
-            .map_err(|e| DataFusionError::Execution(format!("Failed to write CRAM record: {}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Failed to write CRAM record: {e}")))
     }
 
     /// Writes multiple alignment records to the file
@@ -184,11 +182,12 @@ impl CramLocalWriter {
     /// Returns an error if finishing fails
     pub fn finish(mut self, header: &sam::Header) -> Result<()> {
         self.writer.finish(header).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to finish CRAM stream: {}", e))
+            DataFusionError::Execution(format!("Failed to finish CRAM stream: {e}"))
         })?;
-        self.writer.get_mut().flush().map_err(|e| {
-            DataFusionError::Execution(format!("Failed to flush CRAM output: {}", e))
-        })?;
+        self.writer
+            .get_mut()
+            .flush()
+            .map_err(|e| DataFusionError::Execution(format!("Failed to flush CRAM output: {e}")))?;
         Ok(())
     }
 }
@@ -277,7 +276,7 @@ mod tests {
         // Build reference repository
         let fasta_file = File::open(ref_path).unwrap();
         let fasta_reader = std::io::BufReader::new(fasta_file);
-        let fai_path = format!("{}.fai", ref_path);
+        let fai_path = format!("{ref_path}.fai");
         let index_file = File::open(&fai_path).unwrap();
         let mut index_reader = fasta::fai::io::Reader::new(std::io::BufReader::new(index_file));
         let index = index_reader.read_index().unwrap();
@@ -297,7 +296,7 @@ mod tests {
             match result {
                 Ok(record) => records.push(record),
                 Err(e) => {
-                    eprintln!("Error reading record: {}", e);
+                    eprintln!("Error reading record: {e}");
                     break;
                 }
             }
@@ -370,6 +369,6 @@ mod tests {
             count, num_original,
             "Should read back the same number of records"
         );
-        eprintln!("Roundtrip successful: {} records", count);
+        eprintln!("Roundtrip successful: {count} records");
     }
 }

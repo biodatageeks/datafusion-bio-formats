@@ -67,7 +67,7 @@ impl DisplayAs for PairsExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "PairsExec: projection=[{}]", proj_str)
+        write!(f, "PairsExec: projection=[{proj_str}]")
     }
 }
 
@@ -226,7 +226,7 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
     region_str
         .parse::<noodles_core::Region>()
-        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{}': {}", region_str, e)))
+        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{region_str}': {e}")))
 }
 
 enum ColumnValue {
@@ -337,7 +337,7 @@ async fn get_local_pairs_stream(
     let stream = try_stream! {
         let opts = object_storage_options.unwrap_or_default();
         let mut reader = new_local_reader(&file_path, opts).await
-            .map_err(|e| DataFusionError::Execution(format!("Failed to open Pairs file: {}", e)))?;
+            .map_err(|e| DataFusionError::Execution(format!("Failed to open Pairs file: {e}")))?;
 
         let num_columns = columns.len();
         let mut column_data: Vec<Vec<ColumnValue>> = (0..num_columns).map(|_| Vec::with_capacity(batch_size)).collect();
@@ -347,7 +347,7 @@ async fn get_local_pairs_stream(
         loop {
             line.clear();
             let bytes = reader.read_line(&mut line)
-                .map_err(|e| DataFusionError::Execution(format!("Read error: {}", e)))?;
+                .map_err(|e| DataFusionError::Execution(format!("Read error: {e}")))?;
             if bytes == 0 {
                 break;
             }
@@ -446,7 +446,7 @@ async fn get_indexed_pairs_stream(
         let mut read_and_send = || -> Result<(), DataFusionError> {
             let mut indexed_reader =
                 IndexedPairsReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed Pairs: {}", e))
+                    DataFusionError::Execution(format!("Failed to open indexed Pairs: {e}"))
                 })?;
 
             let num_columns = columns.len();
@@ -476,15 +476,12 @@ async fn get_indexed_pairs_stream(
 
                 let noodles_region = build_noodles_region(region)?;
                 let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("Pairs region query failed: {}", e))
+                    DataFusionError::Execution(format!("Pairs region query failed: {e}"))
                 })?;
 
                 for result in records {
                     let raw_record = result.map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Pairs indexed record read error: {}",
-                            e
-                        ))
+                        DataFusionError::Execution(format!("Pairs indexed record read error: {e}"))
                     })?;
 
                     let line: &str = raw_record.as_ref();

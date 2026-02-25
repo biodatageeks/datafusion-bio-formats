@@ -125,15 +125,12 @@ async fn benchmark_regular_keys(
 
         record_count += 1;
         if record_count % 300_000 == 0 {
-            println!("  OLD: {} records", record_count);
+            println!("  OLD: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ OLD (regular keys): {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ OLD (regular keys): {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -162,15 +159,12 @@ async fn benchmark_interned_keys(
 
         record_count += 1;
         if record_count % 300_000 == 0 {
-            println!("  NEW: {} records", record_count);
+            println!("  NEW: {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ NEW (interned keys): {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ NEW (interned keys): {record_count} records in {duration:?}");
 
     // Report cache statistics
     KEY_CACHE.with(|cache| {
@@ -186,11 +180,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("🔑 STRING INTERNING FOR KEYS Benchmark");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("======================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -208,20 +202,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let old_rps = 3_148_136.0 / old_time.as_secs_f64();
     let new_rps = 3_148_136.0 / new_time.as_secs_f64();
 
-    println!(
-        "🐌 OLD (regular):     {:?} ({:.0} records/sec)",
-        old_time, old_rps
-    );
-    println!(
-        "⚡ NEW (interned):    {:?} ({:.0} records/sec)",
-        new_time, new_rps
-    );
+    println!("🐌 OLD (regular):     {old_time:?} ({old_rps:.0} records/sec)");
+    println!("⚡ NEW (interned):    {new_time:?} ({new_rps:.0} records/sec)");
 
     let improvement = old_time.as_secs_f64() / new_time.as_secs_f64();
 
     println!();
     println!("📊 OPTIMIZATION IMPACT:");
-    println!("String interning is {:.2}x FASTER", improvement);
+    println!("String interning is {improvement:.2}x FASTER");
 
     if improvement > 1.5 {
         println!("✅ EXCELLENT! String interning provides significant benefit");

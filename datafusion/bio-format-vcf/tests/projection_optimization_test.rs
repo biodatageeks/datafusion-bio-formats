@@ -30,7 +30,7 @@ chr2	400	.	T	G	50	PASS	AC=1;AF=0.25;AN=4;DP=40;SVTYPE=SNV;FS=0.8;MQ=49.5;QD=11.2
 "#;
 
 async fn create_test_vcf_file_with_many_info(test_name: &str) -> std::io::Result<String> {
-    let temp_file = format!("/tmp/test_projection_optimization_{}.vcf", test_name);
+    let temp_file = format!("/tmp/test_projection_optimization_{test_name}.vcf");
     fs::write(&temp_file, SAMPLE_VCF_CONTENT_WITH_MANY_INFO).await?;
     Ok(temp_file)
 }
@@ -90,7 +90,7 @@ async fn test_projection_optimization_core_fields_only() -> Result<(), Box<dyn s
     let query = "SELECT chrom, start, id FROM vcf_table LIMIT 10";
     let df = ctx.sql(query).await?;
 
-    println!("Query 1 (core fields only): {:?}", query);
+    println!("Query 1 (core fields only): {query:?}");
 
     let results = df.collect().await?;
     println!("Results count: {}", results.len());
@@ -151,7 +151,7 @@ async fn test_projection_optimization_with_info_fields() -> Result<(), Box<dyn s
     let query = "SELECT chrom, start, `AC`, `DP` FROM vcf_table LIMIT 10";
     let df = ctx.sql(query).await?;
 
-    println!("Query 2 (with specific INFO fields): {:?}", query);
+    println!("Query 2 (with specific INFO fields): {query:?}");
 
     let results = df.collect().await?;
     println!("Results count: {}", results.len());
@@ -213,7 +213,7 @@ async fn test_count_optimization() -> Result<(), Box<dyn std::error::Error>> {
     let query = "SELECT COUNT(*) FROM vcf_table";
     let df = ctx.sql(query).await?;
 
-    println!("Query 3 (COUNT(*)): {:?}", query);
+    println!("Query 3 (COUNT(*)): {query:?}");
 
     let results = df.collect().await?;
 
@@ -225,7 +225,7 @@ async fn test_count_optimization() -> Result<(), Box<dyn std::error::Error>> {
             .downcast_ref::<datafusion::arrow::array::Int64Array>()
             .unwrap();
         let count = count_array.value(0);
-        println!("✅ COUNT(*) optimization works - counted {} records", count);
+        println!("✅ COUNT(*) optimization works - counted {count} records");
         assert!(count >= 4); // We have 4 records in our test file
     }
 

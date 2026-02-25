@@ -265,7 +265,7 @@ macro_rules! impl_bed_local_reader {
                         ObjectStorageOptions::default(),
                     )
                     .await
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                    .map_err(std::io::Error::other)?;
                     match compression_type {
                         CompressionType::BGZF => {
                             let reader = get_local_bed_bgzf_reader::<$n>(file_path)?;

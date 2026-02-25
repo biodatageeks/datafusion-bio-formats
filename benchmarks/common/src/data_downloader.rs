@@ -52,7 +52,7 @@ impl DataDownloader {
         if output_path.exists() && !force {
             // Validate cached file is not a stale HTML page from a previous failed download
             if let Err(e) = validate_not_html(&output_path, &file.filename) {
-                println!("✗ Cached file invalid ({}), re-downloading...", e);
+                println!("✗ Cached file invalid ({e}), re-downloading...");
                 // validate_not_html already removes the file on HTML detection
             } else {
                 println!("✓ Using cached file: {}", output_path.display());
@@ -75,10 +75,7 @@ impl DataDownloader {
 
         // Try direct download first
         if let Err(e) = self.download_direct(file, &output_path) {
-            println!(
-                "Direct download failed ({}), trying with confirmation...",
-                e
-            );
+            println!("Direct download failed ({e}), trying with confirmation...");
             self.download_with_confirmation(file, &output_path)?;
         }
 
@@ -93,9 +90,7 @@ impl DataDownloader {
             if &actual_checksum != expected_checksum {
                 std::fs::remove_file(&output_path)?;
                 return Err(anyhow!(
-                    "Checksum mismatch:\n  Expected: {}\n  Actual:   {}",
-                    expected_checksum,
-                    actual_checksum
+                    "Checksum mismatch:\n  Expected: {expected_checksum}\n  Actual:   {actual_checksum}"
                 ));
             }
             println!("✓ Checksum verified");
@@ -217,10 +212,7 @@ pub fn extract_drive_id(url: &str) -> Result<String> {
         }
     }
 
-    Err(anyhow!(
-        "Could not extract Google Drive ID from URL: {}",
-        url
-    ))
+    Err(anyhow!("Could not extract Google Drive ID from URL: {url}"))
 }
 
 /// Check that a downloaded file is not an HTML page.
@@ -232,8 +224,7 @@ fn validate_not_html(path: &Path, filename: &str) -> Result<()> {
     let bytes_read = file.read(&mut header)?;
     if bytes_read == 0 {
         anyhow::bail!(
-            "Downloaded file '{}' is empty — Google Drive may have returned an error page",
-            filename
+            "Downloaded file '{filename}' is empty — Google Drive may have returned an error page"
         );
     }
 

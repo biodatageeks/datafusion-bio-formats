@@ -9,7 +9,7 @@ use tempfile::TempDir;
 fn generate_test_fastq(path: &str, num_records: usize) {
     let mut file = std::fs::File::create(path).expect("Failed to create test file");
     for i in 0..num_records {
-        writeln!(file, "@read_{}", i).unwrap();
+        writeln!(file, "@read_{i}").unwrap();
         writeln!(file, "ACGTACGTACGTACGT").unwrap();
         writeln!(file, "+").unwrap();
         writeln!(file, "IIIIIIIIIIIIIIII").unwrap();
@@ -39,8 +39,7 @@ async fn test_bgzf_parallel_row_count() {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
             total_rows, 2000,
-            "Row count mismatch for {} target partitions: got {}",
-            partitions, total_rows
+            "Row count mismatch for {partitions} target partitions: got {total_rows}"
         );
     }
 }
@@ -151,8 +150,7 @@ async fn test_bgzf_parallel_with_limit() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert!(
         total_rows <= 10,
-        "Expected at most 10 rows, got {}",
-        total_rows
+        "Expected at most 10 rows, got {total_rows}"
     );
 }
 
@@ -212,8 +210,7 @@ async fn test_uncompressed_parallel_row_count() {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(
             total_rows, 500,
-            "Row count mismatch for {} target partitions: got {}",
-            partitions, total_rows
+            "Row count mismatch for {partitions} target partitions: got {total_rows}"
         );
     }
 }
@@ -314,8 +311,7 @@ async fn test_uncompressed_parallel_with_limit() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert!(
         total_rows <= 10,
-        "Expected at most 10 rows, got {}",
-        total_rows
+        "Expected at most 10 rows, got {total_rows}"
     );
 }
 
@@ -342,8 +338,7 @@ async fn test_uncompressed_parallel_small_file() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
         total_rows, 3,
-        "Expected 3 rows for small file, got {}",
-        total_rows
+        "Expected 3 rows for small file, got {total_rows}"
     );
 }
 
@@ -368,7 +363,7 @@ async fn test_uncompressed_parallel_single_record() {
     let batches = df.collect().await.expect("Failed to collect results");
 
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(total_rows, 1, "Expected exactly 1 row, got {}", total_rows);
+    assert_eq!(total_rows, 1, "Expected exactly 1 row, got {total_rows}");
 }
 
 // ---- GZIP sequential fallback test ----
@@ -390,7 +385,7 @@ async fn test_gzip_reads_sequentially() {
         .expect("Failed to create writer");
         for i in 0..num_records {
             let record = noodles_fastq::Record::new(
-                Definition::new(format!("read_{}", i), ""),
+                Definition::new(format!("read_{i}"), ""),
                 b"ACGTACGT".to_vec(),
                 b"IIIIIIII".to_vec(),
             );
@@ -416,7 +411,6 @@ async fn test_gzip_reads_sequentially() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
         total_rows, num_records,
-        "Expected {} rows from gzip file, got {}",
-        num_records, total_rows
+        "Expected {num_records} rows from gzip file, got {total_rows}"
     );
 }

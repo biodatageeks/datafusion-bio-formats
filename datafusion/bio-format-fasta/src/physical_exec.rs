@@ -70,7 +70,7 @@ impl DisplayAs for FastaExec {
             }
             None => "*".to_string(),
         };
-        write!(f, "FastaExec: projection=[{}]", proj_str)
+        write!(f, "FastaExec: projection=[{proj_str}]")
     }
 }
 
@@ -169,7 +169,7 @@ async fn get_remote_fasta_stream(
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
                     &name,
@@ -178,7 +178,7 @@ async fn get_remote_fasta_stream(
                     projection.clone(),
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 // Clear vectors for the next batch.
                 name.clear();
@@ -237,7 +237,7 @@ async fn get_local_fasta(
             record_num += 1;
             // Once the batch size is reached, build and yield a record batch.
             if record_num % batch_size == 0 {
-                debug!("Record number: {}", record_num);
+                debug!("Record number: {record_num}");
                 let batch = build_record_batch(
                     Arc::clone(&schema.clone()),
                     &name,
@@ -246,7 +246,7 @@ async fn get_local_fasta(
                     projection.clone(),
                 )?;
                 batch_num += 1;
-                debug!("Batch number: {}", batch_num);
+                debug!("Batch number: {batch_num}");
                 yield batch;
                 // Clear vectors for the next batch.
                 name.clear();
@@ -289,7 +289,7 @@ async fn get_local_fasta_sync(
     std::thread::spawn(move || {
         let read_and_send = || -> Result<(), DataFusionError> {
             let mut reader = open_local_fasta_sync(&file_path, compression_type)
-                .map_err(|e| DataFusionError::Execution(format!("Failed to open FASTA: {}", e)))?;
+                .map_err(|e| DataFusionError::Execution(format!("Failed to open FASTA: {e}")))?;
 
             let mut name: Vec<String> = Vec::with_capacity(batch_size);
             let mut description: Vec<Option<String>> = Vec::with_capacity(batch_size);
@@ -306,14 +306,13 @@ async fn get_local_fasta_sync(
                     Ok(_) => {
                         seq_buf.clear();
                         reader.read_sequence(&mut seq_buf).map_err(|e| {
-                            DataFusionError::Execution(format!("FASTA sequence read error: {}", e))
+                            DataFusionError::Execution(format!("FASTA sequence read error: {e}"))
                         })?;
 
                         let definition: noodles_fasta::record::Definition =
                             def_buf.parse().map_err(|e| {
                                 DataFusionError::Execution(format!(
-                                    "FASTA definition parse error: {}",
-                                    e
+                                    "FASTA definition parse error: {e}"
                                 ))
                             })?;
 
@@ -332,7 +331,7 @@ async fn get_local_fasta_sync(
                         record_num += 1;
 
                         if record_num % batch_size == 0 {
-                            debug!("Record number: {}", record_num);
+                            debug!("Record number: {record_num}");
                             let batch = build_record_batch(
                                 Arc::clone(&schema),
                                 &name,
@@ -355,10 +354,7 @@ async fn get_local_fasta_sync(
                         }
                     }
                     Err(e) => {
-                        return Err(DataFusionError::Execution(format!(
-                            "FASTA read error: {}",
-                            e
-                        )));
+                        return Err(DataFusionError::Execution(format!("FASTA read error: {e}")));
                     }
                 }
             }
@@ -381,7 +377,7 @@ async fn get_local_fasta_sync(
                 }
             }
 
-            debug!("Local FASTA sync scan: {} records", record_num);
+            debug!("Local FASTA sync scan: {record_num} records");
             Ok(())
         };
         if let Err(e) = read_and_send() {
@@ -436,7 +432,7 @@ fn build_record_batch(
         }
     };
     RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+        .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
 }
 
 async fn get_stream(
@@ -462,7 +458,7 @@ async fn get_stream(
             )
             .await
             .map_err(|e| {
-                DataFusionError::Execution(format!("Failed to detect compression: {}", e))
+                DataFusionError::Execution(format!("Failed to detect compression: {e}"))
             })?;
 
             if matches!(compression_type, CompressionType::GZIP) {

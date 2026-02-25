@@ -59,6 +59,7 @@ pub async fn get_local_bam_reader(file_path: String) -> Result<Reader<BgzfReader
 ///
 /// This type abstracts over the different reader implementations needed for local
 /// files with multithreaded decompression and remote files accessed via cloud storage.
+#[allow(clippy::large_enum_variant)]
 pub enum BamReader {
     /// Local BAM reader with single-threaded BGZF decompression
     Local(Reader<BgzfReader<File>>),
@@ -97,7 +98,7 @@ impl BamReader {
                     .unwrap();
                 BamReader::Remote(reader)
             }
-            _ => panic!("Unsupported storage type for BAM file: {:?}", storage_type),
+            _ => panic!("Unsupported storage type for BAM file: {storage_type:?}"),
         }
     }
     /// Reads BAM records from the file as an async stream.
@@ -274,7 +275,7 @@ impl IndexedBamReader {
         let mut reader = bam::io::indexed_reader::Builder::default()
             .set_index(bam::bai::fs::read(index_path)?)
             .build_from_path(file_path)
-            .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+            .map_err(Error::other)?;
         let header = reader.read_header()?;
         Ok(Self { reader, header })
     }
@@ -327,7 +328,7 @@ pub fn estimate_sizes_from_bai(
     let index = match bam::bai::fs::read(index_path) {
         Ok(idx) => idx,
         Err(e) => {
-            log::debug!("Failed to read BAI index for size estimation: {}", e);
+            log::debug!("Failed to read BAI index for size estimation: {e}");
             // Return uniform estimates as fallback
             return regions
                 .iter()

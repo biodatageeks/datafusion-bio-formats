@@ -7,7 +7,7 @@ async fn benchmark_parser(
     parser_type: GffParserType,
     parser_name: &str,
 ) -> Result<(usize, std::time::Duration), Box<dyn std::error::Error>> {
-    println!("Starting benchmark for {} parser...", parser_name);
+    println!("Starting benchmark for {parser_name} parser...");
 
     let start = Instant::now();
 
@@ -29,15 +29,12 @@ async fn benchmark_parser(
 
         // Print progress every 100k records
         if record_count % 100_000 == 0 {
-            println!("{} parser: processed {} records", parser_name, record_count);
+            println!("{parser_name} parser: processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "{} parser completed: {} records in {:?}",
-        parser_name, record_count, duration
-    );
+    println!("{parser_name} parser completed: {record_count} records in {duration:?}");
 
     Ok((record_count, duration))
 }
@@ -46,12 +43,12 @@ async fn benchmark_parser(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
-    println!("Benchmarking GFF parsers with file: {}", file_path);
+    println!("Benchmarking GFF parsers with file: {file_path}");
     println!("=========================================");
 
     // Check if file exists
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("Error: File {} not found", file_path);
+        eprintln!("Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -72,8 +69,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("BENCHMARK RESULTS");
     println!("=================");
-    println!("File: {}", file_path);
-    println!("Records processed: {}", std_count);
+    println!("File: {file_path}");
+    println!("Records processed: {std_count}");
     println!();
     println!(
         "Standard parser: {:?} ({:.2} ns/record)",
@@ -94,22 +91,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if std_time > fast_time {
         let speedup = std_time.as_nanos() as f64 / fast_time.as_nanos() as f64;
-        println!("Fast parser is {:.2}x faster than Standard", speedup);
+        println!("Fast parser is {speedup:.2}x faster than Standard");
     }
 
     if std_time > simd_time {
         let speedup = std_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-        println!("SIMD parser is {:.2}x faster than Standard", speedup);
+        println!("SIMD parser is {speedup:.2}x faster than Standard");
     }
 
     match fast_time.cmp(&simd_time) {
         std::cmp::Ordering::Greater => {
             let speedup = fast_time.as_nanos() as f64 / simd_time.as_nanos() as f64;
-            println!("SIMD parser is {:.2}x faster than Fast", speedup);
+            println!("SIMD parser is {speedup:.2}x faster than Fast");
         }
         std::cmp::Ordering::Less => {
             let speedup = simd_time.as_nanos() as f64 / fast_time.as_nanos() as f64;
-            println!("Fast parser is {:.2}x faster than SIMD", speedup);
+            println!("Fast parser is {speedup:.2}x faster than SIMD");
         }
         std::cmp::Ordering::Equal => {}
     }

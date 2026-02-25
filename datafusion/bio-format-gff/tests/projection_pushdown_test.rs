@@ -17,7 +17,7 @@ async fn create_test_gff_file() -> std::io::Result<String> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let temp_file = format!("/tmp/test_projection_{}.gff3", nanos);
+    let temp_file = format!("/tmp/test_projection_{nanos}.gff3");
     fs::write(&temp_file, SAMPLE_GFF_CONTENT).await?;
     Ok(temp_file)
 }
@@ -501,7 +501,7 @@ async fn test_gff_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .value(0);
 
-    println!("GFF COUNT(*) result: {}", count_star);
+    println!("GFF COUNT(*) result: {count_star}");
 
     // Test COUNT(chrom) - this should work as a comparison
     println!("Testing GFF COUNT(chrom)...");
@@ -519,15 +519,14 @@ async fn test_gff_count_star_bug() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap()
         .value(0);
 
-    println!("GFF COUNT(chrom) result: {}", count_chrom);
+    println!("GFF COUNT(chrom) result: {count_chrom}");
 
     // They should be equal and match the expected record count (3 records in test GFF)
     assert_eq!(
         count_star, count_chrom,
-        "COUNT(*) should equal COUNT(chrom) but got {} vs {}",
-        count_star, count_chrom
+        "COUNT(*) should equal COUNT(chrom) but got {count_star} vs {count_chrom}"
     );
-    assert_eq!(count_star, 3, "COUNT(*) should be 3 but got {}", count_star);
+    assert_eq!(count_star, 3, "COUNT(*) should be 3 but got {count_star}");
 
     Ok(())
 }

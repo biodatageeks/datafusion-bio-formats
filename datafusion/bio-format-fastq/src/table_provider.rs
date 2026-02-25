@@ -27,7 +27,7 @@ fn determine_schema() -> datafusion::common::Result<SchemaRef> {
         Field::new("quality_scores", DataType::Utf8, false),
     ];
     let schema = Schema::new(fields);
-    debug!("Schema: {:?}", schema);
+    debug!("Schema: {schema:?}");
     Ok(Arc::new(schema))
 }
 

@@ -108,7 +108,7 @@ impl VcfLocalWriter {
         compression: VcfCompressionType,
     ) -> Result<Self> {
         let file = File::create(path.as_ref()).map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create output file: {}", e))
+            DataFusionError::Execution(format!("Failed to create output file: {e}"))
         })?;
         let buf_writer = BufWriter::new(file);
 
@@ -164,19 +164,19 @@ impl VcfLocalWriter {
 
     /// Writes a single line to the file
     fn write_line(&mut self, line: &str) -> Result<()> {
-        let line_with_newline = format!("{}\n", line);
+        let line_with_newline = format!("{line}\n");
         let bytes = line_with_newline.as_bytes();
 
         match self {
-            VcfLocalWriter::Plain(writer) => writer.write_all(bytes).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write VCF line: {}", e))
-            }),
-            VcfLocalWriter::Gzip(writer) => writer.write_all(bytes).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write VCF line: {}", e))
-            }),
-            VcfLocalWriter::Bgzf(writer) => writer.write_all(bytes).map_err(|e| {
-                DataFusionError::Execution(format!("Failed to write VCF line: {}", e))
-            }),
+            VcfLocalWriter::Plain(writer) => writer
+                .write_all(bytes)
+                .map_err(|e| DataFusionError::Execution(format!("Failed to write VCF line: {e}"))),
+            VcfLocalWriter::Gzip(writer) => writer
+                .write_all(bytes)
+                .map_err(|e| DataFusionError::Execution(format!("Failed to write VCF line: {e}"))),
+            VcfLocalWriter::Bgzf(writer) => writer
+                .write_all(bytes)
+                .map_err(|e| DataFusionError::Execution(format!("Failed to write VCF line: {e}"))),
         }
     }
 
@@ -218,13 +218,13 @@ impl VcfLocalWriter {
         match self {
             VcfLocalWriter::Plain(writer) => writer
                 .flush()
-                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {}", e))),
+                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}"))),
             VcfLocalWriter::Gzip(writer) => writer
                 .flush()
-                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {}", e))),
+                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}"))),
             VcfLocalWriter::Bgzf(writer) => writer
                 .flush()
-                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {}", e))),
+                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}"))),
         }
     }
 
@@ -240,16 +240,16 @@ impl VcfLocalWriter {
         match self {
             VcfLocalWriter::Plain(mut writer) => writer
                 .flush()
-                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {}", e))),
+                .map_err(|e| DataFusionError::Execution(format!("Failed to flush writer: {e}"))),
             VcfLocalWriter::Gzip(encoder) => {
                 encoder.finish().map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to finish GZIP stream: {}", e))
+                    DataFusionError::Execution(format!("Failed to finish GZIP stream: {e}"))
                 })?;
                 Ok(())
             }
             VcfLocalWriter::Bgzf(bgzf_writer) => {
                 bgzf_writer.finish().map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to finish BGZF stream: {}", e))
+                    DataFusionError::Execution(format!("Failed to finish BGZF stream: {e}"))
                 })?;
                 Ok(())
             }

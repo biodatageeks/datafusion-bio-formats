@@ -19,7 +19,7 @@ chr2	400	.	T	G	50	PASS	AC=1;AF=0.25;AN=4;DP=40;SVTYPE=SNV
 "#;
 
 async fn create_test_vcf_file_with_info(test_name: &str) -> std::io::Result<String> {
-    let temp_file = format!("/tmp/test_info_projection_{}.vcf", test_name);
+    let temp_file = format!("/tmp/test_info_projection_{test_name}.vcf");
     fs::write(&temp_file, SAMPLE_VCF_CONTENT_WITH_INFO).await?;
     Ok(temp_file)
 }

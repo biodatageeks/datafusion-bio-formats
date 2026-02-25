@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await?;
 
                 let stream_time = stream_start.elapsed();
-                println!("Stream setup time: {:?}", stream_time);
+                println!("Stream setup time: {stream_time:?}");
 
                 let inner = bgzf::r#async::io::Reader::new(StreamReader::new(stream));
                 let mut reader = vcf::r#async::io::Reader::new(inner);
@@ -62,14 +62,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 let fileformat = header.file_format();
-                println!("VCF file format: {:?}", fileformat);
+                println!("VCF file format: {fileformat:?}");
 
                 let essential_fields = ["AC", "AF", "AN"];
                 for field in essential_fields {
                     if header.infos().get(field).is_some() {
-                        println!("Found essential INFO field: {}", field);
+                        println!("Found essential INFO field: {field}");
                     } else {
-                        println!("Warning: Missing essential INFO field: {}", field);
+                        println!("Warning: Missing essential INFO field: {field}");
                     }
                 }
 
@@ -97,8 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let batch_time = batch_start.elapsed();
                         let records_per_sec = BATCH_SIZE as f64 / batch_time.as_secs_f64();
                         println!(
-                            "Processed batch of {} records in {:?} ({:.2} records/sec). Total records: {}",
-                            BATCH_SIZE, batch_time, records_per_sec, count
+                            "Processed batch of {BATCH_SIZE} records in {batch_time:?} ({records_per_sec:.2} records/sec). Total records: {count}"
                         );
                         batch_count = 0;
                         batch_start = Instant::now();
@@ -107,9 +106,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let total_time = start_time.elapsed();
                 let avg_speed = count as f64 / total_time.as_secs_f64();
-                println!("Records count: {}", count);
-                println!("Total time: {:?}", total_time);
-                println!("Average speed: {:.2} records/sec", avg_speed);
+                println!("Records count: {count}");
+                println!("Total time: {total_time:?}");
+                println!("Average speed: {avg_speed:.2} records/sec");
                 println!("---------------------------------------------");
             }
         }

@@ -267,10 +267,10 @@ pub fn build_record_batch(
     if arrays.is_empty() {
         let options = RecordBatchOptions::new().with_row_count(Some(record_count));
         RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
-            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
     } else {
         RecordBatch::try_new(schema.clone(), arrays)
-            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
     }
 }
 
@@ -332,10 +332,10 @@ pub fn build_record_batch_from_builders(
     if arrays.is_empty() {
         let options = RecordBatchOptions::new().with_row_count(Some(record_count));
         RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
-            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
     } else {
         RecordBatch::try_new(schema.clone(), arrays)
-            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {:?}", e)))
+            .map_err(|e| DataFusionError::Execution(format!("Error creating batch: {e:?}")))
     }
 }
 
@@ -754,7 +754,7 @@ fn code_to_op_kind(code: u8) -> io::Result<OpKind> {
         8 => Ok(OpKind::SequenceMismatch),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("invalid CIGAR op code: {}", code),
+            format!("invalid CIGAR op code: {code}"),
         )),
     }
 }

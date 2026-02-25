@@ -95,15 +95,12 @@ async fn benchmark_with_arrow_building(
 
         record_count += 1;
         if record_count % 100_000 == 0 {
-            println!("  Processed {} records", record_count);
+            println!("  Processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ WITH Arrow building: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ WITH Arrow building: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -133,15 +130,12 @@ async fn benchmark_without_arrow_building(
 
         record_count += 1;
         if record_count % 100_000 == 0 {
-            println!("  Processed {} records", record_count);
+            println!("  Processed {record_count} records");
         }
     }
 
     let duration = start.elapsed();
-    println!(
-        "✅ WITHOUT Arrow building: {} records in {:?}",
-        record_count, duration
-    );
+    println!("✅ WITHOUT Arrow building: {record_count} records in {duration:?}");
     Ok(duration)
 }
 
@@ -150,11 +144,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = "/tmp/gencode.v38.annotation.gff3.gz";
 
     println!("⚡ ARROW BATCH BUILDING Performance Analysis");
-    println!("File: {}", file_path);
+    println!("File: {file_path}");
     println!("============================================");
 
     if !std::path::Path::new(file_path).exists() {
-        eprintln!("❌ Error: File {} not found", file_path);
+        eprintln!("❌ Error: File {file_path} not found");
         std::process::exit(1);
     }
 
@@ -173,19 +167,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_arrow_records_per_sec = 3_148_136.0 / no_arrow_time.as_secs_f64();
     let with_arrow_records_per_sec = 3_148_136.0 / with_arrow_time.as_secs_f64();
 
-    println!(
-        "🚀 PARSING ONLY: {:?} ({:.0} records/sec)",
-        no_arrow_time, no_arrow_records_per_sec
-    );
-    println!(
-        "🐌 WITH ARROW:   {:?} ({:.0} records/sec)",
-        with_arrow_time, with_arrow_records_per_sec
-    );
+    println!("🚀 PARSING ONLY: {no_arrow_time:?} ({no_arrow_records_per_sec:.0} records/sec)");
+    println!("🐌 WITH ARROW:   {with_arrow_time:?} ({with_arrow_records_per_sec:.0} records/sec)");
 
     let arrow_slowdown = with_arrow_time.as_secs_f64() / no_arrow_time.as_secs_f64();
     println!();
     println!("📊 ARROW BUILDING IMPACT:");
-    println!("Arrow building adds {:.1}x slowdown", arrow_slowdown);
+    println!("Arrow building adds {arrow_slowdown:.1}x slowdown");
 
     if arrow_slowdown > 5.0 {
         println!("🚨 CRITICAL: Arrow building is a major bottleneck!");

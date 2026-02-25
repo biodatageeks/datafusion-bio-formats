@@ -23,7 +23,7 @@ async fn create_test_gff_file() -> std::io::Result<String> {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let temp_file = format!("/tmp/test_filter_pushdown_{}.gff3", nanos);
+    let temp_file = format!("/tmp/test_filter_pushdown_{nanos}.gff3");
     fs::write(&temp_file, SAMPLE_GFF_CONTENT).await?;
     Ok(temp_file)
 }
@@ -289,8 +289,7 @@ async fn test_filter_pushdown_between() -> Result<(), Box<dyn std::error::Error>
         let start_val = start_array.value(i);
         assert!(
             (1000..=4000).contains(&start_val),
-            "All results should have start between 1000 and 4000, got {}",
-            start_val
+            "All results should have start between 1000 and 4000, got {start_val}"
         );
     }
 
@@ -331,8 +330,7 @@ async fn test_filter_pushdown_in_list() -> Result<(), Box<dyn std::error::Error>
         let chrom_val = chrom_array.value(i);
         assert!(
             chrom_val == "chr1" || chrom_val == "chr2",
-            "All results should be from chr1 or chr2, got {}",
-            chrom_val
+            "All results should be from chr1 or chr2, got {chrom_val}"
         );
     }
 
@@ -419,8 +417,7 @@ async fn test_filter_pushdown_score_field() -> Result<(), Box<dyn std::error::Er
             let score_val = score_array.value(i);
             assert!(
                 score_val > 75.0,
-                "All results should have score > 75.0, got {}",
-                score_val
+                "All results should have score > 75.0, got {score_val}"
             );
         }
     }

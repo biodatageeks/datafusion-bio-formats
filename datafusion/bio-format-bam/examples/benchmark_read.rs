@@ -31,8 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     for (sql, label) in &queries {
-        println!("\n--- {} ---", label);
-        println!("SQL: {}", sql);
+        println!("\n--- {label} ---");
+        println!("SQL: {sql}");
 
         let mut timings = Vec::with_capacity(NUM_RUNS);
         let mut rows = 0;
@@ -42,10 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rows = r;
             let secs = elapsed.as_secs_f64();
             let rows_per_sec = rows as f64 / secs;
-            println!(
-                "  Run {}: {:.3}s  ({} rows, {:.0} rows/sec)",
-                run, secs, rows, rows_per_sec
-            );
+            println!("  Run {run}: {secs:.3}s  ({rows} rows, {rows_per_sec:.0} rows/sec)");
             timings.push(elapsed);
         }
 

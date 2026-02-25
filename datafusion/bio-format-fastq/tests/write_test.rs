@@ -16,7 +16,7 @@ use tempfile::TempDir;
 fn generate_test_fastq(path: &str, num_records: usize) {
     let mut file = std::fs::File::create(path).expect("Failed to create test file");
     for i in 0..num_records {
-        writeln!(file, "@read_{} sample description {}", i, i).unwrap();
+        writeln!(file, "@read_{i} sample description {i}").unwrap();
         writeln!(file, "ACGTACGTACGTACGT").unwrap();
         writeln!(file, "+").unwrap();
         writeln!(file, "IIIIIIIIIIIIIIII").unwrap();
@@ -83,8 +83,7 @@ async fn test_write_plain_round_trip() {
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
         total_rows, num_records,
-        "Expected {} rows, got {}",
-        num_records, total_rows
+        "Expected {num_records} rows, got {total_rows}"
     );
 
     // Verify all names are unique
@@ -337,8 +336,7 @@ async fn test_write_with_sql_filter() {
     // read_1, read_10, read_11, ..., read_19 = 11 records
     assert_eq!(
         total_rows, 11,
-        "Expected 11 filtered rows, got {}",
-        total_rows
+        "Expected 11 filtered rows, got {total_rows}"
     );
 
     // Verify all names match the filter

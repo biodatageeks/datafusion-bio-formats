@@ -32,8 +32,8 @@ pub fn discover_index_path(data_file: &str, format: IndexFormat) -> Option<Strin
     let candidates = get_index_candidates(data_file, format);
     let result = candidates.into_iter().find(|path| Path::new(path).exists());
     match &result {
-        Some(path) => debug!("Discovered {:?} index for {}: {}", format, data_file, path),
-        None => debug!("No {:?} index found for {}", format, data_file),
+        Some(path) => debug!("Discovered {format:?} index for {data_file}: {path}"),
+        None => debug!("No {format:?} index found for {data_file}"),
     }
     result
 }
@@ -47,7 +47,7 @@ fn get_index_candidates(data_file: &str, format: IndexFormat) -> Vec<String> {
             // Convention 2: file.bai (replacing .bam extension)
             let mut candidates = vec![format!("{}.bai", data_file)];
             if let Some(stripped) = data_file.strip_suffix(".bam") {
-                candidates.push(format!("{}.bai", stripped));
+                candidates.push(format!("{stripped}.bai"));
             }
             candidates
         }
@@ -102,12 +102,9 @@ pub fn discover_pairs_index(data_file: &str) -> Option<(String, IndexFormat)> {
         return Some((path, IndexFormat::CSI));
     }
     // Pairix (.px2) index is tabix-compatible
-    let px2_path = format!("{}.px2", data_file);
+    let px2_path = format!("{data_file}.px2");
     if Path::new(&px2_path).exists() {
-        debug!(
-            "Discovered pairix (.px2) index for {}: {}",
-            data_file, px2_path
-        );
+        debug!("Discovered pairix (.px2) index for {data_file}: {px2_path}");
         return Some((px2_path, IndexFormat::TBI));
     }
     None
