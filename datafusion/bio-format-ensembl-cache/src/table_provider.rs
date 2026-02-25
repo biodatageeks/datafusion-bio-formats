@@ -156,19 +156,20 @@ impl ProviderInner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let projected_schema = project_schema(&self.schema, projection);
         let predicate = extract_simple_predicate(filters);
-        let requested_partitions = match self.options.target_partitions {
+        let base_partitions = match self.options.target_partitions {
             Some(target) => target,
-            None => {
-                let session_target = state.config().target_partitions();
-                let use_storable = self.kind != EnsemblEntityKind::Variation
-                    && self.cache_info.serializer_type.as_deref() == Some("storable");
-                if use_storable {
-                    let cap = self.options.max_storable_partitions.unwrap_or(4);
-                    session_target.min(cap)
-                } else {
-                    session_target
-                }
-            }
+            None => state.config().target_partitions(),
+        };
+        // Storable entities stream-parse entire files with significant per-
+        // partition memory (alias refs, SValue trees).  Cap concurrency to
+        // prevent OOM regardless of how target_partitions was set.
+        let use_storable = self.kind != EnsemblEntityKind::Variation
+            && self.cache_info.serializer_type.as_deref() == Some("storable");
+        let requested_partitions = if use_storable {
+            let cap = self.options.max_storable_partitions.unwrap_or(4);
+            base_partitions.min(cap)
+        } else {
+            base_partitions
         }
         .max(1);
         let num_partitions = requested_partitions.min(self.files.len().max(1));
