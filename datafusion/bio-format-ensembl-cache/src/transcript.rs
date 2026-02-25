@@ -5,14 +5,12 @@ use crate::decode::storable_binary::{
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
-use crate::row::{CellValue, Row};
 use crate::util::ProvenanceWriter;
 use crate::util::{
     BatchBuilder, ColumnMap, canonical_json_string, json_bool, json_i32, json_i64, json_str,
     normalize_genomic_end, normalize_genomic_start, parse_i64, read_maybe_gzip_bytes, stable_hash,
 };
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -58,14 +56,6 @@ pub(crate) struct TranscriptColumnIndices {
 }
 
 impl TranscriptColumnIndices {
-    pub fn exons_projected(&self) -> bool {
-        self.exons_projected
-    }
-
-    pub fn sequences_projected(&self) -> bool {
-        self.sequences_projected
-    }
-
     pub fn new(col_map: &ColumnMap) -> Self {
         let translation_stable_id = col_map.get("translation_stable_id");
         let translation_start = col_map.get("translation_start");
@@ -126,12 +116,6 @@ struct TranscriptRowCore {
     end: i64,
     strand: i8,
     stable_id: String,
-}
-
-struct TranscriptRowContext<'a> {
-    coordinate_system_zero_based: bool,
-    cache_info: &'a CacheInfo,
-    source_file: &'a Path,
 }
 
 // ---------------------------------------------------------------------------
@@ -482,17 +466,23 @@ pub(crate) fn parse_transcript_line_into(
 }
 
 // ---------------------------------------------------------------------------
-// Storable binary parser (kept with Vec<Row> for now)
+// Storable binary parser (direct-to-batch streaming)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn parse_transcript_storable_file(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn parse_transcript_storable_file_into<F>(
     source_file: &Path,
-    cache_info: &CacheInfo,
+    source_file_str: &str,
     predicate: &SimplePredicate,
     coordinate_system_zero_based: bool,
-    exons_projected: bool,
-    sequences_projected: bool,
-) -> Result<Vec<Row>> {
+    batch: &mut BatchBuilder,
+    col_idx: &TranscriptColumnIndices,
+    provenance: &ProvenanceWriter,
+    mut on_row_added: F,
+) -> Result<()>
+where
+    F: FnMut(&mut BatchBuilder) -> Result<bool>,
+{
     let bytes = read_maybe_gzip_bytes(source_file)?;
     if !bytes.starts_with(b"pst0") {
         return Err(exec_err(format!(
@@ -509,7 +499,6 @@ pub(crate) fn parse_transcript_storable_file(
         ))
     })?;
 
-    let mut rows = Vec::new();
     for (region_chr, region_value) in root_obj {
         let Some(items) = region_value.as_array() else {
             continue;
@@ -572,34 +561,37 @@ pub(crate) fn parse_transcript_storable_file(
                 strand,
                 stable_id,
             };
-            let context = TranscriptRowContext {
-                coordinate_system_zero_based,
-                cache_info,
-                source_file,
-            };
-
-            rows.push(build_transcript_row_storable(
+            append_transcript_storable_row_into(
                 item,
                 obj,
                 core,
-                &context,
-                exons_projected,
-                sequences_projected,
-            )?);
+                coordinate_system_zero_based,
+                source_file_str,
+                batch,
+                col_idx,
+                provenance,
+            )?;
+
+            if !on_row_added(batch)? {
+                return Ok(());
+            }
         }
     }
 
-    Ok(rows)
+    Ok(())
 }
 
-fn build_transcript_row_storable(
+#[allow(clippy::too_many_arguments)]
+fn append_transcript_storable_row_into(
     payload: &SValue,
     object: &std::collections::BTreeMap<String, SValue>,
     core: TranscriptRowCore,
-    context: &TranscriptRowContext<'_>,
-    exons_projected: bool,
-    sequences_projected: bool,
-) -> Result<Row> {
+    coordinate_system_zero_based: bool,
+    source_file_str: &str,
+    batch: &mut BatchBuilder,
+    col_idx: &TranscriptColumnIndices,
+    provenance: &ProvenanceWriter,
+) -> Result<()> {
     let TranscriptRowCore {
         chrom,
         start,
@@ -607,179 +599,207 @@ fn build_transcript_row_storable(
         strand,
         stable_id,
     } = core;
-    let canonical_json = canonical_storable_json_string(payload);
-    let object_hash = stable_hash(&canonical_json);
 
-    let mut row: Row = HashMap::new();
-    row.insert("chrom".to_string(), CellValue::Utf8(chrom));
-    row.insert("start".to_string(), CellValue::Int64(start));
-    row.insert("end".to_string(), CellValue::Int64(end));
-    row.insert("strand".to_string(), CellValue::Int8(strand));
-    row.insert("stable_id".to_string(), CellValue::Utf8(stable_id));
+    // Required columns
+    if let Some(idx) = col_idx.chrom {
+        batch.set_utf8(idx, &chrom);
+    }
+    if let Some(idx) = col_idx.start {
+        batch.set_i64(idx, start);
+    }
+    if let Some(idx) = col_idx.end {
+        batch.set_i64(idx, end);
+    }
+    if let Some(idx) = col_idx.strand {
+        batch.set_i8(idx, strand);
+    }
+    if let Some(idx) = col_idx.stable_id {
+        batch.set_utf8(idx, &stable_id);
+    }
 
-    insert_opt_i32(
-        &mut row,
-        "version",
-        sv_i64(object.get("version")).and_then(|v| i32::try_from(v).ok()),
-    );
-    insert_opt_utf8(&mut row, "biotype", sv_str(object.get("biotype")));
-    insert_opt_utf8(
-        &mut row,
-        "source",
-        sv_str(object.get("source").or_else(|| object.get("_source_cache"))),
-    );
-    insert_opt_bool(
-        &mut row,
-        "is_canonical",
-        sv_bool(object.get("is_canonical")),
-    );
-    insert_opt_utf8(
-        &mut row,
-        "gene_stable_id",
-        sv_str(
+    // Optional scalar columns
+    if let Some(idx) = col_idx.version {
+        batch.set_opt_i32(
+            idx,
+            sv_i64(object.get("version")).and_then(|v| i32::try_from(v).ok()),
+        );
+    }
+    if let Some(idx) = col_idx.biotype {
+        let value = sv_str(object.get("biotype"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.source {
+        let value = sv_str(object.get("source").or_else(|| object.get("_source_cache")));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.is_canonical {
+        batch.set_opt_bool(idx, sv_bool(object.get("is_canonical")));
+    }
+    if let Some(idx) = col_idx.gene_stable_id {
+        let value = sv_str(
             object
                 .get("gene_stable_id")
                 .or_else(|| object.get("_gene_stable_id")),
-        ),
-    );
-    insert_opt_utf8(
-        &mut row,
-        "gene_symbol",
-        sv_str(
+        );
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.gene_symbol {
+        let value = sv_str(
             object
                 .get("gene_symbol")
                 .or_else(|| object.get("_gene_symbol")),
-        ),
-    );
-    insert_opt_utf8(
-        &mut row,
-        "gene_symbol_source",
-        sv_str(
+        );
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.gene_symbol_source {
+        let value = sv_str(
             object
                 .get("gene_symbol_source")
                 .or_else(|| object.get("_gene_symbol_source")),
-        ),
-    );
-    insert_opt_utf8(&mut row, "gene_hgnc_id", sv_str(object.get("gene_hgnc_id")));
-    if let Some(refseq_id) =
-        sv_str(object.get("refseq_id").or_else(|| object.get("_refseq"))).filter(|v| v != "-")
-    {
-        row.insert("refseq_id".to_string(), CellValue::Utf8(refseq_id));
+        );
+        batch.set_opt_utf8_owned(idx, value.as_ref());
     }
-    insert_opt_i64(
-        &mut row,
-        "coding_region_start",
-        sv_i64(object.get("coding_region_start"))
-            .map(|value| normalize_genomic_start(value, context.coordinate_system_zero_based)),
-    );
-    insert_opt_i64(
-        &mut row,
-        "coding_region_end",
-        sv_i64(object.get("coding_region_end"))
-            .map(|value| normalize_genomic_end(value, context.coordinate_system_zero_based)),
-    );
-    insert_opt_i64(
-        &mut row,
-        "cdna_coding_start",
-        sv_i64(object.get("cdna_coding_start")),
-    );
-    insert_opt_i64(
-        &mut row,
-        "cdna_coding_end",
-        sv_i64(object.get("cdna_coding_end")),
-    );
-
-    if let Some(translation_obj) = object.get("translation").and_then(SValue::as_hash) {
-        insert_opt_utf8(
-            &mut row,
-            "translation_stable_id",
-            sv_str(translation_obj.get("stable_id")),
-        );
-        insert_opt_i64(
-            &mut row,
-            "translation_start",
-            sv_i64(translation_obj.get("start")),
-        );
-        insert_opt_i64(
-            &mut row,
-            "translation_end",
-            sv_i64(translation_obj.get("end")),
+    if let Some(idx) = col_idx.gene_hgnc_id {
+        let value = sv_str(object.get("gene_hgnc_id"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.refseq_id {
+        let value =
+            sv_str(object.get("refseq_id").or_else(|| object.get("_refseq"))).filter(|v| v != "-");
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.coding_region_start {
+        batch.set_opt_i64(
+            idx,
+            sv_i64(object.get("coding_region_start"))
+                .map(|value| normalize_genomic_start(value, coordinate_system_zero_based)),
         );
     }
+    if let Some(idx) = col_idx.coding_region_end {
+        batch.set_opt_i64(
+            idx,
+            sv_i64(object.get("coding_region_end"))
+                .map(|value| normalize_genomic_end(value, coordinate_system_zero_based)),
+        );
+    }
+    if let Some(idx) = col_idx.cdna_coding_start {
+        batch.set_opt_i64(idx, sv_i64(object.get("cdna_coding_start")));
+    }
+    if let Some(idx) = col_idx.cdna_coding_end {
+        batch.set_opt_i64(idx, sv_i64(object.get("cdna_coding_end")));
+    }
 
-    let exon_count = sv_i64(object.get("exon_count"))
-        .and_then(|v| i32::try_from(v).ok())
-        .or_else(|| {
-            object
-                .get("_trans_exon_array")
-                .and_then(SValue::as_array)
-                .and_then(|arr| i32::try_from(arr.len()).ok())
-        });
-    insert_opt_i32(&mut row, "exon_count", exon_count);
-
-    // Exon structured array (skip when not projected)
-    if exons_projected {
-        if let Some(exon_arr) = object.get("_trans_exon_array").and_then(SValue::as_array) {
-            let exon_tuples: Vec<(i64, i64, i8)> = exon_arr
-                .iter()
-                .filter_map(|exon_val| {
-                    let exon_obj = exon_val.as_hash()?;
-                    let start = sv_i64(exon_obj.get("start")).map(|v| {
-                        normalize_genomic_start(v, context.coordinate_system_zero_based)
-                    })?;
-                    let end = sv_i64(exon_obj.get("end"))
-                        .map(|v| normalize_genomic_end(v, context.coordinate_system_zero_based))?;
-                    let phase = sv_i64(exon_obj.get("phase"))
-                        .and_then(|v| i8::try_from(v).ok())
-                        .unwrap_or(-1);
-                    Some((start, end, phase))
-                })
-                .collect();
-            row.insert("exons".to_string(), CellValue::ExonList(exon_tuples));
+    // Translation sub-object
+    if col_idx.translation_projected {
+        if let Some(translation_obj) = object.get("translation").and_then(SValue::as_hash) {
+            if let Some(idx) = col_idx.translation_stable_id {
+                let value = sv_str(translation_obj.get("stable_id"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
+            if let Some(idx) = col_idx.translation_start {
+                batch.set_opt_i64(idx, sv_i64(translation_obj.get("start")));
+            }
+            if let Some(idx) = col_idx.translation_end {
+                batch.set_opt_i64(idx, sv_i64(translation_obj.get("end")));
+            }
         }
     }
 
-    // Sequences from _variation_effect_feature_cache (skip when not projected)
-    if sequences_projected {
+    if let Some(idx) = col_idx.exon_count {
+        let exon_count = sv_i64(object.get("exon_count"))
+            .and_then(|v| i32::try_from(v).ok())
+            .or_else(|| {
+                object
+                    .get("_trans_exon_array")
+                    .and_then(SValue::as_array)
+                    .and_then(|arr| i32::try_from(arr.len()).ok())
+            });
+        batch.set_opt_i32(idx, exon_count);
+    }
+
+    // Exon structured array — only parse when projected
+    if col_idx.exons_projected {
+        if let Some(idx) = col_idx.exons {
+            let exon_tuples = object
+                .get("_trans_exon_array")
+                .and_then(SValue::as_array)
+                .map(|exon_arr| {
+                    exon_arr
+                        .iter()
+                        .filter_map(|exon_val| {
+                            let exon_obj = exon_val.as_hash()?;
+                            let start = sv_i64(exon_obj.get("start")).map(|v| {
+                                normalize_genomic_start(v, coordinate_system_zero_based)
+                            })?;
+                            let end = sv_i64(exon_obj.get("end"))
+                                .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
+                            let phase = sv_i64(exon_obj.get("phase"))
+                                .and_then(|v| i8::try_from(v).ok())
+                                .unwrap_or(-1);
+                            Some((start, end, phase))
+                        })
+                        .collect::<Vec<(i64, i64, i8)>>()
+                });
+            batch.set_exon_list(idx, exon_tuples.as_deref());
+        }
+    }
+
+    // Sequences from _variation_effect_feature_cache — only parse when projected
+    if col_idx.sequences_projected {
         if let Some(vef_cache) = object
             .get("_variation_effect_feature_cache")
             .and_then(SValue::as_hash)
         {
-            insert_opt_utf8(
-                &mut row,
-                "cdna_seq",
-                sv_str(vef_cache.get("translateable_seq")),
-            );
-            insert_opt_utf8(&mut row, "peptide_seq", sv_str(vef_cache.get("peptide")));
+            if let Some(idx) = col_idx.cdna_seq {
+                let value = sv_str(vef_cache.get("translateable_seq"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
+            if let Some(idx) = col_idx.peptide_seq {
+                let value = sv_str(vef_cache.get("peptide"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
         }
     }
 
     // Simple scalar VEP fields
-    insert_opt_i32(
-        &mut row,
-        "codon_table",
-        sv_i64(object.get("codon_table")).and_then(|v| i32::try_from(v).ok()),
-    );
-    insert_opt_i32(
-        &mut row,
-        "tsl",
-        sv_i64(object.get("tsl")).and_then(|v| i32::try_from(v).ok()),
-    );
-    insert_opt_utf8(&mut row, "mane_select", sv_str(object.get("mane_select")));
-    insert_opt_utf8(
-        &mut row,
-        "mane_plus_clinical",
-        sv_str(object.get("mane_plus_clinical")),
-    );
+    if let Some(idx) = col_idx.codon_table {
+        batch.set_opt_i32(
+            idx,
+            sv_i64(object.get("codon_table")).and_then(|v| i32::try_from(v).ok()),
+        );
+    }
+    if let Some(idx) = col_idx.tsl {
+        batch.set_opt_i32(
+            idx,
+            sv_i64(object.get("tsl")).and_then(|v| i32::try_from(v).ok()),
+        );
+    }
+    if let Some(idx) = col_idx.mane_select {
+        let value = sv_str(object.get("mane_select"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.mane_plus_clinical {
+        let value = sv_str(object.get("mane_plus_clinical"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
 
-    row.insert(
-        "raw_object_json".to_string(),
-        CellValue::Utf8(canonical_json),
-    );
-    row.insert("object_hash".to_string(), CellValue::Utf8(object_hash));
+    // Only compute canonical JSON + hash if projected
+    let need_json = col_idx.raw_object_json.is_some();
+    let need_hash = col_idx.object_hash.is_some();
+    if need_json || need_hash {
+        let canonical_json = canonical_storable_json_string(payload);
+        if let Some(idx) = col_idx.object_hash {
+            let hash = stable_hash(&canonical_json);
+            batch.set_utf8(idx, &hash);
+        }
+        if let Some(idx) = col_idx.raw_object_json {
+            batch.set_utf8(idx, &canonical_json);
+        }
+    }
 
-    append_provenance_row(&mut row, context.cache_info, context.source_file);
-    Ok(row)
+    provenance.write(batch, source_file_str);
+    batch.finish_row();
+    Ok(())
 }
 
 fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
@@ -800,65 +820,6 @@ fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value
 
 fn unwrap_blessed_object_optional(value: &Value) -> Option<&serde_json::Map<String, Value>> {
     unwrap_blessed_object(value).ok()
-}
-
-fn insert_opt_utf8(row: &mut Row, key: &str, value: Option<String>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Utf8(value));
-    }
-}
-
-fn insert_opt_i64(row: &mut Row, key: &str, value: Option<i64>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Int64(value));
-    }
-}
-
-fn insert_opt_i32(row: &mut Row, key: &str, value: Option<i32>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Int32(value));
-    }
-}
-
-fn insert_opt_bool(row: &mut Row, key: &str, value: Option<bool>) {
-    if let Some(value) = value {
-        row.insert(key.to_string(), CellValue::Boolean(value));
-    }
-}
-
-fn append_provenance_row(row: &mut Row, cache_info: &CacheInfo, source_file: &Path) {
-    row.insert(
-        "species".to_string(),
-        CellValue::Utf8(cache_info.species.clone()),
-    );
-    row.insert(
-        "assembly".to_string(),
-        CellValue::Utf8(cache_info.assembly.clone()),
-    );
-    row.insert(
-        "cache_version".to_string(),
-        CellValue::Utf8(cache_info.cache_version.clone()),
-    );
-    for source in &cache_info.source_descriptors {
-        row.insert(
-            source.source_column.clone(),
-            CellValue::Utf8(source.value.clone()),
-        );
-    }
-    if let Some(serializer) = &cache_info.serializer_type {
-        row.insert(
-            "serializer_type".to_string(),
-            CellValue::Utf8(serializer.clone()),
-        );
-    }
-    row.insert(
-        "source_cache_path".to_string(),
-        CellValue::Utf8(cache_info.source_cache_path.clone()),
-    );
-    row.insert(
-        "source_file".to_string(),
-        CellValue::Utf8(source_file.to_string_lossy().to_string()),
-    );
 }
 
 fn sv_str(value: Option<&SValue>) -> Option<String> {

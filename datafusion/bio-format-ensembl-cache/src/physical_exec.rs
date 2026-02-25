@@ -4,15 +4,13 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::regulatory::{
     RegulatoryColumnIndices, RegulatoryTarget, parse_regulatory_line_into,
-    parse_regulatory_storable_file,
+    parse_regulatory_storable_file_into,
 };
-use crate::row::Row;
 use crate::transcript::{
-    TranscriptColumnIndices, parse_transcript_line_into, parse_transcript_storable_file,
+    TranscriptColumnIndices, parse_transcript_line_into, parse_transcript_storable_file_into,
 };
 use crate::util::{
     BatchBuilder, ColumnMap, ProvenanceWriter, is_storable_binary_payload, open_text_reader,
-    rows_to_record_batch,
 };
 use crate::variation::{
     SourceIdWriter, VariationColumnIndices, VariationContext, parse_variation_line_into,
@@ -283,6 +281,37 @@ impl ExecutionPlan for EnsemblCacheExec {
 /// Runs the file-read+parse loop on a blocking thread pool thread.
 /// Sends completed `RecordBatch`es through `tx`. Returns `Ok(())` on
 /// completion or early exit (consumer dropped / LIMIT reached).
+enum RowDispatchState {
+    Continue,
+    Stop,
+    ConsumerDropped,
+}
+
+fn dispatch_row(
+    tx: &Sender<DFResult<RecordBatch>>,
+    batch_builder: &mut BatchBuilder,
+    emitted_rows: &mut usize,
+    limit: Option<usize>,
+    batch_size: usize,
+) -> Result<RowDispatchState> {
+    *emitted_rows += 1;
+
+    if batch_builder.len() >= batch_size {
+        let batch = batch_builder.finish()?;
+        if tx.blocking_send(Ok(batch)).is_err() {
+            return Ok(RowDispatchState::ConsumerDropped);
+        }
+    }
+
+    if let Some(max_rows) = limit {
+        if *emitted_rows >= max_rows {
+            return Ok(RowDispatchState::Stop);
+        }
+    }
+
+    Ok(RowDispatchState::Continue)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_partition(
     tx: Sender<DFResult<RecordBatch>>,
@@ -330,8 +359,8 @@ fn process_partition(
         None
     };
 
-    let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size.max(1))?;
-    let mut buffered_rows: Vec<Row> = Vec::new();
+    let batch_size = batch_size.max(1);
+    let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size)?;
     let mut emitted_rows: usize = 0;
     let mut stop = false;
 
@@ -355,54 +384,104 @@ fn process_partition(
             && is_storable_binary_payload(source_file)?;
 
         if use_native_storable {
-            // Storable binary path: still uses Vec<Row> + rows_to_record_batch
-            let parsed_rows = match kind {
+            let mut reached_limit = false;
+            let mut consumer_dropped = false;
+
+            match kind {
                 EnsemblEntityKind::Transcript => {
-                    let col_idx = transcript_col_idx.as_ref().unwrap();
-                    parse_transcript_storable_file(
+                    parse_transcript_storable_file_into(
                         source_file,
-                        &cache_info,
+                        source_file_str,
                         &predicate,
                         coordinate_system_zero_based,
-                        col_idx.exons_projected(),
-                        col_idx.sequences_projected(),
-                    )?
+                        &mut batch_builder,
+                        transcript_col_idx.as_ref().unwrap(),
+                        &provenance,
+                        |batch_builder| match dispatch_row(
+                            &tx,
+                            batch_builder,
+                            &mut emitted_rows,
+                            limit,
+                            batch_size,
+                        )? {
+                            RowDispatchState::Continue => Ok(true),
+                            RowDispatchState::Stop => {
+                                reached_limit = true;
+                                Ok(false)
+                            }
+                            RowDispatchState::ConsumerDropped => {
+                                consumer_dropped = true;
+                                Ok(false)
+                            }
+                        },
+                    )?;
                 }
-                EnsemblEntityKind::RegulatoryFeature => parse_regulatory_storable_file(
-                    source_file,
-                    &cache_info,
-                    &predicate,
-                    RegulatoryTarget::RegulatoryFeature,
-                    coordinate_system_zero_based,
-                )?,
-                EnsemblEntityKind::MotifFeature => parse_regulatory_storable_file(
-                    source_file,
-                    &cache_info,
-                    &predicate,
-                    RegulatoryTarget::MotifFeature,
-                    coordinate_system_zero_based,
-                )?,
-                EnsemblEntityKind::Variation => Vec::new(),
-            };
-
-            for row in parsed_rows {
-                buffered_rows.push(row);
-                emitted_rows += 1;
-
-                if buffered_rows.len() >= batch_size.max(1) {
-                    let batch = rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
-                    buffered_rows.clear();
-                    if tx.blocking_send(Ok(batch)).is_err() {
-                        return Ok(()); // consumer dropped — graceful shutdown
-                    }
+                EnsemblEntityKind::RegulatoryFeature => {
+                    parse_regulatory_storable_file_into(
+                        source_file,
+                        source_file_str,
+                        &predicate,
+                        RegulatoryTarget::RegulatoryFeature,
+                        coordinate_system_zero_based,
+                        &mut batch_builder,
+                        regulatory_col_idx.as_ref().unwrap(),
+                        &provenance,
+                        |batch_builder| match dispatch_row(
+                            &tx,
+                            batch_builder,
+                            &mut emitted_rows,
+                            limit,
+                            batch_size,
+                        )? {
+                            RowDispatchState::Continue => Ok(true),
+                            RowDispatchState::Stop => {
+                                reached_limit = true;
+                                Ok(false)
+                            }
+                            RowDispatchState::ConsumerDropped => {
+                                consumer_dropped = true;
+                                Ok(false)
+                            }
+                        },
+                    )?;
                 }
-
-                if let Some(max_rows) = limit {
-                    if emitted_rows >= max_rows {
-                        stop = true;
-                        break;
-                    }
+                EnsemblEntityKind::MotifFeature => {
+                    parse_regulatory_storable_file_into(
+                        source_file,
+                        source_file_str,
+                        &predicate,
+                        RegulatoryTarget::MotifFeature,
+                        coordinate_system_zero_based,
+                        &mut batch_builder,
+                        regulatory_col_idx.as_ref().unwrap(),
+                        &provenance,
+                        |batch_builder| match dispatch_row(
+                            &tx,
+                            batch_builder,
+                            &mut emitted_rows,
+                            limit,
+                            batch_size,
+                        )? {
+                            RowDispatchState::Continue => Ok(true),
+                            RowDispatchState::Stop => {
+                                reached_limit = true;
+                                Ok(false)
+                            }
+                            RowDispatchState::ConsumerDropped => {
+                                consumer_dropped = true;
+                                Ok(false)
+                            }
+                        },
+                    )?;
                 }
+                EnsemblEntityKind::Variation => {}
+            }
+
+            if consumer_dropped {
+                return Ok(()); // consumer dropped — graceful shutdown
+            }
+            if reached_limit {
+                stop = true;
             }
             continue;
         }
@@ -474,19 +553,20 @@ fn process_partition(
             };
 
             if added {
-                emitted_rows += 1;
-
-                if batch_builder.len() >= batch_size.max(1) {
-                    let batch = batch_builder.finish()?;
-                    if tx.blocking_send(Ok(batch)).is_err() {
-                        return Ok(()); // consumer dropped — graceful shutdown
-                    }
-                }
-
-                if let Some(max_rows) = limit {
-                    if emitted_rows >= max_rows {
+                match dispatch_row(
+                    &tx,
+                    &mut batch_builder,
+                    &mut emitted_rows,
+                    limit,
+                    batch_size,
+                )? {
+                    RowDispatchState::Continue => {}
+                    RowDispatchState::Stop => {
                         stop = true;
                         break;
+                    }
+                    RowDispatchState::ConsumerDropped => {
+                        return Ok(()); // consumer dropped — graceful shutdown
                     }
                 }
             }
@@ -496,14 +576,6 @@ fn process_partition(
     // Flush remaining rows from BatchBuilder
     if batch_builder.len() > 0 {
         let batch = batch_builder.finish()?;
-        if tx.blocking_send(Ok(batch)).is_err() {
-            return Ok(());
-        }
-    }
-
-    // Flush remaining rows from storable path
-    if !buffered_rows.is_empty() {
-        let batch = rows_to_record_batch(stream_schema.clone(), &buffered_rows)?;
         if tx.blocking_send(Ok(batch)).is_err() {
             return Ok(());
         }
