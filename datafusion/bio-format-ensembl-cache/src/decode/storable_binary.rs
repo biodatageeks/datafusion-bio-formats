@@ -273,30 +273,18 @@ impl<R: Read> Parser<R> {
         self.refs.push(Some(SValue::Null));
 
         let len = self.read_u32()? as usize;
-        // Keep one previous entry alive so immediate-sibling aliases can resolve.
-        let mut previous_range: Option<(usize, usize)> = None;
 
         for _ in 0..len {
-            let subtree_start = self.refs.len();
             let value = self.parse_value()?;
-            let subtree_end = self.refs.len();
 
             let key = self.parse_hash_key()?;
             let should_continue = on_entry(key, value)?;
-
-            if let Some((start, end)) = previous_range.take() {
-                self.evict_refs_range(start, end);
-            }
-            previous_range = Some((subtree_start, subtree_end));
 
             if !should_continue {
                 break;
             }
         }
 
-        if let Some((start, end)) = previous_range.take() {
-            self.evict_refs_range(start, end);
-        }
         self.refs[root_slot] = None;
 
         Ok(())
@@ -374,35 +362,54 @@ impl<R: Read> Parser<R> {
         let should_continue = match opcode {
             0x02 => {
                 let len = self.read_u32()? as usize;
-                // Keep one previous item alive so immediate-sibling aliases can resolve.
-                let mut previous_range: Option<(usize, usize)> = None;
+                let mut values = Vec::with_capacity(len);
                 for _ in 0..len {
-                    let item_start = self.refs.len();
                     let item = self.parse_value()?;
-                    let item_end = self.refs.len();
+                    values.push(item.clone());
 
                     let keep_going = on_item(item)?;
-                    if let Some((start, end)) = previous_range.take() {
-                        self.evict_refs_range(start, end);
-                    }
-                    previous_range = Some((item_start, item_end));
-
                     if !keep_going {
-                        if let Some((start, end)) = previous_range.take() {
-                            self.evict_refs_range(start, end);
-                        }
-                        self.refs[slot] = None;
+                        self.refs[slot] = Some(SValue::Array(Arc::new(values)));
                         return Ok(false);
                     }
                 }
-                if let Some((start, end)) = previous_range.take() {
-                    self.evict_refs_range(start, end);
-                }
+                self.refs[slot] = Some(SValue::Array(Arc::new(values)));
                 true
             }
             0x04 | 0x1b => {
                 let inner = self.read_u8()?;
-                self.stream_array_value_items_with_opcode(inner, on_item)?
+                if inner == 0x02 {
+                    let len = self.read_u32()? as usize;
+                    let mut values = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        let item = self.parse_value()?;
+                        values.push(item.clone());
+
+                        let keep_going = on_item(item)?;
+                        if !keep_going {
+                            self.refs[slot] = Some(SValue::Array(Arc::new(values)));
+                            return Ok(false);
+                        }
+                    }
+                    self.refs[slot] = Some(SValue::Array(Arc::new(values)));
+                    true
+                } else {
+                    let value = self.parse_value_from_opcode(inner)?;
+                    let Some(items) = value.as_array() else {
+                        return Err(exec_err(format!(
+                            "Expected array value in streaming mode, found wrapped opcode 0x{inner:02x} at byte offset {}",
+                            self.pos.saturating_sub(1)
+                        )));
+                    };
+                    for item in items {
+                        if !on_item(item.clone())? {
+                            self.refs[slot] = Some(value.clone());
+                            return Ok(false);
+                        }
+                    }
+                    self.refs[slot] = Some(value);
+                    true
+                }
             }
             other => {
                 let value = self.parse_value_from_opcode(other)?;
@@ -414,16 +421,15 @@ impl<R: Read> Parser<R> {
                 };
                 for item in items {
                     if !on_item(item.clone())? {
-                        self.refs[slot] = None;
+                        self.refs[slot] = Some(value.clone());
                         return Ok(false);
                     }
                 }
+                self.refs[slot] = Some(value);
                 true
             }
         };
 
-        // The streamed array container can be evicted once items were dispatched.
-        self.refs[slot] = None;
         Ok(should_continue)
     }
 
@@ -580,15 +586,6 @@ impl<R: Read> Parser<R> {
         })?;
         self.pos = self.pos.saturating_add(buf.len());
         Ok(())
-    }
-
-    fn evict_refs_range(&mut self, start: usize, end: usize) {
-        if start >= end || end > self.refs.len() {
-            return;
-        }
-        for entry in &mut self.refs[start..end] {
-            *entry = None;
-        }
     }
 }
 
