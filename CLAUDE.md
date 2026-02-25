@@ -102,15 +102,14 @@ The `bio-format-core` crate provides cloud storage integration via OpenDAL with 
 - Compression detection (GZIP, BGZF, AUTO)
 
 ### Key Dependencies
-- DataFusion 50.3.0 - SQL query engine
+- DataFusion 52.1.0 - SQL query engine
 - Noodles 0.93.0 - Bioinformatics file parsing
 - OpenDAL 0.53.3 - Object storage abstraction
 - Tokio - Async runtime
 
 ## Development Environment
 
-- Rust toolchain: 1.85.0 (specified in rust-toolchain.toml)
-- Rustfmt version requirement: 1.8.0
+- Rust toolchain: 1.88.0 (specified in rust-toolchain.toml)
 - The CI workflow runs formatting checks, so ensure code is properly formatted before committing
 
 ## File Format Schemas
