@@ -383,6 +383,17 @@ impl<R: Read> Parser<R> {
             .is_none_or(|counts| counts.contains_key(&slot))
     }
 
+    /// Release excess internal capacity.  Called between top-level hash
+    /// entries (e.g. between chromosomes) so that HashMap/HashSet buffers
+    /// sized for one entry's peak don't carry over to the next.
+    fn shrink_internal_state(&mut self) {
+        self.refs.shrink_to_fit();
+        self.in_progress_slots.shrink_to_fit();
+        if let Some(counts) = self.alias_ref_counts.as_mut() {
+            counts.shrink_to_fit();
+        }
+    }
+
     fn consume_header(&mut self) -> Result<()> {
         let mut header = [0u8; 6];
         self.read_exact_into(&mut header)?;
@@ -516,6 +527,10 @@ impl<R: Read> Parser<R> {
             if !should_continue {
                 break;
             }
+
+            // Release excess HashMap capacity between entries (chromosomes)
+            // to prevent monotonic RSS growth.
+            self.shrink_internal_state();
         }
 
         self.finish_slot(root_slot, None);
