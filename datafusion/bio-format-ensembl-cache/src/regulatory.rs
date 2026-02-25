@@ -1,8 +1,8 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, canonical_json_string as canonical_storable_json_string,
-    collect_nstore_alias_slots_from_reader,
-    stream_nstore_top_hash_entries_with_alias_slots_from_reader,
+    collect_nstore_alias_counts_from_reader,
+    stream_nstore_top_hash_entries_with_alias_counts_from_reader,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -306,19 +306,19 @@ pub(crate) fn parse_regulatory_storable_file_into<F>(
 where
     F: FnMut(&mut BatchBuilder) -> Result<bool>,
 {
-    let alias_slots = collect_nstore_alias_slots_from_reader(open_binary_reader(source_file)?)
+    let alias_counts = collect_nstore_alias_counts_from_reader(open_binary_reader(source_file)?)
         .map_err(|e| {
             exec_err(format!(
-                "Failed collecting storable alias slots from {}: {}",
+                "Failed collecting storable alias references from {}: {}",
                 source_file.display(),
                 e
             ))
         })?;
 
     let reader = open_binary_reader(source_file)?;
-    stream_nstore_top_hash_entries_with_alias_slots_from_reader(
+    stream_nstore_top_hash_entries_with_alias_counts_from_reader(
         reader,
-        alias_slots,
+        alias_counts,
         |region_chr, region_payload| {
             let Some(region_obj) = region_payload.as_hash() else {
                 return Ok(true);

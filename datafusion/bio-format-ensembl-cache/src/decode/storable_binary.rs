@@ -1,5 +1,5 @@
 use crate::errors::{Result, exec_err};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 
@@ -92,14 +92,25 @@ pub(crate) fn decode_nstore_from_reader<R: Read>(reader: R) -> Result<SValue> {
     parser.parse_value()
 }
 
-/// Collect all alias slots (`REFP` / opcode `0x00` targets) referenced in an
-/// nstore payload. This is used by streaming decoders to retain only slots that
-/// can be addressed by future aliases.
-pub(crate) fn collect_nstore_alias_slots_from_reader<R: Read>(reader: R) -> Result<HashSet<usize>> {
+/// Collect alias reference counts (`REFP` / opcode `0x00` targets) from an
+/// nstore payload.
+pub(crate) fn collect_nstore_alias_counts_from_reader<R: Read>(
+    reader: R,
+) -> Result<HashMap<usize, usize>> {
     let mut collector = AliasCollector::new(reader);
     collector.consume_header()?;
     collector.collect_value()?;
-    Ok(collector.alias_slots)
+    Ok(collector.alias_counts)
+}
+
+/// Collect all alias slots (`REFP` / opcode `0x00` targets) referenced in an
+/// nstore payload. This is used by streaming decoders to retain only slots that
+/// can be addressed by future aliases.
+#[cfg(test)]
+pub(crate) fn collect_nstore_alias_slots_from_reader<R: Read>(reader: R) -> Result<HashSet<usize>> {
+    Ok(collect_nstore_alias_counts_from_reader(reader)?
+        .into_keys()
+        .collect())
 }
 
 /// Streams top-level hash entries from an nstore payload.
@@ -119,18 +130,18 @@ where
     parser.stream_top_hash_entries(&mut on_entry)
 }
 
-/// Same as `stream_nstore_top_hash_entries_from_reader`, but keeps only slots
-/// present in `alias_slots` in the internal reference table.
-pub(crate) fn stream_nstore_top_hash_entries_with_alias_slots_from_reader<R, F>(
+/// Same as `stream_nstore_top_hash_entries_from_reader`, but
+/// also tracks alias use counts and evicts retained references after last use.
+pub(crate) fn stream_nstore_top_hash_entries_with_alias_counts_from_reader<R, F>(
     reader: R,
-    alias_slots: HashSet<usize>,
+    alias_counts: HashMap<usize, usize>,
     mut on_entry: F,
 ) -> Result<()>
 where
     R: Read,
     F: FnMut(String, SValue) -> Result<bool>,
 {
-    let mut parser = Parser::with_alias_slots(reader, alias_slots);
+    let mut parser = Parser::with_alias_ref_counts(reader, alias_counts);
     parser.consume_header()?;
     parser.stream_top_hash_entries(&mut on_entry)
 }
@@ -161,6 +172,7 @@ where
 
 /// Same as `stream_nstore_top_hash_array_items_from_reader`, but keeps only
 /// slots present in `alias_slots` in the internal reference table.
+#[cfg(test)]
 pub(crate) fn stream_nstore_top_hash_array_items_with_alias_slots_from_reader<R, F>(
     reader: R,
     alias_slots: HashSet<usize>,
@@ -170,7 +182,27 @@ where
     R: Read,
     F: FnMut(TopHashArrayEvent) -> Result<bool>,
 {
-    let mut parser = Parser::with_alias_slots(reader, alias_slots);
+    let alias_counts = alias_slots
+        .into_iter()
+        .map(|slot| (slot, usize::MAX))
+        .collect();
+    let mut parser = Parser::with_alias_ref_counts(reader, alias_counts);
+    parser.consume_header()?;
+    parser.stream_top_hash_array_items(&mut on_event)
+}
+
+/// Same as `stream_nstore_top_hash_array_items_with_alias_slots_from_reader`,
+/// but also tracks alias use counts and evicts retained references after last use.
+pub(crate) fn stream_nstore_top_hash_array_items_with_alias_counts_from_reader<R, F>(
+    reader: R,
+    alias_counts: HashMap<usize, usize>,
+    mut on_event: F,
+) -> Result<()>
+where
+    R: Read,
+    F: FnMut(TopHashArrayEvent) -> Result<bool>,
+{
+    let mut parser = Parser::with_alias_ref_counts(reader, alias_counts);
     parser.consume_header()?;
     parser.stream_top_hash_array_items(&mut on_event)
 }
@@ -249,9 +281,10 @@ struct Parser<R> {
     reader: R,
     pos: usize,
     classes: Vec<Arc<str>>,
-    refs: Vec<Option<SValue>>,
-    assigned_once: Vec<bool>,
-    alias_slots: Option<HashSet<usize>>,
+    refs: HashMap<usize, SValue>,
+    next_slot: usize,
+    in_progress_slots: HashSet<usize>,
+    alias_ref_counts: Option<HashMap<usize, usize>>,
 }
 
 impl<R: Read> Parser<R> {
@@ -261,42 +294,73 @@ impl<R: Read> Parser<R> {
             reader,
             pos: 0,
             classes: Vec::new(),
-            refs: Vec::new(),
-            assigned_once: Vec::new(),
-            alias_slots: None,
+            refs: HashMap::new(),
+            next_slot: 0,
+            in_progress_slots: HashSet::new(),
+            alias_ref_counts: None,
         }
     }
 
-    fn with_alias_slots(reader: R, alias_slots: HashSet<usize>) -> Self {
+    fn with_alias_ref_counts(reader: R, alias_ref_counts: HashMap<usize, usize>) -> Self {
         Self {
             reader,
             pos: 0,
             classes: Vec::new(),
-            refs: Vec::new(),
-            assigned_once: Vec::new(),
-            alias_slots: Some(alias_slots),
+            refs: HashMap::new(),
+            next_slot: 0,
+            in_progress_slots: HashSet::new(),
+            alias_ref_counts: Some(alias_ref_counts),
         }
     }
 
     fn push_ref(&mut self, value: Option<SValue>) -> usize {
-        let slot = self.refs.len();
-        self.refs.push(value);
-        self.assigned_once.push(self.refs[slot].is_some());
+        let slot = self.next_slot;
+        self.next_slot = self.next_slot.saturating_add(1);
+        match value {
+            Some(value) => {
+                if self.should_retain_slot(slot) {
+                    self.refs.insert(slot, value);
+                }
+            }
+            None => {
+                self.in_progress_slots.insert(slot);
+            }
+        }
         slot
     }
 
     fn store_ref(&mut self, slot: usize, value: SValue) {
-        if slot < self.refs.len() {
-            self.refs[slot] = Some(value);
-            self.assigned_once[slot] = true;
+        self.finish_slot(slot, Some(value));
+    }
+
+    fn finish_slot(&mut self, slot: usize, value: Option<SValue>) {
+        self.in_progress_slots.remove(&slot);
+        match value {
+            Some(value) => {
+                self.refs.insert(slot, value);
+            }
+            None => {
+                self.refs.remove(&slot);
+            }
+        }
+    }
+
+    fn consume_alias_ref(&mut self, slot: usize) {
+        if let Some(counts) = self.alias_ref_counts.as_mut() {
+            if let Some(remaining) = counts.get_mut(&slot) {
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    counts.remove(&slot);
+                    self.refs.remove(&slot);
+                }
+            }
         }
     }
 
     fn should_retain_slot(&self, slot: usize) -> bool {
-        match &self.alias_slots {
-            Some(slots) => slots.contains(&slot),
-            None => true,
-        }
+        self.alias_ref_counts
+            .as_ref()
+            .is_none_or(|counts| counts.contains_key(&slot))
     }
 
     fn consume_header(&mut self) -> Result<()> {
@@ -360,7 +424,7 @@ impl<R: Read> Parser<R> {
             }
         }
 
-        self.refs[root_slot] = None;
+        self.finish_slot(root_slot, None);
         Ok(())
     }
 
@@ -391,7 +455,7 @@ impl<R: Read> Parser<R> {
             }
         }
 
-        self.refs[root_slot] = None;
+        self.finish_slot(root_slot, None);
         Ok(())
     }
 
@@ -466,12 +530,16 @@ impl<R: Read> Parser<R> {
                         if !on_item(item.clone())? {
                             if keep_wrapper_slot {
                                 self.store_ref(wrapper_slot, value.clone());
+                            } else {
+                                self.finish_slot(wrapper_slot, None);
                             }
                             return Ok(false);
                         }
                     }
                     if keep_wrapper_slot {
                         self.store_ref(wrapper_slot, value);
+                    } else {
+                        self.finish_slot(wrapper_slot, None);
                     }
                     true
                 }
@@ -522,30 +590,46 @@ impl<R: Read> Parser<R> {
                 values.push(item.clone());
             }
             if !on_item(item)? {
-                if let Some(values) = retained_values {
-                    let array_value = SValue::Array(Arc::new(values));
-                    if keep_slot {
-                        self.store_ref(slot, array_value.clone());
-                    }
-                    if let Some((slot, true)) = secondary_slot {
-                        self.store_ref(slot, array_value);
-                    }
-                }
+                let array_value = retained_values.map(|values| SValue::Array(Arc::new(values)));
+                self.finish_stream_array_slots(slot, keep_slot, secondary_slot, array_value);
                 return Ok(false);
             }
         }
 
-        if let Some(values) = retained_values {
-            let array_value = SValue::Array(Arc::new(values));
-            if keep_slot {
-                self.store_ref(slot, array_value.clone());
-            }
-            if let Some((slot, true)) = secondary_slot {
-                self.store_ref(slot, array_value);
-            }
-        }
+        let array_value = retained_values.map(|values| SValue::Array(Arc::new(values)));
+        self.finish_stream_array_slots(slot, keep_slot, secondary_slot, array_value);
 
         Ok(true)
+    }
+
+    fn finish_stream_array_slots(
+        &mut self,
+        slot: usize,
+        keep_slot: bool,
+        secondary_slot: Option<(usize, bool)>,
+        array_value: Option<SValue>,
+    ) {
+        if keep_slot {
+            if let Some(value) = array_value.as_ref() {
+                self.store_ref(slot, value.clone());
+            } else {
+                self.finish_slot(slot, None);
+            }
+        } else {
+            self.finish_slot(slot, None);
+        }
+
+        if let Some((secondary, keep_secondary)) = secondary_slot {
+            if keep_secondary {
+                if let Some(value) = array_value {
+                    self.store_ref(secondary, value);
+                } else {
+                    self.finish_slot(secondary, None);
+                }
+            } else {
+                self.finish_slot(secondary, None);
+            }
+        }
     }
 
     fn parse_value(&mut self) -> Result<SValue> {
@@ -632,44 +716,44 @@ impl<R: Read> Parser<R> {
 
         if self.should_retain_slot(slot) {
             self.store_ref(slot, value.clone());
+        } else {
+            self.finish_slot(slot, None);
         }
 
         Ok(value)
     }
 
-    fn resolve_alias(&self, idx: usize) -> Result<SValue> {
-        let retain_requested = self
-            .alias_slots
-            .as_ref()
-            .map(|slots| slots.contains(&idx))
-            .unwrap_or(true);
-        let slot_assigned_once = self.assigned_once.get(idx).copied().unwrap_or(false);
+    fn resolve_alias(&mut self, idx: usize) -> Result<SValue> {
+        let retain_requested = self.should_retain_slot(idx);
 
-        match self.refs.get(idx) {
-            Some(Some(value)) => Ok(value.clone()),
-            Some(None) => {
-                // Some Storable payloads contain aliases to slots that are still under
-                // construction. If this slot is alias-retained, return null instead of
-                // failing hard; required transcript fields are still parsed from direct keys.
-                if retain_requested && !slot_assigned_once {
-                    return Ok(SValue::Null);
-                }
-
-                Err(exec_err(format!(
-                    "Storable reference alias index {} at byte offset {} points to an evicted value in streaming mode (retain_requested={}, slot_assigned_once={}, refs_len={})",
-                    idx,
-                    self.pos.saturating_sub(1),
-                    retain_requested,
-                    slot_assigned_once,
-                    self.refs.len()
-                )))
-            }
-            None => Err(exec_err(format!(
-                "Invalid storable reference alias index {} at byte offset {}",
-                idx,
-                self.pos.saturating_sub(1)
-            ))),
+        if let Some(value) = self.refs.get(&idx).cloned() {
+            self.consume_alias_ref(idx);
+            return Ok(value);
         }
+
+        if self.in_progress_slots.contains(&idx) {
+            // Some Storable payloads contain aliases to slots that are still under
+            // construction. Return null to avoid hard failure.
+            self.consume_alias_ref(idx);
+            return Ok(SValue::Null);
+        }
+
+        if idx < self.next_slot {
+            return Err(exec_err(format!(
+                "Storable reference alias index {} at byte offset {} points to an evicted value in streaming mode (retain_requested={}, retained_refs={}, allocated_slots={})",
+                idx,
+                self.pos.saturating_sub(1),
+                retain_requested,
+                self.refs.len(),
+                self.next_slot
+            )));
+        }
+
+        Err(exec_err(format!(
+            "Invalid storable reference alias index {} at byte offset {}",
+            idx,
+            self.pos.saturating_sub(1)
+        )))
     }
 
     fn parse_hash_key(&mut self) -> Result<String> {
@@ -725,7 +809,7 @@ struct AliasCollector<R> {
     reader: R,
     pos: usize,
     class_count: usize,
-    alias_slots: HashSet<usize>,
+    alias_counts: HashMap<usize, usize>,
 }
 
 impl<R: Read> AliasCollector<R> {
@@ -734,7 +818,7 @@ impl<R: Read> AliasCollector<R> {
             reader,
             pos: 0,
             class_count: 0,
-            alias_slots: HashSet::new(),
+            alias_counts: HashMap::new(),
         }
     }
 
@@ -779,7 +863,7 @@ impl<R: Read> AliasCollector<R> {
 
         if opcode == 0x00 {
             let idx = self.read_u32()? as usize;
-            self.alias_slots.insert(idx);
+            *self.alias_counts.entry(idx).or_insert(0) += 1;
             return Ok(());
         }
 
@@ -998,6 +1082,20 @@ mod tests {
 
         let slots = collect_nstore_alias_slots_from_reader(Cursor::new(bytes)).expect("collect");
         assert!(slots.contains(&2));
+    }
+
+    #[test]
+    fn collects_alias_counts() {
+        // Generated via Perl:
+        // my $v = { q => "x" };
+        // nstore({ a => $v, b => $v });
+        let hex =
+            "70737430050b03000000020403000000010a0178000000017100000001620400000000020000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let counts =
+            collect_nstore_alias_counts_from_reader(Cursor::new(bytes)).expect("collect counts");
+        assert_eq!(counts.get(&2), Some(&1usize));
     }
 
     #[test]
