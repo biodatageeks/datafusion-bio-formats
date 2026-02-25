@@ -250,6 +250,7 @@ struct Parser<R> {
     pos: usize,
     classes: Vec<Arc<str>>,
     refs: Vec<Option<SValue>>,
+    assigned_once: Vec<bool>,
     alias_slots: Option<HashSet<usize>>,
 }
 
@@ -261,6 +262,7 @@ impl<R: Read> Parser<R> {
             pos: 0,
             classes: Vec::new(),
             refs: Vec::new(),
+            assigned_once: Vec::new(),
             alias_slots: None,
         }
     }
@@ -271,6 +273,7 @@ impl<R: Read> Parser<R> {
             pos: 0,
             classes: Vec::new(),
             refs: Vec::new(),
+            assigned_once: Vec::new(),
             alias_slots: Some(alias_slots),
         }
     }
@@ -278,7 +281,15 @@ impl<R: Read> Parser<R> {
     fn push_ref(&mut self, value: Option<SValue>) -> usize {
         let slot = self.refs.len();
         self.refs.push(value);
+        self.assigned_once.push(self.refs[slot].is_some());
         slot
+    }
+
+    fn store_ref(&mut self, slot: usize, value: SValue) {
+        if slot < self.refs.len() {
+            self.refs[slot] = Some(value);
+            self.assigned_once[slot] = true;
+        }
     }
 
     fn should_retain_slot(&self, slot: usize) -> bool {
@@ -417,19 +428,32 @@ impl<R: Read> Parser<R> {
             return Ok(true);
         }
 
-        let slot = self.push_ref(None);
-        let keep_slot = self.should_retain_slot(slot);
-
         let should_continue = match opcode {
             0x02 => {
+                let slot = self.push_ref(None);
+                let keep_slot = self.should_retain_slot(slot);
                 let len = self.read_u32()? as usize;
-                self.stream_inline_array_items(slot, len, keep_slot, on_item)?
+                self.stream_inline_array_items(slot, len, keep_slot, None, on_item)?
             }
             0x04 | 0x1b => {
+                // Wrapped value (or weak ref wrapper): mirror parse_value_from_opcode slot
+                // behavior exactly so alias indices remain stable in streaming mode.
+                let wrapper_slot = self.push_ref(None);
+                let keep_wrapper_slot = self.should_retain_slot(wrapper_slot);
                 let inner = self.read_u8()?;
                 if inner == 0x02 {
+                    // parse_value_from_opcode(0x04|0x1b) would allocate both a wrapper
+                    // slot and an inner array slot. Retain either slot if referenced.
+                    let inner_array_slot = self.push_ref(None);
+                    let keep_inner_array_slot = self.should_retain_slot(inner_array_slot);
                     let len = self.read_u32()? as usize;
-                    self.stream_inline_array_items(slot, len, keep_slot, on_item)?
+                    self.stream_inline_array_items(
+                        wrapper_slot,
+                        len,
+                        keep_wrapper_slot,
+                        Some((inner_array_slot, keep_inner_array_slot)),
+                        on_item,
+                    )?
                 } else {
                     let value = self.parse_value_from_opcode(inner)?;
                     let Some(items) = value.as_array() else {
@@ -440,19 +464,21 @@ impl<R: Read> Parser<R> {
                     };
                     for item in items {
                         if !on_item(item.clone())? {
-                            if keep_slot {
-                                self.refs[slot] = Some(value.clone());
+                            if keep_wrapper_slot {
+                                self.store_ref(wrapper_slot, value.clone());
                             }
                             return Ok(false);
                         }
                     }
-                    if keep_slot {
-                        self.refs[slot] = Some(value);
+                    if keep_wrapper_slot {
+                        self.store_ref(wrapper_slot, value);
                     }
                     true
                 }
             }
             other => {
+                // Parse using the regular opcode path so slot assignment/retention
+                // is identical to non-streaming decode.
                 let value = self.parse_value_from_opcode(other)?;
                 let Some(items) = value.as_array() else {
                     return Err(exec_err(format!(
@@ -462,14 +488,8 @@ impl<R: Read> Parser<R> {
                 };
                 for item in items {
                     if !on_item(item.clone())? {
-                        if keep_slot {
-                            self.refs[slot] = Some(value.clone());
-                        }
                         return Ok(false);
                     }
-                }
-                if keep_slot {
-                    self.refs[slot] = Some(value);
                 }
                 true
             }
@@ -483,12 +503,14 @@ impl<R: Read> Parser<R> {
         slot: usize,
         len: usize,
         keep_slot: bool,
+        secondary_slot: Option<(usize, bool)>,
         on_item: &mut F,
     ) -> Result<bool>
     where
         F: FnMut(SValue) -> Result<bool>,
     {
-        let mut retained_values = if keep_slot {
+        let keep_secondary = secondary_slot.map(|(_, keep)| keep).unwrap_or(false);
+        let mut retained_values = if keep_slot || keep_secondary {
             Some(Vec::with_capacity(len))
         } else {
             None
@@ -501,14 +523,26 @@ impl<R: Read> Parser<R> {
             }
             if !on_item(item)? {
                 if let Some(values) = retained_values {
-                    self.refs[slot] = Some(SValue::Array(Arc::new(values)));
+                    let array_value = SValue::Array(Arc::new(values));
+                    if keep_slot {
+                        self.store_ref(slot, array_value.clone());
+                    }
+                    if let Some((slot, true)) = secondary_slot {
+                        self.store_ref(slot, array_value);
+                    }
                 }
                 return Ok(false);
             }
         }
 
         if let Some(values) = retained_values {
-            self.refs[slot] = Some(SValue::Array(Arc::new(values)));
+            let array_value = SValue::Array(Arc::new(values));
+            if keep_slot {
+                self.store_ref(slot, array_value.clone());
+            }
+            if let Some((slot, true)) = secondary_slot {
+                self.store_ref(slot, array_value);
+            }
         }
 
         Ok(true)
@@ -597,20 +631,39 @@ impl<R: Read> Parser<R> {
         };
 
         if self.should_retain_slot(slot) {
-            self.refs[slot] = Some(value.clone());
+            self.store_ref(slot, value.clone());
         }
 
         Ok(value)
     }
 
     fn resolve_alias(&self, idx: usize) -> Result<SValue> {
+        let retain_requested = self
+            .alias_slots
+            .as_ref()
+            .map(|slots| slots.contains(&idx))
+            .unwrap_or(true);
+        let slot_assigned_once = self.assigned_once.get(idx).copied().unwrap_or(false);
+
         match self.refs.get(idx) {
             Some(Some(value)) => Ok(value.clone()),
-            Some(None) => Err(exec_err(format!(
-                "Storable reference alias index {} at byte offset {} points to an evicted value in streaming mode",
-                idx,
-                self.pos.saturating_sub(1)
-            ))),
+            Some(None) => {
+                // Some Storable payloads contain aliases to slots that are still under
+                // construction. If this slot is alias-retained, return null instead of
+                // failing hard; required transcript fields are still parsed from direct keys.
+                if retain_requested && !slot_assigned_once {
+                    return Ok(SValue::Null);
+                }
+
+                Err(exec_err(format!(
+                    "Storable reference alias index {} at byte offset {} points to an evicted value in streaming mode (retain_requested={}, slot_assigned_once={}, refs_len={})",
+                    idx,
+                    self.pos.saturating_sub(1),
+                    retain_requested,
+                    slot_assigned_once,
+                    self.refs.len()
+                )))
+            }
             None => Err(exec_err(format!(
                 "Invalid storable reference alias index {} at byte offset {}",
                 idx,
@@ -945,5 +998,40 @@ mod tests {
 
         let slots = collect_nstore_alias_slots_from_reader(Cursor::new(bytes)).expect("collect");
         assert!(slots.contains(&2));
+    }
+
+    #[test]
+    fn streams_top_hash_array_items_with_wrapped_alias() {
+        // Generated shape:
+        // {
+        //   b => [1],
+        //   a => same array as b (aliased through wrapped reference)
+        // }
+        //
+        // The aliased index points at the inner array slot, not the wrapper slot.
+        let hex = "70737430050b0300000002040200000001088100000001620400000000020000000161";
+        let bytes = hex::decode(hex).expect("hex decode");
+
+        let alias_slots = collect_nstore_alias_slots_from_reader(Cursor::new(bytes.clone()))
+            .expect("collect alias slots");
+        assert!(alias_slots.contains(&2));
+
+        let mut seen_items = Vec::new();
+        let mut seen_keys = Vec::new();
+        stream_nstore_top_hash_array_items_with_alias_slots_from_reader(
+            Cursor::new(bytes),
+            alias_slots,
+            |event| {
+                match event {
+                    TopHashArrayEvent::Item(item) => seen_items.push(item.as_i64()),
+                    TopHashArrayEvent::EntryKey(key) => seen_keys.push(key),
+                }
+                Ok(true)
+            },
+        )
+        .expect("stream array events");
+
+        assert_eq!(seen_items, vec![Some(1), Some(1)]);
+        assert_eq!(seen_keys, vec!["b".to_string(), "a".to_string()]);
     }
 }
