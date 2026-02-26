@@ -1,7 +1,12 @@
 //! Integration tests for VCF write functionality
 
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::array::{
+    ArrayBuilder, Float64Array, LargeListBuilder, ListArray, RecordBatch, StringArray,
+    StringBuilder, StructArray, StructBuilder, UInt32Array,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::catalog::TableProvider;
+use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
@@ -213,6 +218,168 @@ async fn test_write_vcf_multi_sample() {
     assert!(content.contains("1/1")); // Sample2 GT
 
     cleanup_files(&[&input_path, output_path]).await;
+}
+
+#[tokio::test]
+async fn test_write_vcf_multisample_large_list_roundtrip_preserves_gt_values() {
+    let output_path = "/tmp/test_write_multisample_large_list_roundtrip.vcf";
+
+    let mut gt_metadata = std::collections::HashMap::new();
+    gt_metadata.insert(
+        VCF_FIELD_DESCRIPTION_KEY.to_string(),
+        "Genotype".to_string(),
+    );
+    gt_metadata.insert(VCF_FIELD_TYPE_KEY.to_string(), "String".to_string());
+    gt_metadata.insert(VCF_FIELD_NUMBER_KEY.to_string(), "1".to_string());
+    gt_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
+
+    let value_fields = vec![Field::new("GT", DataType::Utf8, true).with_metadata(gt_metadata)];
+    let genotype_item_type = DataType::Struct(
+        vec![
+            Field::new("sample_id", DataType::Utf8, false),
+            Field::new(
+                "values",
+                DataType::Struct(value_fields.clone().into()),
+                true,
+            ),
+        ]
+        .into(),
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("end", DataType::UInt32, false),
+        Field::new("id", DataType::Utf8, true),
+        Field::new("ref", DataType::Utf8, false),
+        Field::new("alt", DataType::Utf8, false),
+        Field::new("qual", DataType::Float64, true),
+        Field::new("filter", DataType::Utf8, true),
+        Field::new(
+            "genotypes",
+            DataType::LargeList(Arc::new(Field::new("item", genotype_item_type, true))),
+            true,
+        ),
+    ]));
+
+    let values_builder = StructBuilder::new(
+        value_fields.clone(),
+        vec![Box::new(StringBuilder::new()) as Box<dyn ArrayBuilder>],
+    );
+    let item_builder = StructBuilder::new(
+        vec![
+            Field::new("sample_id", DataType::Utf8, false),
+            Field::new("values", DataType::Struct(value_fields.into()), true),
+        ],
+        vec![
+            Box::new(StringBuilder::new()) as Box<dyn ArrayBuilder>,
+            Box::new(values_builder) as Box<dyn ArrayBuilder>,
+        ],
+    );
+    let mut genotypes_builder = LargeListBuilder::new(item_builder);
+
+    {
+        let item = genotypes_builder.values();
+        item.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("Sample1");
+        let values = item.field_builder::<StructBuilder>(1).unwrap();
+        values
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("0/1");
+        values.append(true);
+        item.append(true);
+
+        item.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("Sample2");
+        let values = item.field_builder::<StructBuilder>(1).unwrap();
+        values
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("1/1");
+        values.append(true);
+        item.append(true);
+        genotypes_builder.append(true);
+    }
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![Some("rs1")])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["T"])),
+            Arc::new(Float64Array::from(vec![Some(60.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+            Arc::new(genotypes_builder.finish()),
+        ],
+    )
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    let source = MemTable::try_new(schema.clone(), vec![vec![batch]]).unwrap();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        schema,
+        vec![],
+        vec!["GT".to_string()],
+        vec!["Sample1".to_string(), "Sample2".to_string()],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(output_path).await.unwrap();
+    assert!(content.contains("##FORMAT=<ID=GT"));
+    assert!(content.contains("GT\t0/1\t1/1"));
+
+    let roundtrip = create_read_provider(output_path, Some(vec![]), Some(vec!["GT".to_string()]));
+    let ctx_read = SessionContext::new();
+    ctx_read.register_table("rt", Arc::new(roundtrip)).unwrap();
+
+    let batches = ctx_read
+        .sql("SELECT genotypes FROM rt")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let first = genotypes.value(0);
+    let first_struct = first.as_any().downcast_ref::<StructArray>().unwrap();
+    let values = first_struct
+        .column_by_name("values")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let gts = values
+        .column_by_name("GT")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    assert_eq!(gts.value(0), "0/1");
+    assert_eq!(gts.value(1), "1/1");
+
+    cleanup_files(&[output_path]).await;
 }
 
 #[tokio::test]
