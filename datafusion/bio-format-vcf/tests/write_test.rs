@@ -1,5 +1,6 @@
 //! Integration tests for VCF write functionality
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::{
@@ -363,8 +364,22 @@ async fn test_schema_field_metadata_preserved() {
         Some(&"A".to_string())
     );
 
-    // Check FORMAT field metadata (multi-sample uses Sample1_GT naming)
-    let gt_field = schema.field_with_name("Sample1_GT").unwrap();
+    // Check FORMAT field metadata in nested multisample schema
+    let genotypes = schema.field_with_name("genotypes").unwrap();
+    let value_fields = match genotypes.data_type() {
+        DataType::List(item) => match item.data_type() {
+            DataType::Struct(item_fields) => {
+                let values = item_fields.iter().find(|f| f.name() == "values").unwrap();
+                match values.data_type() {
+                    DataType::Struct(value_fields) => value_fields,
+                    other => panic!("expected values struct, got {other:?}"),
+                }
+            }
+            other => panic!("expected list item struct, got {other:?}"),
+        },
+        other => panic!("expected list for genotypes, got {other:?}"),
+    };
+    let gt_field = value_fields.iter().find(|f| f.name() == "GT").unwrap();
     let gt_metadata = gt_field.metadata();
     assert_eq!(
         gt_metadata.get(VCF_FIELD_DESCRIPTION_KEY),

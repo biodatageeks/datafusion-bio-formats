@@ -127,50 +127,48 @@ async fn determine_schema_from_header(
         Field::new("filter", DataType::Utf8, true),
     ];
 
-    if let Some(infos) = info_fields {
-        for tag in infos {
-            let dtype = info_to_arrow_type(header_infos, tag);
-            let info = header_infos.get(tag.as_str()).unwrap();
-            let nullable = is_nullable(&info.ty());
-            // Store VCF header metadata in field metadata for round-trip preservation
-            let mut field_metadata = HashMap::new();
-            field_metadata.insert(
-                VCF_FIELD_DESCRIPTION_KEY.to_string(),
-                info.description().to_string(),
-            );
-            field_metadata.insert(
-                VCF_FIELD_TYPE_KEY.to_string(),
-                info_type_to_string(&info.ty()),
-            );
-            field_metadata.insert(
-                VCF_FIELD_NUMBER_KEY.to_string(),
-                info_number_to_string(info.number()),
-            );
-            field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
-            // Preserve case sensitivity for INFO fields to avoid conflicts
-            let field = Field::new(tag.clone(), dtype, nullable).with_metadata(field_metadata);
-            fields.push(field);
-        }
+    // None means all INFO fields from header; empty vector means none.
+    let info_tags: Vec<String> = match info_fields {
+        Some(tags) => tags.clone(),
+        None => header_infos.keys().map(|k| k.to_string()).collect(),
+    };
+    for tag in &info_tags {
+        let dtype = info_to_arrow_type(header_infos, tag);
+        let info = header_infos.get(tag.as_str()).unwrap();
+        let nullable = is_nullable(&info.ty());
+        // Store VCF header metadata in field metadata for round-trip preservation
+        let mut field_metadata = HashMap::new();
+        field_metadata.insert(
+            VCF_FIELD_DESCRIPTION_KEY.to_string(),
+            info.description().to_string(),
+        );
+        field_metadata.insert(
+            VCF_FIELD_TYPE_KEY.to_string(),
+            info_type_to_string(&info.ty()),
+        );
+        field_metadata.insert(
+            VCF_FIELD_NUMBER_KEY.to_string(),
+            info_number_to_string(info.number()),
+        );
+        field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
+        // Preserve case sensitivity for INFO fields to avoid conflicts
+        let field = Field::new(tag.clone(), dtype, nullable).with_metadata(field_metadata);
+        fields.push(field);
     }
 
-    // Generate per-sample FORMAT columns
-    // Naming convention: {format_field} for single sample, {sample_name}_{format_field} for multiple
-    // If format_fields is None, include all FORMAT fields from header
+    // Generate FORMAT columns.
+    // Single sample: top-level columns for simpler SQL.
+    // Multi-sample: one nested "genotypes" column for scalability.
+    // If format_fields is None, include all FORMAT fields from header.
     let format_tags: Vec<String> = match format_fields {
         Some(tags) => tags.clone(),
         None => header_formats.keys().map(|k| k.to_string()).collect(),
     };
     if !format_tags.is_empty() && !sample_names.is_empty() {
         let single_sample = sample_names.len() == 1;
-        for sample_name in &sample_names {
+        if single_sample {
             for tag in &format_tags {
                 let dtype = format_to_arrow_type(header_formats, tag);
-                // Skip sample prefix for single-sample VCFs
-                let field_name = if single_sample {
-                    tag.clone()
-                } else {
-                    format!("{sample_name}_{tag}")
-                };
                 // Store VCF header metadata in field metadata for round-trip preservation
                 let mut field_metadata = HashMap::new();
                 if let Some(format_info) = header_formats.get(tag.as_str()) {
@@ -189,9 +187,48 @@ async fn determine_schema_from_header(
                 }
                 field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
                 field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
-                let field = Field::new(field_name, dtype, true).with_metadata(field_metadata);
+                let field = Field::new(tag.clone(), dtype, true).with_metadata(field_metadata);
                 fields.push(field);
             }
+        } else {
+            let value_fields = format_tags
+                .iter()
+                .map(|tag| {
+                    let dtype = format_to_arrow_type(header_formats, tag);
+                    let mut field_metadata = HashMap::new();
+                    if let Some(format_info) = header_formats.get(tag.as_str()) {
+                        field_metadata.insert(
+                            VCF_FIELD_DESCRIPTION_KEY.to_string(),
+                            format_info.description().to_string(),
+                        );
+                        field_metadata.insert(
+                            VCF_FIELD_TYPE_KEY.to_string(),
+                            format_type_to_string(&format_info.ty()),
+                        );
+                        field_metadata.insert(
+                            VCF_FIELD_NUMBER_KEY.to_string(),
+                            format_number_to_string(format_info.number()),
+                        );
+                    }
+                    field_metadata
+                        .insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
+                    field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
+                    Field::new(tag.clone(), dtype, true).with_metadata(field_metadata)
+                })
+                .collect::<Vec<_>>();
+
+            let genotype_struct = DataType::Struct(
+                vec![
+                    Field::new("sample_id", DataType::Utf8, false),
+                    Field::new("values", DataType::Struct(value_fields.into()), true),
+                ]
+                .into(),
+            );
+            fields.push(Field::new(
+                "genotypes",
+                DataType::List(Arc::new(Field::new("item", genotype_struct, true))),
+                true,
+            ));
         }
     }
 

@@ -213,6 +213,22 @@ fn find_format_field<'a>(
         return Some(schema.field(idx));
     }
 
+    // New multisample schema: genotypes: List<Struct<sample_id, values: Struct<...>>>
+    if let Ok(idx) = schema.index_of("genotypes") {
+        let genotypes_field = schema.field(idx);
+        if let DataType::List(item) = genotypes_field.data_type() {
+            if let DataType::Struct(item_fields) = item.data_type() {
+                if let Some(values_field) = item_fields.iter().find(|f| f.name() == "values") {
+                    if let DataType::Struct(value_fields) = values_field.data_type() {
+                        if let Some(field) = value_fields.iter().find(|f| f.name() == format_name) {
+                            return Some(field.as_ref());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Try multi-sample naming convention: {sample}_{format}
     for sample_name in sample_names {
         let column_name = format!("{sample_name}_{format_name}");

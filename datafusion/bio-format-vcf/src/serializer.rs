@@ -5,9 +5,11 @@
 
 use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
-    ListArray, RecordBatch, StringArray, UInt32Array,
+    ListArray, RecordBatch, StringArray, StructArray, UInt32Array,
 };
 use datafusion::common::{DataFusionError, Result};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Enum to hold either StringArray or LargeStringArray reference
 /// This allows handling both standard Arrow Utf8 and Polars LargeUtf8 types
@@ -81,7 +83,11 @@ pub fn batch_to_vcf_lines(
 
     // Build column index maps for INFO and FORMAT fields
     let info_columns = build_info_column_map(batch, info_fields);
-    let format_columns = build_format_column_map(batch, format_fields, sample_names);
+    let format_columns = if sample_names.len() == 1 {
+        Some(build_format_column_map(batch, format_fields, sample_names))
+    } else {
+        None
+    };
 
     let mut records = Vec::with_capacity(num_rows);
 
@@ -132,8 +138,13 @@ pub fn batch_to_vcf_lines(
         let info_str = build_info_string(batch, row, info_fields, &info_columns)?;
 
         // FORMAT and samples
-        let (format_str, samples_str) =
-            build_format_and_samples(batch, row, format_fields, sample_names, &format_columns)?;
+        let (format_str, samples_str) = build_format_and_samples(
+            batch,
+            row,
+            format_fields,
+            sample_names,
+            format_columns.as_ref(),
+        )?;
 
         // Build the VCF line
         let mut line = format!(
@@ -384,11 +395,20 @@ fn build_format_and_samples(
     row: usize,
     format_fields: &[String],
     sample_names: &[String],
-    format_columns: &std::collections::HashMap<(String, String), usize>,
+    format_columns: Option<&std::collections::HashMap<(String, String), usize>>,
 ) -> Result<(String, Vec<String>)> {
     if sample_names.is_empty() || format_fields.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
+
+    if sample_names.len() > 1 {
+        let samples = build_nested_multisample_values(batch, row, format_fields, sample_names)?;
+        return Ok((format_fields.join(":"), samples));
+    }
+
+    let format_columns = format_columns.ok_or_else(|| {
+        DataFusionError::Execution("Missing single-sample FORMAT column mapping".to_string())
+    })?;
 
     // Build FORMAT string
     let format_str = format_fields.join(":");
@@ -415,6 +435,89 @@ fn build_format_and_samples(
     }
 
     Ok((format_str, samples))
+}
+
+fn build_nested_multisample_values(
+    batch: &RecordBatch,
+    row: usize,
+    format_fields: &[String],
+    sample_names: &[String],
+) -> Result<Vec<String>> {
+    let genotypes_idx = batch.schema().index_of("genotypes").map_err(|_| {
+        DataFusionError::Execution(
+            "Multisample output requires a 'genotypes' column in nested schema".to_string(),
+        )
+    })?;
+    let genotypes_col = batch.column(genotypes_idx);
+    if genotypes_col.is_null(row) {
+        let missing = vec!["."; format_fields.len()].join(":");
+        return Ok(vec![missing; sample_names.len()]);
+    }
+
+    let genotype_rows: Arc<dyn Array> =
+        if let Some(list) = genotypes_col.as_any().downcast_ref::<ListArray>() {
+            list.value(row)
+        } else if let Some(list) = genotypes_col.as_any().downcast_ref::<LargeListArray>() {
+            list.value(row)
+        } else {
+            return Err(DataFusionError::Execution(
+                "Column 'genotypes' must be List or LargeList".to_string(),
+            ));
+        };
+
+    let genotype_struct = genotype_rows
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            DataFusionError::Execution("Column 'genotypes' list values must be Struct".to_string())
+        })?;
+
+    let sample_id_col = genotype_struct.column_by_name("sample_id").ok_or_else(|| {
+        DataFusionError::Execution("Missing 'sample_id' in genotypes struct".to_string())
+    })?;
+    let sample_ids = sample_id_col
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            DataFusionError::Execution("'sample_id' in genotypes must be Utf8".to_string())
+        })?;
+
+    let values_col = genotype_struct.column_by_name("values").ok_or_else(|| {
+        DataFusionError::Execution("Missing 'values' in genotypes struct".to_string())
+    })?;
+    let values_struct = values_col
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            DataFusionError::Execution("'values' in genotypes must be Struct".to_string())
+        })?;
+
+    let mut sample_map: HashMap<String, String> = HashMap::new();
+    for i in 0..genotype_struct.len() {
+        if sample_ids.is_null(i) {
+            continue;
+        }
+        let sample_id = sample_ids.value(i).to_string();
+        let mut values = Vec::with_capacity(format_fields.len());
+        for format_field in format_fields {
+            if let Some(col) = values_struct.column_by_name(format_field) {
+                values.push(extract_sample_value_string(col.as_ref(), i)?);
+            } else {
+                values.push(".".to_string());
+            }
+        }
+        sample_map.insert(sample_id, values.join(":"));
+    }
+
+    let mut samples = Vec::with_capacity(sample_names.len());
+    for sample_name in sample_names {
+        if let Some(sample_val) = sample_map.get(sample_name) {
+            samples.push(sample_val.clone());
+        } else {
+            samples.push(vec!["."; format_fields.len()].join(":"));
+        }
+    }
+    Ok(samples)
 }
 
 /// Extracts a sample/FORMAT value as a string from an Arrow array
@@ -476,6 +579,7 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::array::{Int32Builder, ListBuilder, StringBuilder, StructBuilder};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -563,7 +667,22 @@ mod tests {
 
     #[test]
     fn test_batch_to_vcf_lines_multi_sample() {
-        // Schema with FORMAT fields for two samples
+        // Schema with nested multisample FORMAT data in `genotypes`
+        let value_fields = vec![
+            Field::new("GT", DataType::Utf8, true),
+            Field::new("DP", DataType::Int32, true),
+        ];
+        let genotype_item_type = DataType::Struct(
+            vec![
+                Field::new("sample_id", DataType::Utf8, false),
+                Field::new(
+                    "values",
+                    DataType::Struct(value_fields.clone().into()),
+                    true,
+                ),
+            ]
+            .into(),
+        );
         let schema = Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, false),
             Field::new("start", DataType::UInt32, false),
@@ -573,11 +692,67 @@ mod tests {
             Field::new("alt", DataType::Utf8, false),
             Field::new("qual", DataType::Float64, true),
             Field::new("filter", DataType::Utf8, true),
-            Field::new("SAMPLE1_GT", DataType::Utf8, true),
-            Field::new("SAMPLE1_DP", DataType::Int32, true),
-            Field::new("SAMPLE2_GT", DataType::Utf8, true),
-            Field::new("SAMPLE2_DP", DataType::Int32, true),
+            Field::new(
+                "genotypes",
+                DataType::List(Arc::new(Field::new("item", genotype_item_type, true))),
+                true,
+            ),
         ]));
+
+        let values_builder = StructBuilder::new(
+            value_fields.clone(),
+            vec![
+                Box::new(StringBuilder::new()) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+                Box::new(Int32Builder::new()) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+            ],
+        );
+        let item_builder = StructBuilder::new(
+            vec![
+                Field::new("sample_id", DataType::Utf8, false),
+                Field::new("values", DataType::Struct(value_fields.into()), true),
+            ],
+            vec![
+                Box::new(StringBuilder::new()) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+                Box::new(values_builder) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+            ],
+        );
+        let mut genotypes_builder = ListBuilder::new(item_builder);
+
+        {
+            let item = genotypes_builder.values();
+            item.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("SAMPLE1");
+            let values = item.field_builder::<StructBuilder>(1).unwrap();
+            values
+                .field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("0/1");
+            values
+                .field_builder::<Int32Builder>(1)
+                .unwrap()
+                .append_value(25);
+            values.append(true);
+            item.append(true);
+
+            item.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("SAMPLE2");
+            let values = item.field_builder::<StructBuilder>(1).unwrap();
+            values
+                .field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("1/1");
+            values
+                .field_builder::<Int32Builder>(1)
+                .unwrap()
+                .append_value(30);
+            values.append(true);
+            item.append(true);
+
+            genotypes_builder.append(true);
+        }
+        let genotypes = Arc::new(genotypes_builder.finish());
 
         let batch = RecordBatch::try_new(
             schema,
@@ -590,10 +765,7 @@ mod tests {
                 Arc::new(StringArray::from(vec!["G"])),
                 Arc::new(Float64Array::from(vec![Some(30.0)])),
                 Arc::new(StringArray::from(vec![Some("PASS")])),
-                Arc::new(StringArray::from(vec![Some("0/1")])),
-                Arc::new(Int32Array::from(vec![Some(25)])),
-                Arc::new(StringArray::from(vec![Some("1/1")])),
-                Arc::new(Int32Array::from(vec![Some(30)])),
+                genotypes,
             ],
         )
         .unwrap();
