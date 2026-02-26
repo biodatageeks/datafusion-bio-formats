@@ -43,6 +43,12 @@ pub const VCF_ALTERNATIVE_ALLELES_KEY: &str = "bio.vcf.alternative_alleles";
 /// VCF sample names stored as JSON array of strings
 pub const VCF_SAMPLE_NAMES_KEY: &str = "bio.vcf.samples";
 
+/// VCF FORMAT definitions stored as JSON object keyed by FORMAT ID
+///
+/// Value type is `HashMap<String, VcfFieldMetadata>`, where the outer key is FORMAT ID
+/// (e.g., `GT`, `DP`) and the value contains `number`, `type`, and `description`.
+pub const VCF_FORMAT_FIELDS_KEY: &str = "bio.vcf.format_fields";
+
 // Field-level metadata
 
 /// VCF field description stored in field metadata
@@ -180,6 +186,22 @@ pub struct AltAlleleMetadata {
     /// ALT allele ID (e.g., "DEL", "INS", "DUP")
     pub id: String,
     /// ALT allele description
+    pub description: String,
+}
+
+/// VCF field metadata for INFO/FORMAT definitions.
+///
+/// This is used for schema-level `bio.vcf.format_fields` metadata to preserve
+/// header fidelity when field-level metadata is nested (e.g., multisample
+/// `genotypes.values.*`).
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct VcfFieldMetadata {
+    /// VCF Number value (e.g., "1", "A", "R", "G", ".")
+    pub number: String,
+    /// VCF Type value (e.g., "Integer", "Float", "String", "Flag")
+    #[serde(rename = "type")]
+    pub field_type: String,
+    /// Header description text
     pub description: String,
 }
 

@@ -11,8 +11,8 @@ use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
-    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_SAMPLE_NAMES_KEY,
-    from_json_string,
+    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY,
+    VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string,
 };
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use datafusion_bio_format_vcf::writer::VcfCompressionType;
@@ -556,6 +556,56 @@ async fn test_schema_field_metadata_preserved() {
         gt_metadata.get(VCF_FIELD_FORMAT_ID_KEY),
         Some(&"GT".to_string())
     );
+
+    // Check schema-level FORMAT metadata map for nested multisample schemas
+    let format_fields_json = schema
+        .metadata()
+        .get(VCF_FORMAT_FIELDS_KEY)
+        .expect("schema should include bio.vcf.format_fields metadata");
+    let format_fields =
+        from_json_string::<std::collections::HashMap<String, VcfFieldMetadata>>(format_fields_json)
+            .expect("bio.vcf.format_fields should be valid JSON");
+    let gt_def = format_fields.get("GT").expect("GT should be present");
+    assert_eq!(gt_def.number, "1");
+    assert_eq!(gt_def.field_type, "String");
+    assert_eq!(gt_def.description, "Genotype");
+
+    cleanup_files(&[&input_path]).await;
+}
+
+#[tokio::test]
+async fn test_multisample_schema_metadata_exposes_format_descriptions() {
+    let input_path = create_test_vcf("multisample_format_meta", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+
+    let provider = VcfTableProvider::new(
+        input_path.clone(),
+        Some(vec!["DP".to_string(), "AF".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()]),
+        None,
+        true,
+    )
+    .unwrap();
+    let schema = provider.schema();
+
+    let format_fields_json = schema
+        .metadata()
+        .get(VCF_FORMAT_FIELDS_KEY)
+        .expect("schema should include bio.vcf.format_fields metadata");
+    let format_fields =
+        from_json_string::<std::collections::HashMap<String, VcfFieldMetadata>>(format_fields_json)
+            .expect("bio.vcf.format_fields should be valid JSON");
+
+    let gt = format_fields.get("GT").expect("GT should be present");
+    assert_eq!(gt.number, "1");
+    assert_eq!(gt.field_type, "String");
+    assert_eq!(gt.description, "Genotype");
+
+    let dp = format_fields.get("DP").expect("DP should be present");
+    assert_eq!(dp.number, "1");
+    assert_eq!(dp.field_type, "Integer");
+    assert_eq!(dp.description, "Sample read depth");
 
     cleanup_files(&[&input_path]).await;
 }

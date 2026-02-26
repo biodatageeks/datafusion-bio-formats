@@ -12,7 +12,7 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
     VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
-    VCF_SAMPLE_NAMES_KEY, to_json_string,
+    VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -164,6 +164,20 @@ async fn determine_schema_from_header(
         Some(tags) => tags.clone(),
         None => header_formats.keys().map(|k| k.to_string()).collect(),
     };
+    let mut format_field_metadata: HashMap<String, VcfFieldMetadata> = HashMap::new();
+    for tag in &format_tags {
+        if let Some(format_info) = header_formats.get(tag.as_str()) {
+            format_field_metadata.insert(
+                tag.clone(),
+                VcfFieldMetadata {
+                    number: format_number_to_string(format_info.number()),
+                    field_type: format_type_to_string(&format_info.ty()),
+                    description: format_info.description().to_string(),
+                },
+            );
+        }
+    }
+
     if !format_tags.is_empty() && !sample_names.is_empty() {
         let single_sample = sample_names.len() == 1;
         if single_sample {
@@ -171,19 +185,17 @@ async fn determine_schema_from_header(
                 let dtype = format_to_arrow_type(header_formats, tag);
                 // Store VCF header metadata in field metadata for round-trip preservation
                 let mut field_metadata = HashMap::new();
-                if let Some(format_info) = header_formats.get(tag.as_str()) {
+                if let Some(format_info) = format_field_metadata.get(tag) {
                     field_metadata.insert(
                         VCF_FIELD_DESCRIPTION_KEY.to_string(),
-                        format_info.description().to_string(),
+                        format_info.description.clone(),
                     );
                     field_metadata.insert(
                         VCF_FIELD_TYPE_KEY.to_string(),
-                        format_type_to_string(&format_info.ty()),
+                        format_info.field_type.clone(),
                     );
-                    field_metadata.insert(
-                        VCF_FIELD_NUMBER_KEY.to_string(),
-                        format_number_to_string(format_info.number()),
-                    );
+                    field_metadata
+                        .insert(VCF_FIELD_NUMBER_KEY.to_string(), format_info.number.clone());
                 }
                 field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
                 field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
@@ -196,19 +208,17 @@ async fn determine_schema_from_header(
                 .map(|tag| {
                     let dtype = format_to_arrow_type(header_formats, tag);
                     let mut field_metadata = HashMap::new();
-                    if let Some(format_info) = header_formats.get(tag.as_str()) {
+                    if let Some(format_info) = format_field_metadata.get(tag) {
                         field_metadata.insert(
                             VCF_FIELD_DESCRIPTION_KEY.to_string(),
-                            format_info.description().to_string(),
+                            format_info.description.clone(),
                         );
                         field_metadata.insert(
                             VCF_FIELD_TYPE_KEY.to_string(),
-                            format_type_to_string(&format_info.ty()),
+                            format_info.field_type.clone(),
                         );
-                        field_metadata.insert(
-                            VCF_FIELD_NUMBER_KEY.to_string(),
-                            format_number_to_string(format_info.number()),
-                        );
+                        field_metadata
+                            .insert(VCF_FIELD_NUMBER_KEY.to_string(), format_info.number.clone());
                     }
                     field_metadata
                         .insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
@@ -250,6 +260,10 @@ async fn determine_schema_from_header(
     metadata.insert(
         VCF_SAMPLE_NAMES_KEY.to_string(),
         to_json_string(&sample_names),
+    );
+    metadata.insert(
+        VCF_FORMAT_FIELDS_KEY.to_string(),
+        to_json_string(&format_field_metadata),
     );
 
     let schema = Schema::new_with_metadata(fields, metadata);
