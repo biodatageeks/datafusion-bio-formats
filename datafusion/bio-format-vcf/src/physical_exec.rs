@@ -143,9 +143,7 @@ fn choose_initial_builder_batch_size(
     source_sample_names: &[String],
 ) -> usize {
     if any_format_projected && source_sample_names.len() > 1 {
-        effective_batch_size
-            .min(MULTISAMPLE_MAX_INITIAL_BUILDER_ROWS)
-            .max(1)
+        effective_batch_size.clamp(1, MULTISAMPLE_MAX_INITIAL_BUILDER_ROWS)
     } else {
         effective_batch_size.max(1)
     }
@@ -190,11 +188,7 @@ fn adjust_effective_batch_size_by_observed_format_bytes(
 
     if next_effective != current_effective_batch_size {
         debug!(
-            "Adjusting effective VCF batch size from {} to {} based on observed FORMAT bytes/row={} (target_bytes={})",
-            current_effective_batch_size,
-            next_effective,
-            bytes_per_row,
-            MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH
+            "Adjusting effective VCF batch size from {current_effective_batch_size} to {next_effective} based on observed FORMAT bytes/row={bytes_per_row} (target_bytes={MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH})"
         );
     }
 
@@ -1687,7 +1681,7 @@ enum FormatMode {
         sample_count: usize,
     },
     Multi {
-        builder: MultiSampleFormatBuilder,
+        builder: Box<MultiSampleFormatBuilder>,
     },
 }
 
@@ -1836,7 +1830,9 @@ fn init_format_mode(
             value_fields,
             batch_size,
         )?;
-        Ok(FormatMode::Multi { builder })
+        Ok(FormatMode::Multi {
+            builder: Box::new(builder),
+        })
     }
 }
 
@@ -2250,7 +2246,7 @@ fn load_formats_single_pass(
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Utf8) {
                             if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
-                                builder.append_string(&first.to_string())?;
+                                builder.append_string(first.as_ref())?;
                             } else {
                                 builder.append_null()?;
                             }
@@ -2593,64 +2589,6 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
     }
 }
 
-#[cfg(test)]
-mod build_noodles_region_tests {
-    use super::build_noodles_region;
-    use datafusion_bio_format_core::genomic_filter::GenomicRegion;
-
-    #[test]
-    fn supports_contig_names_with_colons() {
-        let region = GenomicRegion {
-            chrom: "HLA-A*01:01:01:02N".to_string(),
-            start: None,
-            end: None,
-            unmapped_tail: false,
-        };
-
-        let parsed = build_noodles_region(&region).expect("region should be valid");
-        let name_bytes: &[u8] = parsed.name().as_ref();
-        assert_eq!(
-            name_bytes, b"HLA-A*01:01:01:02N",
-            "region name should be preserved exactly"
-        );
-        assert_eq!(parsed.interval().start().map(|p| p.get()), None);
-        assert_eq!(parsed.interval().end().map(|p| p.get()), None);
-    }
-
-    #[test]
-    fn supports_intervals_for_contig_names_with_colons() {
-        let region = GenomicRegion {
-            chrom: "HLA-A*01:01:01:02N".to_string(),
-            start: Some(10),
-            end: Some(20),
-            unmapped_tail: false,
-        };
-
-        let parsed = build_noodles_region(&region).expect("region should be valid");
-        let name_bytes: &[u8] = parsed.name().as_ref();
-        assert_eq!(
-            name_bytes, b"HLA-A*01:01:01:02N",
-            "region name should be preserved exactly"
-        );
-        assert_eq!(parsed.interval().start().map(|p| p.get()), Some(10));
-        assert_eq!(parsed.interval().end().map(|p| p.get()), Some(20));
-    }
-
-    #[test]
-    fn rejects_zero_positions() {
-        let region = GenomicRegion {
-            chrom: "chr1".to_string(),
-            start: Some(0),
-            end: None,
-            unmapped_tail: false,
-        };
-
-        let err = build_noodles_region(&region).expect_err("zero start must be rejected");
-        let msg = err.to_string();
-        assert!(msg.contains("start position must be >= 1"));
-    }
-}
-
 /// Get a streaming RecordBatch stream from an indexed VCF file for one or more regions.
 ///
 /// Uses `thread::spawn` + `mpsc::channel(1)` for streaming I/O with backpressure.
@@ -2765,8 +2703,7 @@ async fn get_indexed_vcf_stream(
                             continue;
                         }
                         return Err(DataFusionError::Execution(format!(
-                            "VCF region query failed: {}",
-                            e
+                            "VCF region query failed: {e}"
                         )));
                     }
                 };
@@ -3010,4 +2947,62 @@ async fn get_indexed_vcf_stream(
     // Stream batches from the channel
     let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+}
+
+#[cfg(test)]
+mod build_noodles_region_tests {
+    use super::build_noodles_region;
+    use datafusion_bio_format_core::genomic_filter::GenomicRegion;
+
+    #[test]
+    fn supports_contig_names_with_colons() {
+        let region = GenomicRegion {
+            chrom: "HLA-A*01:01:01:02N".to_string(),
+            start: None,
+            end: None,
+            unmapped_tail: false,
+        };
+
+        let parsed = build_noodles_region(&region).expect("region should be valid");
+        let name_bytes: &[u8] = parsed.name().as_ref();
+        assert_eq!(
+            name_bytes, b"HLA-A*01:01:01:02N",
+            "region name should be preserved exactly"
+        );
+        assert_eq!(parsed.interval().start().map(|p| p.get()), None);
+        assert_eq!(parsed.interval().end().map(|p| p.get()), None);
+    }
+
+    #[test]
+    fn supports_intervals_for_contig_names_with_colons() {
+        let region = GenomicRegion {
+            chrom: "HLA-A*01:01:01:02N".to_string(),
+            start: Some(10),
+            end: Some(20),
+            unmapped_tail: false,
+        };
+
+        let parsed = build_noodles_region(&region).expect("region should be valid");
+        let name_bytes: &[u8] = parsed.name().as_ref();
+        assert_eq!(
+            name_bytes, b"HLA-A*01:01:01:02N",
+            "region name should be preserved exactly"
+        );
+        assert_eq!(parsed.interval().start().map(|p| p.get()), Some(10));
+        assert_eq!(parsed.interval().end().map(|p| p.get()), Some(20));
+    }
+
+    #[test]
+    fn rejects_zero_positions() {
+        let region = GenomicRegion {
+            chrom: "chr1".to_string(),
+            start: Some(0),
+            end: None,
+            unmapped_tail: false,
+        };
+
+        let err = build_noodles_region(&region).expect_err("zero start must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("start position must be >= 1"));
+    }
 }
