@@ -16,7 +16,7 @@ use datafusion_bio_format_core::metadata::{
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
@@ -31,7 +31,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use futures::executor::block_on;
-use log::debug;
+use log::{debug, warn};
 use noodles_vcf::header::Formats;
 use noodles_vcf::header::Infos;
 use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
@@ -56,10 +56,44 @@ use std::sync::Arc;
 /// * `object_storage_options` - Configuration for cloud storage access
 /// * `coordinate_system_zero_based` - If true, coordinates are 0-based half-open; if false, 1-based closed
 ///
+/// Resolves the subset of sample names to include in output.
+///
+/// Matching is exact and case-sensitive. The returned order follows
+/// `samples_to_include` order.
+fn resolve_selected_samples(
+    header_sample_names: &[String],
+    samples_to_include: &Option<Vec<String>>,
+) -> Vec<String> {
+    match samples_to_include {
+        None => header_sample_names.to_vec(),
+        Some(requested) => {
+            let available: HashSet<&str> = header_sample_names.iter().map(|s| s.as_str()).collect();
+            let mut seen = HashSet::with_capacity(requested.len());
+            let mut selected = Vec::with_capacity(requested.len());
+
+            for sample in requested {
+                if !available.contains(sample.as_str()) {
+                    warn!(
+                        "Requested VCF sample '{sample}' not found in header; skipping this sample"
+                    );
+                    continue;
+                }
+
+                if seen.insert(sample.as_str()) {
+                    selected.push(sample.clone());
+                }
+            }
+
+            selected
+        }
+    }
+}
+
 /// # Returns
 ///
-/// A tuple of (Arrow SchemaRef, sample names) representing the VCF table structure
-/// and the sample names from the header.
+/// A tuple of `(schema, selected_sample_names, source_sample_names)` where
+/// `selected_sample_names` are the samples visible in table output and
+/// `source_sample_names` are all samples from the input VCF header.
 ///
 /// # Errors
 ///
@@ -68,17 +102,19 @@ async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
     format_fields: &Option<Vec<String>>,
+    samples_to_include: &Option<Vec<String>>,
     object_storage_options: &Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
-) -> datafusion::common::Result<(SchemaRef, Vec<String>)> {
+) -> datafusion::common::Result<(SchemaRef, Vec<String>, Vec<String>)> {
     let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
     let header_infos = header.infos();
     let header_formats = header.formats();
-    let sample_names: Vec<String> = header
+    let source_sample_names: Vec<String> = header
         .sample_names()
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let sample_names = resolve_selected_samples(&source_sample_names, samples_to_include);
 
     // Extract header metadata for schema storage
     let file_format_obj = header.file_format();
@@ -179,7 +215,7 @@ async fn determine_schema_from_header(
     }
 
     if !format_tags.is_empty() && !sample_names.is_empty() {
-        let single_sample = sample_names.len() == 1;
+        let single_sample = source_sample_names.len() == 1;
         if single_sample {
             for tag in &format_tags {
                 let dtype = format_to_arrow_type(header_formats, tag);
@@ -268,7 +304,7 @@ async fn determine_schema_from_header(
 
     let schema = Schema::new_with_metadata(fields, metadata);
     // println!("Schema: {:?}", schema);
-    Ok((Arc::new(schema), sample_names))
+    Ok((Arc::new(schema), sample_names, source_sample_names))
 }
 
 /// Determines if a VCF INFO field type is nullable.
@@ -348,8 +384,10 @@ pub struct VcfTableProvider {
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
-    /// Sample names from the VCF header (used for FORMAT column naming)
+    /// Sample names visible in output (all header samples or the requested subset).
     sample_names: Vec<String>,
+    /// All sample names from the source VCF header (before optional filtering).
+    source_sample_names: Vec<String>,
     /// Path to an index file (TBI/CSI). Auto-discovered if not provided.
     index_path: Option<String>,
     /// Contig names from the file header (for partitioning full scans by chromosome)
@@ -384,12 +422,35 @@ impl VcfTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples(
+            file_path,
+            info_fields,
+            format_fields,
+            None,
+            object_storage_options,
+            coordinate_system_zero_based,
+        )
+    }
+
+    /// Creates a new VCF table provider with an optional sample subset.
+    ///
+    /// Matching is exact and case-sensitive. Missing sample names are skipped with a warning.
+    /// For multisample sources, schema stays nested (`genotypes`) even if a single sample is selected.
+    pub fn new_with_samples(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        samples_to_include: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+    ) -> datafusion::common::Result<Self> {
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
 
-        let (schema, sample_names) = block_on(determine_schema_from_header(
+        let (schema, sample_names, source_sample_names) = block_on(determine_schema_from_header(
             &file_path,
             &info_fields,
             &format_fields,
+            &samples_to_include,
             &object_storage_options,
             coordinate_system_zero_based,
         ))?;
@@ -463,6 +524,7 @@ impl VcfTableProvider {
             object_storage_options,
             coordinate_system_zero_based,
             sample_names,
+            source_sample_names,
             index_path,
             contig_names,
             contig_lengths,
@@ -510,7 +572,8 @@ impl VcfTableProvider {
             schema,
             object_storage_options: None,
             coordinate_system_zero_based,
-            sample_names,
+            sample_names: sample_names.clone(),
+            source_sample_names: sample_names,
             index_path: None,
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
@@ -653,7 +716,7 @@ impl TableProvider for VcfTableProvider {
                     cache: PlanProperties::new(
                         EquivalenceProperties::new(schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
-                        EmissionType::Final,
+                        EmissionType::Incremental,
                         Boundedness::Bounded,
                     ),
                     file_path: self.file_path.clone(),
@@ -661,6 +724,7 @@ impl TableProvider for VcfTableProvider {
                     info_fields: self.info_fields.clone(),
                     format_fields: self.format_fields.clone(),
                     sample_names: self.sample_names.clone(),
+                    source_sample_names: self.source_sample_names.clone(),
                     projection: projection.cloned(),
                     limit,
                     object_storage_options: self.object_storage_options.clone(),
@@ -677,7 +741,7 @@ impl TableProvider for VcfTableProvider {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
-                EmissionType::Final,
+                EmissionType::Incremental,
                 Boundedness::Bounded,
             ),
             file_path: self.file_path.clone(),
@@ -685,6 +749,7 @@ impl TableProvider for VcfTableProvider {
             info_fields: self.info_fields.clone(),
             format_fields: self.format_fields.clone(),
             sample_names: self.sample_names.clone(),
+            source_sample_names: self.source_sample_names.clone(),
             projection: projection.cloned(),
             limit,
             object_storage_options: self.object_storage_options.clone(),

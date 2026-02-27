@@ -34,7 +34,7 @@ use datafusion_bio_format_core::{
 };
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::{StreamExt, TryStreamExt};
-use log::{debug, info};
+use log::{debug, info, warn};
 use noodles_vcf::Header;
 use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
 use noodles_vcf::header::{Formats, Infos};
@@ -437,6 +437,7 @@ async fn get_local_vcf(
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
+    source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -474,8 +475,14 @@ async fn get_local_vcf(
         .collect();
     let mut info_populated = vec![false; num_info_fields];
 
-    let mut format_mode = init_format_mode(batch_size, format_fields, &sample_names, formats)
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+    let mut format_mode = init_format_mode(
+        batch_size,
+        format_fields,
+        &sample_names,
+        &source_sample_names,
+        formats,
+    )
+    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     let has_format_fields = format_mode.has_fields();
 
     let flags = ProjectionFlags::new(&projection, num_info_fields);
@@ -619,6 +626,7 @@ async fn get_local_vcf_sync(
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
+    source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
@@ -652,9 +660,14 @@ async fn get_local_vcf_sync(
                 .collect();
             let mut info_populated = vec![false; num_info_fields];
 
-            let mut format_mode =
-                init_format_mode(batch_size, format_fields, &sample_names, formats)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+            let mut format_mode = init_format_mode(
+                batch_size,
+                format_fields,
+                &sample_names,
+                &source_sample_names,
+                formats,
+            )
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let has_format_fields = format_mode.has_fields();
 
             let flags = ProjectionFlags::new(&projection, num_info_fields);
@@ -884,6 +897,7 @@ async fn get_remote_vcf_stream(
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
+    source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -916,8 +930,14 @@ async fn get_remote_vcf_stream(
         .collect();
     let mut info_populated = vec![false; num_info_fields];
 
-    let mut format_mode = init_format_mode(batch_size, format_fields, &sample_names, formats)
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+    let mut format_mode = init_format_mode(
+        batch_size,
+        format_fields,
+        &sample_names,
+        &source_sample_names,
+        formats,
+    )
+    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     let has_format_fields = format_mode.has_fields();
 
     let flags = ProjectionFlags::new(&projection, num_info_fields);
@@ -1091,6 +1111,7 @@ enum ParsedFormatValue {
 /// `List<Struct<sample_id: Utf8, values: Struct<...>>>`.
 struct MultiSampleFormatBuilder {
     sample_names: Vec<String>,
+    header_index_to_output_index: Vec<Option<usize>>,
     field_types: Vec<DataType>,
     field_to_index: HashMap<String, usize>,
     list_builder: ListBuilder<StructBuilder>,
@@ -1099,6 +1120,8 @@ struct MultiSampleFormatBuilder {
 impl MultiSampleFormatBuilder {
     fn new(
         sample_names: Vec<String>,
+        selected_header_indices: Vec<usize>,
+        source_sample_count: usize,
         value_fields: Vec<datafusion::arrow::datatypes::Field>,
         batch_size: usize,
     ) -> Result<Self, datafusion::arrow::error::ArrowError> {
@@ -1138,9 +1161,16 @@ impl MultiSampleFormatBuilder {
             .enumerate()
             .map(|(i, field)| (field.name().to_string(), i))
             .collect();
+        let mut header_index_to_output_index = vec![None; source_sample_count];
+        for (output_idx, header_idx) in selected_header_indices.into_iter().enumerate() {
+            if header_idx < source_sample_count {
+                header_index_to_output_index[header_idx] = Some(output_idx);
+            }
+        }
 
         Ok(Self {
             sample_names,
+            header_index_to_output_index,
             field_types,
             field_to_index,
             list_builder,
@@ -1165,7 +1195,16 @@ impl MultiSampleFormatBuilder {
 
         let mut parsed_by_sample =
             vec![vec![None; self.field_types.len()]; self.sample_names.len()];
-        for (sample_idx, sample) in samples.iter().enumerate().take(self.sample_names.len()) {
+        let mut remaining_selected = self.sample_names.len();
+        for (header_sample_idx, sample) in samples.iter().enumerate() {
+            let Some(Some(output_sample_idx)) = self
+                .header_index_to_output_index
+                .get(header_sample_idx)
+                .copied()
+            else {
+                continue;
+            };
+
             for result in sample.iter(header) {
                 let (key, value) = result.map_err(|e| {
                     datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
@@ -1236,7 +1275,12 @@ impl MultiSampleFormatBuilder {
                     }
                 };
 
-                parsed_by_sample[sample_idx][idx] = parsed_value;
+                parsed_by_sample[output_sample_idx][idx] = parsed_value;
+            }
+
+            remaining_selected -= 1;
+            if remaining_selected == 0 {
+                break;
             }
         }
 
@@ -1336,21 +1380,44 @@ impl FormatMode {
     }
 }
 
+fn resolve_selected_sample_indices(
+    selected_sample_names: &[String],
+    source_sample_names: &[String],
+) -> Vec<usize> {
+    let source_name_to_index: HashMap<&str, usize> = source_sample_names
+        .iter()
+        .enumerate()
+        .map(|(idx, name)| (name.as_str(), idx))
+        .collect();
+
+    selected_sample_names
+        .iter()
+        .filter_map(|name| {
+            let idx = source_name_to_index.get(name.as_str()).copied();
+            if idx.is_none() {
+                warn!("Selected sample '{name}' not found in source header; skipping");
+            }
+            idx
+        })
+        .collect()
+}
+
 fn init_format_mode(
     batch_size: usize,
     format_fields: Option<Vec<String>>,
     sample_names: &[String],
+    source_sample_names: &[String],
     formats: &Formats,
 ) -> Result<FormatMode, datafusion::arrow::error::ArrowError> {
     let field_names: Vec<String> = match format_fields {
         Some(tags) => tags,
         None => formats.keys().map(|k| k.to_string()).collect(),
     };
-    if field_names.is_empty() || sample_names.is_empty() {
+    if field_names.is_empty() || sample_names.is_empty() || source_sample_names.is_empty() {
         return Ok(FormatMode::None);
     }
 
-    if sample_names.len() == 1 {
+    if source_sample_names.len() == 1 {
         let mut format_builders: FormatBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         set_format_builders(
             batch_size,
@@ -1375,6 +1442,12 @@ fn init_format_mode(
             sample_count: sample_names.len(),
         })
     } else {
+        let selected_sample_indices =
+            resolve_selected_sample_indices(sample_names, source_sample_names);
+        if selected_sample_indices.is_empty() {
+            return Ok(FormatMode::None);
+        }
+
         let value_fields = field_names
             .iter()
             .map(|name| {
@@ -1400,8 +1473,13 @@ fn init_format_mode(
                     .with_metadata(metadata)
             })
             .collect::<Vec<_>>();
-        let builder =
-            MultiSampleFormatBuilder::new(sample_names.to_vec(), value_fields, batch_size)?;
+        let builder = MultiSampleFormatBuilder::new(
+            sample_names.to_vec(),
+            selected_sample_indices,
+            source_sample_names.len(),
+            value_fields,
+            batch_size,
+        )?;
         Ok(FormatMode::Multi { builder })
     }
 }
@@ -1856,6 +1934,7 @@ async fn get_stream(
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
+    source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
@@ -1890,6 +1969,7 @@ async fn get_stream(
                     info_fields,
                     format_fields,
                     sample_names,
+                    source_sample_names,
                     projection,
                     object_storage_options,
                     coordinate_system_zero_based,
@@ -1907,6 +1987,7 @@ async fn get_stream(
                     info_fields,
                     format_fields,
                     sample_names,
+                    source_sample_names,
                     projection,
                     coordinate_system_zero_based,
                     residual_filters,
@@ -1924,6 +2005,7 @@ async fn get_stream(
                 info_fields,
                 format_fields,
                 sample_names,
+                source_sample_names,
                 projection,
                 object_storage_options,
                 coordinate_system_zero_based,
@@ -1944,7 +2026,10 @@ pub struct VcfExec {
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) info_fields: Option<Vec<String>>,
     pub(crate) format_fields: Option<Vec<String>>,
+    /// Samples included in output (all or filtered subset).
     pub(crate) sample_names: Vec<String>,
+    /// All sample names from source VCF header.
+    pub(crate) source_sample_names: Vec<String>,
     pub(crate) cache: PlanProperties,
     pub(crate) limit: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
@@ -2045,6 +2130,7 @@ impl ExecutionPlan for VcfExec {
                 let info_fields = self.info_fields.clone();
                 let format_fields = self.format_fields.clone();
                 let sample_names = self.sample_names.clone();
+                let source_sample_names = self.source_sample_names.clone();
                 let residual_filters = self.residual_filters.clone();
 
                 let limit = self.limit;
@@ -2059,6 +2145,7 @@ impl ExecutionPlan for VcfExec {
                     info_fields,
                     format_fields,
                     sample_names,
+                    source_sample_names,
                     residual_filters,
                     limit,
                 );
@@ -2075,6 +2162,7 @@ impl ExecutionPlan for VcfExec {
             self.info_fields.clone(),
             self.format_fields.clone(),
             self.sample_names.clone(),
+            self.source_sample_names.clone(),
             self.projection.clone(),
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
@@ -2117,6 +2205,7 @@ async fn get_indexed_vcf_stream(
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
     sample_names: Vec<String>,
+    source_sample_names: Vec<String>,
     residual_filters: Vec<Expr>,
     limit: Option<usize>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
@@ -2151,9 +2240,14 @@ async fn get_indexed_vcf_stream(
                 .collect();
             let mut info_populated = vec![false; num_info_fields];
 
-            let mut format_mode =
-                init_format_mode(batch_size, format_fields, &sample_names, formats)
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+            let mut format_mode = init_format_mode(
+                batch_size,
+                format_fields,
+                &sample_names,
+                &source_sample_names,
+                formats,
+            )
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let has_format_fields = format_mode.has_fields();
 
             let flags = ProjectionFlags::new(&projection, num_info_fields);

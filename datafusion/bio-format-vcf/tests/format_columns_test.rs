@@ -1,4 +1,4 @@
-use datafusion::arrow::array::{Int32Array, ListArray, StringArray, StructArray};
+use datafusion::arrow::array::{Array, Int32Array, ListArray, StringArray, StructArray};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
@@ -237,6 +237,170 @@ async fn test_info_none_includes_all_header_info_fields() -> Result<(), Box<dyn 
 
     let schema = table.schema();
     assert!(schema.field_with_name("DP").is_ok());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multisample_sample_subset_preserves_requested_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("multi_subset_order", SAMPLE_VCF_MULTI).await?;
+
+    let table = VcfTableProvider::new_with_samples(
+        file_path,
+        Some(vec!["DP".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string()]),
+        Some(vec!["Sample2".to_string(), "Sample1".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    let df = ctx
+        .sql("SELECT genotypes FROM test_vcf ORDER BY start LIMIT 1")
+        .await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+
+    let genotypes = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("genotypes list");
+
+    let first_row = genotypes.value(0);
+    let first_row_struct = first_row
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("list item struct");
+
+    let sample_ids = first_row_struct
+        .column_by_name("sample_id")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let values = first_row_struct
+        .column_by_name("values")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+
+    let gts = values
+        .column_by_name("GT")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let dps = values
+        .column_by_name("DP")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+
+    assert_eq!(sample_ids.len(), 2);
+    assert_eq!(sample_ids.value(0), "Sample2");
+    assert_eq!(sample_ids.value(1), "Sample1");
+    assert_eq!(gts.value(0), "1/1");
+    assert_eq!(gts.value(1), "0/1");
+    assert_eq!(dps.value(0), 30);
+    assert_eq!(dps.value(1), 20);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multisample_single_selected_stays_nested() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("multi_single_selected_nested", SAMPLE_VCF_MULTI).await?;
+
+    let table = VcfTableProvider::new_with_samples(
+        file_path,
+        Some(vec!["DP".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string()]),
+        Some(vec!["Sample2".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+    assert!(schema.field_with_name("genotypes").is_ok());
+    assert!(schema.field_with_name("GT").is_err());
+    assert!(schema.field_with_name("Sample2_GT").is_err());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    let df = ctx
+        .sql("SELECT genotypes FROM test_vcf ORDER BY start LIMIT 1")
+        .await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+    let genotypes = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("genotypes list");
+    let first_row = genotypes.value(0);
+    let first_row_struct = first_row
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("list item struct");
+    let sample_ids = first_row_struct
+        .column_by_name("sample_id")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(sample_ids.len(), 1);
+    assert_eq!(sample_ids.value(0), "Sample2");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_missing_requested_samples_are_skipped() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("multi_missing_requested", SAMPLE_VCF_MULTI).await?;
+
+    let table = VcfTableProvider::new_with_samples(
+        file_path,
+        Some(vec!["DP".to_string()]),
+        Some(vec!["GT".to_string()]),
+        Some(vec!["MissingSample".to_string(), "Sample1".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    let df = ctx
+        .sql("SELECT genotypes FROM test_vcf ORDER BY start LIMIT 1")
+        .await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+    let genotypes = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("genotypes list");
+    let first_row = genotypes.value(0);
+    let first_row_struct = first_row
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("list item struct");
+    let sample_ids = first_row_struct
+        .column_by_name("sample_id")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    assert_eq!(sample_ids.len(), 1);
+    assert_eq!(sample_ids.value(0), "Sample1");
 
     Ok(())
 }
