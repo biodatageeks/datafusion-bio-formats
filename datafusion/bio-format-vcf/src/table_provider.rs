@@ -461,10 +461,14 @@ impl VcfTableProvider {
             .get(VCF_CONTIGS_KEY)
             .and_then(|json| serde_json::from_str::<Vec<ContigMetadata>>(json).ok())
             .unwrap_or_default();
-        let contig_names: Vec<String> = contig_metadata.iter().map(|c| c.id.clone()).collect();
-        let contig_lengths: Vec<u64> = contig_metadata
+        let mut contig_names: Vec<String> = contig_metadata.iter().map(|c| c.id.clone()).collect();
+        let mut contig_lengths: Vec<u64> = contig_metadata
             .iter()
             .map(|c| c.length.unwrap_or(0))
+            .collect();
+        let contig_length_by_name: HashMap<&str, u64> = contig_metadata
+            .iter()
+            .filter_map(|c| c.length.map(|len| (c.id.as_str(), len)))
             .collect();
 
         // Auto-discover index file for local BGZF-compressed files
@@ -478,43 +482,55 @@ impl VcfTableProvider {
             None
         };
 
-        // When the VCF header lacks ##contig lines but a TBI index exists,
-        // fall back to the TBI header for contig names so that indexed
-        // partitioning can still split across multiple cores.
-        let (contig_names, contig_lengths) = if contig_names.is_empty() {
-            if let Some(ref idx_path) = index_path {
-                match noodles_tabix::fs::read(idx_path) {
-                    Ok(index) => {
-                        use noodles_csi::binning_index::BinningIndex;
-                        let names: Vec<String> = index
-                            .header()
-                            .map(|h| {
-                                h.reference_sequence_names()
-                                    .iter()
-                                    .map(|n| n.to_string())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if !names.is_empty() {
+        // Prefer TBI header reference names for indexed full scans and size
+        // estimation. This keeps reference-name->index-id mapping aligned even
+        // when VCF header contigs include many entries absent from the index.
+        if let Some(ref idx_path) = index_path {
+            match noodles_tabix::fs::read(idx_path) {
+                Ok(index) => {
+                    use noodles_csi::binning_index::BinningIndex;
+                    let index_names: Vec<String> = index
+                        .header()
+                        .map(|h| {
+                            h.reference_sequence_names()
+                                .iter()
+                                .map(|n| n.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    if !index_names.is_empty() {
+                        if contig_names.is_empty() {
                             debug!(
                                 "VCF header lacks ##contig lines; inferred {} contigs from TBI index",
-                                names.len()
+                                index_names.len()
+                            );
+                        } else if contig_names != index_names {
+                            debug!(
+                                "Using {} contigs from TBI header for indexed partitioning (schema has {})",
+                                index_names.len(),
+                                contig_names.len()
                             );
                         }
-                        let lengths = vec![0u64; names.len()];
-                        (names, lengths)
-                    }
-                    Err(e) => {
-                        debug!("Failed to read TBI for contig name fallback: {e}");
-                        (contig_names, contig_lengths)
+
+                        let index_lengths: Vec<u64> = index_names
+                            .iter()
+                            .map(|name| {
+                                contig_length_by_name
+                                    .get(name.as_str())
+                                    .copied()
+                                    .unwrap_or(0)
+                            })
+                            .collect();
+                        contig_names = index_names;
+                        contig_lengths = index_lengths;
                     }
                 }
-            } else {
-                (contig_names, contig_lengths)
+                Err(e) => {
+                    debug!("Failed to read TBI index header for partitioning contigs: {e}");
+                }
             }
-        } else {
-            (contig_names, contig_lengths)
-        };
+        }
 
         Ok(Self {
             file_path,

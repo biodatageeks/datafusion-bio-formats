@@ -744,6 +744,7 @@ pub fn estimate_sizes_from_tbi(
     contig_lengths: &[u64],
 ) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
     use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+    use noodles_csi::binning_index::BinningIndex;
 
     let index = match noodles_tabix::fs::read(index_path) {
         Ok(idx) => idx,
@@ -763,31 +764,67 @@ pub fn estimate_sizes_from_tbi(
         }
     };
 
-    let contig_name_to_idx: std::collections::HashMap<&str, usize> = contig_names
+    // Prefer index header reference names for chrom -> ref_idx mapping.
+    // This avoids positional mismatches when schema/header contigs contain
+    // additional sequences not present in the index.
+    let index_ref_names: Vec<String> = index
+        .header()
+        .map(|h| {
+            h.reference_sequence_names()
+                .iter()
+                .map(|n| n.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let index_name_to_idx: std::collections::HashMap<&str, usize> = index_ref_names
         .iter()
         .enumerate()
         .map(|(i, n)| (n.as_str(), i))
         .collect();
 
+    let contig_name_to_idx: std::collections::HashMap<&str, usize> = contig_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    let contig_length_by_name: std::collections::HashMap<&str, u64> = contig_names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| {
+            contig_lengths
+                .get(i)
+                .copied()
+                .filter(|&len| len > 0)
+                .map(|len| (n.as_str(), len))
+        })
+        .collect();
+
     regions
         .iter()
         .map(|region| {
-            let ref_idx = contig_name_to_idx.get(region.chrom.as_str()).copied();
+            let ref_idx = index_name_to_idx
+                .get(region.chrom.as_str())
+                .copied()
+                .or_else(|| {
+                    contig_name_to_idx
+                        .get(region.chrom.as_str())
+                        .copied()
+                        .filter(|&idx| idx < index.reference_sequences().len())
+                });
             let estimated_bytes = ref_idx
-                .and_then(|idx| {
-                    index.reference_sequences().get(idx).map(|ref_seq| {
-                        let mut min_offset = u64::MAX;
-                        let mut max_offset = 0u64;
-                        for (_bin_id, bin) in ref_seq.bins() {
-                            for chunk in bin.chunks() {
-                                let start = chunk.start().compressed();
-                                let end = chunk.end().compressed();
-                                min_offset = min_offset.min(start);
-                                max_offset = max_offset.max(end);
-                            }
+                .and_then(|idx| index.reference_sequences().get(idx))
+                .map(|ref_seq| {
+                    let mut min_offset = u64::MAX;
+                    let mut max_offset = 0u64;
+                    for (_bin_id, bin) in ref_seq.bins() {
+                        for chunk in bin.chunks() {
+                            let start = chunk.start().compressed();
+                            let end = chunk.end().compressed();
+                            min_offset = min_offset.min(start);
+                            max_offset = max_offset.max(end);
                         }
-                        max_offset.saturating_sub(min_offset)
-                    })
+                    }
+                    max_offset.saturating_sub(min_offset)
                 })
                 .unwrap_or(1);
 
@@ -811,9 +848,9 @@ pub fn estimate_sizes_from_tbi(
                 .unwrap_or_default();
             nonempty_bin_positions.sort_unstable();
 
-            let contig_length = ref_idx
-                .and_then(|idx| contig_lengths.get(idx).copied())
-                .filter(|&len| len > 0)
+            let contig_length = contig_length_by_name
+                .get(region.chrom.as_str())
+                .copied()
                 .or_else(|| {
                     // First try leaf bins (finest granularity).
                     nonempty_bin_positions
@@ -993,6 +1030,47 @@ mod tests {
                 Some(contig_lengths[i]),
                 "header length should take priority for {}",
                 est.region.chrom
+            );
+        }
+    }
+
+    #[test]
+    fn tbi_estimation_uses_index_name_mapping_even_with_misaligned_contigs() {
+        let tbi_path = test_tbi_path();
+        let index_contig_names = read_tbi_contig_names(&tbi_path);
+        assert!(
+            !index_contig_names.is_empty(),
+            "TBI should have contig names"
+        );
+        let regions = vcf_regions(&index_contig_names);
+
+        let baseline = estimate_sizes_from_tbi(&tbi_path, &regions, &index_contig_names, &[]);
+
+        let mut misaligned_contigs = vec![
+            "__extra_before_1".to_string(),
+            "__extra_before_2".to_string(),
+        ];
+        misaligned_contigs.extend(index_contig_names.iter().cloned());
+        let misaligned_lengths = vec![0u64; misaligned_contigs.len()];
+        let with_misaligned = estimate_sizes_from_tbi(
+            &tbi_path,
+            &regions,
+            &misaligned_contigs,
+            &misaligned_lengths,
+        );
+
+        assert_eq!(baseline.len(), with_misaligned.len());
+        for (base, shifted) in baseline.iter().zip(with_misaligned.iter()) {
+            assert_eq!(base.region.chrom, shifted.region.chrom);
+            assert_eq!(
+                base.estimated_bytes, shifted.estimated_bytes,
+                "estimated bytes should not depend on caller contig ordering for {}",
+                base.region.chrom
+            );
+            assert_eq!(
+                base.nonempty_bin_positions, shifted.nonempty_bin_positions,
+                "non-empty bin positions should not depend on caller contig ordering for {}",
+                base.region.chrom
             );
         }
     }
