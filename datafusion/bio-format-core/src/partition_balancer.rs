@@ -50,9 +50,8 @@ pub struct PartitionAssignment {
 /// byte-budget boundary (proportional to base pairs). This guarantees each
 /// partition receives approximately `total_bytes / target` estimated bytes.
 ///
-/// When a chromosome is split and has unmapped reads (from BAI metadata),
-/// an `unmapped_tail` region is emitted after the last sub-region for
-/// direct-seek reading of unmapped records.
+/// When a chromosome has unmapped reads (from BAI metadata), an `unmapped_tail`
+/// region is emitted for direct-seek reading of unmapped records.
 ///
 /// # Edge cases
 ///
@@ -254,8 +253,9 @@ pub fn balance_partitions(
             }
         }
 
-        // Emit unmapped tail if chromosome was split and has unmapped reads
-        if was_split && est.unmapped_count > 0 {
+        // Emit unmapped tail for any reference that has unmapped reads.
+        // Indexed range queries do not guarantee coverage of these records.
+        if est.unmapped_count > 0 {
             let tail = GenomicRegion {
                 chrom: est.region.chrom.clone(),
                 start: None,
@@ -637,10 +637,10 @@ mod tests {
     }
 
     #[test]
-    fn test_no_unmapped_tail_when_no_split() {
+    fn test_unmapped_tail_emitted_even_when_no_split() {
         // chrM is small relative to ideal (total=200, target=4, ideal=50, chrM=5 < 50)
-        // so it won't be split and no unmapped_tail should be emitted
-        // (unmapped reads are already captured by the whole-chromosome query)
+        // so it won't be split, but we should still emit an unmapped_tail when
+        // unmapped_count > 0.
         let estimates = vec![
             estimate_with_unmapped("chr1", 100, Some(249_000_000), 500),
             estimate_with_unmapped("chr2", 95, Some(243_000_000), 300),
@@ -654,9 +654,10 @@ mod tests {
             .iter()
             .filter(|r| r.chrom == "chrM" && r.unmapped_tail)
             .collect();
-        assert!(
-            chrm_unmapped.is_empty(),
-            "Should not emit unmapped_tail for unsplit regions (chrM)"
+        assert_eq!(
+            chrm_unmapped.len(),
+            1,
+            "Should emit unmapped_tail for unsplit regions when unmapped_count > 0"
         );
     }
 

@@ -1,5 +1,6 @@
 use crate::storage::{
-    BamReader, BamRecordFields, IndexedBamReader, SamReader, is_sam_file, open_local_bam_sync,
+    BamReader, BamRecordFields, IndexedBamReader, SamReader, UNPLACED_UNMAPPED_SENTINEL_CHROM,
+    is_sam_file, open_local_bam_sync,
 };
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
@@ -29,6 +30,7 @@ use futures::SinkExt;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
 use noodles_bam as bam;
+use noodles_csi::binning_index::BinningIndex as _;
 use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
@@ -1250,6 +1252,105 @@ async fn get_indexed_stream(
                 // Handle unmapped tail regions via direct BGZF seek —
                 // stream records one-by-one instead of collecting into Vec.
                 if region.unmapped_tail {
+                    // Dedicated partition for global no-coor records (n_no_coor).
+                    if region.chrom == UNPLACED_UNMAPPED_SENTINEL_CHROM {
+                        let no_coor_index = bam::bai::fs::read(&index_path).map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Failed to read BAI for unplaced/unmapped tail: {e}"
+                            ))
+                        })?;
+                        let no_coor_hint =
+                            no_coor_index.unplaced_unmapped_record_count().unwrap_or(0);
+                        if no_coor_hint == 0 {
+                            continue;
+                        }
+
+                        let seek_pos = no_coor_index
+                            .last_first_record_start_position()
+                            .unwrap_or_default();
+
+                        let mut no_coor_reader = bam::io::indexed_reader::Builder::default()
+                            .set_index(no_coor_index)
+                            .build_from_path(&file_path)
+                            .map_err(|e| {
+                                DataFusionError::Execution(format!("Failed to open BAM file: {e}"))
+                            })?;
+                        let _no_coor_header = no_coor_reader.read_header().map_err(|e| {
+                            DataFusionError::Execution(format!("Failed to read BAM header: {e}"))
+                        })?;
+                        no_coor_reader.get_mut().seek(seek_pos).map_err(|e| {
+                            DataFusionError::Execution(format!("BGZF seek failed: {e}"))
+                        })?;
+
+                        let mut no_coor_buf = bam::Record::default();
+                        let mut no_coor_count: usize = 0;
+
+                        loop {
+                            match no_coor_reader.read_record(&mut no_coor_buf) {
+                                Ok(0) => break, // EOF
+                                Ok(_) => {
+                                    if no_coor_buf.reference_sequence_id().is_some() {
+                                        continue;
+                                    }
+                                    if no_coor_buf.alignment_start().is_some() {
+                                        continue;
+                                    }
+
+                                    let chrom_name: Option<&str> = None;
+                                    let start_val: Option<u32> = None;
+                                    let end_val: Option<u32> = None;
+                                    let mq = no_coor_buf
+                                        .mapping_quality()
+                                        .map(|q| q.get() as u32)
+                                        .unwrap_or(255u32);
+
+                                    if has_residual_filters {
+                                        let fields = BamRecordFields {
+                                            chrom: None,
+                                            start: start_val,
+                                            end: end_val,
+                                            mapping_quality: Some(mq),
+                                            flags: no_coor_buf.flags().bits() as u32,
+                                        };
+                                        if !evaluate_record_filters(&fields, &residual_filters) {
+                                            continue;
+                                        }
+                                    }
+
+                                    accumulate_record_fields!(
+                                        no_coor_buf,
+                                        chrom_name,
+                                        start_val,
+                                        end_val,
+                                        mq
+                                    );
+
+                                    total_records += 1;
+                                    batch_row_count += 1;
+                                    no_coor_count += 1;
+
+                                    if batch_row_count == batch_size {
+                                        flush_batch!(batch_row_count, return Ok(()));
+                                        batch_row_count = 0;
+                                    }
+                                }
+                                Err(e) => {
+                                    return Err(DataFusionError::Execution(format!(
+                                        "Error reading unplaced/unmapped BAM records: {e}"
+                                    )));
+                                }
+                            }
+                        }
+
+                        debug!(
+                            "Read {} unplaced/unmapped (n_no_coor) records via direct seek",
+                            no_coor_count
+                        );
+                        continue; // Done with this synthetic no-coor tail region
+                    }
+
+                    // Per-reference unmapped tail (reference_sequence_id set,
+                    // alignment_start absent).
                     let unmapped_index = bam::bai::fs::read(&index_path).map_err(|e| {
                         DataFusionError::Execution(format!(
                             "Failed to read BAI for unmapped tail: {e}"
@@ -1267,27 +1368,25 @@ async fn get_indexed_stream(
                                 ))
                             })?;
 
-                    let ref_seq = unmapped_index
-                        .reference_sequences()
-                        .get(ref_idx)
-                        .ok_or_else(|| {
-                            DataFusionError::Execution(format!(
-                                "Reference index {ref_idx} not found in BAI index"
-                            ))
-                        })?;
+                    let seek_pos = {
+                        let ref_seq = unmapped_index
+                            .reference_sequences()
+                            .get(ref_idx)
+                            .ok_or_else(|| {
+                                DataFusionError::Execution(format!(
+                                    "Reference index {ref_idx} not found in BAI index"
+                                ))
+                            })?;
 
-                    let seek_pos = ref_seq
-                        .bins()
-                        .values()
-                        .flat_map(|bin| bin.chunks())
-                        .map(|chunk| chunk.end())
-                        .max()
-                        .ok_or_else(|| {
-                            DataFusionError::Execution(format!(
-                                "No bins found in BAI for reference '{}' — cannot locate unmapped section",
-                                region.chrom
-                            ))
-                        })?;
+                        ref_seq
+                            .bins()
+                            .values()
+                            .flat_map(|bin| bin.chunks())
+                            .map(|chunk| chunk.end())
+                            .max()
+                    }
+                    .or_else(|| unmapped_index.last_first_record_start_position())
+                    .unwrap_or_default();
 
                     let mut unmapped_reader = bam::io::indexed_reader::Builder::default()
                         .set_index(unmapped_index)
@@ -1304,17 +1403,25 @@ async fn get_indexed_stream(
 
                     let mut unmapped_buf = bam::Record::default();
                     let mut unmapped_count: usize = 0;
+                    let mut seen_target_ref = false;
 
                     loop {
                         match unmapped_reader.read_record(&mut unmapped_buf) {
                             Ok(0) => break, // EOF
                             Ok(_) => {
                                 match unmapped_buf.reference_sequence_id() {
-                                    Some(Ok(id)) if id == ref_idx => {}
-                                    _ => break,
+                                    Some(Ok(id)) if id == ref_idx => {
+                                        seen_target_ref = true;
+                                    }
+                                    _ => {
+                                        if seen_target_ref {
+                                            break;
+                                        }
+                                        continue;
+                                    }
                                 }
                                 if unmapped_buf.alignment_start().is_some() {
-                                    continue; // Skip mapped records near seek point
+                                    continue;
                                 }
 
                                 let chrom_name: Option<&str> = Some(region.chrom.as_str());
@@ -1388,21 +1495,22 @@ async fn get_indexed_stream(
                     let chrom_name =
                         chrom_name_by_idx(get_chrom_idx(record.reference_sequence_id()), &names);
 
-                    let start_val = match record.alignment_start() {
-                        Some(start_pos) => {
-                            let pos = start_pos
-                                .map_err(|e| {
-                                    DataFusionError::Execution(format!("BAM position error: {e}"))
-                                })?
-                                .get() as u32;
-                            Some(if coordinate_system_zero_based {
-                                pos - 1
-                            } else {
-                                pos
-                            })
-                        }
-                        None => None,
+                    // Mapped region partitions handle only mapped records. Unmapped
+                    // records are handled by dedicated tail partitions.
+                    let start_pos = match record.alignment_start() {
+                        Some(start_pos) => start_pos,
+                        None => continue,
                     };
+                    let pos = start_pos
+                        .map_err(|e| {
+                            DataFusionError::Execution(format!("BAM position error: {e}"))
+                        })?
+                        .get() as u32;
+                    let start_val = Some(if coordinate_system_zero_based {
+                        pos - 1
+                    } else {
+                        pos
+                    });
 
                     // Skip records outside the sub-region bounds (BAI bins may return
                     // overlapping records at sub-region boundaries)
