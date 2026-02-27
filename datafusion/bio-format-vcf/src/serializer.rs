@@ -401,7 +401,10 @@ fn build_format_and_samples(
         return Ok((String::new(), Vec::new()));
     }
 
-    if sample_names.len() > 1 {
+    // Multisample sources keep FORMAT data in nested `genotypes` even when
+    // only a subset (including one sample) is selected for output.
+    let has_nested_genotypes = batch.schema().column_with_name("genotypes").is_some();
+    if has_nested_genotypes {
         let samples = build_nested_multisample_values(batch, row, format_fields, sample_names)?;
         return Ok((format_fields.join(":"), samples));
     }
@@ -782,6 +785,119 @@ mod tests {
         assert!(line.contains("GT:DP"));
         assert!(line.contains("0/1:25")); // SAMPLE1
         assert!(line.contains("1/1:30")); // SAMPLE2
+    }
+
+    #[test]
+    fn test_batch_to_vcf_lines_nested_multisample_single_selected_sample() {
+        let value_fields = vec![
+            Field::new("GT", DataType::Utf8, true),
+            Field::new("DP", DataType::Int32, true),
+        ];
+        let genotype_item_type = DataType::Struct(
+            vec![
+                Field::new("sample_id", DataType::Utf8, false),
+                Field::new(
+                    "values",
+                    DataType::Struct(value_fields.clone().into()),
+                    true,
+                ),
+            ]
+            .into(),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(
+                "genotypes",
+                DataType::List(Arc::new(Field::new("item", genotype_item_type, true))),
+                true,
+            ),
+        ]));
+
+        let values_builder = StructBuilder::new(
+            value_fields.clone(),
+            vec![
+                Box::new(StringBuilder::new()) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+                Box::new(Int32Builder::new()) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+            ],
+        );
+        let item_builder = StructBuilder::new(
+            vec![
+                Field::new("sample_id", DataType::Utf8, false),
+                Field::new("values", DataType::Struct(value_fields.into()), true),
+            ],
+            vec![
+                Box::new(StringBuilder::new()) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+                Box::new(values_builder) as Box<dyn datafusion::arrow::array::ArrayBuilder>,
+            ],
+        );
+        let mut genotypes_builder = ListBuilder::new(item_builder);
+        {
+            let item = genotypes_builder.values();
+            item.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("SAMPLE1");
+            let values = item.field_builder::<StructBuilder>(1).unwrap();
+            values
+                .field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("0/1");
+            values
+                .field_builder::<Int32Builder>(1)
+                .unwrap()
+                .append_value(25);
+            values.append(true);
+            item.append(true);
+
+            item.field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("SAMPLE2");
+            let values = item.field_builder::<StructBuilder>(1).unwrap();
+            values
+                .field_builder::<StringBuilder>(0)
+                .unwrap()
+                .append_value("1/1");
+            values
+                .field_builder::<Int32Builder>(1)
+                .unwrap()
+                .append_value(30);
+            values.append(true);
+            item.append(true);
+
+            genotypes_builder.append(true);
+        }
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![Some("rs123")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(genotypes_builder.finish()),
+            ],
+        )
+        .unwrap();
+
+        let sample_names = vec!["SAMPLE1".to_string()];
+        let format_fields = vec!["GT".to_string(), "DP".to_string()];
+
+        let lines = batch_to_vcf_lines(&batch, &[], &format_fields, &sample_names, true).unwrap();
+        assert_eq!(lines.len(), 1);
+        let line = &lines[0].line;
+        assert!(line.contains("GT:DP"));
+        assert!(line.contains("0/1:25"));
+        assert!(!line.contains("1/1:30"));
     }
 
     #[test]

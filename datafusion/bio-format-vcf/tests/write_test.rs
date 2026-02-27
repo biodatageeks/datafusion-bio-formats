@@ -221,6 +221,50 @@ async fn test_write_vcf_multi_sample() {
 }
 
 #[tokio::test]
+async fn test_insert_overwrite_with_inferred_fields_preserves_info_and_format() {
+    let source_path = create_test_vcf("infer_fields_source", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+    // Destination must exist so VcfTableProvider::new keeps info_fields/format_fields as None.
+    let output_path = create_test_vcf("infer_fields_dest", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+
+    let ctx = SessionContext::new();
+
+    let source = create_read_provider(
+        &source_path,
+        Some(vec!["DP".to_string(), "AF".to_string(), "DB".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()]),
+    );
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Keep None/None to validate inference from schema during INSERT OVERWRITE.
+    let dest = create_read_provider(&output_path, None, None);
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(&output_path).await.unwrap();
+
+    // INFO/FORMAT headers and per-record values should be preserved.
+    assert!(content.contains("##INFO=<ID=DP"));
+    assert!(content.contains("##INFO=<ID=AF"));
+    assert!(content.contains("##FORMAT=<ID=GT"));
+    assert!(content.contains("##FORMAT=<ID=DP"));
+    assert!(content.contains("GT:DP:GQ"));
+    assert!(content.contains("0/1:20:99"));
+    assert!(content.contains("1/1:30:95"));
+
+    cleanup_files(&[&source_path, &output_path]).await;
+}
+
+#[tokio::test]
 async fn test_write_vcf_multisample_large_list_roundtrip_preserves_gt_values() {
     let output_path = "/tmp/test_write_multisample_large_list_roundtrip.vcf";
 

@@ -397,6 +397,59 @@ pub struct VcfTableProvider {
 }
 
 impl VcfTableProvider {
+    fn infer_info_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
+        schema
+            .fields()
+            .iter()
+            .filter(|field| {
+                field
+                    .metadata()
+                    .get(VCF_FIELD_FIELD_TYPE_KEY)
+                    .is_some_and(|v| v == "INFO")
+            })
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    fn infer_format_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
+        if let Ok(genotypes_idx) = schema.index_of("genotypes") {
+            let genotypes_field = schema.field(genotypes_idx);
+            let item_field = match genotypes_field.data_type() {
+                DataType::List(item) | DataType::LargeList(item) => Some(item),
+                _ => None,
+            };
+
+            if let Some(item_field) = item_field
+                && let DataType::Struct(genotype_fields) = item_field.data_type()
+                && let Some(values_field) = genotype_fields.iter().find(|f| f.name() == "values")
+                && let DataType::Struct(value_fields) = values_field.data_type()
+            {
+                return value_fields
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect();
+            }
+        }
+
+        schema
+            .fields()
+            .iter()
+            .filter(|field| {
+                field
+                    .metadata()
+                    .get(VCF_FIELD_FIELD_TYPE_KEY)
+                    .is_some_and(|v| v == "FORMAT")
+            })
+            .map(|field| {
+                field
+                    .metadata()
+                    .get(VCF_FIELD_FORMAT_ID_KEY)
+                    .cloned()
+                    .unwrap_or_else(|| field.name().clone())
+            })
+            .collect()
+    }
+
     /// Creates a new VCF table provider.
     ///
     /// # Arguments
@@ -575,16 +628,10 @@ impl VcfTableProvider {
     ) -> Self {
         Self {
             file_path,
-            info_fields: if info_fields.is_empty() {
-                None
-            } else {
-                Some(info_fields)
-            },
-            format_fields: if format_fields.is_empty() {
-                None
-            } else {
-                Some(format_fields)
-            },
+            // Keep explicit empty vectors as "write no INFO/FORMAT fields".
+            // `None` is reserved for "infer defaults from schema".
+            info_fields: Some(info_fields),
+            format_fields: Some(format_fields),
             schema,
             object_storage_options: None,
             coordinate_system_zero_based,
@@ -805,9 +852,17 @@ impl TableProvider for VcfTableProvider {
         // Determine compression from file path
         let compression = VcfCompressionType::from_path(&self.file_path);
 
-        // Get info and format field names
-        let info_fields = self.info_fields.clone().unwrap_or_default();
-        let format_fields = self.format_fields.clone().unwrap_or_default();
+        // Resolve info/format fields for write:
+        // - Some(vec) (including empty): explicit selection
+        // - None: infer defaults from schema
+        let info_fields = self
+            .info_fields
+            .clone()
+            .unwrap_or_else(|| Self::infer_info_fields_from_schema(&self.schema));
+        let format_fields = self
+            .format_fields
+            .clone()
+            .unwrap_or_else(|| Self::infer_format_fields_from_schema(&self.schema));
 
         Ok(Arc::new(VcfWriteExec::new(
             input,
