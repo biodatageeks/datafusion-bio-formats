@@ -1114,6 +1114,11 @@ struct MultiSampleFormatBuilder {
     header_index_to_output_index: Vec<Option<usize>>,
     field_types: Vec<DataType>,
     field_to_index: HashMap<String, usize>,
+    // Reusable per-record scratch: flattened [sample_idx * num_fields + field_idx].
+    parsed_values: Vec<Option<ParsedFormatValue>>,
+    // Tracks which flattened positions were populated in the current record.
+    // We clear only these entries before parsing the next record.
+    touched_indices: Vec<usize>,
     list_builder: ListBuilder<StructBuilder>,
 }
 
@@ -1167,12 +1172,18 @@ impl MultiSampleFormatBuilder {
                 header_index_to_output_index[header_idx] = Some(output_idx);
             }
         }
+        let num_fields = field_types.len();
+        let num_samples = sample_names.len();
+        let parsed_values = vec![None; num_samples * num_fields];
+        let touched_indices = Vec::with_capacity(num_samples * num_fields);
 
         Ok(Self {
             sample_names,
             header_index_to_output_index,
             field_types,
             field_to_index,
+            parsed_values,
+            touched_indices,
             list_builder,
         })
     }
@@ -1185,6 +1196,10 @@ impl MultiSampleFormatBuilder {
         use noodles_vcf::variant::record::samples::series::Value as SV;
         use noodles_vcf::variant::record::samples::series::value::Array as SamplesArray;
 
+        for idx in self.touched_indices.drain(..) {
+            self.parsed_values[idx] = None;
+        }
+
         let samples = match record.samples() {
             Ok(s) => s,
             Err(_) => {
@@ -1193,8 +1208,7 @@ impl MultiSampleFormatBuilder {
             }
         };
 
-        let mut parsed_by_sample =
-            vec![vec![None; self.field_types.len()]; self.sample_names.len()];
+        let num_fields = self.field_types.len();
         let mut remaining_selected = self.sample_names.len();
         for (header_sample_idx, sample) in samples.iter().enumerate() {
             let Some(Some(output_sample_idx)) = self
@@ -1275,7 +1289,11 @@ impl MultiSampleFormatBuilder {
                     }
                 };
 
-                parsed_by_sample[output_sample_idx][idx] = parsed_value;
+                if let Some(value) = parsed_value {
+                    let flat_idx = output_sample_idx * num_fields + idx;
+                    self.parsed_values[flat_idx] = Some(value);
+                    self.touched_indices.push(flat_idx);
+                }
             }
 
             remaining_selected -= 1;
@@ -1285,8 +1303,6 @@ impl MultiSampleFormatBuilder {
         }
 
         for (sample_idx, sample_name) in self.sample_names.iter().enumerate() {
-            let parsed = &parsed_by_sample[sample_idx];
-
             let item_builder = self.list_builder.values();
             let sample_id_builder =
                 item_builder
@@ -1308,7 +1324,13 @@ impl MultiSampleFormatBuilder {
                     })?;
 
             for (idx, data_type) in self.field_types.iter().enumerate() {
-                append_value_to_struct_field(values_builder, idx, data_type, parsed[idx].as_ref())?;
+                let flat_idx = sample_idx * num_fields + idx;
+                append_value_to_struct_field(
+                    values_builder,
+                    idx,
+                    data_type,
+                    self.parsed_values[flat_idx].as_ref(),
+                )?;
             }
             values_builder.append(true);
             item_builder.append(true);
