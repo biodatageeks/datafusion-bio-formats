@@ -2549,16 +2549,106 @@ impl ExecutionPlan for VcfExec {
 
 /// Build a noodles Region from a GenomicRegion.
 fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, DataFusionError> {
-    let region_str = match (region.start, region.end) {
-        (Some(start), Some(end)) => format!("{}:{}-{}", region.chrom, start, end),
-        (Some(start), None) => format!("{}:{}", region.chrom, start),
-        (None, Some(end)) => format!("{}:1-{}", region.chrom, end),
-        (None, None) => region.chrom.clone(),
-    };
+    let to_position =
+        |label: &str, value: u64| -> Result<noodles_core::Position, DataFusionError> {
+            let n = usize::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Invalid region '{}': {label} position {value} exceeds platform size",
+                    region.chrom
+                ))
+            })?;
+            noodles_core::Position::try_from(n).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Invalid region '{}': {label} position must be >= 1 (got {value})",
+                    region.chrom
+                ))
+            })
+        };
 
-    region_str
-        .parse::<noodles_core::Region>()
-        .map_err(|e| DataFusionError::Execution(format!("Invalid region '{region_str}': {e}")))
+    match (region.start, region.end) {
+        (Some(start), Some(end)) => {
+            if end < start {
+                return Err(DataFusionError::Execution(format!(
+                    "Invalid region '{}': end ({end}) is less than start ({start})",
+                    region.chrom
+                )));
+            }
+
+            let start_pos = to_position("start", start)?;
+            let end_pos = to_position("end", end)?;
+            Ok(noodles_core::Region::new(
+                region.chrom.clone(),
+                start_pos..=end_pos,
+            ))
+        }
+        (Some(start), None) => {
+            let start_pos = to_position("start", start)?;
+            Ok(noodles_core::Region::new(region.chrom.clone(), start_pos..))
+        }
+        (None, Some(end)) => {
+            let end_pos = to_position("end", end)?;
+            Ok(noodles_core::Region::new(region.chrom.clone(), ..=end_pos))
+        }
+        (None, None) => Ok(noodles_core::Region::new(region.chrom.clone(), ..)),
+    }
+}
+
+#[cfg(test)]
+mod build_noodles_region_tests {
+    use super::build_noodles_region;
+    use datafusion_bio_format_core::genomic_filter::GenomicRegion;
+
+    #[test]
+    fn supports_contig_names_with_colons() {
+        let region = GenomicRegion {
+            chrom: "HLA-A*01:01:01:02N".to_string(),
+            start: None,
+            end: None,
+            unmapped_tail: false,
+        };
+
+        let parsed = build_noodles_region(&region).expect("region should be valid");
+        let name_bytes: &[u8] = parsed.name().as_ref();
+        assert_eq!(
+            name_bytes, b"HLA-A*01:01:01:02N",
+            "region name should be preserved exactly"
+        );
+        assert_eq!(parsed.interval().start().map(|p| p.get()), None);
+        assert_eq!(parsed.interval().end().map(|p| p.get()), None);
+    }
+
+    #[test]
+    fn supports_intervals_for_contig_names_with_colons() {
+        let region = GenomicRegion {
+            chrom: "HLA-A*01:01:01:02N".to_string(),
+            start: Some(10),
+            end: Some(20),
+            unmapped_tail: false,
+        };
+
+        let parsed = build_noodles_region(&region).expect("region should be valid");
+        let name_bytes: &[u8] = parsed.name().as_ref();
+        assert_eq!(
+            name_bytes, b"HLA-A*01:01:01:02N",
+            "region name should be preserved exactly"
+        );
+        assert_eq!(parsed.interval().start().map(|p| p.get()), Some(10));
+        assert_eq!(parsed.interval().end().map(|p| p.get()), Some(20));
+    }
+
+    #[test]
+    fn rejects_zero_positions() {
+        let region = GenomicRegion {
+            chrom: "chr1".to_string(),
+            start: Some(0),
+            end: None,
+            unmapped_tail: false,
+        };
+
+        let err = build_noodles_region(&region).expect_err("zero start must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("start position must be >= 1"));
+    }
 }
 
 /// Get a streaming RecordBatch stream from an indexed VCF file for one or more regions.
