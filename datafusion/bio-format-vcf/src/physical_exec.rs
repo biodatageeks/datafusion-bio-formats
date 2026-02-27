@@ -13,7 +13,7 @@ use datafusion::arrow::array::{
     Array, ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, ListBuilder,
     StringBuilder, StructBuilder, UInt32Builder,
 };
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::Expr;
@@ -60,6 +60,63 @@ where
         first = false;
         let _ = write!(buf, "{item}");
     }
+}
+
+// Soft budget for multisample FORMAT work per batch: rows * selected_samples * format_fields.
+const MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH: usize = 250_000;
+const MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE: usize = 32;
+const MULTISAMPLE_BUILDER_RECYCLE_INTERVAL_BATCHES: usize = 1;
+
+fn count_requested_format_fields(format_fields: &Option<Vec<String>>, formats: &Formats) -> usize {
+    match format_fields {
+        Some(fields) => fields.len(),
+        None => formats.keys().count(),
+    }
+}
+
+fn choose_effective_batch_size(
+    requested_batch_size: usize,
+    any_format_projected: bool,
+    format_fields: &Option<Vec<String>>,
+    selected_sample_names: &[String],
+    source_sample_names: &[String],
+    formats: &Formats,
+) -> usize {
+    // Adaptive reduction is only useful for multisample FORMAT work.
+    if !any_format_projected || source_sample_names.len() <= 1 || selected_sample_names.is_empty() {
+        return requested_batch_size.max(1);
+    }
+
+    let format_field_count = count_requested_format_fields(format_fields, formats).max(1);
+    let cells_per_row = selected_sample_names
+        .len()
+        .saturating_mul(format_field_count);
+    if cells_per_row == 0 {
+        return requested_batch_size.max(1);
+    }
+
+    let max_by_cells = (MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH / cells_per_row).max(1);
+    let mut effective = requested_batch_size.min(max_by_cells);
+
+    // Keep moderate batches only when the cell budget allows it.
+    if max_by_cells >= MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE
+        && requested_batch_size > MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE
+    {
+        effective = effective.max(MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE);
+    }
+
+    if effective < requested_batch_size {
+        debug!(
+            "Reducing effective VCF batch size from {} to {} (selected_samples={}, format_fields={}, target_cells={})",
+            requested_batch_size,
+            effective,
+            selected_sample_names.len(),
+            format_field_count,
+            MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH
+        );
+    }
+
+    effective.max(1)
 }
 
 /// Precomputed flags indicating which core VCF columns are needed based on projection.
@@ -461,8 +518,27 @@ async fn get_local_vcf(
     let mut batch_row_count: usize = 0;
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
-    set_info_builders(batch_size, info_fields, infos, &mut info_builders);
+    set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
     let num_info_fields = info_builders.0.len();
+    let flags = ProjectionFlags::new(&projection, num_info_fields);
+    let effective_batch_size = choose_effective_batch_size(
+        batch_size,
+        flags.any_format,
+        &format_fields,
+        &sample_names,
+        &source_sample_names,
+        formats,
+    );
+
+    if effective_batch_size != batch_size {
+        info_builders = (Vec::new(), Vec::new(), Vec::new());
+        set_info_builders(
+            effective_batch_size,
+            info_fields.clone(),
+            infos,
+            &mut info_builders,
+        );
+    }
 
     // Build INFO name→index HashMap for single-pass iteration
     // Uses owned String keys (~20-30 short strings cloned once per query) to avoid
@@ -476,8 +552,8 @@ async fn get_local_vcf(
     let mut info_populated = vec![false; num_info_fields];
 
     let mut format_mode = init_format_mode(
-        batch_size,
-        format_fields,
+        effective_batch_size,
+        format_fields.clone(),
         &sample_names,
         &source_sample_names,
         formats,
@@ -485,8 +561,7 @@ async fn get_local_vcf(
     .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     let has_format_fields = format_mode.has_fields();
 
-    let flags = ProjectionFlags::new(&projection, num_info_fields);
-    let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+    let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
 
     let has_residual_filters = !residual_filters.is_empty();
     let needs_start = flags.start || has_residual_filters;
@@ -558,7 +633,7 @@ async fn get_local_vcf(
                 break;
             }
 
-            if batch_row_count == batch_size {
+            if batch_row_count == effective_batch_size {
                 debug!("Record number: {record_num}");
                 let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
@@ -566,7 +641,11 @@ async fn get_local_vcf(
                     None
                 };
                 let format_arrays = if has_format_fields && flags.any_format {
-                    Some(format_mode.finish_arrays())
+                    Some(
+                        format_mode
+                            .finish_arrays()
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                    )
                 } else {
                     None
                 };
@@ -593,7 +672,11 @@ async fn get_local_vcf(
                 None
             };
             let format_arrays = if has_format_fields && flags.any_format {
-                Some(format_mode.finish_arrays())
+                Some(
+                    format_mode
+                        .finish_arrays()
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                )
             } else {
                 None
             };
@@ -649,8 +732,27 @@ async fn get_local_vcf_sync(
             // Initialize INFO builders
             let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
                 (Vec::new(), Vec::new(), Vec::new());
-            set_info_builders(batch_size, info_fields, infos, &mut info_builders);
+            set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
             let num_info_fields = info_builders.0.len();
+            let flags = ProjectionFlags::new(&projection, num_info_fields);
+            let effective_batch_size = choose_effective_batch_size(
+                batch_size,
+                flags.any_format,
+                &format_fields,
+                &sample_names,
+                &source_sample_names,
+                formats,
+            );
+
+            if effective_batch_size != batch_size {
+                info_builders = (Vec::new(), Vec::new(), Vec::new());
+                set_info_builders(
+                    effective_batch_size,
+                    info_fields.clone(),
+                    infos,
+                    &mut info_builders,
+                );
+            }
 
             let info_name_to_index: HashMap<String, usize> = info_builders
                 .0
@@ -661,8 +763,8 @@ async fn get_local_vcf_sync(
             let mut info_populated = vec![false; num_info_fields];
 
             let mut format_mode = init_format_mode(
-                batch_size,
-                format_fields,
+                effective_batch_size,
+                format_fields.clone(),
                 &sample_names,
                 &source_sample_names,
                 formats,
@@ -670,8 +772,7 @@ async fn get_local_vcf_sync(
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let has_format_fields = format_mode.has_fields();
 
-            let flags = ProjectionFlags::new(&projection, num_info_fields);
-            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+            let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
             let mut join_buf = String::with_capacity(64);
 
             let has_residual_filters = !residual_filters.is_empty();
@@ -796,18 +897,21 @@ async fn get_local_vcf_sync(
                             break;
                         }
 
-                        if batch_row_count == batch_size {
+                        if batch_row_count == effective_batch_size {
                             debug!("Record number: {record_num}");
                             let info_arrays = if flags.any_info {
                                 Some(builders_to_arrays(&mut info_builders.2))
                             } else {
                                 None
                             };
-                            let format_arrays = if has_format_fields && flags.any_format {
-                                Some(format_mode.finish_arrays())
-                            } else {
-                                None
-                            };
+                            let format_arrays =
+                                if has_format_fields && flags.any_format {
+                                    Some(format_mode.finish_arrays().map_err(|e| {
+                                        DataFusionError::ArrowError(Box::new(e), None)
+                                    })?)
+                                } else {
+                                    None
+                                };
                             let core_arrays = builders.finish();
                             let batch = build_record_batch_from_builders(
                                 Arc::clone(&schema),
@@ -848,7 +952,11 @@ async fn get_local_vcf_sync(
                     None
                 };
                 let format_arrays = if has_format_fields && flags.any_format {
-                    Some(format_mode.finish_arrays())
+                    Some(
+                        format_mode
+                            .finish_arrays()
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                    )
                 } else {
                     None
                 };
@@ -916,8 +1024,27 @@ async fn get_remote_vcf_stream(
     let formats = header.formats();
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
-    set_info_builders(batch_size, info_fields, infos, &mut info_builders);
+    set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
     let num_info_fields = info_builders.0.len();
+    let flags = ProjectionFlags::new(&projection, num_info_fields);
+    let effective_batch_size = choose_effective_batch_size(
+        batch_size,
+        flags.any_format,
+        &format_fields,
+        &sample_names,
+        &source_sample_names,
+        formats,
+    );
+
+    if effective_batch_size != batch_size {
+        info_builders = (Vec::new(), Vec::new(), Vec::new());
+        set_info_builders(
+            effective_batch_size,
+            info_fields.clone(),
+            infos,
+            &mut info_builders,
+        );
+    }
 
     // Build INFO name→index HashMap for single-pass iteration
     // Uses owned String keys (~20-30 short strings cloned once per query) to avoid
@@ -931,8 +1058,8 @@ async fn get_remote_vcf_stream(
     let mut info_populated = vec![false; num_info_fields];
 
     let mut format_mode = init_format_mode(
-        batch_size,
-        format_fields,
+        effective_batch_size,
+        format_fields.clone(),
         &sample_names,
         &source_sample_names,
         formats,
@@ -940,12 +1067,11 @@ async fn get_remote_vcf_stream(
     .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     let has_format_fields = format_mode.has_fields();
 
-    let flags = ProjectionFlags::new(&projection, num_info_fields);
     let has_residual_filters = !residual_filters.is_empty();
     let needs_start = flags.start || has_residual_filters;
 
     let stream = try_stream! {
-        let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+        let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
         let mut join_buf = String::with_capacity(64);
 
         debug!("Info fields: {:?}", info_builders);
@@ -1018,7 +1144,7 @@ async fn get_remote_vcf_stream(
                 break;
             }
 
-            if batch_row_count == batch_size {
+            if batch_row_count == effective_batch_size {
                 debug!("Record number: {record_num}");
                 let info_arrays = if flags.any_info {
                     Some(builders_to_arrays(&mut info_builders.2))
@@ -1026,7 +1152,11 @@ async fn get_remote_vcf_stream(
                     None
                 };
                 let format_arrays = if has_format_fields && flags.any_format {
-                    Some(format_mode.finish_arrays())
+                    Some(
+                        format_mode
+                            .finish_arrays()
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                    )
                 } else {
                     None
                 };
@@ -1053,7 +1183,11 @@ async fn get_remote_vcf_stream(
                 None
             };
             let format_arrays = if has_format_fields && flags.any_format {
-                Some(format_mode.finish_arrays())
+                Some(
+                    format_mode
+                        .finish_arrays()
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                )
             } else {
                 None
             };
@@ -1102,9 +1236,21 @@ enum ParsedFormatValue {
     Int(i32),
     Float(f32),
     String(String),
-    ArrayInt(Vec<Option<i32>>),
-    ArrayFloat(Vec<Option<f32>>),
-    ArrayString(Vec<Option<String>>),
+    ArrayIntRange { start: usize, len: usize },
+    ArrayFloatRange { start: usize, len: usize },
+    ArrayStringRange { start: usize, len: usize },
+}
+
+struct ParsedArrayPools<'a> {
+    int_values: &'a [Option<i32>],
+    float_values: &'a [Option<f32>],
+    string_values: &'a [Option<String>],
+}
+
+#[inline]
+fn pool_slice<T>(pool: &[Option<T>], start: usize, len: usize) -> Option<&[Option<T>]> {
+    let end = start.checked_add(len)?;
+    pool.get(start..end)
 }
 
 /// Multisample FORMAT builder that emits a single nested `genotypes` column:
@@ -1112,6 +1258,7 @@ enum ParsedFormatValue {
 struct MultiSampleFormatBuilder {
     sample_names: Vec<String>,
     header_index_to_output_index: Vec<Option<usize>>,
+    value_fields: Vec<Field>,
     field_types: Vec<DataType>,
     field_to_index: HashMap<String, usize>,
     // Reusable per-record scratch: flattened [sample_idx * num_fields + field_idx].
@@ -1119,7 +1266,45 @@ struct MultiSampleFormatBuilder {
     // Tracks which flattened positions were populated in the current record.
     // We clear only these entries before parsing the next record.
     touched_indices: Vec<usize>,
+    // Reusable pools for array FORMAT values to avoid per-value Vec allocations.
+    array_int_pool: Vec<Option<i32>>,
+    array_float_pool: Vec<Option<f32>>,
+    array_string_pool: Vec<Option<String>>,
+    batch_size: usize,
+    batches_since_recycle: usize,
     list_builder: ListBuilder<StructBuilder>,
+}
+
+fn build_multisample_list_builder(
+    value_fields: &[Field],
+    field_types: &[DataType],
+    sample_count: usize,
+    batch_size: usize,
+) -> Result<ListBuilder<StructBuilder>, datafusion::arrow::error::ArrowError> {
+    let mut value_builders: Vec<Box<dyn ArrayBuilder>> = Vec::with_capacity(field_types.len());
+    for data_type in field_types {
+        value_builders.push(create_array_builder_for_type(data_type, batch_size)?);
+    }
+
+    let values_struct_builder = StructBuilder::new(value_fields.to_vec(), value_builders);
+    let sample_builder =
+        StringBuilder::with_capacity(batch_size * sample_count, batch_size * sample_count * 8);
+    let item_builder = StructBuilder::new(
+        vec![
+            datafusion::arrow::datatypes::Field::new("sample_id", DataType::Utf8, false),
+            datafusion::arrow::datatypes::Field::new(
+                "values",
+                DataType::Struct(value_fields.to_vec().into()),
+                true,
+            ),
+        ],
+        vec![
+            Box::new(sample_builder) as Box<dyn ArrayBuilder>,
+            Box::new(values_struct_builder) as Box<dyn ArrayBuilder>,
+        ],
+    );
+
+    Ok(ListBuilder::with_capacity(item_builder, batch_size))
 }
 
 impl MultiSampleFormatBuilder {
@@ -1134,32 +1319,12 @@ impl MultiSampleFormatBuilder {
             .iter()
             .map(|f| f.data_type().clone())
             .collect::<Vec<_>>();
-
-        let mut value_builders: Vec<Box<dyn ArrayBuilder>> = Vec::with_capacity(field_types.len());
-        for data_type in &field_types {
-            value_builders.push(create_array_builder_for_type(data_type, batch_size)?);
-        }
-
-        let values_struct_builder = StructBuilder::new(value_fields.clone(), value_builders);
-        let sample_builder = StringBuilder::with_capacity(
-            batch_size * sample_names.len(),
-            batch_size * sample_names.len() * 8,
-        );
-        let item_builder = StructBuilder::new(
-            vec![
-                datafusion::arrow::datatypes::Field::new("sample_id", DataType::Utf8, false),
-                datafusion::arrow::datatypes::Field::new(
-                    "values",
-                    DataType::Struct(value_fields.clone().into()),
-                    true,
-                ),
-            ],
-            vec![
-                Box::new(sample_builder) as Box<dyn ArrayBuilder>,
-                Box::new(values_struct_builder) as Box<dyn ArrayBuilder>,
-            ],
-        );
-        let list_builder = ListBuilder::with_capacity(item_builder, batch_size);
+        let list_builder = build_multisample_list_builder(
+            &value_fields,
+            &field_types,
+            sample_names.len(),
+            batch_size,
+        )?;
 
         let field_to_index = value_fields
             .iter()
@@ -1180,10 +1345,16 @@ impl MultiSampleFormatBuilder {
         Ok(Self {
             sample_names,
             header_index_to_output_index,
+            value_fields,
             field_types,
             field_to_index,
             parsed_values,
             touched_indices,
+            array_int_pool: Vec::new(),
+            array_float_pool: Vec::new(),
+            array_string_pool: Vec::new(),
+            batch_size,
+            batches_since_recycle: 0,
             list_builder,
         })
     }
@@ -1199,6 +1370,9 @@ impl MultiSampleFormatBuilder {
         for idx in self.touched_indices.drain(..) {
             self.parsed_values[idx] = None;
         }
+        self.array_int_pool.clear();
+        self.array_float_pool.clear();
+        self.array_string_pool.clear();
 
         let samples = match record.samples() {
             Ok(s) => s,
@@ -1261,28 +1435,46 @@ impl MultiSampleFormatBuilder {
                         Some(SV::Character(c)) => Some(ParsedFormatValue::String(c.to_string())),
                         Some(SV::Array(arr)) => match arr {
                             SamplesArray::Integer(values) => {
-                                let vals: Vec<Option<i32>> =
-                                    values.iter().map(|v| v.ok().flatten()).collect();
-                                Some(ParsedFormatValue::ArrayInt(vals))
+                                let start = self.array_int_pool.len();
+                                for v in values.iter() {
+                                    self.array_int_pool.push(v.ok().flatten());
+                                }
+                                Some(ParsedFormatValue::ArrayIntRange {
+                                    start,
+                                    len: self.array_int_pool.len() - start,
+                                })
                             }
                             SamplesArray::Float(values) => {
-                                let vals: Vec<Option<f32>> =
-                                    values.iter().map(|v| v.ok().flatten()).collect();
-                                Some(ParsedFormatValue::ArrayFloat(vals))
+                                let start = self.array_float_pool.len();
+                                for v in values.iter() {
+                                    self.array_float_pool.push(v.ok().flatten());
+                                }
+                                Some(ParsedFormatValue::ArrayFloatRange {
+                                    start,
+                                    len: self.array_float_pool.len() - start,
+                                })
                             }
                             SamplesArray::String(values) => {
-                                let vals: Vec<Option<String>> = values
-                                    .iter()
-                                    .map(|v| v.ok().flatten().map(|s| s.to_string()))
-                                    .collect();
-                                Some(ParsedFormatValue::ArrayString(vals))
+                                let start = self.array_string_pool.len();
+                                for v in values.iter() {
+                                    self.array_string_pool
+                                        .push(v.ok().flatten().map(|s| s.to_string()));
+                                }
+                                Some(ParsedFormatValue::ArrayStringRange {
+                                    start,
+                                    len: self.array_string_pool.len() - start,
+                                })
                             }
                             SamplesArray::Character(values) => {
-                                let vals: Vec<Option<String>> = values
-                                    .iter()
-                                    .map(|v| v.ok().flatten().map(|c| c.to_string()))
-                                    .collect();
-                                Some(ParsedFormatValue::ArrayString(vals))
+                                let start = self.array_string_pool.len();
+                                for v in values.iter() {
+                                    self.array_string_pool
+                                        .push(v.ok().flatten().map(|c| c.to_string()));
+                                }
+                                Some(ParsedFormatValue::ArrayStringRange {
+                                    start,
+                                    len: self.array_string_pool.len() - start,
+                                })
                             }
                         },
                         Some(SV::Genotype(_)) | None => None,
@@ -1302,6 +1494,11 @@ impl MultiSampleFormatBuilder {
             }
         }
 
+        let array_pools = ParsedArrayPools {
+            int_values: &self.array_int_pool,
+            float_values: &self.array_float_pool,
+            string_values: &self.array_string_pool,
+        };
         for (sample_idx, sample_name) in self.sample_names.iter().enumerate() {
             let item_builder = self.list_builder.values();
             let sample_id_builder =
@@ -1330,6 +1527,7 @@ impl MultiSampleFormatBuilder {
                     idx,
                     data_type,
                     self.parsed_values[flat_idx].as_ref(),
+                    &array_pools,
                 )?;
             }
             values_builder.append(true);
@@ -1340,8 +1538,26 @@ impl MultiSampleFormatBuilder {
         Ok(())
     }
 
-    fn finish_array(&mut self) -> Arc<dyn Array> {
-        Arc::new(self.list_builder.finish())
+    fn finish_array(&mut self) -> Result<Arc<dyn Array>, datafusion::arrow::error::ArrowError> {
+        let array = Arc::new(self.list_builder.finish()) as Arc<dyn Array>;
+        self.batches_since_recycle += 1;
+
+        if self.batches_since_recycle >= MULTISAMPLE_BUILDER_RECYCLE_INTERVAL_BATCHES {
+            self.list_builder = build_multisample_list_builder(
+                &self.value_fields,
+                &self.field_types,
+                self.sample_names.len(),
+                self.batch_size,
+            )?;
+            self.batches_since_recycle = 0;
+            self.parsed_values.fill(None);
+            self.touched_indices.clear();
+            self.array_int_pool.clear();
+            self.array_float_pool.clear();
+            self.array_string_pool.clear();
+        }
+
+        Ok(array)
     }
 }
 
@@ -1391,13 +1607,15 @@ impl FormatMode {
         }
     }
 
-    fn finish_arrays(&mut self) -> Vec<Arc<dyn Array>> {
+    fn finish_arrays(
+        &mut self,
+    ) -> Result<Vec<Arc<dyn Array>>, datafusion::arrow::error::ArrowError> {
         match self {
-            Self::None => Vec::new(),
+            Self::None => Ok(Vec::new()),
             Self::Single {
                 format_builders, ..
-            } => builders_to_arrays(&mut format_builders.3),
-            Self::Multi { builder } => vec![builder.finish_array()],
+            } => Ok(builders_to_arrays(&mut format_builders.3)),
+            Self::Multi { builder } => Ok(vec![builder.finish_array()?]),
         }
     }
 }
@@ -1574,6 +1792,7 @@ fn append_value_to_struct_field(
     field_idx: usize,
     data_type: &DataType,
     parsed: Option<&ParsedFormatValue>,
+    array_pools: &ParsedArrayPools<'_>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
     match data_type {
         DataType::Int32 => {
@@ -1586,9 +1805,13 @@ fn append_value_to_struct_field(
                 })?;
             match parsed {
                 Some(ParsedFormatValue::Int(v)) => builder.append_value(*v),
-                Some(ParsedFormatValue::ArrayInt(values)) => {
-                    if let Some(v) = values.iter().find_map(|v| *v) {
-                        builder.append_value(v);
+                Some(ParsedFormatValue::ArrayIntRange { start, len }) => {
+                    if let Some(values) = pool_slice(array_pools.int_values, *start, *len) {
+                        if let Some(v) = values.iter().find_map(|v| *v) {
+                            builder.append_value(v);
+                        } else {
+                            builder.append_null();
+                        }
                     } else {
                         builder.append_null();
                     }
@@ -1606,9 +1829,13 @@ fn append_value_to_struct_field(
                 })?;
             match parsed {
                 Some(ParsedFormatValue::Float(v)) => builder.append_value(*v),
-                Some(ParsedFormatValue::ArrayFloat(values)) => {
-                    if let Some(v) = values.iter().find_map(|v| *v) {
-                        builder.append_value(v);
+                Some(ParsedFormatValue::ArrayFloatRange { start, len }) => {
+                    if let Some(values) = pool_slice(array_pools.float_values, *start, *len) {
+                        if let Some(v) = values.iter().find_map(|v| *v) {
+                            builder.append_value(v);
+                        } else {
+                            builder.append_null();
+                        }
                     } else {
                         builder.append_null();
                     }
@@ -1626,9 +1853,13 @@ fn append_value_to_struct_field(
                 })?;
             match parsed {
                 Some(ParsedFormatValue::String(v)) => builder.append_value(v),
-                Some(ParsedFormatValue::ArrayString(values)) => {
-                    if let Some(v) = values.iter().find_map(|v| v.clone()) {
-                        builder.append_value(v);
+                Some(ParsedFormatValue::ArrayStringRange { start, len }) => {
+                    if let Some(values) = pool_slice(array_pools.string_values, *start, *len) {
+                        if let Some(v) = values.iter().find_map(|v| v.as_deref()) {
+                            builder.append_value(v);
+                        } else {
+                            builder.append_null();
+                        }
                     } else {
                         builder.append_null();
                     }
@@ -1658,14 +1889,18 @@ fn append_value_to_struct_field(
                         )
                     })?;
                 match parsed {
-                    Some(ParsedFormatValue::ArrayInt(values)) => {
-                        for v in values {
-                            match v {
-                                Some(v) => builder.values().append_value(*v),
-                                None => builder.values().append_null(),
+                    Some(ParsedFormatValue::ArrayIntRange { start, len }) => {
+                        if let Some(values) = pool_slice(array_pools.int_values, *start, *len) {
+                            for v in values {
+                                match v {
+                                    Some(v) => builder.values().append_value(*v),
+                                    None => builder.values().append_null(),
+                                }
                             }
+                            builder.append(true);
+                        } else {
+                            builder.append(false);
                         }
-                        builder.append(true);
                     }
                     Some(ParsedFormatValue::Int(v)) => {
                         builder.values().append_value(*v);
@@ -1683,14 +1918,18 @@ fn append_value_to_struct_field(
                         )
                     })?;
                 match parsed {
-                    Some(ParsedFormatValue::ArrayFloat(values)) => {
-                        for v in values {
-                            match v {
-                                Some(v) => builder.values().append_value(*v),
-                                None => builder.values().append_null(),
+                    Some(ParsedFormatValue::ArrayFloatRange { start, len }) => {
+                        if let Some(values) = pool_slice(array_pools.float_values, *start, *len) {
+                            for v in values {
+                                match v {
+                                    Some(v) => builder.values().append_value(*v),
+                                    None => builder.values().append_null(),
+                                }
                             }
+                            builder.append(true);
+                        } else {
+                            builder.append(false);
                         }
-                        builder.append(true);
                     }
                     Some(ParsedFormatValue::Float(v)) => {
                         builder.values().append_value(*v);
@@ -1708,14 +1947,18 @@ fn append_value_to_struct_field(
                         )
                     })?;
                 match parsed {
-                    Some(ParsedFormatValue::ArrayString(values)) => {
-                        for v in values {
-                            match v {
-                                Some(v) => builder.values().append_value(v),
-                                None => builder.values().append_null(),
+                    Some(ParsedFormatValue::ArrayStringRange { start, len }) => {
+                        if let Some(values) = pool_slice(array_pools.string_values, *start, *len) {
+                            for v in values {
+                                match v {
+                                    Some(v) => builder.values().append_value(v),
+                                    None => builder.values().append_null(),
+                                }
                             }
+                            builder.append(true);
+                        } else {
+                            builder.append(false);
                         }
-                        builder.append(true);
                     }
                     Some(ParsedFormatValue::String(v)) => {
                         builder.values().append_value(v);
@@ -1855,80 +2098,72 @@ fn load_formats_single_pass(
                     let mut buf = [0u8; 4];
                     builder.append_string(c.encode_utf8(&mut buf))?;
                 }
-                Some(SV::Array(arr)) => {
-                    match arr {
-                        SamplesArray::Integer(values) => {
-                            // Preserve nulls for proper allele alignment (e.g., AD=10,. -> [10, null])
-                            let ints: Vec<Option<i32>> =
-                                values.iter().map(|v| v.ok().flatten()).collect();
-                            let all_null = ints.iter().all(|v| v.is_none());
-                            if all_null {
-                                builder.append_null()?;
-                            } else if matches!(data_type, DataType::Int32) {
-                                // Scalar type but got array - take first non-null value
-                                if let Some(first) = ints.iter().find_map(|v| *v) {
-                                    builder.append_int(first)?;
-                                } else {
-                                    builder.append_null()?;
-                                }
+                Some(SV::Array(arr)) => match arr {
+                    SamplesArray::Integer(values) => {
+                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                            builder.append_null()?;
+                        } else if matches!(data_type, DataType::Int32) {
+                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
+                                builder.append_int(first)?;
                             } else {
-                                builder.append_array_int_nullable(ints)?;
-                            }
-                        }
-                        SamplesArray::Float(values) => {
-                            let floats: Vec<Option<f32>> =
-                                values.iter().map(|v| v.ok().flatten()).collect();
-                            let all_null = floats.iter().all(|v| v.is_none());
-                            if all_null {
                                 builder.append_null()?;
-                            } else if matches!(data_type, DataType::Float32) {
-                                if let Some(first) = floats.iter().find_map(|v| *v) {
-                                    builder.append_float(first)?;
-                                } else {
-                                    builder.append_null()?;
-                                }
-                            } else {
-                                builder.append_array_float_nullable(floats)?;
                             }
-                        }
-                        SamplesArray::String(values) => {
-                            let strings: Vec<Option<String>> = values
-                                .iter()
-                                .map(|v| v.ok().flatten().map(|s| s.to_string()))
-                                .collect();
-                            let all_null = strings.iter().all(|v| v.is_none());
-                            if all_null {
-                                builder.append_null()?;
-                            } else if matches!(data_type, DataType::Utf8) {
-                                if let Some(first) = strings.iter().find_map(|v| v.clone()) {
-                                    builder.append_string(&first)?;
-                                } else {
-                                    builder.append_null()?;
-                                }
-                            } else {
-                                builder.append_array_string_nullable(strings)?;
-                            }
-                        }
-                        SamplesArray::Character(values) => {
-                            let strings: Vec<Option<String>> = values
-                                .iter()
-                                .map(|v| v.ok().flatten().map(|c| c.to_string()))
-                                .collect();
-                            let all_null = strings.iter().all(|v| v.is_none());
-                            if all_null {
-                                builder.append_null()?;
-                            } else if matches!(data_type, DataType::Utf8) {
-                                if let Some(first) = strings.iter().find_map(|v| v.clone()) {
-                                    builder.append_string(&first)?;
-                                } else {
-                                    builder.append_null()?;
-                                }
-                            } else {
-                                builder.append_array_string_nullable(strings)?;
-                            }
+                        } else {
+                            builder.append_array_int_nullable_iter(
+                                values.iter().map(|v| v.ok().flatten()),
+                            )?;
                         }
                     }
-                }
+                    SamplesArray::Float(values) => {
+                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                            builder.append_null()?;
+                        } else if matches!(data_type, DataType::Float32) {
+                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
+                                builder.append_float(first)?;
+                            } else {
+                                builder.append_null()?;
+                            }
+                        } else {
+                            builder.append_array_float_nullable_iter(
+                                values.iter().map(|v| v.ok().flatten()),
+                            )?;
+                        }
+                    }
+                    SamplesArray::String(values) => {
+                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                            builder.append_null()?;
+                        } else if matches!(data_type, DataType::Utf8) {
+                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
+                                builder.append_string(&first.to_string())?;
+                            } else {
+                                builder.append_null()?;
+                            }
+                        } else {
+                            builder.append_array_string_nullable_iter(
+                                values
+                                    .iter()
+                                    .map(|v| v.ok().flatten().map(|s| s.to_string())),
+                            )?;
+                        }
+                    }
+                    SamplesArray::Character(values) => {
+                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                            builder.append_null()?;
+                        } else if matches!(data_type, DataType::Utf8) {
+                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
+                                builder.append_string(&first.to_string())?;
+                            } else {
+                                builder.append_null()?;
+                            }
+                        } else {
+                            builder.append_array_string_nullable_iter(
+                                values
+                                    .iter()
+                                    .map(|v| v.ok().flatten().map(|c| c.to_string())),
+                            )?;
+                        }
+                    }
+                },
                 Some(SV::Genotype(_)) => {
                     // Genotype should have been handled above
                     builder.append_null()?;
@@ -2237,7 +2472,7 @@ async fn get_indexed_vcf_stream(
     >(2);
 
     std::thread::spawn(move || {
-        let read_and_send = || -> Result<(), DataFusionError> {
+        let mut read_and_send = || -> Result<(), DataFusionError> {
             let mut indexed_reader =
                 IndexedVcfReader::new(&file_path, &index_path).map_err(|e| {
                     DataFusionError::Execution(format!("Failed to open indexed VCF: {e}"))
@@ -2250,8 +2485,27 @@ async fn get_indexed_vcf_stream(
             // Initialize INFO builders
             let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
                 (Vec::new(), Vec::new(), Vec::new());
-            set_info_builders(batch_size, info_fields, infos, &mut info_builders);
+            set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
             let num_info_fields = info_builders.0.len();
+            let flags = ProjectionFlags::new(&projection, num_info_fields);
+            let effective_batch_size = choose_effective_batch_size(
+                batch_size,
+                flags.any_format,
+                &format_fields,
+                &sample_names,
+                &source_sample_names,
+                formats,
+            );
+
+            if effective_batch_size != batch_size {
+                info_builders = (Vec::new(), Vec::new(), Vec::new());
+                set_info_builders(
+                    effective_batch_size,
+                    info_fields.clone(),
+                    infos,
+                    &mut info_builders,
+                );
+            }
 
             // Build INFO name→index HashMap for single-pass iteration
             let info_name_to_index: HashMap<String, usize> = info_builders
@@ -2263,8 +2517,8 @@ async fn get_indexed_vcf_stream(
             let mut info_populated = vec![false; num_info_fields];
 
             let mut format_mode = init_format_mode(
-                batch_size,
-                format_fields,
+                effective_batch_size,
+                format_fields.clone(),
                 &sample_names,
                 &source_sample_names,
                 formats,
@@ -2272,8 +2526,7 @@ async fn get_indexed_vcf_stream(
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let has_format_fields = format_mode.has_fields();
 
-            let flags = ProjectionFlags::new(&projection, num_info_fields);
-            let mut builders = CoreBatchBuilders::new(&flags, batch_size);
+            let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
             let mut join_buf = String::with_capacity(64);
             let has_residual_filters = !residual_filters.is_empty();
             let needs_start_for_filters = flags.start || has_residual_filters;
@@ -2427,14 +2680,18 @@ async fn get_indexed_vcf_stream(
                         break 'regions;
                     }
 
-                    if batch_record_count == batch_size {
+                    if batch_record_count == effective_batch_size {
                         let info_arrays = if flags.any_info {
                             Some(builders_to_arrays(&mut info_builders.2))
                         } else {
                             None
                         };
                         let format_arrays = if has_format_fields && flags.any_format {
-                            Some(format_mode.finish_arrays())
+                            Some(
+                                format_mode
+                                    .finish_arrays()
+                                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                            )
                         } else {
                             None
                         };
@@ -2474,7 +2731,11 @@ async fn get_indexed_vcf_stream(
                     None
                 };
                 let format_arrays = if has_format_fields && flags.any_format {
-                    Some(format_mode.finish_arrays())
+                    Some(
+                        format_mode
+                            .finish_arrays()
+                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                    )
                 } else {
                     None
                 };

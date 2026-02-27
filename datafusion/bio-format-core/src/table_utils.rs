@@ -333,6 +333,30 @@ impl OptionalField {
         }
     }
 
+    /// Appends nullable integer values from an iterator as an array element.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayInt32Builder
+    pub fn append_array_int_nullable_iter(
+        &mut self,
+        iter: impl Iterator<Item = Option<i32>>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayInt32Builder(builder) => {
+                for v in iter {
+                    match v {
+                        Some(i) => builder.values().append_value(i),
+                        None => builder.values().append_null(),
+                    }
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayInt32Builder".into())),
+        }
+    }
+
     /// Appends a float value to the builder
     ///
     /// # Arguments
@@ -411,6 +435,32 @@ impl OptionalField {
         }
     }
 
+    /// Appends nullable float values from an iterator as an array element.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayFloat32Builder
+    pub fn append_array_float_nullable_iter(
+        &mut self,
+        iter: impl Iterator<Item = Option<f32>>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayFloat32Builder(builder) => {
+                for v in iter {
+                    match v {
+                        Some(f) => builder.values().append_value(f),
+                        None => builder.values().append_null(),
+                    }
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError(
+                "Expected ArrayFloat32Builder".into(),
+            )),
+        }
+    }
+
     /// Appends a string value to the builder
     ///
     /// # Arguments
@@ -475,6 +525,30 @@ impl OptionalField {
         match self {
             OptionalField::ArrayUtf8Builder(builder) => {
                 for v in value {
+                    match v {
+                        Some(s) => builder.values().append_value(&s),
+                        None => builder.values().append_null(),
+                    }
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayUtf8Builder".into())),
+        }
+    }
+
+    /// Appends nullable string values from an iterator as an array element.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this is not an ArrayUtf8Builder
+    pub fn append_array_string_nullable_iter(
+        &mut self,
+        iter: impl Iterator<Item = Option<String>>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayUtf8Builder(builder) => {
+                for v in iter {
                     match v {
                         Some(s) => builder.values().append_value(&s),
                         None => builder.values().append_null(),
