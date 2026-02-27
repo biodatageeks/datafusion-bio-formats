@@ -1265,10 +1265,6 @@ async fn get_indexed_stream(
                             continue;
                         }
 
-                        let seek_pos = no_coor_index
-                            .last_first_record_start_position()
-                            .unwrap_or_default();
-
                         let mut no_coor_reader = bam::io::indexed_reader::Builder::default()
                             .set_index(no_coor_index)
                             .build_from_path(&file_path)
@@ -1278,9 +1274,10 @@ async fn get_indexed_stream(
                         let _no_coor_header = no_coor_reader.read_header().map_err(|e| {
                             DataFusionError::Execution(format!("Failed to read BAM header: {e}"))
                         })?;
-                        no_coor_reader.get_mut().seek(seek_pos).map_err(|e| {
-                            DataFusionError::Execution(format!("BGZF seek failed: {e}"))
-                        })?;
+
+                        // Do not seek for no-coor partition. Some all-no-coor BAI files
+                        // do not provide a safe seek hint for starting record reads.
+                        // Scan from the first alignment record and filter to no-coor rows.
 
                         let mut no_coor_buf = bam::Record::default();
                         let mut no_coor_count: usize = 0;
