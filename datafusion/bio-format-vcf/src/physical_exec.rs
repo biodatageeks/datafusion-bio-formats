@@ -62,10 +62,15 @@ where
     }
 }
 
-// Soft budget for multisample FORMAT work per batch: rows * selected_samples * format_fields.
-const MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH: usize = 250_000;
-const MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE: usize = 32;
+// Soft budgets for multisample FORMAT work per batch.
+const MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH: usize = 100_000;
+const MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH: usize = 2_000_000;
+const MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE: usize = 8;
+const MULTISAMPLE_ESTIMATED_SAMPLE_ID_BYTES_PER_ENTRY: usize = 16;
+const MULTISAMPLE_ESTIMATED_VALUE_BYTES_PER_CELL: usize = 8;
+const MULTISAMPLE_MAX_INITIAL_BUILDER_ROWS: usize = 32;
 const MULTISAMPLE_BUILDER_RECYCLE_INTERVAL_BATCHES: usize = 1;
+const STREAM_CHANNEL_BUFFERED_BATCHES: usize = 1;
 
 fn count_requested_format_fields(format_fields: &Option<Vec<String>>, formats: &Formats) -> usize {
     match format_fields {
@@ -95,11 +100,23 @@ fn choose_effective_batch_size(
         return requested_batch_size.max(1);
     }
 
-    let max_by_cells = (MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH / cells_per_row).max(1);
-    let mut effective = requested_batch_size.min(max_by_cells);
+    let estimated_bytes_per_sample = MULTISAMPLE_ESTIMATED_SAMPLE_ID_BYTES_PER_ENTRY
+        .saturating_add(
+            format_field_count.saturating_mul(MULTISAMPLE_ESTIMATED_VALUE_BYTES_PER_CELL),
+        );
+    let estimated_bytes_per_row = selected_sample_names
+        .len()
+        .saturating_mul(estimated_bytes_per_sample)
+        .max(1);
 
-    // Keep moderate batches only when the cell budget allows it.
+    let max_by_cells = (MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH / cells_per_row).max(1);
+    let max_by_bytes =
+        (MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH / estimated_bytes_per_row).max(1);
+    let mut effective = requested_batch_size.min(max_by_cells).min(max_by_bytes);
+
+    // Keep moderate batches only when both budgets allow it.
     if max_by_cells >= MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE
+        && max_by_bytes >= MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE
         && requested_batch_size > MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE
     {
         effective = effective.max(MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE);
@@ -107,16 +124,81 @@ fn choose_effective_batch_size(
 
     if effective < requested_batch_size {
         debug!(
-            "Reducing effective VCF batch size from {} to {} (selected_samples={}, format_fields={}, target_cells={})",
+            "Reducing effective VCF batch size from {} to {} (selected_samples={}, format_fields={}, target_cells={}, target_bytes={})",
             requested_batch_size,
             effective,
             selected_sample_names.len(),
             format_field_count,
-            MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH
+            MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH,
+            MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH
         );
     }
 
     effective.max(1)
+}
+
+fn choose_initial_builder_batch_size(
+    effective_batch_size: usize,
+    any_format_projected: bool,
+    source_sample_names: &[String],
+) -> usize {
+    if any_format_projected && source_sample_names.len() > 1 {
+        effective_batch_size
+            .min(MULTISAMPLE_MAX_INITIAL_BUILDER_ROWS)
+            .max(1)
+    } else {
+        effective_batch_size.max(1)
+    }
+}
+
+fn adjust_effective_batch_size_by_observed_format_bytes(
+    requested_batch_size: usize,
+    current_effective_batch_size: usize,
+    any_format_projected: bool,
+    source_sample_names: &[String],
+    batch_rows: usize,
+    format_arrays: Option<&Vec<Arc<dyn Array>>>,
+) -> usize {
+    if !any_format_projected || source_sample_names.len() <= 1 || batch_rows == 0 {
+        return current_effective_batch_size;
+    }
+
+    let Some(format_arrays) = format_arrays else {
+        return current_effective_batch_size;
+    };
+    if format_arrays.is_empty() {
+        return current_effective_batch_size;
+    }
+
+    let format_bytes = format_arrays
+        .iter()
+        .map(|array| array.get_array_memory_size())
+        .sum::<usize>();
+    if format_bytes == 0 {
+        return current_effective_batch_size;
+    }
+
+    let bytes_per_row = format_bytes.div_ceil(batch_rows).max(1);
+    let max_by_observed_bytes =
+        (MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH / bytes_per_row).max(1);
+    let mut next_effective = requested_batch_size.min(max_by_observed_bytes);
+    if max_by_observed_bytes >= MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE
+        && requested_batch_size > MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE
+    {
+        next_effective = next_effective.max(MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE);
+    }
+
+    if next_effective != current_effective_batch_size {
+        debug!(
+            "Adjusting effective VCF batch size from {} to {} based on observed FORMAT bytes/row={} (target_bytes={})",
+            current_effective_batch_size,
+            next_effective,
+            bytes_per_row,
+            MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH
+        );
+    }
+
+    next_effective.max(1)
 }
 
 /// Precomputed flags indicating which core VCF columns are needed based on projection.
@@ -519,9 +601,9 @@ async fn get_local_vcf(
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
     set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
-    let num_info_fields = info_builders.0.len();
+    let mut num_info_fields = info_builders.0.len();
     let flags = ProjectionFlags::new(&projection, num_info_fields);
-    let effective_batch_size = choose_effective_batch_size(
+    let mut effective_batch_size = choose_effective_batch_size(
         batch_size,
         flags.any_format,
         &format_fields,
@@ -529,16 +611,19 @@ async fn get_local_vcf(
         &source_sample_names,
         formats,
     );
-
-    if effective_batch_size != batch_size {
-        info_builders = (Vec::new(), Vec::new(), Vec::new());
-        set_info_builders(
-            effective_batch_size,
-            info_fields.clone(),
-            infos,
-            &mut info_builders,
-        );
-    }
+    let initial_builder_batch_size = choose_initial_builder_batch_size(
+        effective_batch_size,
+        flags.any_format,
+        &source_sample_names,
+    );
+    info_builders = (Vec::new(), Vec::new(), Vec::new());
+    set_info_builders(
+        initial_builder_batch_size,
+        info_fields.clone(),
+        infos,
+        &mut info_builders,
+    );
+    num_info_fields = info_builders.0.len();
 
     // Build INFO name→index HashMap for single-pass iteration
     // Uses owned String keys (~20-30 short strings cloned once per query) to avoid
@@ -552,7 +637,7 @@ async fn get_local_vcf(
     let mut info_populated = vec![false; num_info_fields];
 
     let mut format_mode = init_format_mode(
-        effective_batch_size,
+        initial_builder_batch_size,
         format_fields.clone(),
         &sample_names,
         &source_sample_names,
@@ -561,7 +646,7 @@ async fn get_local_vcf(
     .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
     let has_format_fields = format_mode.has_fields();
 
-    let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
+    let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
 
     let has_residual_filters = !residual_filters.is_empty();
     let needs_start = flags.start || has_residual_filters;
@@ -649,6 +734,14 @@ async fn get_local_vcf(
                 } else {
                     None
                 };
+                effective_batch_size = adjust_effective_batch_size_by_observed_format_bytes(
+                    batch_size,
+                    effective_batch_size,
+                    flags.any_format,
+                    &source_sample_names,
+                    batch_row_count,
+                    format_arrays.as_ref(),
+                );
                 let core_arrays = builders.finish();
                 let batch = build_record_batch_from_builders(
                     schema.clone(),
@@ -719,7 +812,7 @@ async fn get_local_vcf_sync(
     let schema = schema_ref.clone();
     let (mut tx, rx) = futures::channel::mpsc::channel::<
         Result<RecordBatch, datafusion::arrow::error::ArrowError>,
-    >(2);
+    >(STREAM_CHANNEL_BUFFERED_BATCHES);
 
     std::thread::spawn(move || {
         let read_and_send = || -> Result<(), DataFusionError> {
@@ -733,9 +826,9 @@ async fn get_local_vcf_sync(
             let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
                 (Vec::new(), Vec::new(), Vec::new());
             set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
-            let num_info_fields = info_builders.0.len();
+            let mut num_info_fields = info_builders.0.len();
             let flags = ProjectionFlags::new(&projection, num_info_fields);
-            let effective_batch_size = choose_effective_batch_size(
+            let mut effective_batch_size = choose_effective_batch_size(
                 batch_size,
                 flags.any_format,
                 &format_fields,
@@ -743,16 +836,19 @@ async fn get_local_vcf_sync(
                 &source_sample_names,
                 formats,
             );
-
-            if effective_batch_size != batch_size {
-                info_builders = (Vec::new(), Vec::new(), Vec::new());
-                set_info_builders(
-                    effective_batch_size,
-                    info_fields.clone(),
-                    infos,
-                    &mut info_builders,
-                );
-            }
+            let initial_builder_batch_size = choose_initial_builder_batch_size(
+                effective_batch_size,
+                flags.any_format,
+                &source_sample_names,
+            );
+            info_builders = (Vec::new(), Vec::new(), Vec::new());
+            set_info_builders(
+                initial_builder_batch_size,
+                info_fields.clone(),
+                infos,
+                &mut info_builders,
+            );
+            num_info_fields = info_builders.0.len();
 
             let info_name_to_index: HashMap<String, usize> = info_builders
                 .0
@@ -763,7 +859,7 @@ async fn get_local_vcf_sync(
             let mut info_populated = vec![false; num_info_fields];
 
             let mut format_mode = init_format_mode(
-                effective_batch_size,
+                initial_builder_batch_size,
                 format_fields.clone(),
                 &sample_names,
                 &source_sample_names,
@@ -772,7 +868,7 @@ async fn get_local_vcf_sync(
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let has_format_fields = format_mode.has_fields();
 
-            let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
+            let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
             let mut join_buf = String::with_capacity(64);
 
             let has_residual_filters = !residual_filters.is_empty();
@@ -912,6 +1008,15 @@ async fn get_local_vcf_sync(
                                 } else {
                                     None
                                 };
+                            effective_batch_size =
+                                adjust_effective_batch_size_by_observed_format_bytes(
+                                    batch_size,
+                                    effective_batch_size,
+                                    flags.any_format,
+                                    &source_sample_names,
+                                    batch_row_count,
+                                    format_arrays.as_ref(),
+                                );
                             let core_arrays = builders.finish();
                             let batch = build_record_batch_from_builders(
                                 Arc::clone(&schema),
@@ -1025,9 +1130,9 @@ async fn get_remote_vcf_stream(
     let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
         (Vec::new(), Vec::new(), Vec::new());
     set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
-    let num_info_fields = info_builders.0.len();
+    let mut num_info_fields = info_builders.0.len();
     let flags = ProjectionFlags::new(&projection, num_info_fields);
-    let effective_batch_size = choose_effective_batch_size(
+    let mut effective_batch_size = choose_effective_batch_size(
         batch_size,
         flags.any_format,
         &format_fields,
@@ -1035,16 +1140,19 @@ async fn get_remote_vcf_stream(
         &source_sample_names,
         formats,
     );
-
-    if effective_batch_size != batch_size {
-        info_builders = (Vec::new(), Vec::new(), Vec::new());
-        set_info_builders(
-            effective_batch_size,
-            info_fields.clone(),
-            infos,
-            &mut info_builders,
-        );
-    }
+    let initial_builder_batch_size = choose_initial_builder_batch_size(
+        effective_batch_size,
+        flags.any_format,
+        &source_sample_names,
+    );
+    info_builders = (Vec::new(), Vec::new(), Vec::new());
+    set_info_builders(
+        initial_builder_batch_size,
+        info_fields.clone(),
+        infos,
+        &mut info_builders,
+    );
+    num_info_fields = info_builders.0.len();
 
     // Build INFO name→index HashMap for single-pass iteration
     // Uses owned String keys (~20-30 short strings cloned once per query) to avoid
@@ -1058,7 +1166,7 @@ async fn get_remote_vcf_stream(
     let mut info_populated = vec![false; num_info_fields];
 
     let mut format_mode = init_format_mode(
-        effective_batch_size,
+        initial_builder_batch_size,
         format_fields.clone(),
         &sample_names,
         &source_sample_names,
@@ -1071,7 +1179,7 @@ async fn get_remote_vcf_stream(
     let needs_start = flags.start || has_residual_filters;
 
     let stream = try_stream! {
-        let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
+        let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
         let mut join_buf = String::with_capacity(64);
 
         debug!("Info fields: {:?}", info_builders);
@@ -1160,6 +1268,14 @@ async fn get_remote_vcf_stream(
                 } else {
                     None
                 };
+                effective_batch_size = adjust_effective_batch_size_by_observed_format_bytes(
+                    batch_size,
+                    effective_batch_size,
+                    flags.any_format,
+                    &source_sample_names,
+                    batch_row_count,
+                    format_arrays.as_ref(),
+                );
                 let core_arrays = builders.finish();
                 let batch = build_record_batch_from_builders(
                     schema.clone(),
@@ -2447,8 +2563,8 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
 /// Get a streaming RecordBatch stream from an indexed VCF file for one or more regions.
 ///
-/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
-/// Each partition processes its assigned regions sequentially, keeping only ~3 batches
+/// Uses `thread::spawn` + `mpsc::channel(1)` for streaming I/O with backpressure.
+/// Each partition processes its assigned regions sequentially, keeping only ~2 batches
 /// in memory at a time (constant memory regardless of data volume).
 #[allow(clippy::too_many_arguments)]
 async fn get_indexed_vcf_stream(
@@ -2469,7 +2585,7 @@ async fn get_indexed_vcf_stream(
     let schema = schema_ref.clone();
     let (mut tx, rx) = futures::channel::mpsc::channel::<
         Result<RecordBatch, datafusion::arrow::error::ArrowError>,
-    >(2);
+    >(STREAM_CHANNEL_BUFFERED_BATCHES);
 
     std::thread::spawn(move || {
         let mut read_and_send = || -> Result<(), DataFusionError> {
@@ -2486,9 +2602,9 @@ async fn get_indexed_vcf_stream(
             let mut info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
                 (Vec::new(), Vec::new(), Vec::new());
             set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
-            let num_info_fields = info_builders.0.len();
+            let mut num_info_fields = info_builders.0.len();
             let flags = ProjectionFlags::new(&projection, num_info_fields);
-            let effective_batch_size = choose_effective_batch_size(
+            let mut effective_batch_size = choose_effective_batch_size(
                 batch_size,
                 flags.any_format,
                 &format_fields,
@@ -2496,16 +2612,19 @@ async fn get_indexed_vcf_stream(
                 &source_sample_names,
                 formats,
             );
-
-            if effective_batch_size != batch_size {
-                info_builders = (Vec::new(), Vec::new(), Vec::new());
-                set_info_builders(
-                    effective_batch_size,
-                    info_fields.clone(),
-                    infos,
-                    &mut info_builders,
-                );
-            }
+            let initial_builder_batch_size = choose_initial_builder_batch_size(
+                effective_batch_size,
+                flags.any_format,
+                &source_sample_names,
+            );
+            info_builders = (Vec::new(), Vec::new(), Vec::new());
+            set_info_builders(
+                initial_builder_batch_size,
+                info_fields.clone(),
+                infos,
+                &mut info_builders,
+            );
+            num_info_fields = info_builders.0.len();
 
             // Build INFO name→index HashMap for single-pass iteration
             let info_name_to_index: HashMap<String, usize> = info_builders
@@ -2517,7 +2636,7 @@ async fn get_indexed_vcf_stream(
             let mut info_populated = vec![false; num_info_fields];
 
             let mut format_mode = init_format_mode(
-                effective_batch_size,
+                initial_builder_batch_size,
                 format_fields.clone(),
                 &sample_names,
                 &source_sample_names,
@@ -2526,7 +2645,7 @@ async fn get_indexed_vcf_stream(
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
             let has_format_fields = format_mode.has_fields();
 
-            let mut builders = CoreBatchBuilders::new(&flags, effective_batch_size);
+            let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
             let mut join_buf = String::with_capacity(64);
             let has_residual_filters = !residual_filters.is_empty();
             let needs_start_for_filters = flags.start || has_residual_filters;
@@ -2695,6 +2814,14 @@ async fn get_indexed_vcf_stream(
                         } else {
                             None
                         };
+                        effective_batch_size = adjust_effective_batch_size_by_observed_format_bytes(
+                            batch_size,
+                            effective_batch_size,
+                            flags.any_format,
+                            &source_sample_names,
+                            batch_record_count,
+                            format_arrays.as_ref(),
+                        );
                         let core_arrays = builders.finish();
                         let batch = build_record_batch_from_builders(
                             Arc::clone(&schema),
