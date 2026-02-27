@@ -1,12 +1,18 @@
 //! Integration tests for VCF write functionality
 
+use datafusion::arrow::array::{
+    ArrayBuilder, Float64Array, LargeListBuilder, ListArray, RecordBatch, StringArray,
+    StringBuilder, StructArray, StructBuilder, UInt32Array,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::catalog::TableProvider;
+use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
-    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_SAMPLE_NAMES_KEY,
-    from_json_string,
+    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY,
+    VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string,
 };
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use datafusion_bio_format_vcf::writer::VcfCompressionType;
@@ -215,6 +221,212 @@ async fn test_write_vcf_multi_sample() {
 }
 
 #[tokio::test]
+async fn test_insert_overwrite_with_inferred_fields_preserves_info_and_format() {
+    let source_path = create_test_vcf("infer_fields_source", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+    // Destination must exist so VcfTableProvider::new keeps info_fields/format_fields as None.
+    let output_path = create_test_vcf("infer_fields_dest", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+
+    let ctx = SessionContext::new();
+
+    let source = create_read_provider(
+        &source_path,
+        Some(vec!["DP".to_string(), "AF".to_string(), "DB".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()]),
+    );
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Keep None/None to validate inference from schema during INSERT OVERWRITE.
+    let dest = create_read_provider(&output_path, None, None);
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(&output_path).await.unwrap();
+
+    // INFO/FORMAT headers and per-record values should be preserved.
+    assert!(content.contains("##INFO=<ID=DP"));
+    assert!(content.contains("##INFO=<ID=AF"));
+    assert!(content.contains("##FORMAT=<ID=GT"));
+    assert!(content.contains("##FORMAT=<ID=DP"));
+    assert!(content.contains("GT:DP:GQ"));
+    assert!(content.contains("0/1:20:99"));
+    assert!(content.contains("1/1:30:95"));
+
+    cleanup_files(&[&source_path, &output_path]).await;
+}
+
+#[tokio::test]
+async fn test_write_vcf_multisample_large_list_roundtrip_preserves_gt_values() {
+    let output_path = "/tmp/test_write_multisample_large_list_roundtrip.vcf";
+
+    let mut gt_metadata = std::collections::HashMap::new();
+    gt_metadata.insert(
+        VCF_FIELD_DESCRIPTION_KEY.to_string(),
+        "Genotype".to_string(),
+    );
+    gt_metadata.insert(VCF_FIELD_TYPE_KEY.to_string(), "String".to_string());
+    gt_metadata.insert(VCF_FIELD_NUMBER_KEY.to_string(), "1".to_string());
+    gt_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
+
+    let value_fields = vec![Field::new("GT", DataType::Utf8, true).with_metadata(gt_metadata)];
+    let genotype_item_type = DataType::Struct(
+        vec![
+            Field::new("sample_id", DataType::Utf8, false),
+            Field::new(
+                "values",
+                DataType::Struct(value_fields.clone().into()),
+                true,
+            ),
+        ]
+        .into(),
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("end", DataType::UInt32, false),
+        Field::new("id", DataType::Utf8, true),
+        Field::new("ref", DataType::Utf8, false),
+        Field::new("alt", DataType::Utf8, false),
+        Field::new("qual", DataType::Float64, true),
+        Field::new("filter", DataType::Utf8, true),
+        Field::new(
+            "genotypes",
+            DataType::LargeList(Arc::new(Field::new("item", genotype_item_type, true))),
+            true,
+        ),
+    ]));
+
+    let values_builder = StructBuilder::new(
+        value_fields.clone(),
+        vec![Box::new(StringBuilder::new()) as Box<dyn ArrayBuilder>],
+    );
+    let item_builder = StructBuilder::new(
+        vec![
+            Field::new("sample_id", DataType::Utf8, false),
+            Field::new("values", DataType::Struct(value_fields.into()), true),
+        ],
+        vec![
+            Box::new(StringBuilder::new()) as Box<dyn ArrayBuilder>,
+            Box::new(values_builder) as Box<dyn ArrayBuilder>,
+        ],
+    );
+    let mut genotypes_builder = LargeListBuilder::new(item_builder);
+
+    {
+        let item = genotypes_builder.values();
+        item.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("Sample1");
+        let values = item.field_builder::<StructBuilder>(1).unwrap();
+        values
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("0/1");
+        values.append(true);
+        item.append(true);
+
+        item.field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("Sample2");
+        let values = item.field_builder::<StructBuilder>(1).unwrap();
+        values
+            .field_builder::<StringBuilder>(0)
+            .unwrap()
+            .append_value("1/1");
+        values.append(true);
+        item.append(true);
+        genotypes_builder.append(true);
+    }
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![Some("rs1")])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["T"])),
+            Arc::new(Float64Array::from(vec![Some(60.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+            Arc::new(genotypes_builder.finish()),
+        ],
+    )
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    let source = MemTable::try_new(schema.clone(), vec![vec![batch]]).unwrap();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        schema,
+        vec![],
+        vec!["GT".to_string()],
+        vec!["Sample1".to_string(), "Sample2".to_string()],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(output_path).await.unwrap();
+    assert!(content.contains("##FORMAT=<ID=GT"));
+    assert!(content.contains("GT\t0/1\t1/1"));
+
+    let roundtrip = create_read_provider(output_path, Some(vec![]), Some(vec!["GT".to_string()]));
+    let ctx_read = SessionContext::new();
+    ctx_read.register_table("rt", Arc::new(roundtrip)).unwrap();
+
+    let batches = ctx_read
+        .sql("SELECT genotypes FROM rt")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let first = genotypes.value(0);
+    let first_struct = first.as_any().downcast_ref::<StructArray>().unwrap();
+    let values = first_struct
+        .column_by_name("values")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let gts = values
+        .column_by_name("GT")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    assert_eq!(gts.value(0), "0/1");
+    assert_eq!(gts.value(1), "1/1");
+
+    cleanup_files(&[output_path]).await;
+}
+
+#[tokio::test]
 async fn test_write_vcf_coordinate_conversion() {
     let input_path = create_test_vcf("coord_input", SIMPLE_VCF).await.unwrap();
     let output_path = "/tmp/test_write_coord_output.vcf";
@@ -363,8 +575,22 @@ async fn test_schema_field_metadata_preserved() {
         Some(&"A".to_string())
     );
 
-    // Check FORMAT field metadata (multi-sample uses Sample1_GT naming)
-    let gt_field = schema.field_with_name("Sample1_GT").unwrap();
+    // Check FORMAT field metadata in nested multisample schema
+    let genotypes = schema.field_with_name("genotypes").unwrap();
+    let value_fields = match genotypes.data_type() {
+        DataType::List(item) => match item.data_type() {
+            DataType::Struct(item_fields) => {
+                let values = item_fields.iter().find(|f| f.name() == "values").unwrap();
+                match values.data_type() {
+                    DataType::Struct(value_fields) => value_fields,
+                    other => panic!("expected values struct, got {other:?}"),
+                }
+            }
+            other => panic!("expected list item struct, got {other:?}"),
+        },
+        other => panic!("expected list for genotypes, got {other:?}"),
+    };
+    let gt_field = value_fields.iter().find(|f| f.name() == "GT").unwrap();
     let gt_metadata = gt_field.metadata();
     assert_eq!(
         gt_metadata.get(VCF_FIELD_DESCRIPTION_KEY),
@@ -374,6 +600,56 @@ async fn test_schema_field_metadata_preserved() {
         gt_metadata.get(VCF_FIELD_FORMAT_ID_KEY),
         Some(&"GT".to_string())
     );
+
+    // Check schema-level FORMAT metadata map for nested multisample schemas
+    let format_fields_json = schema
+        .metadata()
+        .get(VCF_FORMAT_FIELDS_KEY)
+        .expect("schema should include bio.vcf.format_fields metadata");
+    let format_fields =
+        from_json_string::<std::collections::HashMap<String, VcfFieldMetadata>>(format_fields_json)
+            .expect("bio.vcf.format_fields should be valid JSON");
+    let gt_def = format_fields.get("GT").expect("GT should be present");
+    assert_eq!(gt_def.number, "1");
+    assert_eq!(gt_def.field_type, "String");
+    assert_eq!(gt_def.description, "Genotype");
+
+    cleanup_files(&[&input_path]).await;
+}
+
+#[tokio::test]
+async fn test_multisample_schema_metadata_exposes_format_descriptions() {
+    let input_path = create_test_vcf("multisample_format_meta", SAMPLE_VCF_ROUNDTRIP)
+        .await
+        .unwrap();
+
+    let provider = VcfTableProvider::new(
+        input_path.clone(),
+        Some(vec!["DP".to_string(), "AF".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()]),
+        None,
+        true,
+    )
+    .unwrap();
+    let schema = provider.schema();
+
+    let format_fields_json = schema
+        .metadata()
+        .get(VCF_FORMAT_FIELDS_KEY)
+        .expect("schema should include bio.vcf.format_fields metadata");
+    let format_fields =
+        from_json_string::<std::collections::HashMap<String, VcfFieldMetadata>>(format_fields_json)
+            .expect("bio.vcf.format_fields should be valid JSON");
+
+    let gt = format_fields.get("GT").expect("GT should be present");
+    assert_eq!(gt.number, "1");
+    assert_eq!(gt.field_type, "String");
+    assert_eq!(gt.description, "Genotype");
+
+    let dp = format_fields.get("DP").expect("DP should be present");
+    assert_eq!(dp.number, "1");
+    assert_eq!(dp.field_type, "Integer");
+    assert_eq!(dp.description, "Sample read depth");
 
     cleanup_files(&[&input_path]).await;
 }

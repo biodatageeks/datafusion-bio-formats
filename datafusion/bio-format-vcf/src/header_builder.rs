@@ -213,6 +213,23 @@ fn find_format_field<'a>(
         return Some(schema.field(idx));
     }
 
+    // New multisample schema: genotypes: List<Struct<sample_id, values: Struct<...>>>
+    if let Ok(idx) = schema.index_of("genotypes") {
+        let genotypes_field = schema.field(idx);
+        let item = match genotypes_field.data_type() {
+            DataType::List(item) | DataType::LargeList(item) => Some(item),
+            _ => None,
+        };
+        if let Some(item) = item
+            && let DataType::Struct(item_fields) = item.data_type()
+            && let Some(values_field) = item_fields.iter().find(|f| f.name() == "values")
+            && let DataType::Struct(value_fields) = values_field.data_type()
+            && let Some(field) = value_fields.iter().find(|f| f.name() == format_name)
+        {
+            return Some(field.as_ref());
+        }
+    }
+
     // Try multi-sample naming convention: {sample}_{format}
     for sample_name in sample_names {
         let column_name = format!("{sample_name}_{format_name}");
@@ -383,5 +400,41 @@ mod tests {
         );
         assert!(field.is_some());
         assert_eq!(field.unwrap().name(), "SAMPLE1_GT");
+    }
+
+    #[test]
+    fn test_find_format_field_nested_large_list() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new(
+                "genotypes",
+                DataType::LargeList(Arc::new(Field::new(
+                    "item",
+                    DataType::Struct(
+                        vec![
+                            Field::new("sample_id", DataType::Utf8, false),
+                            Field::new(
+                                "values",
+                                DataType::Struct(
+                                    vec![Field::new("GT", DataType::Utf8, true)].into(),
+                                ),
+                                true,
+                            ),
+                        ]
+                        .into(),
+                    ),
+                    true,
+                ))),
+                true,
+            ),
+        ]));
+
+        let field = find_format_field(
+            &schema,
+            "GT",
+            &["SAMPLE1".to_string(), "SAMPLE2".to_string()],
+        );
+        assert!(field.is_some());
+        assert_eq!(field.unwrap().name(), "GT");
     }
 }

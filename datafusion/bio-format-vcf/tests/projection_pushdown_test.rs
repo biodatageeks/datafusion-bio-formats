@@ -1,3 +1,4 @@
+use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use datafusion_bio_format_core::test_utils::{assert_plan_projection, find_leaf_exec};
@@ -710,5 +711,25 @@ async fn test_vcf_plan_with_info_fields() -> Result<(), Box<dyn std::error::Erro
     let df = ctx.sql("SELECT chrom, `DP` FROM t").await?;
     let plan = df.create_physical_plan().await?;
     assert_plan_projection(&plan, "VCFExec", &["chrom", "DP"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vcf_plan_emission_type_is_incremental() -> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("plan_emission").await?;
+    let table = VcfTableProvider::new(
+        file_path,
+        Some(vec!["DP".to_string()]),
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+    let ctx = SessionContext::new();
+    ctx.register_table("t", Arc::new(table))?;
+    let df = ctx.sql("SELECT chrom FROM t").await?;
+    let plan = df.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "VCFExec");
+    assert_eq!(leaf.properties().emission_type, EmissionType::Incremental);
     Ok(())
 }

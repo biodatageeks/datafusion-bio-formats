@@ -12,11 +12,11 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
     VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
-    VCF_SAMPLE_NAMES_KEY, to_json_string,
+    VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
@@ -31,7 +31,7 @@ use datafusion::physical_plan::{
 };
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use futures::executor::block_on;
-use log::debug;
+use log::{debug, warn};
 use noodles_vcf::header::Formats;
 use noodles_vcf::header::Infos;
 use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
@@ -56,10 +56,44 @@ use std::sync::Arc;
 /// * `object_storage_options` - Configuration for cloud storage access
 /// * `coordinate_system_zero_based` - If true, coordinates are 0-based half-open; if false, 1-based closed
 ///
+/// Resolves the subset of sample names to include in output.
+///
+/// Matching is exact and case-sensitive. The returned order follows
+/// `samples_to_include` order.
+fn resolve_selected_samples(
+    header_sample_names: &[String],
+    samples_to_include: &Option<Vec<String>>,
+) -> Vec<String> {
+    match samples_to_include {
+        None => header_sample_names.to_vec(),
+        Some(requested) => {
+            let available: HashSet<&str> = header_sample_names.iter().map(|s| s.as_str()).collect();
+            let mut seen = HashSet::with_capacity(requested.len());
+            let mut selected = Vec::with_capacity(requested.len());
+
+            for sample in requested {
+                if !available.contains(sample.as_str()) {
+                    warn!(
+                        "Requested VCF sample '{sample}' not found in header; skipping this sample"
+                    );
+                    continue;
+                }
+
+                if seen.insert(sample.as_str()) {
+                    selected.push(sample.clone());
+                }
+            }
+
+            selected
+        }
+    }
+}
+
 /// # Returns
 ///
-/// A tuple of (Arrow SchemaRef, sample names) representing the VCF table structure
-/// and the sample names from the header.
+/// A tuple of `(schema, selected_sample_names, source_sample_names)` where
+/// `selected_sample_names` are the samples visible in table output and
+/// `source_sample_names` are all samples from the input VCF header.
 ///
 /// # Errors
 ///
@@ -68,17 +102,19 @@ async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
     format_fields: &Option<Vec<String>>,
+    samples_to_include: &Option<Vec<String>>,
     object_storage_options: &Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
-) -> datafusion::common::Result<(SchemaRef, Vec<String>)> {
+) -> datafusion::common::Result<(SchemaRef, Vec<String>, Vec<String>)> {
     let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
     let header_infos = header.infos();
     let header_formats = header.formats();
-    let sample_names: Vec<String> = header
+    let source_sample_names: Vec<String> = header
         .sample_names()
         .iter()
         .map(|s| s.to_string())
         .collect();
+    let sample_names = resolve_selected_samples(&source_sample_names, samples_to_include);
 
     // Extract header metadata for schema storage
     let file_format_obj = header.file_format();
@@ -127,71 +163,118 @@ async fn determine_schema_from_header(
         Field::new("filter", DataType::Utf8, true),
     ];
 
-    if let Some(infos) = info_fields {
-        for tag in infos {
-            let dtype = info_to_arrow_type(header_infos, tag);
-            let info = header_infos.get(tag.as_str()).unwrap();
-            let nullable = is_nullable(&info.ty());
-            // Store VCF header metadata in field metadata for round-trip preservation
-            let mut field_metadata = HashMap::new();
-            field_metadata.insert(
-                VCF_FIELD_DESCRIPTION_KEY.to_string(),
-                info.description().to_string(),
-            );
-            field_metadata.insert(
-                VCF_FIELD_TYPE_KEY.to_string(),
-                info_type_to_string(&info.ty()),
-            );
-            field_metadata.insert(
-                VCF_FIELD_NUMBER_KEY.to_string(),
-                info_number_to_string(info.number()),
-            );
-            field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
-            // Preserve case sensitivity for INFO fields to avoid conflicts
-            let field = Field::new(tag.clone(), dtype, nullable).with_metadata(field_metadata);
-            fields.push(field);
-        }
+    // None means all INFO fields from header; empty vector means none.
+    let info_tags: Vec<String> = match info_fields {
+        Some(tags) => tags.clone(),
+        None => header_infos.keys().map(|k| k.to_string()).collect(),
+    };
+    for tag in &info_tags {
+        let dtype = info_to_arrow_type(header_infos, tag);
+        let info = header_infos.get(tag.as_str()).unwrap();
+        let nullable = is_nullable(&info.ty());
+        // Store VCF header metadata in field metadata for round-trip preservation
+        let mut field_metadata = HashMap::new();
+        field_metadata.insert(
+            VCF_FIELD_DESCRIPTION_KEY.to_string(),
+            info.description().to_string(),
+        );
+        field_metadata.insert(
+            VCF_FIELD_TYPE_KEY.to_string(),
+            info_type_to_string(&info.ty()),
+        );
+        field_metadata.insert(
+            VCF_FIELD_NUMBER_KEY.to_string(),
+            info_number_to_string(info.number()),
+        );
+        field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
+        // Preserve case sensitivity for INFO fields to avoid conflicts
+        let field = Field::new(tag.clone(), dtype, nullable).with_metadata(field_metadata);
+        fields.push(field);
     }
 
-    // Generate per-sample FORMAT columns
-    // Naming convention: {format_field} for single sample, {sample_name}_{format_field} for multiple
-    // If format_fields is None, include all FORMAT fields from header
+    // Generate FORMAT columns.
+    // Single sample: top-level columns for simpler SQL.
+    // Multi-sample: one nested "genotypes" column for scalability.
+    // If format_fields is None, include all FORMAT fields from header.
     let format_tags: Vec<String> = match format_fields {
         Some(tags) => tags.clone(),
         None => header_formats.keys().map(|k| k.to_string()).collect(),
     };
+    let mut format_field_metadata: HashMap<String, VcfFieldMetadata> = HashMap::new();
+    for tag in &format_tags {
+        if let Some(format_info) = header_formats.get(tag.as_str()) {
+            format_field_metadata.insert(
+                tag.clone(),
+                VcfFieldMetadata {
+                    number: format_number_to_string(format_info.number()),
+                    field_type: format_type_to_string(&format_info.ty()),
+                    description: format_info.description().to_string(),
+                },
+            );
+        }
+    }
+
     if !format_tags.is_empty() && !sample_names.is_empty() {
-        let single_sample = sample_names.len() == 1;
-        for sample_name in &sample_names {
+        let single_sample = source_sample_names.len() == 1;
+        if single_sample {
             for tag in &format_tags {
                 let dtype = format_to_arrow_type(header_formats, tag);
-                // Skip sample prefix for single-sample VCFs
-                let field_name = if single_sample {
-                    tag.clone()
-                } else {
-                    format!("{sample_name}_{tag}")
-                };
                 // Store VCF header metadata in field metadata for round-trip preservation
                 let mut field_metadata = HashMap::new();
-                if let Some(format_info) = header_formats.get(tag.as_str()) {
+                if let Some(format_info) = format_field_metadata.get(tag) {
                     field_metadata.insert(
                         VCF_FIELD_DESCRIPTION_KEY.to_string(),
-                        format_info.description().to_string(),
+                        format_info.description.clone(),
                     );
                     field_metadata.insert(
                         VCF_FIELD_TYPE_KEY.to_string(),
-                        format_type_to_string(&format_info.ty()),
+                        format_info.field_type.clone(),
                     );
-                    field_metadata.insert(
-                        VCF_FIELD_NUMBER_KEY.to_string(),
-                        format_number_to_string(format_info.number()),
-                    );
+                    field_metadata
+                        .insert(VCF_FIELD_NUMBER_KEY.to_string(), format_info.number.clone());
                 }
                 field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
                 field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
-                let field = Field::new(field_name, dtype, true).with_metadata(field_metadata);
+                let field = Field::new(tag.clone(), dtype, true).with_metadata(field_metadata);
                 fields.push(field);
             }
+        } else {
+            let value_fields = format_tags
+                .iter()
+                .map(|tag| {
+                    let dtype = format_to_arrow_type(header_formats, tag);
+                    let mut field_metadata = HashMap::new();
+                    if let Some(format_info) = format_field_metadata.get(tag) {
+                        field_metadata.insert(
+                            VCF_FIELD_DESCRIPTION_KEY.to_string(),
+                            format_info.description.clone(),
+                        );
+                        field_metadata.insert(
+                            VCF_FIELD_TYPE_KEY.to_string(),
+                            format_info.field_type.clone(),
+                        );
+                        field_metadata
+                            .insert(VCF_FIELD_NUMBER_KEY.to_string(), format_info.number.clone());
+                    }
+                    field_metadata
+                        .insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
+                    field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
+                    Field::new(tag.clone(), dtype, true).with_metadata(field_metadata)
+                })
+                .collect::<Vec<_>>();
+
+            let genotype_struct = DataType::Struct(
+                vec![
+                    Field::new("sample_id", DataType::Utf8, false),
+                    Field::new("values", DataType::Struct(value_fields.into()), true),
+                ]
+                .into(),
+            );
+            fields.push(Field::new(
+                "genotypes",
+                DataType::List(Arc::new(Field::new("item", genotype_struct, true))),
+                true,
+            ));
         }
     }
 
@@ -214,10 +297,14 @@ async fn determine_schema_from_header(
         VCF_SAMPLE_NAMES_KEY.to_string(),
         to_json_string(&sample_names),
     );
+    metadata.insert(
+        VCF_FORMAT_FIELDS_KEY.to_string(),
+        to_json_string(&format_field_metadata),
+    );
 
     let schema = Schema::new_with_metadata(fields, metadata);
     // println!("Schema: {:?}", schema);
-    Ok((Arc::new(schema), sample_names))
+    Ok((Arc::new(schema), sample_names, source_sample_names))
 }
 
 /// Determines if a VCF INFO field type is nullable.
@@ -297,8 +384,10 @@ pub struct VcfTableProvider {
     object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
-    /// Sample names from the VCF header (used for FORMAT column naming)
+    /// Sample names visible in output (all header samples or the requested subset).
     sample_names: Vec<String>,
+    /// All sample names from the source VCF header (before optional filtering).
+    source_sample_names: Vec<String>,
     /// Path to an index file (TBI/CSI). Auto-discovered if not provided.
     index_path: Option<String>,
     /// Contig names from the file header (for partitioning full scans by chromosome)
@@ -308,6 +397,59 @@ pub struct VcfTableProvider {
 }
 
 impl VcfTableProvider {
+    fn infer_info_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
+        schema
+            .fields()
+            .iter()
+            .filter(|field| {
+                field
+                    .metadata()
+                    .get(VCF_FIELD_FIELD_TYPE_KEY)
+                    .is_some_and(|v| v == "INFO")
+            })
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    fn infer_format_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
+        if let Ok(genotypes_idx) = schema.index_of("genotypes") {
+            let genotypes_field = schema.field(genotypes_idx);
+            let item_field = match genotypes_field.data_type() {
+                DataType::List(item) | DataType::LargeList(item) => Some(item),
+                _ => None,
+            };
+
+            if let Some(item_field) = item_field
+                && let DataType::Struct(genotype_fields) = item_field.data_type()
+                && let Some(values_field) = genotype_fields.iter().find(|f| f.name() == "values")
+                && let DataType::Struct(value_fields) = values_field.data_type()
+            {
+                return value_fields
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect();
+            }
+        }
+
+        schema
+            .fields()
+            .iter()
+            .filter(|field| {
+                field
+                    .metadata()
+                    .get(VCF_FIELD_FIELD_TYPE_KEY)
+                    .is_some_and(|v| v == "FORMAT")
+            })
+            .map(|field| {
+                field
+                    .metadata()
+                    .get(VCF_FIELD_FORMAT_ID_KEY)
+                    .cloned()
+                    .unwrap_or_else(|| field.name().clone())
+            })
+            .collect()
+    }
+
     /// Creates a new VCF table provider.
     ///
     /// # Arguments
@@ -333,12 +475,35 @@ impl VcfTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples(
+            file_path,
+            info_fields,
+            format_fields,
+            None,
+            object_storage_options,
+            coordinate_system_zero_based,
+        )
+    }
+
+    /// Creates a new VCF table provider with an optional sample subset.
+    ///
+    /// Matching is exact and case-sensitive. Missing sample names are skipped with a warning.
+    /// For multisample sources, schema stays nested (`genotypes`) even if a single sample is selected.
+    pub fn new_with_samples(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        samples_to_include: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+    ) -> datafusion::common::Result<Self> {
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
 
-        let (schema, sample_names) = block_on(determine_schema_from_header(
+        let (schema, sample_names, source_sample_names) = block_on(determine_schema_from_header(
             &file_path,
             &info_fields,
             &format_fields,
+            &samples_to_include,
             &object_storage_options,
             coordinate_system_zero_based,
         ))?;
@@ -349,10 +514,14 @@ impl VcfTableProvider {
             .get(VCF_CONTIGS_KEY)
             .and_then(|json| serde_json::from_str::<Vec<ContigMetadata>>(json).ok())
             .unwrap_or_default();
-        let contig_names: Vec<String> = contig_metadata.iter().map(|c| c.id.clone()).collect();
-        let contig_lengths: Vec<u64> = contig_metadata
+        let mut contig_names: Vec<String> = contig_metadata.iter().map(|c| c.id.clone()).collect();
+        let mut contig_lengths: Vec<u64> = contig_metadata
             .iter()
             .map(|c| c.length.unwrap_or(0))
+            .collect();
+        let contig_length_by_name: HashMap<&str, u64> = contig_metadata
+            .iter()
+            .filter_map(|c| c.length.map(|len| (c.id.as_str(), len)))
             .collect();
 
         // Auto-discover index file for local BGZF-compressed files
@@ -366,43 +535,55 @@ impl VcfTableProvider {
             None
         };
 
-        // When the VCF header lacks ##contig lines but a TBI index exists,
-        // fall back to the TBI header for contig names so that indexed
-        // partitioning can still split across multiple cores.
-        let (contig_names, contig_lengths) = if contig_names.is_empty() {
-            if let Some(ref idx_path) = index_path {
-                match noodles_tabix::fs::read(idx_path) {
-                    Ok(index) => {
-                        use noodles_csi::binning_index::BinningIndex;
-                        let names: Vec<String> = index
-                            .header()
-                            .map(|h| {
-                                h.reference_sequence_names()
-                                    .iter()
-                                    .map(|n| n.to_string())
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        if !names.is_empty() {
+        // Prefer TBI header reference names for indexed full scans and size
+        // estimation. This keeps reference-name->index-id mapping aligned even
+        // when VCF header contigs include many entries absent from the index.
+        if let Some(ref idx_path) = index_path {
+            match noodles_tabix::fs::read(idx_path) {
+                Ok(index) => {
+                    use noodles_csi::binning_index::BinningIndex;
+                    let index_names: Vec<String> = index
+                        .header()
+                        .map(|h| {
+                            h.reference_sequence_names()
+                                .iter()
+                                .map(|n| n.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    if !index_names.is_empty() {
+                        if contig_names.is_empty() {
                             debug!(
                                 "VCF header lacks ##contig lines; inferred {} contigs from TBI index",
-                                names.len()
+                                index_names.len()
+                            );
+                        } else if contig_names != index_names {
+                            debug!(
+                                "Using {} contigs from TBI header for indexed partitioning (schema has {})",
+                                index_names.len(),
+                                contig_names.len()
                             );
                         }
-                        let lengths = vec![0u64; names.len()];
-                        (names, lengths)
-                    }
-                    Err(e) => {
-                        debug!("Failed to read TBI for contig name fallback: {e}");
-                        (contig_names, contig_lengths)
+
+                        let index_lengths: Vec<u64> = index_names
+                            .iter()
+                            .map(|name| {
+                                contig_length_by_name
+                                    .get(name.as_str())
+                                    .copied()
+                                    .unwrap_or(0)
+                            })
+                            .collect();
+                        contig_names = index_names;
+                        contig_lengths = index_lengths;
                     }
                 }
-            } else {
-                (contig_names, contig_lengths)
+                Err(e) => {
+                    debug!("Failed to read TBI index header for partitioning contigs: {e}");
+                }
             }
-        } else {
-            (contig_names, contig_lengths)
-        };
+        }
 
         Ok(Self {
             file_path,
@@ -412,6 +593,7 @@ impl VcfTableProvider {
             object_storage_options,
             coordinate_system_zero_based,
             sample_names,
+            source_sample_names,
             index_path,
             contig_names,
             contig_lengths,
@@ -446,20 +628,15 @@ impl VcfTableProvider {
     ) -> Self {
         Self {
             file_path,
-            info_fields: if info_fields.is_empty() {
-                None
-            } else {
-                Some(info_fields)
-            },
-            format_fields: if format_fields.is_empty() {
-                None
-            } else {
-                Some(format_fields)
-            },
+            // Keep explicit empty vectors as "write no INFO/FORMAT fields".
+            // `None` is reserved for "infer defaults from schema".
+            info_fields: Some(info_fields),
+            format_fields: Some(format_fields),
             schema,
             object_storage_options: None,
             coordinate_system_zero_based,
-            sample_names,
+            sample_names: sample_names.clone(),
+            source_sample_names: sample_names,
             index_path: None,
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
@@ -602,7 +779,7 @@ impl TableProvider for VcfTableProvider {
                     cache: PlanProperties::new(
                         EquivalenceProperties::new(schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
-                        EmissionType::Final,
+                        EmissionType::Incremental,
                         Boundedness::Bounded,
                     ),
                     file_path: self.file_path.clone(),
@@ -610,6 +787,7 @@ impl TableProvider for VcfTableProvider {
                     info_fields: self.info_fields.clone(),
                     format_fields: self.format_fields.clone(),
                     sample_names: self.sample_names.clone(),
+                    source_sample_names: self.source_sample_names.clone(),
                     projection: projection.cloned(),
                     limit,
                     object_storage_options: self.object_storage_options.clone(),
@@ -626,7 +804,7 @@ impl TableProvider for VcfTableProvider {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
-                EmissionType::Final,
+                EmissionType::Incremental,
                 Boundedness::Bounded,
             ),
             file_path: self.file_path.clone(),
@@ -634,6 +812,7 @@ impl TableProvider for VcfTableProvider {
             info_fields: self.info_fields.clone(),
             format_fields: self.format_fields.clone(),
             sample_names: self.sample_names.clone(),
+            source_sample_names: self.source_sample_names.clone(),
             projection: projection.cloned(),
             limit,
             object_storage_options: self.object_storage_options.clone(),
@@ -673,9 +852,17 @@ impl TableProvider for VcfTableProvider {
         // Determine compression from file path
         let compression = VcfCompressionType::from_path(&self.file_path);
 
-        // Get info and format field names
-        let info_fields = self.info_fields.clone().unwrap_or_default();
-        let format_fields = self.format_fields.clone().unwrap_or_default();
+        // Resolve info/format fields for write:
+        // - Some(vec) (including empty): explicit selection
+        // - None: infer defaults from schema
+        let info_fields = self
+            .info_fields
+            .clone()
+            .unwrap_or_else(|| Self::infer_info_fields_from_schema(&self.schema));
+        let format_fields = self
+            .format_fields
+            .clone()
+            .unwrap_or_else(|| Self::infer_format_fields_from_schema(&self.schema));
 
         Ok(Arc::new(VcfWriteExec::new(
             input,
