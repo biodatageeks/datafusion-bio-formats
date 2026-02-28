@@ -291,6 +291,32 @@ async fn determine_schema_from_file(
     Ok(Arc::new(schema))
 }
 
+/// Appends a dedicated partition for global no-coor records when present.
+///
+/// Returns `true` when a partition is appended.
+fn append_unplaced_unmapped_partition(
+    assignments: &mut Vec<datafusion_bio_format_core::partition_balancer::PartitionAssignment>,
+    unplaced_unmapped: u64,
+) -> bool {
+    if unplaced_unmapped == 0 {
+        return false;
+    }
+
+    assignments.push(
+        datafusion_bio_format_core::partition_balancer::PartitionAssignment {
+            regions: vec![datafusion_bio_format_core::genomic_filter::GenomicRegion {
+                chrom: crate::storage::UNPLACED_UNMAPPED_SENTINEL_CHROM.to_string(),
+                start: None,
+                end: None,
+                unmapped_tail: true,
+            }],
+            total_estimated_bytes: unplaced_unmapped.max(1),
+        },
+    );
+
+    true
+}
+
 /// A DataFusion table provider for BAM (Binary Alignment Map) files.
 ///
 /// This struct implements the DataFusion TableProvider trait, allowing BAM files
@@ -922,6 +948,7 @@ impl TableProvider for BamTableProvider {
         // Determine regions and partitioning when index is available
         if let Some(ref index_path) = self.index_path {
             let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
+            let is_full_scan = analysis.regions.is_empty();
 
             let regions = if !analysis.regions.is_empty() {
                 debug!(
@@ -952,7 +979,21 @@ impl TableProvider for BamTableProvider {
                     &self.reference_names,
                     &self.reference_lengths,
                 );
-                let assignments = balance_partitions(estimates, target_partitions);
+                let mut assignments = balance_partitions(estimates, target_partitions);
+
+                // For indexed full scans, add a dedicated partition for global no-coor
+                // records (reference_sequence_id=None, alignment_start=None). These are
+                // not covered by per-reference region queries.
+                if is_full_scan {
+                    let unplaced_unmapped =
+                        crate::storage::unplaced_unmapped_count_from_bai(index_path);
+                    if append_unplaced_unmapped_partition(&mut assignments, unplaced_unmapped) {
+                        debug!(
+                            "BAM indexed full scan: added dedicated no-coor partition ({unplaced_unmapped} records)"
+                        );
+                    }
+                }
+
                 let num_partitions = assignments.len();
 
                 // Collect filters for record-level evaluation
@@ -1072,5 +1113,33 @@ impl TableProvider for BamTableProvider {
             schema_metadata_overrides,
             self.sort_on_write,
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_unplaced_unmapped_partition;
+    use crate::storage::UNPLACED_UNMAPPED_SENTINEL_CHROM;
+    use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
+
+    #[test]
+    fn test_append_unplaced_unmapped_partition_noop_for_zero() {
+        let mut assignments: Vec<PartitionAssignment> = Vec::new();
+        assert!(!append_unplaced_unmapped_partition(&mut assignments, 0));
+        assert!(assignments.is_empty());
+    }
+
+    #[test]
+    fn test_append_unplaced_unmapped_partition_adds_single_tail_partition() {
+        let mut assignments: Vec<PartitionAssignment> = Vec::new();
+        assert!(append_unplaced_unmapped_partition(&mut assignments, 42));
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].regions.len(), 1);
+        assert_eq!(
+            assignments[0].regions[0].chrom,
+            UNPLACED_UNMAPPED_SENTINEL_CHROM
+        );
+        assert!(assignments[0].regions[0].unmapped_tail);
+        assert_eq!(assignments[0].total_estimated_bytes, 42);
     }
 }

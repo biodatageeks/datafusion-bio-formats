@@ -9,6 +9,7 @@ use noodles_bam::Record;
 use noodles_bam::io::Reader;
 use noodles_bgzf::r#async::io::Reader as AsyncBgzfReader;
 use noodles_bgzf::io::Reader as BgzfReader;
+use noodles_csi::binning_index::BinningIndex as _;
 use noodles_csi::binning_index::ReferenceSequence as BinningRefSeq;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -17,6 +18,9 @@ use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufReader, Error};
 use tokio_util::io::StreamReader;
+
+/// Sentinel chromosome label used for the synthetic no-coor partition.
+pub(crate) const UNPLACED_UNMAPPED_SENTINEL_CHROM: &str = "*";
 
 /// Creates a remote BAM reader for cloud storage (GCS, S3, Azure).
 ///
@@ -417,6 +421,20 @@ pub fn estimate_sizes_from_bai(
             }
         })
         .collect()
+}
+
+/// Returns the global unplaced/unmapped (`n_no_coor`) count from a BAI index.
+///
+/// This count represents records with `reference_sequence_id = None` and no alignment
+/// position. These records are not returned by per-reference range queries.
+pub fn unplaced_unmapped_count_from_bai(index_path: &str) -> u64 {
+    match bam::bai::fs::read(index_path) {
+        Ok(index) => index.unplaced_unmapped_record_count().unwrap_or(0),
+        Err(e) => {
+            log::debug!("Failed to read BAI index for unplaced/unmapped count: {e}");
+            0
+        }
+    }
 }
 
 /// Record field accessor for BAM records, used for record-level filter evaluation.

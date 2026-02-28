@@ -233,6 +233,37 @@ async fn test_bam_indexed_vs_full_scan_correctness() -> datafusion::error::Resul
     Ok(())
 }
 
+/// Test: indexed full scan correctness for BAM files containing only no-coor records.
+///
+/// This covers records with RNAME='*' and POS=0 (reference_sequence_id=None,
+/// alignment_start=None), which must be returned by indexed scans.
+#[tokio::test]
+async fn test_bam_full_scan_no_coor_only_file() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+    let provider = BamTableProvider::new(
+        "tests/no_coor_only.bam".to_string(),
+        None,
+        true, // zero-based coordinates
+        Some(vec!["CB".to_string(), "CR".to_string()]),
+        false,
+    )
+    .await?;
+    ctx.register_table("bam", Arc::new(provider))?;
+
+    let total = count_rows(&ctx, "SELECT chrom, \"CB\", \"CR\" FROM bam").await;
+    assert_eq!(total, 2, "Expected 2 no-coor records in full scan");
+
+    let chrom_null = count_rows(&ctx, "SELECT chrom FROM bam WHERE chrom IS NULL").await;
+    assert_eq!(chrom_null, 2, "All no-coor records should have NULL chrom");
+
+    let cb_present = count_rows(&ctx, "SELECT \"CB\" FROM bam WHERE \"CB\" IS NOT NULL").await;
+    let cr_present = count_rows(&ctx, "SELECT \"CR\" FROM bam WHERE \"CR\" IS NOT NULL").await;
+    assert_eq!(cb_present, 2, "Expected CB tag present on both records");
+    assert_eq!(cr_present, 2, "Expected CR tag present on both records");
+
+    Ok(())
+}
+
 /// Create a session context with custom target_partitions.
 async fn setup_bam_ctx_with_partitions(
     target_partitions: usize,
