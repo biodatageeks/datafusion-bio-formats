@@ -1340,8 +1340,7 @@ async fn get_indexed_stream(
                         }
 
                         debug!(
-                            "Read {} unplaced/unmapped (n_no_coor) records via direct seek",
-                            no_coor_count
+                            "Read {no_coor_count} unplaced/unmapped (n_no_coor) records via direct seek",
                         );
                         continue; // Done with this synthetic no-coor tail region
                     }
