@@ -64,13 +64,13 @@ where
 
 // Soft budgets for multisample FORMAT work per batch.
 const MULTISAMPLE_TARGET_GENOTYPE_CELLS_PER_BATCH: usize = 100_000;
-const MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH: usize = 2_000_000;
+const MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH: usize = 8_000_000;
 const MULTISAMPLE_MIN_EFFECTIVE_BATCH_SIZE: usize = 8;
 const MULTISAMPLE_ESTIMATED_SAMPLE_ID_BYTES_PER_ENTRY: usize = 16;
 const MULTISAMPLE_ESTIMATED_VALUE_BYTES_PER_CELL: usize = 8;
 const MULTISAMPLE_MAX_INITIAL_BUILDER_ROWS: usize = 32;
-const MULTISAMPLE_BUILDER_RECYCLE_INTERVAL_BATCHES: usize = 1;
-const STREAM_CHANNEL_BUFFERED_BATCHES: usize = 1;
+const MULTISAMPLE_BUILDER_RECYCLE_INTERVAL_BATCHES: usize = 8;
+const STREAM_CHANNEL_BUFFERED_BATCHES: usize = 4;
 
 fn count_requested_format_fields(format_fields: &Option<Vec<String>>, formats: &Formats) -> usize {
     match format_fields {
@@ -1380,6 +1380,8 @@ struct MultiSampleFormatBuilder {
     array_int_pool: Vec<Option<i32>>,
     array_float_pool: Vec<Option<f32>>,
     array_string_pool: Vec<Option<String>>,
+    // Reusable buffer for GT string formatting to avoid per-sample allocation.
+    gt_buf: String,
     batch_size: usize,
     batches_since_recycle: usize,
     list_builder: ListBuilder<StructBuilder>,
@@ -1463,6 +1465,7 @@ impl MultiSampleFormatBuilder {
             array_int_pool: Vec::new(),
             array_float_pool: Vec::new(),
             array_string_pool: Vec::new(),
+            gt_buf: String::new(),
             batch_size,
             batches_since_recycle: 0,
             list_builder,
@@ -1516,24 +1519,24 @@ impl MultiSampleFormatBuilder {
                 let parsed_value = if key == "GT" {
                     match value {
                         Some(SV::Genotype(gt)) => {
-                            let mut gt_str = String::new();
+                            self.gt_buf.clear();
                             let mut first = true;
                             for (allele, phasing) in gt.iter().flatten() {
                                 if !first {
                                     match phasing {
-                                        Phasing::Phased => gt_str.push('|'),
-                                        Phasing::Unphased => gt_str.push('/'),
+                                        Phasing::Phased => self.gt_buf.push('|'),
+                                        Phasing::Unphased => self.gt_buf.push('/'),
                                     }
                                 }
                                 first = false;
                                 match allele {
                                     Some(a) => {
-                                        let _ = write!(gt_str, "{a}");
+                                        let _ = write!(self.gt_buf, "{a}");
                                     }
-                                    None => gt_str.push('.'),
+                                    None => self.gt_buf.push('.'),
                                 }
                             }
-                            Some(ParsedFormatValue::String(gt_str))
+                            Some(ParsedFormatValue::String(self.gt_buf.clone()))
                         }
                         _ => None,
                     }
