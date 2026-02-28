@@ -148,7 +148,7 @@ Set genotypes to missing where per-sample quality thresholds aren't met:
 ```sql
 SELECT chrom, start, "end", "ref", alt, qual, filter, id,
     named_struct(
-        'GT', mask_gt(
+        'GT', vcf_set_gts(
             genotypes."GT",
             list_and(
                 list_gte(genotypes."GQ", 10),
@@ -163,6 +163,12 @@ SELECT chrom, start, "end", "ref", alt, qual, filter, id,
     ) AS genotypes
 FROM vcf_table
 WHERE qual >= 20
+```
+
+The optional third argument controls the replacement value (default `"."`):
+```sql
+-- Replace failing GTs with "./." instead of "."
+vcf_set_gts(genotypes."GT", mask, './.')
 ```
 
 This replicates the bcftools pipeline:
@@ -183,7 +189,7 @@ bcftools view --samples-file samples.txt input.vcf.gz \
 -- Equivalent SQL:
 SELECT chrom, start, "end", "ref", alt, qual, filter, id,
     named_struct(
-        'GT', mask_gt(
+        'GT', vcf_set_gts(
             genotypes."GT",
             list_and(
                 list_gte(genotypes."GQ", 10),
@@ -207,7 +213,7 @@ WHERE qual >= 20
 | `list_gte` | `(List<Int32\|Float32>, scalar) -> List<Boolean>` | Element-wise `>=` comparison. NULL elements produce NULL in the result. |
 | `list_lte` | `(List<Int32\|Float32>, scalar) -> List<Boolean>` | Element-wise `<=` comparison. NULL elements produce NULL in the result. |
 | `list_and` | `(List<Boolean>, List<Boolean>) -> List<Boolean>` | Element-wise AND. NULL in either input produces NULL. |
-| `mask_gt` | `(List<Utf8>, List<Boolean>) -> List<Utf8>` | Set GT to `"."` where mask is false/NULL. Keeps original GT where mask is true. |
+| `vcf_set_gts` | `(List<Utf8>, List<Boolean> [, Utf8]) -> List<Utf8>` | Replace GT where mask is false/NULL. Optional 3rd arg sets the replacement value (default `"."`). |
 
 ## Dual View: Per-Sample Queries
 
@@ -262,7 +268,7 @@ WHERE a.sample_id = 'NA12878' AND b.sample_id = 'NA12891'
 | Use Case | View | Why |
 |----------|------|-----|
 | Cross-sample aggregates (AVG, COUNT) | `vcf_table` + UDFs | Operates on lists directly, no row explosion |
-| Per-sample GT masking | `vcf_table` + `mask_gt` | Keeps columnar layout for write-back |
+| Per-sample GT masking | `vcf_table` + `vcf_set_gts` | Keeps columnar layout for write-back |
 | Lookup one sample's genotypes | `vcf_table_long` | Natural row-per-sample for filtering |
 | Per-sample statistics (GROUP BY sample) | `vcf_table_long` | One row per sample enables standard SQL aggregation |
 

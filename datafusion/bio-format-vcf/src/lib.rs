@@ -82,7 +82,7 @@ pub mod storage;
 pub mod table_provider;
 /// Scalar UDFs for analytical queries on multi-sample columnar genotype lists.
 ///
-/// Provides `list_avg`, `list_gte`, `list_lte`, `list_and`, and `mask_gt` functions
+/// Provides `list_avg`, `list_gte`, `list_lte`, `list_and`, and `vcf_set_gts` functions
 /// for use in SQL queries on VCF data with the columnar genotypes schema.
 pub mod udfs;
 /// Dual-view support for VCF tables.

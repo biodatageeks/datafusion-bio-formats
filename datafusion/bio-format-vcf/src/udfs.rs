@@ -395,21 +395,30 @@ pub fn list_and_udf() -> ScalarUDF {
 }
 
 // ============================================================================
-// mask_gt — set GT to "." where mask is false
+// vcf_set_gts — replace GT values where mask is false (like bcftools +setGT)
 // ============================================================================
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-struct MaskGtUdf {
+struct VcfSetGtsUdf {
     signature: Signature,
 }
 
-impl MaskGtUdf {
+impl VcfSetGtsUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::exact(
+            signature: Signature::one_of(
                 vec![
-                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                    DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
+                    // 3-arg: vcf_set_gts(gt_list, mask, replacement)
+                    Exact(vec![
+                        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                        DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
+                        DataType::Utf8,
+                    ]),
+                    // 2-arg: vcf_set_gts(gt_list, mask) — defaults to "."
+                    Exact(vec![
+                        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                        DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
+                    ]),
                 ],
                 Volatility::Immutable,
             ),
@@ -417,13 +426,13 @@ impl MaskGtUdf {
     }
 }
 
-impl ScalarUDFImpl for MaskGtUdf {
+impl ScalarUDFImpl for VcfSetGtsUdf {
     fn as_any(&self) -> &dyn Any {
         self
     }
 
     fn name(&self) -> &str {
-        "mask_gt"
+        "vcf_set_gts"
     }
 
     fn signature(&self) -> &Signature {
@@ -441,6 +450,17 @@ impl ScalarUDFImpl for MaskGtUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let gt_arr = args.args[0].clone().into_array(1)?;
         let mask_arr = args.args[1].clone().into_array(1)?;
+        let replacement = if args.args.len() > 2 {
+            let rep_arr = args.args[2].clone().into_array(1)?;
+            rep_arr
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .and_then(|a| a.value(0).to_string().into())
+                .unwrap_or_else(|| ".".to_string())
+        } else {
+            ".".to_string()
+        };
+
         let gt_list = gt_arr.as_list::<i32>();
         let mask_list = mask_arr.as_list::<i32>();
         let mut builder = ListBuilder::new(StringBuilder::new());
@@ -472,12 +492,12 @@ impl ScalarUDFImpl for MaskGtUdf {
                     .is_some_and(|m| j < m.len() && !m.is_null(j) && m.value(j));
                 if keep {
                     if gt_strings.is_null(j) {
-                        builder.values().append_value(".");
+                        builder.values().append_value(&replacement);
                     } else {
                         builder.values().append_value(gt_strings.value(j));
                     }
                 } else {
-                    builder.values().append_value(".");
+                    builder.values().append_value(&replacement);
                 }
             }
             builder.append(true);
@@ -486,9 +506,9 @@ impl ScalarUDFImpl for MaskGtUdf {
     }
 }
 
-/// Creates the `mask_gt` scalar UDF.
-pub fn mask_gt_udf() -> ScalarUDF {
-    ScalarUDF::from(MaskGtUdf::new())
+/// Creates the `vcf_set_gts` scalar UDF.
+pub fn vcf_set_gts_udf() -> ScalarUDF {
+    ScalarUDF::from(VcfSetGtsUdf::new())
 }
 
 // ============================================================================
@@ -502,13 +522,13 @@ pub fn mask_gt_udf() -> ScalarUDF {
 /// - `list_gte(List<Int32|Float32>, T) -> List<Boolean>` — element-wise >=
 /// - `list_lte(List<Int32|Float32>, T) -> List<Boolean>` — element-wise <=
 /// - `list_and(List<Boolean>, List<Boolean>) -> List<Boolean>` — element-wise AND
-/// - `mask_gt(List<Utf8>, List<Boolean>) -> List<Utf8>` — set GT to "." where mask is false
+/// - `vcf_set_gts(List<Utf8>, List<Boolean> [, Utf8]) -> List<Utf8>` — replace GT where mask is false (default: ".")
 pub fn register_vcf_udfs(ctx: &datafusion::prelude::SessionContext) {
     ctx.register_udf(list_avg_udf());
     ctx.register_udf(list_gte_udf());
     ctx.register_udf(list_lte_udf());
     ctx.register_udf(list_and_udf());
-    ctx.register_udf(mask_gt_udf());
+    ctx.register_udf(vcf_set_gts_udf());
 }
 
 #[cfg(test)]
@@ -629,10 +649,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mask_gt() {
+    async fn test_vcf_set_gts() {
         let ctx = make_test_ctx().await;
         let df = ctx
-            .sql(r#"SELECT mask_gt("GT", list_gte("GQ", 15)) as masked FROM test_data"#)
+            .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15)) as masked FROM test_data"#)
             .await
             .unwrap();
         let batches = df.collect().await.unwrap();
@@ -648,6 +668,34 @@ mod tests {
         assert_eq!(strings0.value(0), "0/1");
         assert_eq!(strings0.value(1), "1/1");
         assert_eq!(strings0.value(2), ".");
+    }
+
+    #[tokio::test]
+    async fn test_vcf_set_gts_custom_replacement() {
+        let ctx = make_test_ctx().await;
+        let df = ctx
+            .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15), './.') as masked FROM test_data"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches.len(), 1);
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        // Row 0: GQ=[30,20,10], gte(15)=[T,T,F] → GT=["0/1","1/1","./.""]
+        let inner0 = list.value(0);
+        let strings0 = inner0.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(strings0.value(0), "0/1");
+        assert_eq!(strings0.value(1), "1/1");
+        assert_eq!(strings0.value(2), "./.");
+        // Row 1: GQ=[5,null,15], gte(15)=[F,null,T] → GT=["./.","./.", "1/1"]
+        let inner1 = list.value(1);
+        let strings1 = inner1.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(strings1.value(0), "./.");
+        assert_eq!(strings1.value(1), "./.");
+        assert_eq!(strings1.value(2), "1/1");
     }
 
     #[tokio::test]

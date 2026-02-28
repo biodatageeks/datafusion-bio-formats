@@ -121,7 +121,7 @@ For multi-sample VCFs, FORMAT fields are stored in a columnar `genotypes: Struct
 ```rust
 use datafusion_bio_format_vcf::register_vcf_udfs;
 
-// Register analytical UDFs: list_avg, list_gte, list_lte, list_and, mask_gt
+// Register analytical UDFs: list_avg, list_gte, list_lte, list_and, vcf_set_gts
 register_vcf_udfs(&ctx);
 ```
 
@@ -135,7 +135,7 @@ WHERE qual >= 20
 
 -- Set genotypes to missing where per-sample DP or GQ are too low
 SELECT chrom, start, "ref", alt,
-    mask_gt(genotypes."GT",
+    vcf_set_gts(genotypes."GT",
         list_and(list_gte(genotypes."GQ", 10),
             list_and(list_gte(genotypes."DP", 10), list_lte(genotypes."DP", 200)))
     ) AS masked_gt
