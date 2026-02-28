@@ -11,7 +11,7 @@ use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{
     Array, ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, ListBuilder,
-    StringBuilder, StructBuilder, UInt32Builder,
+    StringBuilder, StructArray, UInt32Builder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -1363,18 +1363,20 @@ fn pool_slice<T>(pool: &[Option<T>], start: usize, len: usize) -> Option<&[Optio
     pool.get(start..end)
 }
 
-/// Multisample FORMAT builder that emits a single nested `genotypes` column:
-/// `List<Struct<sample_id: Utf8, values: Struct<...>>>`.
+/// Multisample FORMAT builder that emits a single columnar `genotypes` column:
+/// `Struct<GT: List<Utf8>, GQ: List<Int32>, DP: List<Int32>, ...>`.
+/// Each list has N elements (one per selected sample) in sample order.
 struct MultiSampleFormatBuilder {
     sample_names: Vec<String>,
     header_index_to_output_index: Vec<Option<usize>>,
-    value_fields: Vec<Field>,
-    field_types: Vec<DataType>,
+    /// Schema fields for the genotypes struct (each is List<T>).
+    list_fields: Vec<Field>,
+    /// Scalar types for each FORMAT field (before wrapping in List).
+    scalar_types: Vec<DataType>,
     field_to_index: HashMap<String, usize>,
     // Reusable per-record scratch: flattened [sample_idx * num_fields + field_idx].
     parsed_values: Vec<Option<ParsedFormatValue>>,
     // Tracks which flattened positions were populated in the current record.
-    // We clear only these entries before parsing the next record.
     touched_indices: Vec<usize>,
     // Reusable pools for array FORMAT values to avoid per-value Vec allocations.
     array_int_pool: Vec<Option<i32>>,
@@ -1384,39 +1386,68 @@ struct MultiSampleFormatBuilder {
     gt_buf: String,
     batch_size: usize,
     batches_since_recycle: usize,
-    list_builder: ListBuilder<StructBuilder>,
+    /// One ListBuilder per FORMAT field.
+    format_list_builders: Vec<Box<dyn ArrayBuilder>>,
 }
 
-fn build_multisample_list_builder(
-    value_fields: &[Field],
-    field_types: &[DataType],
+/// Creates one `ListBuilder<T>` per FORMAT field for the columnar layout.
+fn build_columnar_list_builders(
+    scalar_types: &[DataType],
     sample_count: usize,
     batch_size: usize,
-) -> Result<ListBuilder<StructBuilder>, datafusion::arrow::error::ArrowError> {
-    let mut value_builders: Vec<Box<dyn ArrayBuilder>> = Vec::with_capacity(field_types.len());
-    for data_type in field_types {
-        value_builders.push(create_array_builder_for_type(data_type, batch_size)?);
+) -> Result<Vec<Box<dyn ArrayBuilder>>, datafusion::arrow::error::ArrowError> {
+    let mut builders: Vec<Box<dyn ArrayBuilder>> = Vec::with_capacity(scalar_types.len());
+    // Inner capacity: each list row has `sample_count` elements.
+    let inner_cap = batch_size * sample_count;
+    for scalar_type in scalar_types {
+        let list_builder: Box<dyn ArrayBuilder> = match scalar_type {
+            DataType::Utf8 => Box::new(ListBuilder::with_capacity(
+                StringBuilder::with_capacity(inner_cap, inner_cap * 8),
+                batch_size,
+            )),
+            DataType::Int32 => Box::new(ListBuilder::with_capacity(
+                Int32Builder::with_capacity(inner_cap),
+                batch_size,
+            )),
+            DataType::Float32 => Box::new(ListBuilder::with_capacity(
+                Float32Builder::with_capacity(inner_cap),
+                batch_size,
+            )),
+            DataType::Boolean => Box::new(ListBuilder::with_capacity(
+                BooleanBuilder::with_capacity(inner_cap),
+                batch_size,
+            )),
+            DataType::List(inner) => match inner.data_type() {
+                DataType::Int32 => Box::new(ListBuilder::with_capacity(
+                    ListBuilder::with_capacity(Int32Builder::with_capacity(inner_cap), inner_cap),
+                    batch_size,
+                )),
+                DataType::Float32 => Box::new(ListBuilder::with_capacity(
+                    ListBuilder::with_capacity(Float32Builder::with_capacity(inner_cap), inner_cap),
+                    batch_size,
+                )),
+                DataType::Utf8 => Box::new(ListBuilder::with_capacity(
+                    ListBuilder::with_capacity(
+                        StringBuilder::with_capacity(inner_cap, inner_cap * 8),
+                        inner_cap,
+                    ),
+                    batch_size,
+                )),
+                other => {
+                    return Err(datafusion::arrow::error::ArrowError::SchemaError(format!(
+                        "Unsupported nested list type in columnar FORMAT: {other:?}"
+                    )));
+                }
+            },
+            other => {
+                return Err(datafusion::arrow::error::ArrowError::SchemaError(format!(
+                    "Unsupported FORMAT data type in columnar layout: {other:?}"
+                )));
+            }
+        };
+        builders.push(list_builder);
     }
-
-    let values_struct_builder = StructBuilder::new(value_fields.to_vec(), value_builders);
-    let sample_builder =
-        StringBuilder::with_capacity(batch_size * sample_count, batch_size * sample_count * 8);
-    let item_builder = StructBuilder::new(
-        vec![
-            datafusion::arrow::datatypes::Field::new("sample_id", DataType::Utf8, false),
-            datafusion::arrow::datatypes::Field::new(
-                "values",
-                DataType::Struct(value_fields.to_vec().into()),
-                true,
-            ),
-        ],
-        vec![
-            Box::new(sample_builder) as Box<dyn ArrayBuilder>,
-            Box::new(values_struct_builder) as Box<dyn ArrayBuilder>,
-        ],
-    );
-
-    Ok(ListBuilder::with_capacity(item_builder, batch_size))
+    Ok(builders)
 }
 
 impl MultiSampleFormatBuilder {
@@ -1427,16 +1458,24 @@ impl MultiSampleFormatBuilder {
         value_fields: Vec<datafusion::arrow::datatypes::Field>,
         batch_size: usize,
     ) -> Result<Self, datafusion::arrow::error::ArrowError> {
-        let field_types = value_fields
+        // value_fields have scalar types (e.g., Utf8, Int32); we produce List<T> for each.
+        let scalar_types: Vec<DataType> =
+            value_fields.iter().map(|f| f.data_type().clone()).collect();
+        let format_list_builders =
+            build_columnar_list_builders(&scalar_types, sample_names.len(), batch_size)?;
+
+        // Build list_fields for the genotypes struct schema.
+        let list_fields: Vec<Field> = value_fields
             .iter()
-            .map(|f| f.data_type().clone())
-            .collect::<Vec<_>>();
-        let list_builder = build_multisample_list_builder(
-            &value_fields,
-            &field_types,
-            sample_names.len(),
-            batch_size,
-        )?;
+            .map(|vf| {
+                Field::new(
+                    vf.name(),
+                    DataType::List(Arc::new(Field::new("item", vf.data_type().clone(), true))),
+                    true,
+                )
+                .with_metadata(vf.metadata().clone())
+            })
+            .collect();
 
         let field_to_index = value_fields
             .iter()
@@ -1449,7 +1488,7 @@ impl MultiSampleFormatBuilder {
                 header_index_to_output_index[header_idx] = Some(output_idx);
             }
         }
-        let num_fields = field_types.len();
+        let num_fields = scalar_types.len();
         let num_samples = sample_names.len();
         let parsed_values = vec![None; num_samples * num_fields];
         let touched_indices = Vec::with_capacity(num_samples * num_fields);
@@ -1457,8 +1496,8 @@ impl MultiSampleFormatBuilder {
         Ok(Self {
             sample_names,
             header_index_to_output_index,
-            value_fields,
-            field_types,
+            list_fields,
+            scalar_types,
             field_to_index,
             parsed_values,
             touched_indices,
@@ -1468,7 +1507,7 @@ impl MultiSampleFormatBuilder {
             gt_buf: String::new(),
             batch_size,
             batches_since_recycle: 0,
-            list_builder,
+            format_list_builders,
         })
     }
 
@@ -1490,12 +1529,15 @@ impl MultiSampleFormatBuilder {
         let samples = match record.samples() {
             Ok(s) => s,
             Err(_) => {
-                self.list_builder.append(false);
+                // Append null list for each FORMAT field
+                for (field_idx, builder) in self.format_list_builders.iter_mut().enumerate() {
+                    append_null_list(builder.as_mut(), &self.scalar_types[field_idx])?;
+                }
                 return Ok(());
             }
         };
 
-        let num_fields = self.field_types.len();
+        let num_fields = self.scalar_types.len();
         let mut remaining_selected = self.sample_names.len();
         for (header_sample_idx, sample) in samples.iter().enumerate() {
             let Some(Some(output_sample_idx)) = self
@@ -1607,58 +1649,42 @@ impl MultiSampleFormatBuilder {
             }
         }
 
+        // Build: for each FORMAT field, append a list of N sample values.
         let array_pools = ParsedArrayPools {
             int_values: &self.array_int_pool,
             float_values: &self.array_float_pool,
             string_values: &self.array_string_pool,
         };
-        for (sample_idx, sample_name) in self.sample_names.iter().enumerate() {
-            let item_builder = self.list_builder.values();
-            let sample_id_builder =
-                item_builder
-                    .field_builder::<StringBuilder>(0)
-                    .ok_or_else(|| {
-                        datafusion::arrow::error::ArrowError::SchemaError(
-                            "Missing sample_id builder in genotypes struct".to_string(),
-                        )
-                    })?;
-            sample_id_builder.append_value(sample_name);
-
-            let values_builder =
-                item_builder
-                    .field_builder::<StructBuilder>(1)
-                    .ok_or_else(|| {
-                        datafusion::arrow::error::ArrowError::SchemaError(
-                            "Missing values builder in genotypes struct".to_string(),
-                        )
-                    })?;
-
-            for (idx, data_type) in self.field_types.iter().enumerate() {
-                let flat_idx = sample_idx * num_fields + idx;
-                append_value_to_struct_field(
-                    values_builder,
-                    idx,
-                    data_type,
-                    self.parsed_values[flat_idx].as_ref(),
-                    &array_pools,
-                )?;
-            }
-            values_builder.append(true);
-            item_builder.append(true);
+        let num_samples = self.sample_names.len();
+        for (field_idx, builder) in self.format_list_builders.iter_mut().enumerate() {
+            let scalar_type = &self.scalar_types[field_idx];
+            append_list_of_samples(
+                builder.as_mut(),
+                scalar_type,
+                &self.parsed_values,
+                &array_pools,
+                field_idx,
+                num_fields,
+                num_samples,
+            )?;
         }
 
-        self.list_builder.append(true);
         Ok(())
     }
 
     fn finish_array(&mut self) -> Result<Arc<dyn Array>, datafusion::arrow::error::ArrowError> {
-        let array = Arc::new(self.list_builder.finish()) as Arc<dyn Array>;
-        self.batches_since_recycle += 1;
+        let arrays: Vec<Arc<dyn Array>> = self
+            .format_list_builders
+            .iter_mut()
+            .map(|b| b.finish())
+            .collect();
 
+        let struct_array = StructArray::try_new(self.list_fields.clone().into(), arrays, None)?;
+
+        self.batches_since_recycle += 1;
         if self.batches_since_recycle >= MULTISAMPLE_BUILDER_RECYCLE_INTERVAL_BATCHES {
-            self.list_builder = build_multisample_list_builder(
-                &self.value_fields,
-                &self.field_types,
+            self.format_list_builders = build_columnar_list_builders(
+                &self.scalar_types,
                 self.sample_names.len(),
                 self.batch_size,
             )?;
@@ -1670,8 +1696,247 @@ impl MultiSampleFormatBuilder {
             self.array_string_pool.clear();
         }
 
-        Ok(array)
+        Ok(Arc::new(struct_array))
     }
+}
+
+/// Appends a null list to a list builder for a given scalar type.
+fn append_null_list(
+    builder: &mut dyn ArrayBuilder,
+    scalar_type: &DataType,
+) -> Result<(), datafusion::arrow::error::ArrowError> {
+    match scalar_type {
+        DataType::Utf8 => builder
+            .as_any_mut()
+            .downcast_mut::<ListBuilder<StringBuilder>>()
+            .unwrap()
+            .append(false),
+        DataType::Int32 => builder
+            .as_any_mut()
+            .downcast_mut::<ListBuilder<Int32Builder>>()
+            .unwrap()
+            .append(false),
+        DataType::Float32 => builder
+            .as_any_mut()
+            .downcast_mut::<ListBuilder<Float32Builder>>()
+            .unwrap()
+            .append(false),
+        DataType::Boolean => builder
+            .as_any_mut()
+            .downcast_mut::<ListBuilder<BooleanBuilder>>()
+            .unwrap()
+            .append(false),
+        DataType::List(inner) => match inner.data_type() {
+            DataType::Int32 => builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<ListBuilder<Int32Builder>>>()
+                .unwrap()
+                .append(false),
+            DataType::Float32 => builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<ListBuilder<Float32Builder>>>()
+                .unwrap()
+                .append(false),
+            DataType::Utf8 => builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<ListBuilder<StringBuilder>>>()
+                .unwrap()
+                .append(false),
+            _ => {}
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Appends one list of N sample values for a single FORMAT field.
+#[allow(clippy::too_many_arguments)]
+fn append_list_of_samples(
+    builder: &mut dyn ArrayBuilder,
+    scalar_type: &DataType,
+    parsed_values: &[Option<ParsedFormatValue>],
+    array_pools: &ParsedArrayPools<'_>,
+    field_idx: usize,
+    num_fields: usize,
+    num_samples: usize,
+) -> Result<(), datafusion::arrow::error::ArrowError> {
+    match scalar_type {
+        DataType::Utf8 => {
+            let lb = builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<StringBuilder>>()
+                .unwrap();
+            for sample_idx in 0..num_samples {
+                let flat = sample_idx * num_fields + field_idx;
+                match &parsed_values[flat] {
+                    Some(ParsedFormatValue::String(v)) => lb.values().append_value(v),
+                    Some(ParsedFormatValue::Int(v)) => lb.values().append_value(v.to_string()),
+                    Some(ParsedFormatValue::Float(v)) => lb.values().append_value(format!("{v}")),
+                    _ => lb.values().append_null(),
+                }
+            }
+            lb.append(true);
+        }
+        DataType::Int32 => {
+            let lb = builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<Int32Builder>>()
+                .unwrap();
+            for sample_idx in 0..num_samples {
+                let flat = sample_idx * num_fields + field_idx;
+                match &parsed_values[flat] {
+                    Some(ParsedFormatValue::Int(v)) => lb.values().append_value(*v),
+                    Some(ParsedFormatValue::ArrayIntRange { start, len }) => {
+                        if let Some(values) = pool_slice(array_pools.int_values, *start, *len) {
+                            if let Some(v) = values.iter().find_map(|v| *v) {
+                                lb.values().append_value(v);
+                            } else {
+                                lb.values().append_null();
+                            }
+                        } else {
+                            lb.values().append_null();
+                        }
+                    }
+                    _ => lb.values().append_null(),
+                }
+            }
+            lb.append(true);
+        }
+        DataType::Float32 => {
+            let lb = builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<Float32Builder>>()
+                .unwrap();
+            for sample_idx in 0..num_samples {
+                let flat = sample_idx * num_fields + field_idx;
+                match &parsed_values[flat] {
+                    Some(ParsedFormatValue::Float(v)) => lb.values().append_value(*v),
+                    Some(ParsedFormatValue::ArrayFloatRange { start, len }) => {
+                        if let Some(values) = pool_slice(array_pools.float_values, *start, *len) {
+                            if let Some(v) = values.iter().find_map(|v| *v) {
+                                lb.values().append_value(v);
+                            } else {
+                                lb.values().append_null();
+                            }
+                        } else {
+                            lb.values().append_null();
+                        }
+                    }
+                    _ => lb.values().append_null(),
+                }
+            }
+            lb.append(true);
+        }
+        DataType::Boolean => {
+            let lb = builder
+                .as_any_mut()
+                .downcast_mut::<ListBuilder<BooleanBuilder>>()
+                .unwrap();
+            for sample_idx in 0..num_samples {
+                let _flat = sample_idx * num_fields + field_idx;
+                lb.values().append_null();
+            }
+            lb.append(true);
+        }
+        DataType::List(inner) => match inner.data_type() {
+            DataType::Int32 => {
+                let lb = builder
+                    .as_any_mut()
+                    .downcast_mut::<ListBuilder<ListBuilder<Int32Builder>>>()
+                    .unwrap();
+                for sample_idx in 0..num_samples {
+                    let flat = sample_idx * num_fields + field_idx;
+                    match &parsed_values[flat] {
+                        Some(ParsedFormatValue::ArrayIntRange { start, len }) => {
+                            if let Some(values) = pool_slice(array_pools.int_values, *start, *len) {
+                                for v in values {
+                                    match v {
+                                        Some(v) => lb.values().values().append_value(*v),
+                                        None => lb.values().values().append_null(),
+                                    }
+                                }
+                                lb.values().append(true);
+                            } else {
+                                lb.values().append(false);
+                            }
+                        }
+                        Some(ParsedFormatValue::Int(v)) => {
+                            lb.values().values().append_value(*v);
+                            lb.values().append(true);
+                        }
+                        _ => lb.values().append(false),
+                    }
+                }
+                lb.append(true);
+            }
+            DataType::Float32 => {
+                let lb = builder
+                    .as_any_mut()
+                    .downcast_mut::<ListBuilder<ListBuilder<Float32Builder>>>()
+                    .unwrap();
+                for sample_idx in 0..num_samples {
+                    let flat = sample_idx * num_fields + field_idx;
+                    match &parsed_values[flat] {
+                        Some(ParsedFormatValue::ArrayFloatRange { start, len }) => {
+                            if let Some(values) = pool_slice(array_pools.float_values, *start, *len)
+                            {
+                                for v in values {
+                                    match v {
+                                        Some(v) => lb.values().values().append_value(*v),
+                                        None => lb.values().values().append_null(),
+                                    }
+                                }
+                                lb.values().append(true);
+                            } else {
+                                lb.values().append(false);
+                            }
+                        }
+                        Some(ParsedFormatValue::Float(v)) => {
+                            lb.values().values().append_value(*v);
+                            lb.values().append(true);
+                        }
+                        _ => lb.values().append(false),
+                    }
+                }
+                lb.append(true);
+            }
+            DataType::Utf8 => {
+                let lb = builder
+                    .as_any_mut()
+                    .downcast_mut::<ListBuilder<ListBuilder<StringBuilder>>>()
+                    .unwrap();
+                for sample_idx in 0..num_samples {
+                    let flat = sample_idx * num_fields + field_idx;
+                    match &parsed_values[flat] {
+                        Some(ParsedFormatValue::ArrayStringRange { start, len }) => {
+                            if let Some(values) =
+                                pool_slice(array_pools.string_values, *start, *len)
+                            {
+                                for v in values {
+                                    match v {
+                                        Some(v) => lb.values().values().append_value(v),
+                                        None => lb.values().values().append_null(),
+                                    }
+                                }
+                                lb.values().append(true);
+                            } else {
+                                lb.values().append(false);
+                            }
+                        }
+                        Some(ParsedFormatValue::String(v)) => {
+                            lb.values().values().append_value(v);
+                            lb.values().append(true);
+                        }
+                        _ => lb.values().append(false),
+                    }
+                }
+                lb.append(true);
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+    Ok(())
 }
 
 enum FormatMode {
@@ -1861,240 +2126,6 @@ fn format_type_to_string(ty: &FormatType) -> String {
         FormatType::Character => "Character".to_string(),
         FormatType::String => "String".to_string(),
     }
-}
-
-fn create_array_builder_for_type(
-    data_type: &DataType,
-    batch_size: usize,
-) -> Result<Box<dyn ArrayBuilder>, datafusion::arrow::error::ArrowError> {
-    match data_type {
-        DataType::Int32 => Ok(Box::new(Int32Builder::with_capacity(batch_size))),
-        DataType::Float32 => Ok(Box::new(Float32Builder::with_capacity(batch_size))),
-        DataType::Utf8 => Ok(Box::new(StringBuilder::with_capacity(
-            batch_size,
-            batch_size * 8,
-        ))),
-        DataType::Boolean => Ok(Box::new(BooleanBuilder::with_capacity(batch_size))),
-        DataType::List(inner) => match inner.data_type() {
-            DataType::Int32 => Ok(Box::new(ListBuilder::with_capacity(
-                Int32Builder::with_capacity(batch_size),
-                batch_size,
-            ))),
-            DataType::Float32 => Ok(Box::new(ListBuilder::with_capacity(
-                Float32Builder::with_capacity(batch_size),
-                batch_size,
-            ))),
-            DataType::Utf8 => Ok(Box::new(ListBuilder::with_capacity(
-                StringBuilder::with_capacity(batch_size, batch_size * 8),
-                batch_size,
-            ))),
-            DataType::Boolean => Ok(Box::new(ListBuilder::with_capacity(
-                BooleanBuilder::with_capacity(batch_size),
-                batch_size,
-            ))),
-            other => Err(datafusion::arrow::error::ArrowError::SchemaError(format!(
-                "Unsupported nested list type in FORMAT values: {other:?}"
-            ))),
-        },
-        other => Err(datafusion::arrow::error::ArrowError::SchemaError(format!(
-            "Unsupported FORMAT data type in nested values: {other:?}"
-        ))),
-    }
-}
-
-fn append_value_to_struct_field(
-    values_builder: &mut StructBuilder,
-    field_idx: usize,
-    data_type: &DataType,
-    parsed: Option<&ParsedFormatValue>,
-    array_pools: &ParsedArrayPools<'_>,
-) -> Result<(), datafusion::arrow::error::ArrowError> {
-    match data_type {
-        DataType::Int32 => {
-            let builder = values_builder
-                .field_builder::<Int32Builder>(field_idx)
-                .ok_or_else(|| {
-                    datafusion::arrow::error::ArrowError::SchemaError(
-                        "Missing Int32 FORMAT builder".to_string(),
-                    )
-                })?;
-            match parsed {
-                Some(ParsedFormatValue::Int(v)) => builder.append_value(*v),
-                Some(ParsedFormatValue::ArrayIntRange { start, len }) => {
-                    if let Some(values) = pool_slice(array_pools.int_values, *start, *len) {
-                        if let Some(v) = values.iter().find_map(|v| *v) {
-                            builder.append_value(v);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                _ => builder.append_null(),
-            }
-        }
-        DataType::Float32 => {
-            let builder = values_builder
-                .field_builder::<Float32Builder>(field_idx)
-                .ok_or_else(|| {
-                    datafusion::arrow::error::ArrowError::SchemaError(
-                        "Missing Float32 FORMAT builder".to_string(),
-                    )
-                })?;
-            match parsed {
-                Some(ParsedFormatValue::Float(v)) => builder.append_value(*v),
-                Some(ParsedFormatValue::ArrayFloatRange { start, len }) => {
-                    if let Some(values) = pool_slice(array_pools.float_values, *start, *len) {
-                        if let Some(v) = values.iter().find_map(|v| *v) {
-                            builder.append_value(v);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                _ => builder.append_null(),
-            }
-        }
-        DataType::Utf8 => {
-            let builder = values_builder
-                .field_builder::<StringBuilder>(field_idx)
-                .ok_or_else(|| {
-                    datafusion::arrow::error::ArrowError::SchemaError(
-                        "Missing Utf8 FORMAT builder".to_string(),
-                    )
-                })?;
-            match parsed {
-                Some(ParsedFormatValue::String(v)) => builder.append_value(v),
-                Some(ParsedFormatValue::ArrayStringRange { start, len }) => {
-                    if let Some(values) = pool_slice(array_pools.string_values, *start, *len) {
-                        if let Some(v) = values.iter().find_map(|v| v.as_deref()) {
-                            builder.append_value(v);
-                        } else {
-                            builder.append_null();
-                        }
-                    } else {
-                        builder.append_null();
-                    }
-                }
-                Some(ParsedFormatValue::Int(v)) => builder.append_value(v.to_string()),
-                Some(ParsedFormatValue::Float(v)) => builder.append_value(format!("{v}")),
-                _ => builder.append_null(),
-            }
-        }
-        DataType::Boolean => {
-            let builder = values_builder
-                .field_builder::<BooleanBuilder>(field_idx)
-                .ok_or_else(|| {
-                    datafusion::arrow::error::ArrowError::SchemaError(
-                        "Missing Boolean FORMAT builder".to_string(),
-                    )
-                })?;
-            builder.append_null();
-        }
-        DataType::List(inner) => match inner.data_type() {
-            DataType::Int32 => {
-                let builder = values_builder
-                    .field_builder::<ListBuilder<Int32Builder>>(field_idx)
-                    .ok_or_else(|| {
-                        datafusion::arrow::error::ArrowError::SchemaError(
-                            "Missing List<Int32> FORMAT builder".to_string(),
-                        )
-                    })?;
-                match parsed {
-                    Some(ParsedFormatValue::ArrayIntRange { start, len }) => {
-                        if let Some(values) = pool_slice(array_pools.int_values, *start, *len) {
-                            for v in values {
-                                match v {
-                                    Some(v) => builder.values().append_value(*v),
-                                    None => builder.values().append_null(),
-                                }
-                            }
-                            builder.append(true);
-                        } else {
-                            builder.append(false);
-                        }
-                    }
-                    Some(ParsedFormatValue::Int(v)) => {
-                        builder.values().append_value(*v);
-                        builder.append(true);
-                    }
-                    _ => builder.append(false),
-                }
-            }
-            DataType::Float32 => {
-                let builder = values_builder
-                    .field_builder::<ListBuilder<Float32Builder>>(field_idx)
-                    .ok_or_else(|| {
-                        datafusion::arrow::error::ArrowError::SchemaError(
-                            "Missing List<Float32> FORMAT builder".to_string(),
-                        )
-                    })?;
-                match parsed {
-                    Some(ParsedFormatValue::ArrayFloatRange { start, len }) => {
-                        if let Some(values) = pool_slice(array_pools.float_values, *start, *len) {
-                            for v in values {
-                                match v {
-                                    Some(v) => builder.values().append_value(*v),
-                                    None => builder.values().append_null(),
-                                }
-                            }
-                            builder.append(true);
-                        } else {
-                            builder.append(false);
-                        }
-                    }
-                    Some(ParsedFormatValue::Float(v)) => {
-                        builder.values().append_value(*v);
-                        builder.append(true);
-                    }
-                    _ => builder.append(false),
-                }
-            }
-            DataType::Utf8 => {
-                let builder = values_builder
-                    .field_builder::<ListBuilder<StringBuilder>>(field_idx)
-                    .ok_or_else(|| {
-                        datafusion::arrow::error::ArrowError::SchemaError(
-                            "Missing List<Utf8> FORMAT builder".to_string(),
-                        )
-                    })?;
-                match parsed {
-                    Some(ParsedFormatValue::ArrayStringRange { start, len }) => {
-                        if let Some(values) = pool_slice(array_pools.string_values, *start, *len) {
-                            for v in values {
-                                match v {
-                                    Some(v) => builder.values().append_value(v),
-                                    None => builder.values().append_null(),
-                                }
-                            }
-                            builder.append(true);
-                        } else {
-                            builder.append(false);
-                        }
-                    }
-                    Some(ParsedFormatValue::String(v)) => {
-                        builder.values().append_value(v);
-                        builder.append(true);
-                    }
-                    _ => builder.append(false),
-                }
-            }
-            _ => {
-                return Err(datafusion::arrow::error::ArrowError::SchemaError(
-                    "Unsupported FORMAT list value type".to_string(),
-                ));
-            }
-        },
-        _ => {
-            return Err(datafusion::arrow::error::ArrowError::SchemaError(
-                "Unsupported FORMAT value type".to_string(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn set_format_builders(

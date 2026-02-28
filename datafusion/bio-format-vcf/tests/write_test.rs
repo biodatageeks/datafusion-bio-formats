@@ -1,8 +1,8 @@
 //! Integration tests for VCF write functionality
 
 use datafusion::arrow::array::{
-    ArrayBuilder, Float64Array, LargeListBuilder, ListArray, RecordBatch, StringArray,
-    StringBuilder, StructArray, StructBuilder, UInt32Array,
+    Float64Array, ListArray, ListBuilder, RecordBatch, StringArray, StringBuilder, StructArray,
+    UInt32Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::catalog::TableProvider;
@@ -277,18 +277,14 @@ async fn test_write_vcf_multisample_large_list_roundtrip_preserves_gt_values() {
     gt_metadata.insert(VCF_FIELD_NUMBER_KEY.to_string(), "1".to_string());
     gt_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
 
-    let value_fields = vec![Field::new("GT", DataType::Utf8, true).with_metadata(gt_metadata)];
-    let genotype_item_type = DataType::Struct(
-        vec![
-            Field::new("sample_id", DataType::Utf8, false),
-            Field::new(
-                "values",
-                DataType::Struct(value_fields.clone().into()),
-                true,
-            ),
-        ]
-        .into(),
-    );
+    // Columnar schema: genotypes: Struct<GT: List<Utf8>>
+    let gt_list_field = Field::new(
+        "GT",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    )
+    .with_metadata(gt_metadata);
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt32, false),
@@ -300,52 +296,20 @@ async fn test_write_vcf_multisample_large_list_roundtrip_preserves_gt_values() {
         Field::new("filter", DataType::Utf8, true),
         Field::new(
             "genotypes",
-            DataType::LargeList(Arc::new(Field::new("item", genotype_item_type, true))),
+            DataType::Struct(vec![gt_list_field.clone()].into()),
             true,
         ),
     ]));
 
-    let values_builder = StructBuilder::new(
-        value_fields.clone(),
-        vec![Box::new(StringBuilder::new()) as Box<dyn ArrayBuilder>],
-    );
-    let item_builder = StructBuilder::new(
-        vec![
-            Field::new("sample_id", DataType::Utf8, false),
-            Field::new("values", DataType::Struct(value_fields.into()), true),
-        ],
-        vec![
-            Box::new(StringBuilder::new()) as Box<dyn ArrayBuilder>,
-            Box::new(values_builder) as Box<dyn ArrayBuilder>,
-        ],
-    );
-    let mut genotypes_builder = LargeListBuilder::new(item_builder);
+    // Build columnar genotypes: GT = ["0/1", "1/1"]
+    let mut gt_builder = ListBuilder::new(StringBuilder::new());
+    gt_builder.values().append_value("0/1");
+    gt_builder.values().append_value("1/1");
+    gt_builder.append(true);
+    let gt_array = Arc::new(gt_builder.finish()) as Arc<dyn datafusion::arrow::array::Array>;
 
-    {
-        let item = genotypes_builder.values();
-        item.field_builder::<StringBuilder>(0)
-            .unwrap()
-            .append_value("Sample1");
-        let values = item.field_builder::<StructBuilder>(1).unwrap();
-        values
-            .field_builder::<StringBuilder>(0)
-            .unwrap()
-            .append_value("0/1");
-        values.append(true);
-        item.append(true);
-
-        item.field_builder::<StringBuilder>(0)
-            .unwrap()
-            .append_value("Sample2");
-        let values = item.field_builder::<StructBuilder>(1).unwrap();
-        values
-            .field_builder::<StringBuilder>(0)
-            .unwrap()
-            .append_value("1/1");
-        values.append(true);
-        item.append(true);
-        genotypes_builder.append(true);
-    }
+    let genotypes =
+        Arc::new(StructArray::try_new(vec![gt_list_field].into(), vec![gt_array], None).unwrap());
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -358,7 +322,7 @@ async fn test_write_vcf_multisample_large_list_roundtrip_preserves_gt_values() {
             Arc::new(StringArray::from(vec!["T"])),
             Arc::new(Float64Array::from(vec![Some(60.0)])),
             Arc::new(StringArray::from(vec![Some("PASS")])),
-            Arc::new(genotypes_builder.finish()),
+            genotypes,
         ],
     )
     .unwrap();
@@ -400,25 +364,20 @@ async fn test_write_vcf_multisample_large_list_roundtrip_preserves_gt_values() {
         .await
         .unwrap();
 
+    // Columnar layout: genotypes is a StructArray with List<Utf8> children
     let genotypes = batches[0]
         .column(0)
         .as_any()
-        .downcast_ref::<ListArray>()
-        .unwrap();
-    let first = genotypes.value(0);
-    let first_struct = first.as_any().downcast_ref::<StructArray>().unwrap();
-    let values = first_struct
-        .column_by_name("values")
-        .unwrap()
-        .as_any()
         .downcast_ref::<StructArray>()
         .unwrap();
-    let gts = values
+    let gt_list = genotypes
         .column_by_name("GT")
         .unwrap()
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<ListArray>()
         .unwrap();
+    let row0_gt = gt_list.value(0);
+    let gts = row0_gt.as_any().downcast_ref::<StringArray>().unwrap();
 
     assert_eq!(gts.value(0), "0/1");
     assert_eq!(gts.value(1), "1/1");
@@ -575,22 +534,13 @@ async fn test_schema_field_metadata_preserved() {
         Some(&"A".to_string())
     );
 
-    // Check FORMAT field metadata in nested multisample schema
+    // Check FORMAT field metadata in columnar multisample schema
     let genotypes = schema.field_with_name("genotypes").unwrap();
-    let value_fields = match genotypes.data_type() {
-        DataType::List(item) => match item.data_type() {
-            DataType::Struct(item_fields) => {
-                let values = item_fields.iter().find(|f| f.name() == "values").unwrap();
-                match values.data_type() {
-                    DataType::Struct(value_fields) => value_fields,
-                    other => panic!("expected values struct, got {other:?}"),
-                }
-            }
-            other => panic!("expected list item struct, got {other:?}"),
-        },
-        other => panic!("expected list for genotypes, got {other:?}"),
+    let struct_fields = match genotypes.data_type() {
+        DataType::Struct(fields) => fields,
+        other => panic!("expected Struct for genotypes, got {other:?}"),
     };
-    let gt_field = value_fields.iter().find(|f| f.name() == "GT").unwrap();
+    let gt_field = struct_fields.iter().find(|f| f.name() == "GT").unwrap();
     let gt_metadata = gt_field.metadata();
     assert_eq!(
         gt_metadata.get(VCF_FIELD_DESCRIPTION_KEY),

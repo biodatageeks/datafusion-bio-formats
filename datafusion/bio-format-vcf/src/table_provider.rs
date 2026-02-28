@@ -12,7 +12,8 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
     VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
-    VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, to_json_string,
+    VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
+    to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -239,10 +240,14 @@ async fn determine_schema_from_header(
                 fields.push(field);
             }
         } else {
-            let value_fields = format_tags
+            // Columnar genotypes: Struct<GT: List<Utf8>, GQ: List<Int32>, ...>
+            // Each list has N elements (one per selected sample) in sample order.
+            let list_fields = format_tags
                 .iter()
                 .map(|tag| {
-                    let dtype = format_to_arrow_type(header_formats, tag);
+                    let scalar_dtype = format_to_arrow_type(header_formats, tag);
+                    let list_dtype =
+                        DataType::List(Arc::new(Field::new("item", scalar_dtype, true)));
                     let mut field_metadata = HashMap::new();
                     if let Some(format_info) = format_field_metadata.get(tag) {
                         field_metadata.insert(
@@ -259,22 +264,21 @@ async fn determine_schema_from_header(
                     field_metadata
                         .insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
                     field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
-                    Field::new(tag.clone(), dtype, true).with_metadata(field_metadata)
+                    Field::new(tag.clone(), list_dtype, true).with_metadata(field_metadata)
                 })
                 .collect::<Vec<_>>();
 
-            let genotype_struct = DataType::Struct(
-                vec![
-                    Field::new("sample_id", DataType::Utf8, false),
-                    Field::new("values", DataType::Struct(value_fields.into()), true),
-                ]
-                .into(),
+            // Store sample names in genotypes field metadata
+            let mut genotypes_metadata = HashMap::new();
+            genotypes_metadata.insert(
+                VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
+                to_json_string(&sample_names),
             );
-            fields.push(Field::new(
-                "genotypes",
-                DataType::List(Arc::new(Field::new("item", genotype_struct, true))),
-                true,
-            ));
+
+            fields.push(
+                Field::new("genotypes", DataType::Struct(list_fields.into()), true)
+                    .with_metadata(genotypes_metadata),
+            );
         }
     }
 
@@ -412,25 +416,18 @@ impl VcfTableProvider {
     }
 
     fn infer_format_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
+        // Columnar multi-sample schema: genotypes: Struct<GT: List<T>, GQ: List<T>, ...>
         if let Ok(genotypes_idx) = schema.index_of("genotypes") {
             let genotypes_field = schema.field(genotypes_idx);
-            let item_field = match genotypes_field.data_type() {
-                DataType::List(item) | DataType::LargeList(item) => Some(item),
-                _ => None,
-            };
-
-            if let Some(item_field) = item_field
-                && let DataType::Struct(genotype_fields) = item_field.data_type()
-                && let Some(values_field) = genotype_fields.iter().find(|f| f.name() == "values")
-                && let DataType::Struct(value_fields) = values_field.data_type()
-            {
-                return value_fields
+            if let DataType::Struct(struct_fields) = genotypes_field.data_type() {
+                return struct_fields
                     .iter()
                     .map(|field| field.name().clone())
                     .collect();
             }
         }
 
+        // Single-sample: top-level FORMAT columns
         schema
             .fields()
             .iter()

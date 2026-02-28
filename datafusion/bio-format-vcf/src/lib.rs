@@ -80,9 +80,21 @@ pub mod storage;
 /// This module provides the primary API for registering VCF files as queryable
 /// DataFusion tables and handling schema determination from VCF headers.
 pub mod table_provider;
+/// Scalar UDFs for analytical queries on multi-sample columnar genotype lists.
+///
+/// Provides `list_avg`, `list_gte`, `list_lte`, `list_and`, and `mask_gt` functions
+/// for use in SQL queries on VCF data with the columnar genotypes schema.
+pub mod udfs;
+/// Dual-view support for VCF tables.
+///
+/// Auto-registers a `{table}_long` view that unnests columnar genotypes
+/// into one row per variant×sample with a `sample_id` column.
+pub mod views;
 mod write_exec;
 /// Writer for VCF files with compression support.
 pub mod writer;
 
+pub use udfs::register_vcf_udfs;
+pub use views::{auto_register_vcf_long_view, register_vcf_long_view};
 pub use write_exec::VcfWriteExec;
 pub use writer::{VcfCompressionType, VcfLocalWriter};

@@ -173,8 +173,16 @@ fn get_info_field_metadata(field: &Field, field_name: &str) -> (String, String, 
 ///
 /// Reads metadata from `bio.vcf.field.*` keys. If not present, generates defaults
 /// from the Arrow data type (with special handling for GT fields).
+/// In the columnar multi-sample schema the field type is `List<T>`; the function
+/// unwraps one List level to derive the scalar VCF type for the header.
 fn get_format_field_metadata(field: &Field, format_name: &str) -> (String, String, String) {
     let metadata = field.metadata();
+
+    // For columnar multi-sample fields, unwrap List<T> → T for type inference.
+    let scalar_type = match field.data_type() {
+        DataType::List(inner) => inner.data_type(),
+        other => other,
+    };
 
     // Get stored VCF metadata using bio.vcf.field.* keys
     let vcf_type = metadata
@@ -185,14 +193,14 @@ fn get_format_field_metadata(field: &Field, format_name: &str) -> (String, Strin
             if format_name == "GT" {
                 "String".to_string()
             } else {
-                arrow_type_to_vcf_type(field.data_type()).to_string()
+                arrow_type_to_vcf_type(scalar_type).to_string()
             }
         });
 
     let number = metadata
         .get(VCF_FIELD_NUMBER_KEY)
         .cloned()
-        .unwrap_or_else(|| arrow_type_to_vcf_number(field.data_type()).to_string());
+        .unwrap_or_else(|| arrow_type_to_vcf_number(scalar_type).to_string());
 
     let description = metadata
         .get(VCF_FIELD_DESCRIPTION_KEY)
@@ -206,35 +214,22 @@ fn get_format_field_metadata(field: &Field, format_name: &str) -> (String, Strin
 fn find_format_field<'a>(
     schema: &'a SchemaRef,
     format_name: &str,
-    sample_names: &[String],
+    _sample_names: &[String],
 ) -> Option<&'a Field> {
     // First try direct name lookup (single sample case)
     if let Ok(idx) = schema.index_of(format_name) {
         return Some(schema.field(idx));
     }
 
-    // New multisample schema: genotypes: List<Struct<sample_id, values: Struct<...>>>
+    // Columnar multisample schema: genotypes: Struct<GT: List<T>, GQ: List<T>, ...>
     if let Ok(idx) = schema.index_of("genotypes") {
         let genotypes_field = schema.field(idx);
-        let item = match genotypes_field.data_type() {
-            DataType::List(item) | DataType::LargeList(item) => Some(item),
-            _ => None,
-        };
-        if let Some(item) = item
-            && let DataType::Struct(item_fields) = item.data_type()
-            && let Some(values_field) = item_fields.iter().find(|f| f.name() == "values")
-            && let DataType::Struct(value_fields) = values_field.data_type()
-            && let Some(field) = value_fields.iter().find(|f| f.name() == format_name)
-        {
-            return Some(field.as_ref());
-        }
-    }
-
-    // Try multi-sample naming convention: {sample}_{format}
-    for sample_name in sample_names {
-        let column_name = format!("{sample_name}_{format_name}");
-        if let Ok(idx) = schema.index_of(&column_name) {
-            return Some(schema.field(idx));
+        if let DataType::Struct(struct_fields) = genotypes_field.data_type() {
+            if let Some(field) = struct_fields.iter().find(|f| f.name() == format_name) {
+                // field is List<T>; return a reference so callers can extract metadata.
+                // The caller needs to unwrap List to get scalar type for VCF header.
+                return Some(field.as_ref());
+            }
         }
     }
 
@@ -387,44 +382,26 @@ mod tests {
 
     #[test]
     fn test_find_format_field_multi_sample() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("chrom", DataType::Utf8, false),
-            Field::new("SAMPLE1_GT", DataType::Utf8, true),
-            Field::new("SAMPLE2_GT", DataType::Utf8, true),
-        ]));
-
-        let field = find_format_field(
-            &schema,
-            "GT",
-            &["SAMPLE1".to_string(), "SAMPLE2".to_string()],
-        );
-        assert!(field.is_some());
-        assert_eq!(field.unwrap().name(), "SAMPLE1_GT");
-    }
-
-    #[test]
-    fn test_find_format_field_nested_large_list() {
+        // Columnar schema: genotypes: Struct<GT: List<Utf8>, DP: List<Int32>>
         let schema = Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, false),
             Field::new(
                 "genotypes",
-                DataType::LargeList(Arc::new(Field::new(
-                    "item",
-                    DataType::Struct(
-                        vec![
-                            Field::new("sample_id", DataType::Utf8, false),
-                            Field::new(
-                                "values",
-                                DataType::Struct(
-                                    vec![Field::new("GT", DataType::Utf8, true)].into(),
-                                ),
-                                true,
-                            ),
-                        ]
-                        .into(),
-                    ),
-                    true,
-                ))),
+                DataType::Struct(
+                    vec![
+                        Field::new(
+                            "GT",
+                            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                            true,
+                        ),
+                        Field::new(
+                            "DP",
+                            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                            true,
+                        ),
+                    ]
+                    .into(),
+                ),
                 true,
             ),
         ]));
@@ -436,5 +413,48 @@ mod tests {
         );
         assert!(field.is_some());
         assert_eq!(field.unwrap().name(), "GT");
+    }
+
+    #[test]
+    fn test_find_format_field_columnar_struct() {
+        // Columnar schema with multiple FORMAT fields
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new(
+                "genotypes",
+                DataType::Struct(
+                    vec![
+                        Field::new(
+                            "GT",
+                            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                            true,
+                        ),
+                        Field::new(
+                            "GQ",
+                            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                            true,
+                        ),
+                    ]
+                    .into(),
+                ),
+                true,
+            ),
+        ]));
+
+        let field = find_format_field(
+            &schema,
+            "GQ",
+            &["SAMPLE1".to_string(), "SAMPLE2".to_string()],
+        );
+        assert!(field.is_some());
+        assert_eq!(field.unwrap().name(), "GQ");
+
+        // Non-existent field returns None
+        let missing = find_format_field(
+            &schema,
+            "AD",
+            &["SAMPLE1".to_string(), "SAMPLE2".to_string()],
+        );
+        assert!(missing.is_none());
     }
 }

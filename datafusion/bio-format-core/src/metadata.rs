@@ -49,6 +49,10 @@ pub const VCF_SAMPLE_NAMES_KEY: &str = "bio.vcf.samples";
 /// (e.g., `GT`, `DP`) and the value contains `number`, `type`, and `description`.
 pub const VCF_FORMAT_FIELDS_KEY: &str = "bio.vcf.format_fields";
 
+/// Sample names stored in the genotypes field metadata as a JSON array.
+/// Present on the `genotypes` struct field in multi-sample columnar schemas.
+pub const VCF_GENOTYPES_SAMPLE_NAMES_KEY: &str = "bio.vcf.genotypes.sample_names";
+
 // Field-level metadata
 
 /// VCF field description stored in field metadata
