@@ -12,7 +12,8 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
     VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY,
-    VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string,
+    VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string,
+    to_json_string,
 };
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use datafusion_bio_format_vcf::writer::VcfCompressionType;
@@ -659,4 +660,230 @@ chr1	100	.	A	T	30	PASS	DP=50
     assert_eq!(samples.len(), 0); // No samples in this VCF
 
     cleanup_files(&[&input_path]).await;
+}
+
+/// Tests writing from a `named_struct()` transformed query where the genotypes
+/// struct has no sample name metadata. The writer should infer sample count from
+/// list lengths in the first batch and generate SAMPLE_0, SAMPLE_1, ... names.
+#[tokio::test]
+async fn test_write_vcf_from_named_struct_genotypes() {
+    let output_path = "/tmp/test_write_named_struct_genotypes.vcf";
+
+    // Build a genotypes struct column with NO sample name metadata (simulates named_struct)
+    let gt_list_field = Field::new(
+        "GT",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    );
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("end", DataType::UInt32, false),
+        Field::new("id", DataType::Utf8, true),
+        Field::new("ref", DataType::Utf8, false),
+        Field::new("alt", DataType::Utf8, false),
+        Field::new("qual", DataType::Float64, true),
+        Field::new("filter", DataType::Utf8, true),
+        Field::new(
+            "genotypes",
+            DataType::Struct(vec![gt_list_field.clone()].into()),
+            true,
+        ),
+    ]));
+
+    // Build GT = ["0/1", "1/1"] for 2 samples
+    let mut gt_builder = ListBuilder::new(StringBuilder::new());
+    gt_builder.values().append_value("0/1");
+    gt_builder.values().append_value("1/1");
+    gt_builder.append(true);
+    // Second row
+    gt_builder.values().append_value("0/0");
+    gt_builder.values().append_value("0/1");
+    gt_builder.append(true);
+    let gt_array = Arc::new(gt_builder.finish()) as Arc<dyn datafusion::arrow::array::Array>;
+
+    let genotypes =
+        Arc::new(StructArray::try_new(vec![gt_list_field].into(), vec![gt_array], None).unwrap());
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1", "chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32, 199])),
+            Arc::new(UInt32Array::from(vec![100u32, 200])),
+            Arc::new(StringArray::from(vec![Some("rs1"), Some("rs2")])),
+            Arc::new(StringArray::from(vec!["A", "G"])),
+            Arc::new(StringArray::from(vec!["T", "C"])),
+            Arc::new(Float64Array::from(vec![Some(60.0), Some(80.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS"), Some("PASS")])),
+            genotypes,
+        ],
+    )
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    let source = MemTable::try_new(schema.clone(), vec![vec![batch]]).unwrap();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Destination has empty sample_names and format_fields — will fall back to input schema
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        schema,
+        vec![],
+        vec![],
+        vec![], // empty sample_names triggers inference
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(output_path).await.unwrap();
+
+    // Header should have FORMAT and generated sample names
+    assert!(
+        content.contains("FORMAT\tSAMPLE_0\tSAMPLE_1"),
+        "Expected FORMAT\\tSAMPLE_0\\tSAMPLE_1 in header. Got:\n{content}"
+    );
+    assert!(
+        content.contains("##FORMAT=<ID=GT"),
+        "Expected GT FORMAT header line. Got:\n{content}"
+    );
+    // Data rows should have per-sample GT values
+    assert!(
+        content.contains("GT\t0/1\t1/1"),
+        "Expected GT values for row 1. Got:\n{content}"
+    );
+    assert!(
+        content.contains("GT\t0/0\t0/1"),
+        "Expected GT values for row 2. Got:\n{content}"
+    );
+
+    cleanup_files(&[output_path]).await;
+}
+
+/// Tests that when the input schema has VCF_GENOTYPES_SAMPLE_NAMES_KEY metadata
+/// on the genotypes field, the writer uses those sample names instead of generating them.
+#[tokio::test]
+async fn test_write_vcf_input_schema_metadata_fallback() {
+    let output_path = "/tmp/test_write_input_schema_metadata_fallback.vcf";
+
+    let gt_list_field = Field::new(
+        "GT",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    );
+
+    // Genotypes field WITH sample name metadata
+    let mut genotypes_metadata = std::collections::HashMap::new();
+    genotypes_metadata.insert(
+        VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
+        to_json_string(&vec!["NA12878".to_string(), "NA12891".to_string()]),
+    );
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("end", DataType::UInt32, false),
+        Field::new("id", DataType::Utf8, true),
+        Field::new("ref", DataType::Utf8, false),
+        Field::new("alt", DataType::Utf8, false),
+        Field::new("qual", DataType::Float64, true),
+        Field::new("filter", DataType::Utf8, true),
+        Field::new(
+            "genotypes",
+            DataType::Struct(vec![gt_list_field.clone()].into()),
+            true,
+        )
+        .with_metadata(genotypes_metadata),
+    ]));
+
+    // Build GT = ["0/1", "1/1"]
+    let mut gt_builder = ListBuilder::new(StringBuilder::new());
+    gt_builder.values().append_value("0/1");
+    gt_builder.values().append_value("1/1");
+    gt_builder.append(true);
+    let gt_array = Arc::new(gt_builder.finish()) as Arc<dyn datafusion::arrow::array::Array>;
+
+    let genotypes =
+        Arc::new(StructArray::try_new(vec![gt_list_field].into(), vec![gt_array], None).unwrap());
+
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![Some("rs1")])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["T"])),
+            Arc::new(Float64Array::from(vec![Some(60.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+            genotypes,
+        ],
+    )
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    let source = MemTable::try_new(schema.clone(), vec![vec![batch]]).unwrap();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    // Destination has same column structure but NO sample name metadata on genotypes,
+    // and empty sample_names/format_fields — will fall back to input schema metadata
+    let dest_gt_field = Field::new(
+        "GT",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    );
+    let dest_schema = Arc::new(Schema::new(vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::UInt32, false),
+        Field::new("end", DataType::UInt32, false),
+        Field::new("id", DataType::Utf8, true),
+        Field::new("ref", DataType::Utf8, false),
+        Field::new("alt", DataType::Utf8, false),
+        Field::new("qual", DataType::Float64, true),
+        Field::new("filter", DataType::Utf8, true),
+        Field::new(
+            "genotypes",
+            DataType::Struct(vec![dest_gt_field].into()),
+            true,
+        ),
+    ]));
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        dest_schema,
+        vec![],
+        vec![],
+        vec![], // empty — will fall back to input schema metadata
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(output_path).await.unwrap();
+
+    // Should use sample names from input schema metadata
+    assert!(
+        content.contains("FORMAT\tNA12878\tNA12891"),
+        "Expected FORMAT\\tNA12878\\tNA12891 in header. Got:\n{content}"
+    );
+    assert!(
+        content.contains("GT\t0/1\t1/1"),
+        "Expected GT values. Got:\n{content}"
+    );
+
+    cleanup_files(&[output_path]).await;
 }

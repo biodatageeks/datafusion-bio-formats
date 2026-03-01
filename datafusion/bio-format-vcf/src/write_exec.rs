@@ -5,7 +5,7 @@
 
 use crate::serializer::batch_to_vcf_lines;
 use crate::writer::{VcfCompressionType, VcfLocalWriter};
-use datafusion::arrow::array::{RecordBatch, UInt64Array};
+use datafusion::arrow::array::{Array, ListArray, RecordBatch, StructArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -227,6 +227,45 @@ impl ExecutionPlan for VcfWriteExec {
     }
 }
 
+/// Checks whether a schema has a `genotypes` column with Struct type containing List children.
+fn schema_has_genotypes_struct(schema: &SchemaRef) -> bool {
+    if let Ok(idx) = schema.index_of("genotypes") {
+        matches!(schema.field(idx).data_type(), DataType::Struct(_))
+    } else {
+        false
+    }
+}
+
+/// Infers sample names from the first batch by inspecting the genotypes struct column.
+/// Returns `SAMPLE_0`, `SAMPLE_1`, ... based on the length of the first List child.
+fn infer_sample_names_from_batch(batch: &RecordBatch) -> Vec<String> {
+    let genotypes_idx = match batch.schema().index_of("genotypes") {
+        Ok(idx) => idx,
+        Err(_) => return Vec::new(),
+    };
+    let genotypes_col = batch.column(genotypes_idx);
+    let genotypes_struct = match genotypes_col.as_any().downcast_ref::<StructArray>() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    // Find the first non-null List child to determine sample count
+    for col_idx in 0..genotypes_struct.num_columns() {
+        let child = genotypes_struct.column(col_idx);
+        if let Some(list) = child.as_any().downcast_ref::<ListArray>() {
+            // Use the first non-null row
+            for row in 0..list.len() {
+                if !list.is_null(row) {
+                    let num_samples = list.value(row).len();
+                    return (0..num_samples).map(|i| format!("SAMPLE_{i}")).collect();
+                }
+            }
+        }
+    }
+
+    Vec::new()
+}
+
 /// Writes records from a stream to a VCF file
 #[allow(clippy::too_many_arguments)]
 async fn write_vcf_stream(
@@ -236,17 +275,43 @@ async fn write_vcf_stream(
     compression: VcfCompressionType,
     info_fields: Vec<String>,
     format_fields: Vec<String>,
-    sample_names: Vec<String>,
+    mut sample_names: Vec<String>,
     coordinate_system_zero_based: bool,
     output_schema: SchemaRef,
 ) -> Result<RecordBatch> {
     let mut writer = VcfLocalWriter::with_compression(&output_path, compression)?;
 
-    // Write header
-    writer.write_header(&input_schema, &info_fields, &format_fields, &sample_names)?;
-
     let mut total_count: u64 = 0;
 
+    // When sample_names is empty but the input has a genotypes struct,
+    // defer header writing until the first batch to infer sample count.
+    if sample_names.is_empty() && schema_has_genotypes_struct(&input_schema) {
+        if let Some(first_batch_result) = input.next().await {
+            let first_batch = first_batch_result?;
+            sample_names = infer_sample_names_from_batch(&first_batch);
+            writer.write_header(&input_schema, &info_fields, &format_fields, &sample_names)?;
+
+            if first_batch.num_rows() > 0 {
+                let records = batch_to_vcf_lines(
+                    &first_batch,
+                    &info_fields,
+                    &format_fields,
+                    &sample_names,
+                    coordinate_system_zero_based,
+                )?;
+                total_count += records.len() as u64;
+                writer.write_records(&records)?;
+            }
+        } else {
+            // Empty result — write header with no samples
+            writer.write_header(&input_schema, &info_fields, &format_fields, &sample_names)?;
+        }
+    } else {
+        // Standard path: write header immediately
+        writer.write_header(&input_schema, &info_fields, &format_fields, &sample_names)?;
+    }
+
+    // Continue processing remaining batches
     while let Some(batch_result) = input.next().await {
         let batch = batch_result?;
 

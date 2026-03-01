@@ -13,7 +13,7 @@ use datafusion_bio_format_core::metadata::{
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
     VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
     VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
-    to_json_string,
+    from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -401,6 +401,34 @@ pub struct VcfTableProvider {
 }
 
 impl VcfTableProvider {
+    /// Resolves sample names from a schema, checking genotypes field metadata
+    /// and schema-level metadata. Returns empty Vec if neither source has sample names.
+    fn resolve_sample_names_from_schema(schema: &SchemaRef) -> Vec<String> {
+        // 1. Check genotypes field metadata (direct round-trip from multi-sample read)
+        if let Ok(idx) = schema.index_of("genotypes") {
+            let field = schema.field(idx);
+            if let Some(json) = field.metadata().get(VCF_GENOTYPES_SAMPLE_NAMES_KEY) {
+                if let Some(names) = from_json_string::<Vec<String>>(json) {
+                    if !names.is_empty() {
+                        return names;
+                    }
+                }
+            }
+        }
+
+        // 2. Check schema-level metadata (passthrough query)
+        if let Some(json) = schema.metadata().get(VCF_SAMPLE_NAMES_KEY) {
+            if let Some(names) = from_json_string::<Vec<String>>(json) {
+                if !names.is_empty() {
+                    return names;
+                }
+            }
+        }
+
+        // 3. Neither found — triggers runtime inference in write_exec
+        Vec::new()
+    }
+
     fn infer_info_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
         schema
             .fields()
@@ -852,14 +880,46 @@ impl TableProvider for VcfTableProvider {
         // Resolve info/format fields for write:
         // - Some(vec) (including empty): explicit selection
         // - None: infer defaults from schema
+        // When self's schema yields empty results, fall back to the input plan's schema
         let info_fields = self
             .info_fields
             .clone()
             .unwrap_or_else(|| Self::infer_info_fields_from_schema(&self.schema));
+        let info_fields = if info_fields.is_empty() {
+            let from_input = Self::infer_info_fields_from_schema(&input_schema);
+            if !from_input.is_empty() {
+                from_input
+            } else {
+                info_fields
+            }
+        } else {
+            info_fields
+        };
+
         let format_fields = self
             .format_fields
             .clone()
             .unwrap_or_else(|| Self::infer_format_fields_from_schema(&self.schema));
+        let format_fields = if format_fields.is_empty() {
+            let from_input = Self::infer_format_fields_from_schema(&input_schema);
+            if !from_input.is_empty() {
+                from_input
+            } else {
+                format_fields
+            }
+        } else {
+            format_fields
+        };
+
+        // Resolve sample names with fallback chain:
+        // 1. self.sample_names (destination provider has them)
+        // 2. Input plan's schema metadata (round-trip or passthrough)
+        // 3. Empty (triggers runtime inference in write_exec from first batch)
+        let sample_names = if !self.sample_names.is_empty() {
+            self.sample_names.clone()
+        } else {
+            Self::resolve_sample_names_from_schema(&input_schema)
+        };
 
         Ok(Arc::new(VcfWriteExec::new(
             input,
@@ -867,7 +927,7 @@ impl TableProvider for VcfTableProvider {
             Some(compression),
             info_fields,
             format_fields,
-            self.sample_names.clone(),
+            sample_names,
             self.coordinate_system_zero_based,
         )))
     }
