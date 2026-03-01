@@ -31,7 +31,7 @@ noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "da9
 noodles-csi = { git = "https://github.com/biodatageeks/noodles.git", rev = "da905fff4909ada93e407c780456332fe113858b" }
 
 [dev-dependencies]
-tempfile = "3.10"
+tempfile = "3.26"
 
 [[example]]
 name = "test_bam_reader"
