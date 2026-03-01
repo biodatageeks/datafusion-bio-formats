@@ -227,21 +227,21 @@ jobs:
 
       - name: Upload Baseline Results
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: baseline-results-linux
           path: baseline_results/
           retention-days: 90
 
       - name: Upload Target Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: target-results-linux
           path: target_results/
           retention-days: 90
 
       - name: Upload Metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: metadata-linux
           path: metadata/
@@ -363,21 +363,21 @@ jobs:
 
       - name: Upload Baseline Results
         if: ${{ needs.prepare.outputs.baseline_tag != 'none' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: baseline-results-macos
           path: baseline_results/
           retention-days: 90
 
       - name: Upload Target Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: target-results-macos
           path: target_results/
           retention-days: 90
 
       - name: Upload Metadata
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: metadata-macos
           path: metadata/
