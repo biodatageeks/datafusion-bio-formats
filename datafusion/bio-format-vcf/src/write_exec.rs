@@ -5,7 +5,9 @@
 
 use crate::serializer::batch_to_vcf_lines;
 use crate::writer::{VcfCompressionType, VcfLocalWriter};
-use datafusion::arrow::array::{Array, ListArray, RecordBatch, StructArray, UInt64Array};
+use datafusion::arrow::array::{
+    Array, LargeListArray, ListArray, RecordBatch, StructArray, UInt64Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -249,11 +251,19 @@ fn infer_sample_names_from_batch(batch: &RecordBatch) -> Vec<String> {
         None => return Vec::new(),
     };
 
-    // Find the first non-null List child to determine sample count
+    // Find the first non-null List child to determine sample count.
+    // Try both ListArray and LargeListArray since DataFusion may produce either.
     for col_idx in 0..genotypes_struct.num_columns() {
         let child = genotypes_struct.column(col_idx);
         if let Some(list) = child.as_any().downcast_ref::<ListArray>() {
-            // Use the first non-null row
+            for row in 0..list.len() {
+                if !list.is_null(row) {
+                    let num_samples = list.value(row).len();
+                    return (0..num_samples).map(|i| format!("SAMPLE_{i}")).collect();
+                }
+            }
+        }
+        if let Some(list) = child.as_any().downcast_ref::<LargeListArray>() {
             for row in 0..list.len() {
                 if !list.is_null(row) {
                     let num_samples = list.value(row).len();
