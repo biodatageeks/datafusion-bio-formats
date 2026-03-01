@@ -165,10 +165,10 @@ FROM vcf_table
 WHERE qual >= 20
 ```
 
-The optional third argument controls the replacement value (default `"."`):
+The optional third argument controls the replacement value (default `"./."`):
 ```sql
--- Replace failing GTs with "./." instead of "."
-vcf_set_gts(genotypes."GT", mask, './.')
+-- Replace failing GTs with "." instead of "./."
+vcf_set_gts(genotypes."GT", mask, '.')
 ```
 
 This replicates the bcftools pipeline:
@@ -213,7 +213,34 @@ WHERE qual >= 20
 | `list_gte` | `(List<Int32\|Float32>, scalar) -> List<Boolean>` | Element-wise `>=` comparison. NULL elements produce NULL in the result. |
 | `list_lte` | `(List<Int32\|Float32>, scalar) -> List<Boolean>` | Element-wise `<=` comparison. NULL elements produce NULL in the result. |
 | `list_and` | `(List<Boolean>, List<Boolean>) -> List<Boolean>` | Element-wise AND. NULL in either input produces NULL. |
-| `vcf_set_gts` | `(List<Utf8>, List<Boolean> [, Utf8]) -> List<Utf8>` | Replace GT where mask is false/NULL. Optional 3rd arg sets the replacement value (default `"."`). |
+| `vcf_set_gts` | `(List<Utf8>, List<Boolean> [, Utf8]) -> List<Utf8>` | Replace GT where mask is false/NULL. Optional 3rd arg sets the replacement value (default `"./."`). |
+| `vcf_an` | `List<Utf8> -> Int32` | Allele Number — count of called (non-missing) alleles across samples. |
+| `vcf_ac` | `List<Utf8> -> List<Int32>` | Allele Count — per-ALT-allele call count from GT strings. |
+| `vcf_af` | `List<Utf8> -> List<Float64>` | Allele Frequency — per-ALT-allele frequency (AC/AN). |
+
+## Write Semantics
+
+When writing VCF output via `INSERT OVERWRITE`, be aware of the following:
+
+- **INFO fields are passed through as-is.** If you subset samples or filter rows, INFO fields like `AC`, `AF`, and `AN` will be stale because they describe the original cohort. Use `vcf_an`, `vcf_ac`, and `vcf_af` to recompute them after subsetting.
+- **FORMAT layout is global.** The output FORMAT header is the union of all FORMAT fields present in the Arrow schema, not per-row. Every sample column in every row shares the same set of FORMAT keys.
+
+### Subset + Recompute Workflow
+
+After subsetting samples or filtering rows, recompute allele statistics before writing:
+
+```sql
+INSERT OVERWRITE output_vcf
+SELECT
+    chrom, start, "end", "ref", alt, qual, filter, id,
+    -- Recompute INFO allele stats from the current GT column
+    vcf_an(genotypes."GT") AS "AN",
+    vcf_ac(genotypes."GT") AS "AC",
+    vcf_af(genotypes."GT") AS "AF",
+    genotypes
+FROM vcf_table
+WHERE chrom = '22'
+```
 
 ## Dual View: Per-Sample Queries
 
