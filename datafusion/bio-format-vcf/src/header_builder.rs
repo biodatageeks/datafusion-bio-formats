@@ -178,9 +178,9 @@ fn get_info_field_metadata(field: &Field, field_name: &str) -> (String, String, 
 fn get_format_field_metadata(field: &Field, format_name: &str) -> (String, String, String) {
     let metadata = field.metadata();
 
-    // For columnar multi-sample fields, unwrap List<T> → T for type inference.
+    // For columnar multi-sample fields, unwrap List<T>/LargeList<T> → T for type inference.
     let scalar_type = match field.data_type() {
-        DataType::List(inner) => inner.data_type(),
+        DataType::List(inner) | DataType::LargeList(inner) => inner.data_type(),
         other => other,
     };
 
@@ -262,12 +262,12 @@ pub fn build_vcf_column_header(sample_names: &[String]) -> String {
 /// Converts Arrow DataType to VCF type string
 fn arrow_type_to_vcf_type(data_type: &DataType) -> &'static str {
     match data_type {
-        DataType::Int32 => "Integer",
+        DataType::Int32 | DataType::Int64 => "Integer",
         DataType::Float32 | DataType::Float64 => "Float",
         DataType::Boolean => "Flag",
-        DataType::Utf8 | DataType::LargeUtf8 => "String",
-        DataType::List(inner) => match inner.data_type() {
-            DataType::Int32 => "Integer",
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => "String",
+        DataType::List(inner) | DataType::LargeList(inner) => match inner.data_type() {
+            DataType::Int32 | DataType::Int64 => "Integer",
             DataType::Float32 | DataType::Float64 => "Float",
             _ => "String",
         },
@@ -278,9 +278,9 @@ fn arrow_type_to_vcf_type(data_type: &DataType) -> &'static str {
 /// Converts Arrow DataType to VCF Number string
 fn arrow_type_to_vcf_number(data_type: &DataType) -> &'static str {
     match data_type {
-        DataType::Boolean => "0", // Flag type
-        DataType::List(_) => ".", // Variable length
-        _ => "1",                 // Single value
+        DataType::Boolean => "0",                          // Flag type
+        DataType::List(_) | DataType::LargeList(_) => ".", // Variable length
+        _ => "1",                                          // Single value
     }
 }
 
@@ -456,5 +456,82 @@ mod tests {
             &["SAMPLE1".to_string(), "SAMPLE2".to_string()],
         );
         assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_format_type_inference_from_large_list() {
+        // Columnar schema with LargeList children (DataFusion default from named_struct)
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(
+                "genotypes",
+                DataType::Struct(
+                    vec![
+                        Field::new(
+                            "GT",
+                            DataType::LargeList(Arc::new(Field::new(
+                                "item",
+                                DataType::Utf8View,
+                                true,
+                            ))),
+                            true,
+                        ),
+                        Field::new(
+                            "DP",
+                            DataType::LargeList(Arc::new(Field::new(
+                                "item",
+                                DataType::Int32,
+                                true,
+                            ))),
+                            true,
+                        ),
+                        Field::new(
+                            "GQ",
+                            DataType::LargeList(Arc::new(Field::new(
+                                "item",
+                                DataType::Int32,
+                                true,
+                            ))),
+                            true,
+                        ),
+                    ]
+                    .into(),
+                ),
+                true,
+            ),
+        ]));
+
+        let samples = vec!["S1".to_string(), "S2".to_string()];
+        let format_fields = vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()];
+        let lines = build_vcf_header_lines(&schema, &[], &format_fields, &samples).unwrap();
+
+        // GT should be Type=String
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("ID=GT") && l.contains("Type=String")),
+            "GT should be Type=String. Lines: {lines:?}"
+        );
+        // DP should be Type=Integer (not Type=String)
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("ID=DP") && l.contains("Type=Integer")),
+            "DP should be Type=Integer. Lines: {lines:?}"
+        );
+        // GQ should be Type=Integer (not Type=String)
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("ID=GQ") && l.contains("Type=Integer")),
+            "GQ should be Type=Integer. Lines: {lines:?}"
+        );
     }
 }
