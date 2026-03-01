@@ -5,15 +5,16 @@
 
 use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
-    ListArray, RecordBatch, StringArray, StructArray, UInt32Array,
+    ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
 };
 use datafusion::common::{DataFusionError, Result};
 
-/// Enum to hold either StringArray or LargeStringArray reference
-/// This allows handling both standard Arrow Utf8 and Polars LargeUtf8 types
+/// Enum to hold StringArray, LargeStringArray, or StringViewArray reference.
+/// This allows handling standard Arrow Utf8, Polars LargeUtf8, and DataFusion Utf8View types.
 enum StringColumnRef<'a> {
     Small(&'a StringArray),
     Large(&'a LargeStringArray),
+    View(&'a StringViewArray),
 }
 
 impl StringColumnRef<'_> {
@@ -21,6 +22,7 @@ impl StringColumnRef<'_> {
         match self {
             StringColumnRef::Small(arr) => arr.value(i),
             StringColumnRef::Large(arr) => arr.value(i),
+            StringColumnRef::View(arr) => arr.value(i),
         }
     }
 
@@ -28,6 +30,7 @@ impl StringColumnRef<'_> {
         match self {
             StringColumnRef::Small(arr) => Array::is_null(*arr, i),
             StringColumnRef::Large(arr) => Array::is_null(*arr, i),
+            StringColumnRef::View(arr) => Array::is_null(*arr, i),
         }
     }
 }
@@ -174,16 +177,19 @@ fn get_string_column_by_name<'a>(
     })?;
     let column = batch.column(idx);
 
-    // Try StringArray first, then LargeStringArray
+    // Try StringArray, LargeStringArray, then StringViewArray
     if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
         return Ok(StringColumnRef::Small(arr));
     }
     if let Some(arr) = column.as_any().downcast_ref::<LargeStringArray>() {
         return Ok(StringColumnRef::Large(arr));
     }
+    if let Some(arr) = column.as_any().downcast_ref::<StringViewArray>() {
+        return Ok(StringColumnRef::View(arr));
+    }
 
     Err(DataFusionError::Execution(format!(
-        "Column '{name}' must be Utf8 or LargeUtf8 type"
+        "Column '{name}' must be Utf8, LargeUtf8, or Utf8View type"
     )))
 }
 
@@ -314,11 +320,14 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
         return Ok(Some(arr.value(row).to_string()));
     }
 
-    // Handle both Utf8 (StringArray) and LargeUtf8 (LargeStringArray)
+    // Handle Utf8 (StringArray), LargeUtf8 (LargeStringArray), and Utf8View (StringViewArray)
     if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
         return Ok(Some(arr.value(row).to_string()));
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
+        return Ok(Some(arr.value(row).to_string()));
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
         return Ok(Some(arr.value(row).to_string()));
     }
 
@@ -375,6 +384,15 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<LargeStringArray>() {
         // Handle LargeUtf8 (Polars default string type)
+        for i in 0..len {
+            if array.is_null(i) {
+                values.push(".".to_string());
+            } else {
+                values.push(str_arr.value(i).to_string());
+            }
+        }
+    } else if let Some(str_arr) = array.as_any().downcast_ref::<StringViewArray>() {
+        // Handle Utf8View (DataFusion default in certain operations)
         for i in 0..len {
             if array.is_null(i) {
                 values.push(".".to_string());
@@ -533,7 +551,7 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
         return Ok(format!("{:.6}", arr.value(row)));
     }
 
-    // Handle both Utf8 (StringArray) and LargeUtf8 (LargeStringArray)
+    // Handle Utf8 (StringArray), LargeUtf8 (LargeStringArray), and Utf8View (StringViewArray)
     if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
         let s = arr.value(row);
         if s.is_empty() {
@@ -542,6 +560,13 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
         return Ok(s.to_string());
     }
     if let Some(arr) = array.as_any().downcast_ref::<LargeStringArray>() {
+        let s = arr.value(row);
+        if s.is_empty() {
+            return Ok(".".to_string());
+        }
+        return Ok(s.to_string());
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<StringViewArray>() {
         let s = arr.value(row);
         if s.is_empty() {
             return Ok(".".to_string());
