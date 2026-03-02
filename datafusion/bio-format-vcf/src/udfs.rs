@@ -889,15 +889,19 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let gt_arr = args.args[0].clone().into_array(1)?;
         let mask_arr = args.args[1].clone().into_array(1)?;
-        let replacement = if args.args.len() > 2 {
+        // 2-arg form: ploidy-aware missing (replacement=None)
+        // 3-arg form: literal replacement (always used as-is)
+        let explicit_replacement = if args.args.len() > 2 {
             let rep_arr = args.args[2].clone().into_array(1)?;
-            rep_arr
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .and_then(|a| a.value(0).to_string().into())
-                .unwrap_or_else(|| "./.".to_string())
+            Some(
+                rep_arr
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .map(|a| a.value(0).to_string())
+                    .unwrap_or_else(|| "./.".to_string()),
+            )
         } else {
-            "./.".to_string()
+            None
         };
 
         let gt_list = gt_arr.as_list::<i32>();
@@ -925,27 +929,28 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
                 None
             };
 
-            let is_ploidy_aware = replacement == ".";
             for j in 0..gt_strings.len() {
                 let keep = mask_bools
                     .as_ref()
                     .is_some_and(|m| j < m.len() && !m.is_null(j) && m.value(j));
                 if keep {
                     if gt_strings.is_null(j) {
-                        builder.values().append_value(&replacement);
+                        let fallback = explicit_replacement.as_deref().unwrap_or("./.");
+                        builder.values().append_value(fallback);
                     } else {
                         builder.values().append_value(gt_strings.value(j));
                     }
-                } else if is_ploidy_aware {
-                    // '.' means "set to missing" — produce ploidy-aware missing
-                    let original = if gt_strings.is_null(j) {
+                } else if let Some(ref rep) = explicit_replacement {
+                    // 3-arg form: use literal replacement as-is
+                    builder.values().append_value(rep);
+                } else {
+                    // 2-arg form: ploidy-aware missing
+                    let missing = if gt_strings.is_null(j) {
                         "./.".to_string()
                     } else {
                         make_ploidy_aware_missing(gt_strings.value(j))
                     };
-                    builder.values().append_value(&original);
-                } else {
-                    builder.values().append_value(&replacement);
+                    builder.values().append_value(&missing);
                 }
             }
             builder.append(true);
@@ -1623,9 +1628,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_vcf_set_gts_ploidy_aware_dot() {
+    async fn test_vcf_set_gts_ploidy_aware_2arg() {
         let ctx = make_test_ctx().await;
-        // Use '.' replacement — should produce ploidy-aware missing
+        // 2-arg form — should produce ploidy-aware missing
+        let df = ctx
+            .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15)) as masked FROM test_data"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches.len(), 1);
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        // Row 0: GQ=[30,20,10], gte(15)=[T,T,F], GT=["0/1","1/1","0/0"]
+        // keep 0/1, keep 1/1, replace 0/0 → "./." (diploid unphased)
+        let inner0 = list.value(0);
+        let strings0 = inner0.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(strings0.value(0), "0/1");
+        assert_eq!(strings0.value(1), "1/1");
+        assert_eq!(strings0.value(2), "./."); // ploidy-aware, not literal "."
+    }
+
+    #[tokio::test]
+    async fn test_vcf_set_gts_explicit_dot_is_literal() {
+        let ctx = make_test_ctx().await;
+        // 3-arg form with '.' — should be treated literally (backward compatible)
         let df = ctx
             .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15), '.') as masked FROM test_data"#)
             .await
@@ -1638,11 +1667,11 @@ mod tests {
             .downcast_ref::<ListArray>()
             .unwrap();
         // Row 0: GQ=[30,20,10], gte(15)=[T,T,F], GT=["0/1","1/1","0/0"]
-        // keep 0/1, keep 1/1, replace 0/0 → "./.""  (diploid unphased)
+        // keep 0/1, keep 1/1, replace 0/0 with literal "."
         let inner0 = list.value(0);
         let strings0 = inner0.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(strings0.value(0), "0/1");
         assert_eq!(strings0.value(1), "1/1");
-        assert_eq!(strings0.value(2), "./."); // ploidy-aware, not literal "."
+        assert_eq!(strings0.value(2), "."); // literal ".", NOT ploidy-aware
     }
 }
