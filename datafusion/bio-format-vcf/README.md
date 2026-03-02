@@ -215,8 +215,8 @@ WHERE qual >= 20
 | `list_and` | `(List<Boolean>, List<Boolean>) -> List<Boolean>` | Element-wise AND. NULL in either input produces NULL. |
 | `vcf_set_gts` | `(List<Utf8>, List<Boolean> [, Utf8]) -> List<Utf8>` | Replace GT where mask is false/NULL. Optional 3rd arg sets the replacement value (default `"./."`). |
 | `vcf_an` | `List<Utf8> -> Int32` | Allele Number — count of called (non-missing) alleles across samples. |
-| `vcf_ac` | `List<Utf8> -> List<Int32>` | Allele Count — per-ALT-allele call count from GT strings. |
-| `vcf_af` | `List<Utf8> -> List<Float64>` | Allele Frequency — per-ALT-allele frequency (AC/AN). |
+| `vcf_ac` | `(List<Utf8> [, Utf8]) -> List<Int32>` | Allele Count — per-ALT-allele call count from GT strings. Optional 2nd arg is the `alt` column (pipe-separated) to ensure output length matches the number of ALT alleles. |
+| `vcf_af` | `(List<Utf8> [, Utf8]) -> List<Float64>` | Allele Frequency — per-ALT-allele frequency (AC/AN). Optional 2nd arg is the `alt` column (pipe-separated) to ensure output length matches the number of ALT alleles. When AN=0, produces NULLs. |
 
 ## Write Semantics
 
@@ -234,9 +234,10 @@ INSERT OVERWRITE output_vcf
 SELECT
     chrom, start, "end", "ref", alt, qual, filter, id,
     -- Recompute INFO allele stats from the current GT column
+    -- Pass the alt column to ensure correct cardinality at multi-allelic sites
     vcf_an(genotypes."GT") AS "AN",
-    vcf_ac(genotypes."GT") AS "AC",
-    vcf_af(genotypes."GT") AS "AF",
+    vcf_ac(genotypes."GT", alt) AS "AC",
+    vcf_af(genotypes."GT", alt) AS "AF",
     genotypes
 FROM vcf_table
 WHERE chrom = '22'

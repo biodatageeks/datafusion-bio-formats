@@ -141,6 +141,18 @@ fn parse_gt_alleles(gt: &str) -> Option<Vec<Option<usize>>> {
     }
 }
 
+/// Counts the number of ALT alleles from a pipe-separated ALT string.
+///
+/// E.g., `"A|T"` → 2, `"A"` → 1, `""` / `"."` → 0.
+fn count_alt_alleles(alt: &str) -> usize {
+    let alt = alt.trim();
+    if alt.is_empty() || alt == "." {
+        0
+    } else {
+        alt.split('|').count()
+    }
+}
+
 // ============================================================================
 // vcf_an — allele number: count of called (non-missing) alleles
 // ============================================================================
@@ -231,13 +243,15 @@ struct VcfAcUdf {
 
 impl VcfAcUdf {
     fn new() -> Self {
+        let gt_list = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
         Self {
-            signature: Signature::exact(
-                vec![DataType::List(Arc::new(Field::new(
-                    "item",
-                    DataType::Utf8,
-                    true,
-                )))],
+            signature: Signature::one_of(
+                vec![
+                    // 1-arg: vcf_ac(gt_list)
+                    Exact(vec![gt_list.clone()]),
+                    // 2-arg: vcf_ac(gt_list, alt)
+                    Exact(vec![gt_list, DataType::Utf8]),
+                ],
                 Volatility::Immutable,
             ),
         }
@@ -270,6 +284,25 @@ impl ScalarUDFImpl for VcfAcUdf {
         let list = array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
             DataFusionError::Execution("vcf_ac expects List<Utf8> input".to_string())
         })?;
+
+        // Optional 2nd arg: alt column (pipe-separated ALT alleles)
+        let alt_array = if args.args.len() > 1 {
+            let alt_arr = args.args[1].clone().into_array(list.len())?;
+            Some(
+                alt_arr
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "vcf_ac 2nd argument must be Utf8 (alt column)".to_string(),
+                        )
+                    })?
+                    .clone(),
+            )
+        } else {
+            None
+        };
+
         let mut builder = ListBuilder::new(datafusion::arrow::array::Int32Builder::new());
         for i in 0..list.len() {
             if list.is_null(i) {
@@ -283,6 +316,12 @@ impl ScalarUDFImpl for VcfAcUdf {
                 .ok_or_else(|| {
                     DataFusionError::Execution("vcf_ac expects List<Utf8> input".to_string())
                 })?;
+
+            // Determine num_alt from the alt column (if provided)
+            let num_alt_from_col = alt_array
+                .as_ref()
+                .filter(|a| !a.is_null(i))
+                .map(|a| count_alt_alleles(a.value(i)));
 
             // First pass: find max allele index
             let mut max_allele: usize = 0;
@@ -301,22 +340,30 @@ impl ScalarUDFImpl for VcfAcUdf {
                 }
             }
 
-            if !has_called || max_allele == 0 {
-                // No ALT alleles called — empty list
+            // Output vector length: max(num_alt_from_col, max_allele)
+            let vec_len = match num_alt_from_col {
+                Some(n) => n.max(max_allele),
+                None => max_allele,
+            };
+
+            if vec_len == 0 {
+                // No ALT alleles — empty list
                 builder.append(true);
                 continue;
             }
 
-            // Second pass: count each ALT allele (1..=max_allele)
-            let mut counts = vec![0i32; max_allele];
-            for j in 0..gt_strings.len() {
-                if gt_strings.is_null(j) {
-                    continue;
-                }
-                if let Some(alleles) = parse_gt_alleles(gt_strings.value(j)) {
-                    for idx in alleles.iter().flatten() {
-                        if *idx >= 1 && *idx <= max_allele {
-                            counts[*idx - 1] += 1;
+            // Second pass: count each ALT allele (1..=vec_len)
+            let mut counts = vec![0i32; vec_len];
+            if has_called {
+                for j in 0..gt_strings.len() {
+                    if gt_strings.is_null(j) {
+                        continue;
+                    }
+                    if let Some(alleles) = parse_gt_alleles(gt_strings.value(j)) {
+                        for idx in alleles.iter().flatten() {
+                            if *idx >= 1 && *idx <= vec_len {
+                                counts[*idx - 1] += 1;
+                            }
                         }
                     }
                 }
@@ -332,6 +379,10 @@ impl ScalarUDFImpl for VcfAcUdf {
 }
 
 /// Creates the `vcf_ac` scalar UDF.
+///
+/// Signatures:
+/// - `vcf_ac(List<Utf8>) -> List<Int32>` — infer output length from max GT allele
+/// - `vcf_ac(List<Utf8>, Utf8) -> List<Int32>` — use ALT column for output length
 pub fn vcf_ac_udf() -> ScalarUDF {
     ScalarUDF::from(VcfAcUdf::new())
 }
@@ -347,13 +398,15 @@ struct VcfAfUdf {
 
 impl VcfAfUdf {
     fn new() -> Self {
+        let gt_list = DataType::List(Arc::new(Field::new("item", DataType::Utf8, true)));
         Self {
-            signature: Signature::exact(
-                vec![DataType::List(Arc::new(Field::new(
-                    "item",
-                    DataType::Utf8,
-                    true,
-                )))],
+            signature: Signature::one_of(
+                vec![
+                    // 1-arg: vcf_af(gt_list)
+                    Exact(vec![gt_list.clone()]),
+                    // 2-arg: vcf_af(gt_list, alt)
+                    Exact(vec![gt_list, DataType::Utf8]),
+                ],
                 Volatility::Immutable,
             ),
         }
@@ -386,6 +439,25 @@ impl ScalarUDFImpl for VcfAfUdf {
         let list = array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
             DataFusionError::Execution("vcf_af expects List<Utf8> input".to_string())
         })?;
+
+        // Optional 2nd arg: alt column (pipe-separated ALT alleles)
+        let alt_array = if args.args.len() > 1 {
+            let alt_arr = args.args[1].clone().into_array(list.len())?;
+            Some(
+                alt_arr
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "vcf_af 2nd argument must be Utf8 (alt column)".to_string(),
+                        )
+                    })?
+                    .clone(),
+            )
+        } else {
+            None
+        };
+
         let mut builder = ListBuilder::new(Float64Builder::new());
         for i in 0..list.len() {
             if list.is_null(i) {
@@ -400,12 +472,16 @@ impl ScalarUDFImpl for VcfAfUdf {
                     DataFusionError::Execution("vcf_af expects List<Utf8> input".to_string())
                 })?;
 
-            // Compute AN, max_allele, and per-allele counts in one pass
+            // Determine num_alt from the alt column (if provided)
+            let num_alt_from_col = alt_array
+                .as_ref()
+                .filter(|a| !a.is_null(i))
+                .map(|a| count_alt_alleles(a.value(i)));
+
+            // First pass: find max_allele and AN
             let mut an = 0i32;
             let mut max_allele: usize = 0;
             let mut has_called = false;
-            let mut counts = Vec::new();
-            // First pass: find max_allele and AN
             for j in 0..gt_strings.len() {
                 if gt_strings.is_null(j) {
                     continue;
@@ -421,22 +497,39 @@ impl ScalarUDFImpl for VcfAfUdf {
                 }
             }
 
-            if !has_called || max_allele == 0 || an == 0 {
-                // No ALT alleles called — empty list
+            // Output vector length: max(num_alt_from_col, max_allele)
+            let vec_len = match num_alt_from_col {
+                Some(n) => n.max(max_allele),
+                None => max_allele,
+            };
+
+            if vec_len == 0 {
+                // No ALT alleles — empty list
+                builder.append(true);
+                continue;
+            }
+
+            if an == 0 {
+                // All missing — produce NULLs of length vec_len
+                for _ in 0..vec_len {
+                    builder.values().append_null();
+                }
                 builder.append(true);
                 continue;
             }
 
             // Second pass: count each ALT allele
-            counts.resize(max_allele, 0i32);
-            for j in 0..gt_strings.len() {
-                if gt_strings.is_null(j) {
-                    continue;
-                }
-                if let Some(alleles) = parse_gt_alleles(gt_strings.value(j)) {
-                    for idx in alleles.iter().flatten() {
-                        if *idx >= 1 && *idx <= max_allele {
-                            counts[*idx - 1] += 1;
+            let mut counts = vec![0i32; vec_len];
+            if has_called {
+                for j in 0..gt_strings.len() {
+                    if gt_strings.is_null(j) {
+                        continue;
+                    }
+                    if let Some(alleles) = parse_gt_alleles(gt_strings.value(j)) {
+                        for idx in alleles.iter().flatten() {
+                            if *idx >= 1 && *idx <= vec_len {
+                                counts[*idx - 1] += 1;
+                            }
                         }
                     }
                 }
@@ -452,6 +545,10 @@ impl ScalarUDFImpl for VcfAfUdf {
 }
 
 /// Creates the `vcf_af` scalar UDF.
+///
+/// Signatures:
+/// - `vcf_af(List<Utf8>) -> List<Float64>` — infer output length from max GT allele
+/// - `vcf_af(List<Utf8>, Utf8) -> List<Float64>` — use ALT column for output length
 pub fn vcf_af_udf() -> ScalarUDF {
     ScalarUDF::from(VcfAfUdf::new())
 }
@@ -866,8 +963,8 @@ pub fn vcf_set_gts_udf() -> ScalarUDF {
 /// - `list_and(List<Boolean>, List<Boolean>) -> List<Boolean>` — element-wise AND
 /// - `vcf_set_gts(List<Utf8>, List<Boolean> [, Utf8]) -> List<Utf8>` — replace GT where mask is false (default: "./.")
 /// - `vcf_an(List<Utf8>) -> Int32` — allele number (count of called alleles)
-/// - `vcf_ac(List<Utf8>) -> List<Int32>` — per-ALT-allele call count
-/// - `vcf_af(List<Utf8>) -> List<Float64>` — per-ALT-allele frequency (AC/AN)
+/// - `vcf_ac(List<Utf8> [, Utf8]) -> List<Int32>` — per-ALT-allele call count (optional ALT column for correct cardinality)
+/// - `vcf_af(List<Utf8> [, Utf8]) -> List<Float64>` — per-ALT-allele frequency (optional ALT column for correct cardinality)
 pub fn register_vcf_udfs(ctx: &datafusion::prelude::SessionContext) {
     ctx.register_udf(list_avg_udf());
     ctx.register_udf(list_gte_udf());
@@ -1253,6 +1350,42 @@ mod tests {
         assert_eq!(floats.len(), 2);
         assert!((floats.value(0) - 1.0 / 3.0).abs() < 0.001);
         assert!((floats.value(1) - 1.0 / 3.0).abs() < 0.001);
+
+        // 2-arg form with ALT column — same result since all alleles are observed
+        let df = ctx
+            .sql(r#"SELECT vcf_ac("GT", 'A|T') as ac FROM multi"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let inner = list.value(0);
+        let ints = inner.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(ints.len(), 2);
+        assert_eq!(ints.value(0), 2);
+        assert_eq!(ints.value(1), 2);
+
+        let df = ctx
+            .sql(r#"SELECT vcf_af("GT", 'A|T') as af FROM multi"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let inner = list.value(0);
+        let floats = inner
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!(floats.len(), 2);
+        assert!((floats.value(0) - 1.0 / 3.0).abs() < 0.001);
+        assert!((floats.value(1) - 1.0 / 3.0).abs() < 0.001);
     }
 
     #[tokio::test]
@@ -1314,5 +1447,129 @@ mod tests {
             .unwrap();
         let inner = list.value(0);
         assert_eq!(inner.len(), 0);
+
+        // 2-arg form: ALT="A|T", all GT=./. → AC=[0, 0]
+        let df = ctx
+            .sql(r#"SELECT vcf_ac("GT", 'A|T') as ac FROM missing"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let inner = list.value(0);
+        let ints = inner.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(ints.len(), 2);
+        assert_eq!(ints.value(0), 0);
+        assert_eq!(ints.value(1), 0);
+
+        // 2-arg form: ALT="A|T", all GT=./. → AF=[null, null]
+        let df = ctx
+            .sql(r#"SELECT vcf_af("GT", 'A|T') as af FROM missing"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let inner = list.value(0);
+        let floats = inner
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!(floats.len(), 2);
+        assert!(floats.is_null(0));
+        assert!(floats.is_null(1));
+    }
+
+    /// Reproduces #103: ALT=A|T but GTs only reference allele 1.
+    /// Output length must still be 2 (matching the number of ALT alleles).
+    #[tokio::test]
+    async fn test_ac_af_two_arg_unobserved_alt() {
+        let ctx = SessionContext::new();
+        register_vcf_udfs(&ctx);
+
+        // 3 samples, all carrying only allele 1 — allele 2 never observed in GT
+        let mut gt_builder = ListBuilder::new(StringBuilder::new());
+        gt_builder.values().append_value("0/1");
+        gt_builder.values().append_value("0/1");
+        gt_builder.values().append_value("1/1");
+        gt_builder.append(true);
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "GT",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        )]));
+
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(gt_builder.finish())]).unwrap();
+        ctx.register_batch("unobs", batch).unwrap();
+
+        // 1-arg form: only allele 1 observed → AC=[4] (length 1)
+        let df = ctx
+            .sql(r#"SELECT vcf_ac("GT") as ac FROM unobs"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let inner = list.value(0);
+        let ints = inner.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(ints.len(), 1);
+        assert_eq!(ints.value(0), 4);
+
+        // 2-arg form: ALT="A|T" → AC must be [4, 0] (length 2)
+        let df = ctx
+            .sql(r#"SELECT vcf_ac("GT", 'A|T') as ac FROM unobs"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let inner = list.value(0);
+        let ints = inner.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(ints.len(), 2);
+        assert_eq!(ints.value(0), 4);
+        assert_eq!(ints.value(1), 0);
+
+        // 2-arg form: ALT="A|T" → AF must be [4/6, 0/6] = [0.667, 0.0]
+        let df = ctx
+            .sql(r#"SELECT vcf_af("GT", 'A|T') as af FROM unobs"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let inner = list.value(0);
+        let floats = inner
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!(floats.len(), 2);
+        assert!((floats.value(0) - 4.0 / 6.0).abs() < 0.001);
+        assert!((floats.value(1) - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_count_alt_alleles() {
+        assert_eq!(count_alt_alleles("A"), 1);
+        assert_eq!(count_alt_alleles("A|T"), 2);
+        assert_eq!(count_alt_alleles("A|T|C"), 3);
+        assert_eq!(count_alt_alleles(""), 0);
+        assert_eq!(count_alt_alleles("."), 0);
+        assert_eq!(count_alt_alleles("  A|T  "), 2);
     }
 }
