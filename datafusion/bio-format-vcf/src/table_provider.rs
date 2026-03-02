@@ -12,7 +12,8 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
     VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
-    VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, to_json_string,
+    VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
+    from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -239,10 +240,14 @@ async fn determine_schema_from_header(
                 fields.push(field);
             }
         } else {
-            let value_fields = format_tags
+            // Columnar genotypes: Struct<GT: List<Utf8>, GQ: List<Int32>, ...>
+            // Each list has N elements (one per selected sample) in sample order.
+            let list_fields = format_tags
                 .iter()
                 .map(|tag| {
-                    let dtype = format_to_arrow_type(header_formats, tag);
+                    let scalar_dtype = format_to_arrow_type(header_formats, tag);
+                    let list_dtype =
+                        DataType::List(Arc::new(Field::new("item", scalar_dtype, true)));
                     let mut field_metadata = HashMap::new();
                     if let Some(format_info) = format_field_metadata.get(tag) {
                         field_metadata.insert(
@@ -259,22 +264,21 @@ async fn determine_schema_from_header(
                     field_metadata
                         .insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
                     field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
-                    Field::new(tag.clone(), dtype, true).with_metadata(field_metadata)
+                    Field::new(tag.clone(), list_dtype, true).with_metadata(field_metadata)
                 })
                 .collect::<Vec<_>>();
 
-            let genotype_struct = DataType::Struct(
-                vec![
-                    Field::new("sample_id", DataType::Utf8, false),
-                    Field::new("values", DataType::Struct(value_fields.into()), true),
-                ]
-                .into(),
+            // Store sample names in genotypes field metadata
+            let mut genotypes_metadata = HashMap::new();
+            genotypes_metadata.insert(
+                VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
+                to_json_string(&sample_names),
             );
-            fields.push(Field::new(
-                "genotypes",
-                DataType::List(Arc::new(Field::new("item", genotype_struct, true))),
-                true,
-            ));
+
+            fields.push(
+                Field::new("genotypes", DataType::Struct(list_fields.into()), true)
+                    .with_metadata(genotypes_metadata),
+            );
         }
     }
 
@@ -397,6 +401,34 @@ pub struct VcfTableProvider {
 }
 
 impl VcfTableProvider {
+    /// Resolves sample names from a schema, checking genotypes field metadata
+    /// and schema-level metadata. Returns empty Vec if neither source has sample names.
+    fn resolve_sample_names_from_schema(schema: &SchemaRef) -> Vec<String> {
+        // 1. Check genotypes field metadata (direct round-trip from multi-sample read)
+        if let Ok(idx) = schema.index_of("genotypes") {
+            let field = schema.field(idx);
+            if let Some(json) = field.metadata().get(VCF_GENOTYPES_SAMPLE_NAMES_KEY) {
+                if let Some(names) = from_json_string::<Vec<String>>(json) {
+                    if !names.is_empty() {
+                        return names;
+                    }
+                }
+            }
+        }
+
+        // 2. Check schema-level metadata (passthrough query)
+        if let Some(json) = schema.metadata().get(VCF_SAMPLE_NAMES_KEY) {
+            if let Some(names) = from_json_string::<Vec<String>>(json) {
+                if !names.is_empty() {
+                    return names;
+                }
+            }
+        }
+
+        // 3. Neither found — triggers runtime inference in write_exec
+        Vec::new()
+    }
+
     fn infer_info_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
         schema
             .fields()
@@ -412,25 +444,18 @@ impl VcfTableProvider {
     }
 
     fn infer_format_fields_from_schema(schema: &SchemaRef) -> Vec<String> {
+        // Columnar multi-sample schema: genotypes: Struct<GT: List<T>, GQ: List<T>, ...>
         if let Ok(genotypes_idx) = schema.index_of("genotypes") {
             let genotypes_field = schema.field(genotypes_idx);
-            let item_field = match genotypes_field.data_type() {
-                DataType::List(item) | DataType::LargeList(item) => Some(item),
-                _ => None,
-            };
-
-            if let Some(item_field) = item_field
-                && let DataType::Struct(genotype_fields) = item_field.data_type()
-                && let Some(values_field) = genotype_fields.iter().find(|f| f.name() == "values")
-                && let DataType::Struct(value_fields) = values_field.data_type()
-            {
-                return value_fields
+            if let DataType::Struct(struct_fields) = genotypes_field.data_type() {
+                return struct_fields
                     .iter()
                     .map(|field| field.name().clone())
                     .collect();
             }
         }
 
+        // Single-sample: top-level FORMAT columns
         schema
             .fields()
             .iter()
@@ -855,14 +880,53 @@ impl TableProvider for VcfTableProvider {
         // Resolve info/format fields for write:
         // - Some(vec) (including empty): explicit selection
         // - None: infer defaults from schema
+        // When self's schema yields empty results, fall back to the input plan's schema
         let info_fields = self
             .info_fields
             .clone()
             .unwrap_or_else(|| Self::infer_info_fields_from_schema(&self.schema));
+        let info_fields = if info_fields.is_empty() {
+            let from_input = Self::infer_info_fields_from_schema(&input_schema);
+            if !from_input.is_empty() {
+                from_input
+            } else {
+                info_fields
+            }
+        } else {
+            info_fields
+        };
+
         let format_fields = self
             .format_fields
             .clone()
             .unwrap_or_else(|| Self::infer_format_fields_from_schema(&self.schema));
+        let format_fields = if format_fields.is_empty() {
+            let from_input = Self::infer_format_fields_from_schema(&input_schema);
+            if !from_input.is_empty() {
+                from_input
+            } else {
+                format_fields
+            }
+        } else {
+            format_fields
+        };
+
+        // Resolve sample names with fallback chain:
+        // 1. self.sample_names (destination provider has them)
+        // 2. Input plan's schema metadata (round-trip or passthrough)
+        // 3. Empty (triggers runtime inference in write_exec from first batch)
+        let sample_names = if !self.sample_names.is_empty() {
+            self.sample_names.clone()
+        } else {
+            Self::resolve_sample_names_from_schema(&input_schema)
+        };
+
+        // Capture source schema metadata (contigs, filters, etc.) which may be
+        // lost during DataFusion query plan projections.
+        let source_metadata = {
+            let meta = self.schema.metadata().clone();
+            if meta.is_empty() { None } else { Some(meta) }
+        };
 
         Ok(Arc::new(VcfWriteExec::new(
             input,
@@ -870,8 +934,9 @@ impl TableProvider for VcfTableProvider {
             Some(compression),
             info_fields,
             format_fields,
-            self.sample_names.clone(),
+            sample_names,
             self.coordinate_system_zero_based,
+            source_metadata,
         )))
     }
 

@@ -83,31 +83,23 @@ async fn test_multisample_schema_uses_nested_genotypes() -> Result<(), Box<dyn s
     assert!(schema.field_with_name("genotypes").is_ok());
     assert!(schema.field_with_name("Sample1_GT").is_err());
 
+    // Columnar schema: genotypes: Struct<GT: List<Utf8>, DP: List<Int32>>
     let genotypes_field = schema.field_with_name("genotypes")?;
     match genotypes_field.data_type() {
-        DataType::List(item) => match item.data_type() {
-            DataType::Struct(item_fields) => {
-                let sample_id = item_fields
-                    .iter()
-                    .find(|f| f.name() == "sample_id")
-                    .expect("sample_id field");
-                assert_eq!(sample_id.data_type(), &DataType::Utf8);
+        DataType::Struct(struct_fields) => {
+            let gt_field = struct_fields
+                .iter()
+                .find(|f| f.name() == "GT")
+                .expect("GT field in genotypes struct");
+            assert!(matches!(gt_field.data_type(), DataType::List(_)));
 
-                let values = item_fields
-                    .iter()
-                    .find(|f| f.name() == "values")
-                    .expect("values field");
-                match values.data_type() {
-                    DataType::Struct(value_fields) => {
-                        assert!(value_fields.iter().any(|f| f.name() == "GT"));
-                        assert!(value_fields.iter().any(|f| f.name() == "DP"));
-                    }
-                    other => panic!("expected values struct, got {other:?}"),
-                }
-            }
-            other => panic!("expected list item struct, got {other:?}"),
-        },
-        other => panic!("expected list type for genotypes, got {other:?}"),
+            let dp_field = struct_fields
+                .iter()
+                .find(|f| f.name() == "DP")
+                .expect("DP field in genotypes struct");
+            assert!(matches!(dp_field.data_type(), DataType::List(_)));
+        }
+        other => panic!("expected Struct type for genotypes, got {other:?}"),
     }
 
     Ok(())
@@ -134,50 +126,37 @@ async fn test_multisample_nested_values_are_readable() -> Result<(), Box<dyn std
     let results = df.collect().await?;
     let batch = &results[0];
 
+    // Columnar layout: genotypes is a StructArray with List children
     let genotypes = batch
         .column(0)
         .as_any()
-        .downcast_ref::<ListArray>()
-        .expect("genotypes list");
-
-    let first_row = genotypes.value(0);
-    let first_row_struct = first_row
-        .as_any()
         .downcast_ref::<StructArray>()
-        .expect("list item struct");
+        .expect("genotypes struct");
 
-    let sample_ids = first_row_struct
-        .column_by_name("sample_id")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    let values = first_row_struct
-        .column_by_name("values")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .unwrap();
-
-    let gts = values
+    // GT column: List<Utf8> — each element is a list of sample GTs for that row
+    let gt_list = genotypes
         .column_by_name("GT")
         .unwrap()
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<ListArray>()
         .unwrap();
-    let dps = values
+    let dp_list = genotypes
         .column_by_name("DP")
         .unwrap()
         .as_any()
-        .downcast_ref::<Int32Array>()
+        .downcast_ref::<ListArray>()
         .unwrap();
 
-    assert_eq!(sample_ids.value(0), "Sample1");
-    assert_eq!(sample_ids.value(1), "Sample2");
-    assert_eq!(gts.value(0), "0/1");
-    assert_eq!(gts.value(1), "1/1");
-    assert_eq!(dps.value(0), 20);
-    assert_eq!(dps.value(1), 30);
+    // First row (chr1:100): GT=["0/1", "1/1"], DP=[20, 30]
+    let row0_gt = gt_list.value(0);
+    let row0_gt_values = row0_gt.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(row0_gt_values.value(0), "0/1");
+    assert_eq!(row0_gt_values.value(1), "1/1");
+
+    let row0_dp = dp_list.value(0);
+    let row0_dp_values = row0_dp.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(row0_dp_values.value(0), 20);
+    assert_eq!(row0_dp_values.value(1), 30);
 
     Ok(())
 }
@@ -264,51 +243,38 @@ async fn test_multisample_sample_subset_preserves_requested_order()
     let results = df.collect().await?;
     let batch = &results[0];
 
+    // Columnar layout: genotypes is a StructArray
     let genotypes = batch
         .column(0)
         .as_any()
-        .downcast_ref::<ListArray>()
-        .expect("genotypes list");
-
-    let first_row = genotypes.value(0);
-    let first_row_struct = first_row
-        .as_any()
         .downcast_ref::<StructArray>()
-        .expect("list item struct");
+        .expect("genotypes struct");
 
-    let sample_ids = first_row_struct
-        .column_by_name("sample_id")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    let values = first_row_struct
-        .column_by_name("values")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<StructArray>()
-        .unwrap();
-
-    let gts = values
+    let gt_list = genotypes
         .column_by_name("GT")
         .unwrap()
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<ListArray>()
         .unwrap();
-    let dps = values
+    let dp_list = genotypes
         .column_by_name("DP")
         .unwrap()
         .as_any()
-        .downcast_ref::<Int32Array>()
+        .downcast_ref::<ListArray>()
         .unwrap();
 
-    assert_eq!(sample_ids.len(), 2);
-    assert_eq!(sample_ids.value(0), "Sample2");
-    assert_eq!(sample_ids.value(1), "Sample1");
-    assert_eq!(gts.value(0), "1/1");
-    assert_eq!(gts.value(1), "0/1");
-    assert_eq!(dps.value(0), 30);
-    assert_eq!(dps.value(1), 20);
+    // First row: samples requested in order [Sample2, Sample1]
+    // So GT[0]=Sample2's GT ("1/1"), GT[1]=Sample1's GT ("0/1")
+    let row0_gt = gt_list.value(0);
+    let row0_gt_values = row0_gt.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(row0_gt_values.len(), 2);
+    assert_eq!(row0_gt_values.value(0), "1/1"); // Sample2
+    assert_eq!(row0_gt_values.value(1), "0/1"); // Sample1
+
+    let row0_dp = dp_list.value(0);
+    let row0_dp_values = row0_dp.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(row0_dp_values.value(0), 30); // Sample2
+    assert_eq!(row0_dp_values.value(1), 20); // Sample1
 
     Ok(())
 }
@@ -339,24 +305,25 @@ async fn test_multisample_single_selected_stays_nested() -> Result<(), Box<dyn s
         .await?;
     let results = df.collect().await?;
     let batch = &results[0];
+
+    // Columnar layout: genotypes is a StructArray
     let genotypes = batch
         .column(0)
         .as_any()
-        .downcast_ref::<ListArray>()
-        .expect("genotypes list");
-    let first_row = genotypes.value(0);
-    let first_row_struct = first_row
-        .as_any()
         .downcast_ref::<StructArray>()
-        .expect("list item struct");
-    let sample_ids = first_row_struct
-        .column_by_name("sample_id")
+        .expect("genotypes struct");
+
+    // With only Sample2 selected, each list should have length 1
+    let gt_list = genotypes
+        .column_by_name("GT")
         .unwrap()
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<ListArray>()
         .unwrap();
-    assert_eq!(sample_ids.len(), 1);
-    assert_eq!(sample_ids.value(0), "Sample2");
+    let row0_gt = gt_list.value(0);
+    let row0_gt_values = row0_gt.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(row0_gt_values.len(), 1);
+    assert_eq!(row0_gt_values.value(0), "1/1"); // Sample2's GT
 
     Ok(())
 }
@@ -382,25 +349,25 @@ async fn test_missing_requested_samples_are_skipped() -> Result<(), Box<dyn std:
         .await?;
     let results = df.collect().await?;
     let batch = &results[0];
+
+    // Columnar layout: genotypes is a StructArray
     let genotypes = batch
         .column(0)
         .as_any()
-        .downcast_ref::<ListArray>()
-        .expect("genotypes list");
-    let first_row = genotypes.value(0);
-    let first_row_struct = first_row
-        .as_any()
         .downcast_ref::<StructArray>()
-        .expect("list item struct");
-    let sample_ids = first_row_struct
-        .column_by_name("sample_id")
+        .expect("genotypes struct");
+
+    // MissingSample is skipped, only Sample1 remains → lists have length 1
+    let gt_list = genotypes
+        .column_by_name("GT")
         .unwrap()
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<ListArray>()
         .unwrap();
-
-    assert_eq!(sample_ids.len(), 1);
-    assert_eq!(sample_ids.value(0), "Sample1");
+    let row0_gt = gt_list.value(0);
+    let row0_gt_values = row0_gt.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(row0_gt_values.len(), 1);
+    assert_eq!(row0_gt_values.value(0), "0/1"); // Sample1's GT
 
     Ok(())
 }
