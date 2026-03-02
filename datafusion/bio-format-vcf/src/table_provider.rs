@@ -921,6 +921,13 @@ impl TableProvider for VcfTableProvider {
             Self::resolve_sample_names_from_schema(&input_schema)
         };
 
+        // Capture source schema metadata (contigs, filters, etc.) which may be
+        // lost during DataFusion query plan projections.
+        let source_metadata = {
+            let meta = self.schema.metadata().clone();
+            if meta.is_empty() { None } else { Some(meta) }
+        };
+
         Ok(Arc::new(VcfWriteExec::new(
             input,
             self.file_path.clone(),
@@ -929,6 +936,7 @@ impl TableProvider for VcfTableProvider {
             format_fields,
             sample_names,
             self.coordinate_system_zero_based,
+            source_metadata,
         )))
     }
 

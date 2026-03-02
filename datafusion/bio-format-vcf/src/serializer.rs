@@ -35,6 +35,58 @@ impl StringColumnRef<'_> {
     }
 }
 
+/// Formats a float value for VCF output, matching C's `%g` formatting
+/// (6 significant digits, trailing zeros trimmed).
+///
+/// - Fixed notation when the exponent is in [-4, 6) (matching C `%g` rules)
+/// - Scientific notation otherwise
+/// - Trailing zeros and unnecessary decimal points removed
+/// - `NaN` → `"."` (VCF missing value)
+fn format_vcf_float(v: f64) -> String {
+    if v.is_nan() {
+        return ".".to_string();
+    }
+    // Use Rust's {:.*e} to get scientific form, then decide notation
+    // C %g uses 6 significant digits by default
+    let formatted = format!("{v:.5e}"); // 5 digits after point = 6 sig digits
+    // Parse the exponent
+    let (mantissa_str, exp_str) = formatted.split_once('e').unwrap();
+    let exp: i32 = exp_str.parse().unwrap();
+
+    if (-4..6).contains(&exp) {
+        // Use fixed notation with enough decimal places for 6 sig digits
+        let decimal_places = if exp >= 0 {
+            let dp = 5 - exp; // 6 sig digits - (exp+1) integer digits
+            if dp < 0 { 0 } else { dp as usize }
+        } else {
+            (5 - exp) as usize // more decimals needed for small numbers
+        };
+        let fixed = format!("{v:.decimal_places$}");
+        // Trim trailing zeros after decimal point
+        if fixed.contains('.') {
+            let trimmed = fixed.trim_end_matches('0').trim_end_matches('.');
+            if trimmed.is_empty() || trimmed == "-" {
+                "0".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            fixed
+        }
+    } else {
+        // Scientific notation: reconstruct from parsed parts
+        let mantissa_trimmed = mantissa_str.trim_end_matches('0').trim_end_matches('.');
+        if exp >= 0 {
+            format!("{mantissa_trimmed}e+{exp:02}")
+        } else {
+            format!(
+                "{mantissa_trimmed}e-{exp_abs:02}",
+                exp_abs = exp.unsigned_abs()
+            )
+        }
+    }
+}
+
 /// A serialized VCF record as a string line
 pub struct VcfRecordLine {
     /// The VCF line (without newline)
@@ -309,11 +361,11 @@ fn extract_info_value_string(array: &dyn Array, row: usize) -> Result<Option<Str
     }
 
     if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(Some(format!("{:.6}", arr.value(row))));
+        return Ok(Some(format_vcf_float(arr.value(row) as f64)));
     }
 
     if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(Some(format!("{:.6}", arr.value(row))));
+        return Ok(Some(format_vcf_float(arr.value(row))));
     }
 
     if let Some(arr) = array.as_any().downcast_ref::<BooleanArray>() {
@@ -371,7 +423,15 @@ fn extract_list_values(array: &dyn Array) -> Result<Vec<String>> {
             if array.is_null(i) {
                 values.push(".".to_string());
             } else {
-                values.push(format!("{:.6}", float_arr.value(i)));
+                values.push(format_vcf_float(float_arr.value(i) as f64));
+            }
+        }
+    } else if let Some(float_arr) = array.as_any().downcast_ref::<Float64Array>() {
+        for i in 0..len {
+            if array.is_null(i) {
+                values.push(".".to_string());
+            } else {
+                values.push(format_vcf_float(float_arr.value(i)));
             }
         }
     } else if let Some(str_arr) = array.as_any().downcast_ref::<StringArray>() {
@@ -421,56 +481,61 @@ fn build_format_and_samples(
     // only a subset (including one sample) is selected for output.
     let has_nested_genotypes = batch.schema().column_with_name("genotypes").is_some();
     if has_nested_genotypes {
-        let samples = build_nested_multisample_values(batch, row, format_fields, sample_names)?;
-        return Ok((format_fields.join(":"), samples));
+        let field_values =
+            collect_nested_multisample_values(batch, row, format_fields, sample_names)?;
+        let (format_str, samples) =
+            filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
+        return Ok((format_str, samples));
     }
 
     let format_columns = format_columns.ok_or_else(|| {
         DataFusionError::Execution("Missing single-sample FORMAT column mapping".to_string())
     })?;
 
-    // Build FORMAT string
-    let format_str = format_fields.join(":");
-
-    // Build sample values
-    let mut samples = Vec::with_capacity(sample_names.len());
-
-    for sample_name in sample_names {
-        let mut sample_values = Vec::with_capacity(format_fields.len());
-
-        for format_field in format_fields {
+    // Collect values in field × sample order for filtering
+    let mut field_values: Vec<Vec<String>> = Vec::with_capacity(format_fields.len());
+    for format_field in format_fields {
+        let mut sample_vals = Vec::with_capacity(sample_names.len());
+        for sample_name in sample_names {
             let key = (sample_name.clone(), format_field.clone());
             let value = match format_columns.get(&key) {
                 Some(&col_idx) => {
                     let column = batch.column(col_idx);
                     extract_sample_value_string(column.as_ref(), row)?
                 }
-                None => ".".to_string(), // Column not found, use missing value
+                None => ".".to_string(),
             };
-            sample_values.push(value);
+            sample_vals.push(value);
         }
-
-        samples.push(sample_values.join(":"));
+        field_values.push(sample_vals);
     }
 
+    let (format_str, samples) =
+        filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
     Ok((format_str, samples))
 }
 
-fn build_nested_multisample_values(
+/// Collects per-field, per-sample values from the nested genotypes column.
+/// Returns a 2D structure: `values[field_idx][sample_idx]`.
+fn collect_nested_multisample_values(
     batch: &RecordBatch,
     row: usize,
     format_fields: &[String],
     sample_names: &[String],
-) -> Result<Vec<String>> {
+) -> Result<Vec<Vec<String>>> {
     let genotypes_idx = batch.schema().index_of("genotypes").map_err(|_| {
         DataFusionError::Execution(
             "Multisample output requires a 'genotypes' column in nested schema".to_string(),
         )
     })?;
     let genotypes_col = batch.column(genotypes_idx);
+    let num_samples = sample_names.len();
+
     if genotypes_col.is_null(row) {
-        let missing = vec!["."; format_fields.len()].join(":");
-        return Ok(vec![missing; sample_names.len()]);
+        return Ok(vec![
+            vec![".".to_string(); num_samples];
+            format_fields.len()
+        ]);
     }
 
     // Columnar layout: genotypes is Struct<GT: List<Utf8>, GQ: List<Int32>, ...>
@@ -483,23 +548,57 @@ fn build_nested_multisample_values(
             )
         })?;
 
-    let num_samples = sample_names.len();
-    let mut samples = Vec::with_capacity(num_samples);
-
-    for sample_idx in 0..num_samples {
-        let mut values = Vec::with_capacity(format_fields.len());
-        for format_field in format_fields {
+    let mut field_values = Vec::with_capacity(format_fields.len());
+    for format_field in format_fields {
+        let mut sample_vals = Vec::with_capacity(num_samples);
+        for sample_idx in 0..num_samples {
             let val = if let Some(list_col) = genotypes_struct.column_by_name(format_field) {
-                // Each field is a List<T>; extract the value at [row][sample_idx]
                 extract_list_element_as_string(list_col.as_ref(), row, sample_idx)?
             } else {
                 ".".to_string()
             };
-            values.push(val);
+            sample_vals.push(val);
         }
-        samples.push(values.join(":"));
+        field_values.push(sample_vals);
     }
-    Ok(samples)
+    Ok(field_values)
+}
+
+/// Filters out FORMAT fields where ALL samples have missing values for this row.
+/// Returns the filtered FORMAT string and filtered sample value strings.
+fn filter_all_missing_format_fields(
+    format_fields: &[String],
+    field_values: &[Vec<String>],
+    num_samples: usize,
+) -> (String, Vec<String>) {
+    // Identify which fields have at least one non-missing sample value
+    let keep: Vec<bool> = field_values
+        .iter()
+        .map(|sample_vals| sample_vals.iter().any(|v| v != "."))
+        .collect();
+
+    // Build filtered FORMAT string
+    let filtered_fields: Vec<&str> = format_fields
+        .iter()
+        .zip(keep.iter())
+        .filter(|&(_, &k)| k)
+        .map(|(f, _)| f.as_str())
+        .collect();
+    let format_str = filtered_fields.join(":");
+
+    // Build filtered sample strings
+    let mut samples = Vec::with_capacity(num_samples);
+    for sample_idx in 0..num_samples {
+        let vals: Vec<&str> = field_values
+            .iter()
+            .zip(keep.iter())
+            .filter(|&(_, &k)| k)
+            .map(|(sv, _)| sv[sample_idx].as_str())
+            .collect();
+        samples.push(vals.join(":"));
+    }
+
+    (format_str, samples)
 }
 
 /// Extracts a single element from a list column at [row][element_idx] as a string.
@@ -544,11 +643,11 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
     }
 
     if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(format!("{:.6}", arr.value(row)));
+        return Ok(format_vcf_float(arr.value(row) as f64));
     }
 
     if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(format!("{:.6}", arr.value(row)));
+        return Ok(format_vcf_float(arr.value(row)));
     }
 
     // Handle Utf8 (StringArray), LargeUtf8 (LargeStringArray), and Utf8View (StringViewArray)
@@ -965,5 +1064,142 @@ mod tests {
                 .line
                 .starts_with("chr1\t100\trs456\tC\tT\t45.00\tPASS")
         );
+    }
+
+    #[test]
+    fn test_format_vcf_float() {
+        // 6 significant digits, trailing zeros trimmed
+        assert_eq!(format_vcf_float(0.000312305), "0.000312305");
+        assert_eq!(format_vcf_float(0.5), "0.5");
+        assert_eq!(format_vcf_float(1.0), "1");
+        assert_eq!(format_vcf_float(0.0), "0");
+        assert_eq!(format_vcf_float(1234.57), "1234.57");
+        assert_eq!(format_vcf_float(0.1), "0.1");
+        assert_eq!(format_vcf_float(1e-5), "1e-05");
+        assert_eq!(format_vcf_float(1e7), "1e+07");
+        assert_eq!(format_vcf_float(f64::NAN), ".");
+        // Edge cases
+        assert_eq!(format_vcf_float(100.0), "100");
+        assert_eq!(format_vcf_float(0.001), "0.001");
+        assert_eq!(format_vcf_float(999999.0), "999999");
+        assert_eq!(format_vcf_float(1e-4), "0.0001");
+        assert_eq!(format_vcf_float(1e6), "1e+06");
+        assert_eq!(format_vcf_float(-0.5), "-0.5");
+        assert_eq!(format_vcf_float(123456.0), "123456");
+    }
+
+    #[test]
+    fn test_per_row_variable_format_omits_all_missing_fields() {
+        // Multi-sample with GT, GQ, PL where PL is all-missing for all samples
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(
+                "genotypes",
+                DataType::Struct(
+                    vec![
+                        Field::new(
+                            "GT",
+                            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                            true,
+                        ),
+                        Field::new(
+                            "GQ",
+                            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                            true,
+                        ),
+                        Field::new(
+                            "PL",
+                            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                            true,
+                        ),
+                    ]
+                    .into(),
+                ),
+                true,
+            ),
+        ]));
+
+        // GT = ["0/1", "1/1"], GQ = [30, 40], PL = [null, null] (all missing)
+        let mut gt_builder = ListBuilder::new(StringBuilder::new());
+        gt_builder.values().append_value("0/1");
+        gt_builder.values().append_value("1/1");
+        gt_builder.append(true);
+
+        let mut gq_builder = ListBuilder::new(Int32Builder::new());
+        gq_builder.values().append_value(30);
+        gq_builder.values().append_value(40);
+        gq_builder.append(true);
+
+        // PL: all null values for both samples
+        let mut pl_builder = ListBuilder::new(StringBuilder::new());
+        pl_builder.values().append_null();
+        pl_builder.values().append_null();
+        pl_builder.append(true);
+
+        let genotypes = Arc::new(
+            StructArray::try_new(
+                vec![
+                    Field::new(
+                        "GT",
+                        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                        true,
+                    ),
+                    Field::new(
+                        "GQ",
+                        DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                        true,
+                    ),
+                    Field::new(
+                        "PL",
+                        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                        true,
+                    ),
+                ]
+                .into(),
+                vec![
+                    Arc::new(gt_builder.finish()) as Arc<dyn datafusion::arrow::array::Array>,
+                    Arc::new(gq_builder.finish()) as Arc<dyn datafusion::arrow::array::Array>,
+                    Arc::new(pl_builder.finish()) as Arc<dyn datafusion::arrow::array::Array>,
+                ],
+                None,
+            )
+            .unwrap(),
+        );
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![Some(".")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                genotypes,
+            ],
+        )
+        .unwrap();
+
+        let sample_names = vec!["S1".to_string(), "S2".to_string()];
+        let format_fields = vec!["GT".to_string(), "GQ".to_string(), "PL".to_string()];
+
+        let lines = batch_to_vcf_lines(&batch, &[], &format_fields, &sample_names, true).unwrap();
+        let line = &lines[0].line;
+        let parts: Vec<&str> = line.split('\t').collect();
+
+        // FORMAT should be GT:GQ (PL omitted because all samples have ".")
+        assert_eq!(parts[8], "GT:GQ");
+        // Sample values should only have 2 components
+        assert_eq!(parts[9], "0/1:30");
+        assert_eq!(parts[10], "1/1:40");
     }
 }

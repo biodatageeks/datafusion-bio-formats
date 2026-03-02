@@ -925,6 +925,7 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
                 None
             };
 
+            let is_ploidy_aware = replacement == ".";
             for j in 0..gt_strings.len() {
                 let keep = mask_bools
                     .as_ref()
@@ -935,6 +936,14 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
                     } else {
                         builder.values().append_value(gt_strings.value(j));
                     }
+                } else if is_ploidy_aware {
+                    // '.' means "set to missing" — produce ploidy-aware missing
+                    let original = if gt_strings.is_null(j) {
+                        "./.".to_string()
+                    } else {
+                        make_ploidy_aware_missing(gt_strings.value(j))
+                    };
+                    builder.values().append_value(&original);
                 } else {
                     builder.values().append_value(&replacement);
                 }
@@ -942,6 +951,34 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
             builder.append(true);
         }
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))
+    }
+}
+
+/// Creates a ploidy-aware missing GT string from the original GT value.
+///
+/// Parses the original GT to determine ploidy (number of alleles) and
+/// phase separator (`/` or `|`), then returns a missing string with the
+/// same structure:
+/// - `"0/1"` → `"./."`
+/// - `"0|1"` → `".|."`
+/// - `"0"` → `"."`
+/// - `"0/1/2"` → `"././."`
+fn make_ploidy_aware_missing(original_gt: &str) -> String {
+    if original_gt.is_empty() || original_gt == "." {
+        return "./.".to_string();
+    }
+
+    // Determine separator: '|' for phased, '/' for unphased (default)
+    let sep = if original_gt.contains('|') { '|' } else { '/' };
+
+    // Count alleles by splitting on both possible separators
+    let allele_count = original_gt.split(['/', '|']).count();
+
+    if allele_count <= 1 {
+        ".".to_string()
+    } else {
+        let parts: Vec<&str> = std::iter::repeat_n(".", allele_count).collect();
+        parts.join(&sep.to_string())
     }
 }
 
@@ -1571,5 +1608,41 @@ mod tests {
         assert_eq!(count_alt_alleles(""), 0);
         assert_eq!(count_alt_alleles("."), 0);
         assert_eq!(count_alt_alleles("  A|T  "), 2);
+    }
+
+    #[test]
+    fn test_make_ploidy_aware_missing() {
+        assert_eq!(make_ploidy_aware_missing("0/1"), "./.");
+        assert_eq!(make_ploidy_aware_missing("0|1"), ".|.");
+        assert_eq!(make_ploidy_aware_missing("0"), ".");
+        assert_eq!(make_ploidy_aware_missing("0/1/2"), "././.");
+        assert_eq!(make_ploidy_aware_missing("./."), "./.");
+        assert_eq!(make_ploidy_aware_missing("."), "./.");
+        assert_eq!(make_ploidy_aware_missing(""), "./.");
+        assert_eq!(make_ploidy_aware_missing("0|1|2"), ".|.|.");
+    }
+
+    #[tokio::test]
+    async fn test_vcf_set_gts_ploidy_aware_dot() {
+        let ctx = make_test_ctx().await;
+        // Use '.' replacement — should produce ploidy-aware missing
+        let df = ctx
+            .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15), '.') as masked FROM test_data"#)
+            .await
+            .unwrap();
+        let batches = df.collect().await.unwrap();
+        assert_eq!(batches.len(), 1);
+        let list = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        // Row 0: GQ=[30,20,10], gte(15)=[T,T,F], GT=["0/1","1/1","0/0"]
+        // keep 0/1, keep 1/1, replace 0/0 → "./.""  (diploid unphased)
+        let inner0 = list.value(0);
+        let strings0 = inner0.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(strings0.value(0), "0/1");
+        assert_eq!(strings0.value(1), "1/1");
+        assert_eq!(strings0.value(2), "./."); // ploidy-aware, not literal "."
     }
 }

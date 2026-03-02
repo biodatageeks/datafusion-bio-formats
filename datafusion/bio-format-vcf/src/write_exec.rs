@@ -20,6 +20,7 @@ use datafusion::physical_plan::{
 use futures::StreamExt;
 use log::debug;
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -45,6 +46,9 @@ pub struct VcfWriteExec {
     sample_names: Vec<String>,
     /// Whether the input coordinates are 0-based (need +1 for VCF output)
     coordinate_system_zero_based: bool,
+    /// Schema-level metadata from the source VCF table provider (contigs, filters, etc.)
+    /// that may be lost during DataFusion query plan projections.
+    source_metadata: Option<HashMap<String, String>>,
     /// Cached plan properties
     cache: PlanProperties,
 }
@@ -74,6 +78,7 @@ impl VcfWriteExec {
         format_fields: Vec<String>,
         sample_names: Vec<String>,
         coordinate_system_zero_based: bool,
+        source_metadata: Option<HashMap<String, String>>,
     ) -> Self {
         let compression =
             compression.unwrap_or_else(|| VcfCompressionType::from_path(&output_path));
@@ -100,6 +105,7 @@ impl VcfWriteExec {
             format_fields,
             sample_names,
             coordinate_system_zero_based,
+            source_metadata,
             cache,
         }
     }
@@ -184,6 +190,7 @@ impl ExecutionPlan for VcfWriteExec {
             self.format_fields.clone(),
             self.sample_names.clone(),
             self.coordinate_system_zero_based,
+            self.source_metadata.clone(),
         )))
     }
 
@@ -203,6 +210,7 @@ impl ExecutionPlan for VcfWriteExec {
         let format_fields = self.format_fields.clone();
         let sample_names = self.sample_names.clone();
         let coordinate_system_zero_based = self.coordinate_system_zero_based;
+        let source_metadata = self.source_metadata.clone();
         let input = self.input.execute(0, context)?;
         let input_schema = self.input.schema();
         let output_schema = self.schema();
@@ -218,6 +226,7 @@ impl ExecutionPlan for VcfWriteExec {
                 sample_names,
                 coordinate_system_zero_based,
                 output_schema,
+                source_metadata,
             )
             .await
         });
@@ -276,6 +285,23 @@ fn infer_sample_names_from_batch(batch: &RecordBatch) -> Vec<String> {
     Vec::new()
 }
 
+/// Merges source metadata into the input schema. Source metadata provides
+/// defaults; input schema metadata wins on conflict.
+fn merge_metadata_into_schema(
+    input_schema: &SchemaRef,
+    source_metadata: &Option<HashMap<String, String>>,
+) -> SchemaRef {
+    let Some(source) = source_metadata else {
+        return input_schema.clone();
+    };
+    let mut merged = source.clone();
+    // Input schema metadata wins on conflict
+    for (k, v) in input_schema.metadata() {
+        merged.insert(k.clone(), v.clone());
+    }
+    Arc::new(input_schema.as_ref().clone().with_metadata(merged))
+}
+
 /// Writes records from a stream to a VCF file
 #[allow(clippy::too_many_arguments)]
 async fn write_vcf_stream(
@@ -288,8 +314,12 @@ async fn write_vcf_stream(
     mut sample_names: Vec<String>,
     coordinate_system_zero_based: bool,
     output_schema: SchemaRef,
+    source_metadata: Option<HashMap<String, String>>,
 ) -> Result<RecordBatch> {
     let mut writer = VcfLocalWriter::with_compression(&output_path, compression)?;
+
+    // Merge source metadata (contigs, filters, etc.) into the schema used for header writing.
+    let header_schema = merge_metadata_into_schema(&input_schema, &source_metadata);
 
     let mut total_count: u64 = 0;
 
@@ -299,7 +329,7 @@ async fn write_vcf_stream(
         if let Some(first_batch_result) = input.next().await {
             let first_batch = first_batch_result?;
             sample_names = infer_sample_names_from_batch(&first_batch);
-            writer.write_header(&input_schema, &info_fields, &format_fields, &sample_names)?;
+            writer.write_header(&header_schema, &info_fields, &format_fields, &sample_names)?;
 
             if first_batch.num_rows() > 0 {
                 let records = batch_to_vcf_lines(
@@ -314,11 +344,11 @@ async fn write_vcf_stream(
             }
         } else {
             // Empty result — write header with no samples
-            writer.write_header(&input_schema, &info_fields, &format_fields, &sample_names)?;
+            writer.write_header(&header_schema, &info_fields, &format_fields, &sample_names)?;
         }
     } else {
         // Standard path: write header immediately
-        writer.write_header(&input_schema, &info_fields, &format_fields, &sample_names)?;
+        writer.write_header(&header_schema, &info_fields, &format_fields, &sample_names)?;
     }
 
     // Continue processing remaining batches
@@ -381,6 +411,7 @@ mod tests {
             vec![],
             vec![],
             true,
+            None,
         );
 
         assert_eq!(write_exec.output_path(), output_path);
@@ -403,6 +434,7 @@ mod tests {
             vec![],
             vec![],
             true,
+            None,
         );
         assert_eq!(bgzf_exec.compression(), VcfCompressionType::Bgzf);
 
@@ -417,7 +449,75 @@ mod tests {
             vec![],
             vec![],
             true,
+            None,
         );
         assert_eq!(gzip_exec.compression(), VcfCompressionType::Gzip);
+    }
+
+    #[test]
+    fn test_merge_metadata_into_schema() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "chrom",
+            DataType::Utf8,
+            false,
+        )]));
+
+        // No source metadata → schema unchanged
+        let result = merge_metadata_into_schema(&schema, &None);
+        assert!(result.metadata().is_empty());
+
+        // Source metadata merged into empty schema metadata
+        let mut source = HashMap::new();
+        source.insert("bio.vcf.contigs".to_string(), "[\"chr1\"]".to_string());
+        source.insert("bio.vcf.filters".to_string(), "[\"PASS\"]".to_string());
+        let result = merge_metadata_into_schema(&schema, &Some(source.clone()));
+        assert_eq!(
+            result.metadata().get("bio.vcf.contigs").unwrap(),
+            "[\"chr1\"]"
+        );
+        assert_eq!(
+            result.metadata().get("bio.vcf.filters").unwrap(),
+            "[\"PASS\"]"
+        );
+
+        // Input schema metadata wins on conflict
+        let mut input_meta = HashMap::new();
+        input_meta.insert("bio.vcf.contigs".to_string(), "[\"chr2\"]".to_string());
+        let schema_with_meta = Arc::new(schema.as_ref().clone().with_metadata(input_meta));
+        let result = merge_metadata_into_schema(&schema_with_meta, &Some(source));
+        assert_eq!(
+            result.metadata().get("bio.vcf.contigs").unwrap(),
+            "[\"chr2\"]"
+        );
+        assert_eq!(
+            result.metadata().get("bio.vcf.filters").unwrap(),
+            "[\"PASS\"]"
+        );
+    }
+
+    #[test]
+    fn test_source_metadata_threaded_through_with_new_children() {
+        let schema = create_test_schema();
+        let mut source_meta = HashMap::new();
+        source_meta.insert("bio.vcf.contigs".to_string(), "[\"chr1\"]".to_string());
+
+        let write_exec = Arc::new(VcfWriteExec::new(
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                schema.clone(),
+            )),
+            "/tmp/test.vcf".to_string(),
+            None,
+            vec![],
+            vec![],
+            vec![],
+            true,
+            Some(source_meta.clone()),
+        ));
+
+        // with_new_children should preserve source_metadata
+        let new_child = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema));
+        let rebuilt = write_exec.with_new_children(vec![new_child]).unwrap();
+        let rebuilt_exec = rebuilt.as_any().downcast_ref::<VcfWriteExec>().unwrap();
+        assert_eq!(rebuilt_exec.source_metadata, Some(source_meta));
     }
 }
