@@ -484,7 +484,7 @@ fn build_format_and_samples(
         let field_values =
             collect_nested_multisample_values(batch, row, format_fields, sample_names)?;
         let (format_str, samples) =
-            filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
+            assemble_format_and_samples(format_fields, &field_values, sample_names.len());
         return Ok((format_str, samples));
     }
 
@@ -511,7 +511,7 @@ fn build_format_and_samples(
     }
 
     let (format_str, samples) =
-        filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
+        assemble_format_and_samples(format_fields, &field_values, sample_names.len());
     Ok((format_str, samples))
 }
 
@@ -564,40 +564,21 @@ fn collect_nested_multisample_values(
     Ok(field_values)
 }
 
-/// Filters out FORMAT fields where ALL samples have missing values for this row.
-/// Returns the filtered FORMAT string and filtered sample value strings.
-fn filter_all_missing_format_fields(
+/// Assembles FORMAT string and per-sample value strings from field × sample values.
+fn assemble_format_and_samples(
     format_fields: &[String],
     field_values: &[Vec<String>],
     num_samples: usize,
 ) -> (String, Vec<String>) {
-    // Identify which fields have at least one non-missing sample value
-    let keep: Vec<bool> = field_values
-        .iter()
-        .map(|sample_vals| sample_vals.iter().any(|v| v != "."))
-        .collect();
-
-    // Build filtered FORMAT string
-    let filtered_fields: Vec<&str> = format_fields
-        .iter()
-        .zip(keep.iter())
-        .filter(|&(_, &k)| k)
-        .map(|(f, _)| f.as_str())
-        .collect();
-    let format_str = filtered_fields.join(":");
-
-    // Build filtered sample strings
+    let format_str = format_fields.join(":");
     let mut samples = Vec::with_capacity(num_samples);
     for sample_idx in 0..num_samples {
         let vals: Vec<&str> = field_values
             .iter()
-            .zip(keep.iter())
-            .filter(|&(_, &k)| k)
-            .map(|(sv, _)| sv[sample_idx].as_str())
+            .map(|sv| sv[sample_idx].as_str())
             .collect();
         samples.push(vals.join(":"));
     }
-
     (format_str, samples)
 }
 
@@ -1089,8 +1070,9 @@ mod tests {
     }
 
     #[test]
-    fn test_per_row_variable_format_omits_all_missing_fields() {
+    fn test_format_preserves_all_missing_fields() {
         // Multi-sample with GT, GQ, PL where PL is all-missing for all samples
+        // All FORMAT fields should be preserved (matching bcftools behavior)
         let schema = Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, false),
             Field::new("start", DataType::UInt32, false),
@@ -1196,10 +1178,10 @@ mod tests {
         let line = &lines[0].line;
         let parts: Vec<&str> = line.split('\t').collect();
 
-        // FORMAT should be GT:GQ (PL omitted because all samples have ".")
-        assert_eq!(parts[8], "GT:GQ");
-        // Sample values should only have 2 components
-        assert_eq!(parts[9], "0/1:30");
-        assert_eq!(parts[10], "1/1:40");
+        // FORMAT should preserve all fields including all-missing PL
+        assert_eq!(parts[8], "GT:GQ:PL");
+        // Sample values should have 3 components with PL as "."
+        assert_eq!(parts[9], "0/1:30:.");
+        assert_eq!(parts[10], "1/1:40:.");
     }
 }
