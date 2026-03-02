@@ -667,6 +667,46 @@ impl VcfTableProvider {
             contig_lengths: Vec::new(),
         }
     }
+
+    /// Creates a write-mode VCF table provider with source metadata for header propagation.
+    ///
+    /// Use this when the output schema (from a query plan) lacks header-level metadata
+    /// (contigs, filters, file format version, ALT definitions) that should appear in the
+    /// written VCF header. Pass the **source** VCF table provider's schema metadata
+    /// (`source_provider.schema().metadata()`) as `source_metadata`.
+    ///
+    /// The source metadata is merged into the output schema — if both have the same key,
+    /// the output schema's value takes priority.
+    pub fn new_for_write_with_source_metadata(
+        file_path: String,
+        schema: SchemaRef,
+        info_fields: Vec<String>,
+        format_fields: Vec<String>,
+        sample_names: Vec<String>,
+        coordinate_system_zero_based: bool,
+        source_metadata: std::collections::HashMap<String, String>,
+    ) -> Self {
+        // Merge source metadata into the schema (schema metadata wins on conflict)
+        let mut merged = source_metadata;
+        for (k, v) in schema.metadata() {
+            merged.insert(k.clone(), v.clone());
+        }
+        let schema_with_meta = Arc::new(schema.as_ref().clone().with_metadata(merged));
+
+        Self {
+            file_path,
+            info_fields: Some(info_fields),
+            format_fields: Some(format_fields),
+            schema: schema_with_meta,
+            object_storage_options: None,
+            coordinate_system_zero_based,
+            sample_names: sample_names.clone(),
+            source_sample_names: sample_names,
+            index_path: None,
+            contig_names: Vec::new(),
+            contig_lengths: Vec::new(),
+        }
+    }
 }
 
 #[async_trait]
@@ -921,11 +961,22 @@ impl TableProvider for VcfTableProvider {
             Self::resolve_sample_names_from_schema(&input_schema)
         };
 
-        // Capture source schema metadata (contigs, filters, etc.) which may be
-        // lost during DataFusion query plan projections.
+        // Capture schema metadata (contigs, filters, etc.) for the header writer.
+        // Priority: self.schema (output table) > input plan schema (source query).
+        // DataFusion query plan projections may strip schema-level metadata,
+        // so we check both and merge (self wins on conflict).
         let source_metadata = {
-            let meta = self.schema.metadata().clone();
-            if meta.is_empty() { None } else { Some(meta) }
+            let input_meta = input_schema.metadata();
+            let self_meta = self.schema.metadata();
+            let mut merged = input_meta.clone();
+            for (k, v) in self_meta {
+                merged.insert(k.clone(), v.clone());
+            }
+            if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            }
         };
 
         Ok(Arc::new(VcfWriteExec::new(
