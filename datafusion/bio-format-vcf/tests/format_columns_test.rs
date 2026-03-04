@@ -328,6 +328,37 @@ async fn test_multisample_single_selected_stays_nested() -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// Regression test: VCF files where FORMAT/AD is declared with Number=. (Unknown)
+/// instead of Number=R (ReferenceAlternateBases) should still be readable.
+/// noodles strict validation rejects this as FormatDefinitionMismatch.
+#[tokio::test]
+async fn test_read_vcf_with_ad_number_dot() -> Result<(), Box<dyn std::error::Error>> {
+    let table = VcfTableProvider::new(
+        "tests/head_106667_tail_6.vcf".to_string(),
+        Some(vec![]),
+        Some(vec![
+            "GT".to_string(),
+            "AD".to_string(),
+            "DP".to_string(),
+            "GQ".to_string(),
+            "PL".to_string(),
+        ]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("vcf", Arc::new(table))?;
+
+    let df = ctx.sql("SELECT chrom, start, genotypes FROM vcf").await?;
+    let results = df.collect().await?;
+
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 6, "expected 6 data rows");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_missing_requested_samples_are_skipped() -> Result<(), Box<dyn std::error::Error>> {
     let file_path = create_test_vcf_file("multi_missing_requested", SAMPLE_VCF_MULTI).await?;
