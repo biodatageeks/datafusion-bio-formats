@@ -861,19 +861,11 @@ struct VcfSetGtsUdf {
 impl VcfSetGtsUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::one_of(
+            signature: Signature::exact(
                 vec![
-                    // 3-arg: vcf_set_gts(gt_list, mask, replacement)
-                    Exact(vec![
-                        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                        DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
-                        DataType::Utf8,
-                    ]),
-                    // 2-arg: vcf_set_gts(gt_list, mask) — defaults to "./."
-                    Exact(vec![
-                        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                        DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
-                    ]),
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
+                    DataType::Utf8,
                 ],
                 Volatility::Immutable,
             ),
@@ -905,20 +897,12 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let gt_arr = args.args[0].clone().into_array(1)?;
         let mask_arr = args.args[1].clone().into_array(1)?;
-        // 2-arg form: ploidy-aware missing (replacement=None)
-        // 3-arg form: literal replacement (always used as-is)
-        let explicit_replacement = if args.args.len() > 2 {
-            let rep_arr = args.args[2].clone().into_array(1)?;
-            Some(
-                rep_arr
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .map(|a| a.value(0).to_string())
-                    .unwrap_or_else(|| "./.".to_string()),
-            )
-        } else {
-            None
-        };
+        let rep_arr = args.args[2].clone().into_array(1)?;
+        let replacement = rep_arr
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .map(|a| a.value(0).to_string())
+            .unwrap_or_else(|| "./.".to_string());
 
         let gt_list = gt_arr.as_list::<i32>();
         let mask_list = mask_arr.as_list::<i32>();
@@ -959,54 +943,13 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
                     } else {
                         builder.values().append_value(gt_strings.value(j));
                     }
-                } else if let Some(ref rep) = explicit_replacement {
-                    // 3-arg form: use literal replacement as-is
-                    builder.values().append_value(rep);
                 } else {
-                    // 2-arg form: ploidy-aware missing
-                    let missing = if gt_strings.is_null(j) {
-                        "./.".to_string()
-                    } else {
-                        make_ploidy_aware_missing(gt_strings.value(j))
-                    };
-                    builder.values().append_value(&missing);
+                    builder.values().append_value(&replacement);
                 }
             }
             builder.append(true);
         }
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))
-    }
-}
-
-/// Creates a ploidy-aware missing GT string from the original GT value.
-///
-/// Parses the original GT to determine ploidy (number of alleles) and
-/// phase separator (`/` or `|`), then returns a missing string with the
-/// same structure:
-/// - `"0/1"` → `"./."`
-/// - `"0|1"` → `".|."`
-/// - `"0"` → `"."`
-/// - `"0/1/2"` → `"././."`
-fn make_ploidy_aware_missing(original_gt: &str) -> String {
-    if original_gt.is_empty() {
-        return "./.".to_string();
-    }
-    // A single "." is haploid missing — preserve it as-is
-    if original_gt == "." {
-        return ".".to_string();
-    }
-
-    // Determine separator: '|' for phased, '/' for unphased (default)
-    let sep = if original_gt.contains('|') { '|' } else { '/' };
-
-    // Count alleles by splitting on both possible separators
-    let allele_count = original_gt.split(['/', '|']).count();
-
-    if allele_count <= 1 {
-        ".".to_string()
-    } else {
-        let parts: Vec<&str> = std::iter::repeat_n(".", allele_count).collect();
-        parts.join(&sep.to_string())
     }
 }
 
@@ -1026,7 +969,7 @@ pub fn vcf_set_gts_udf() -> ScalarUDF {
 /// - `list_gte(List<Int32|Float32>, T) -> List<Boolean>` — element-wise >=
 /// - `list_lte(List<Int32|Float32>, T) -> List<Boolean>` — element-wise <=
 /// - `list_and(List<Boolean>, List<Boolean>) -> List<Boolean>` — element-wise AND
-/// - `vcf_set_gts(List<Utf8>, List<Boolean> [, Utf8]) -> List<Utf8>` — replace GT where mask is false (default: "./.")
+/// - `vcf_set_gts(List<Utf8>, List<Boolean>, Utf8) -> List<Utf8>` — replace GT where mask is false with the given replacement string
 /// - `vcf_an(List<Utf8>) -> Int32` — allele number (count of called alleles)
 /// - `vcf_ac(List<Utf8> [, Utf8]) -> List<Int32>` — per-ALT-allele call count (optional ALT column for correct cardinality)
 /// - `vcf_af(List<Utf8> [, Utf8]) -> List<Float64>` — per-ALT-allele frequency (optional ALT column for correct cardinality)
@@ -1160,28 +1103,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_vcf_set_gts() {
-        let ctx = make_test_ctx().await;
-        let df = ctx
-            .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15)) as masked FROM test_data"#)
-            .await
-            .unwrap();
-        let batches = df.collect().await.unwrap();
-        assert_eq!(batches.len(), 1);
-        let list = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
-        // Row 0: GQ=[30,20,10], gte(15)=[T,T,F] → GT=["0/1","1/1","./."]
-        let inner0 = list.value(0);
-        let strings0 = inner0.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(strings0.value(0), "0/1");
-        assert_eq!(strings0.value(1), "1/1");
-        assert_eq!(strings0.value(2), "./.");
-    }
-
-    #[tokio::test]
-    async fn test_vcf_set_gts_custom_replacement() {
         let ctx = make_test_ctx().await;
         let df = ctx
             .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15), './.') as masked FROM test_data"#)
@@ -1640,46 +1561,9 @@ mod tests {
         assert_eq!(count_alt_alleles("  A|T  "), 2);
     }
 
-    #[test]
-    fn test_make_ploidy_aware_missing() {
-        assert_eq!(make_ploidy_aware_missing("0/1"), "./.");
-        assert_eq!(make_ploidy_aware_missing("0|1"), ".|.");
-        assert_eq!(make_ploidy_aware_missing("0"), ".");
-        assert_eq!(make_ploidy_aware_missing("0/1/2"), "././.");
-        assert_eq!(make_ploidy_aware_missing("./."), "./.");
-        assert_eq!(make_ploidy_aware_missing("."), ".");
-        assert_eq!(make_ploidy_aware_missing(""), "./.");
-        assert_eq!(make_ploidy_aware_missing("0|1|2"), ".|.|.");
-    }
-
     #[tokio::test]
-    async fn test_vcf_set_gts_ploidy_aware_2arg() {
+    async fn test_vcf_set_gts_dot_replacement() {
         let ctx = make_test_ctx().await;
-        // 2-arg form — should produce ploidy-aware missing
-        let df = ctx
-            .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15)) as masked FROM test_data"#)
-            .await
-            .unwrap();
-        let batches = df.collect().await.unwrap();
-        assert_eq!(batches.len(), 1);
-        let list = batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
-        // Row 0: GQ=[30,20,10], gte(15)=[T,T,F], GT=["0/1","1/1","0/0"]
-        // keep 0/1, keep 1/1, replace 0/0 → "./." (diploid unphased)
-        let inner0 = list.value(0);
-        let strings0 = inner0.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(strings0.value(0), "0/1");
-        assert_eq!(strings0.value(1), "1/1");
-        assert_eq!(strings0.value(2), "./."); // ploidy-aware, not literal "."
-    }
-
-    #[tokio::test]
-    async fn test_vcf_set_gts_explicit_dot_is_literal() {
-        let ctx = make_test_ctx().await;
-        // 3-arg form with '.' — should be treated literally (backward compatible)
         let df = ctx
             .sql(r#"SELECT vcf_set_gts("GT", list_gte("GQ", 15), '.') as masked FROM test_data"#)
             .await
@@ -1697,6 +1581,6 @@ mod tests {
         let strings0 = inner0.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(strings0.value(0), "0/1");
         assert_eq!(strings0.value(1), "1/1");
-        assert_eq!(strings0.value(2), "."); // literal ".", NOT ploidy-aware
+        assert_eq!(strings0.value(2), ".");
     }
 }
