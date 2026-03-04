@@ -43,3 +43,7 @@ tempfile = "3.0"
 name = "datafusion_integration"
 # Some issue when publishing and path isn't specified, so adding here
 path = "./examples/datafusion_integration.rs"
+
+[[example]]
+name = "vcf_multisample_bench"
+path = "../../benchmarks/vcf/vcf_multisample_bench.rs"

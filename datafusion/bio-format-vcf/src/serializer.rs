@@ -87,6 +87,345 @@ fn format_vcf_float(v: f64) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Batch-level resolved genotypes: eliminate per-row downcasts & array slices
+// ---------------------------------------------------------------------------
+
+/// Pre-resolved typed values from a list column's inner array.
+/// Resolved once per batch to eliminate per-element downcast chains.
+enum TypedValues<'a> {
+    Int32(&'a Int32Array),
+    Float32(&'a Float32Array),
+    Float64(&'a Float64Array),
+    Utf8(&'a StringArray),
+    LargeUtf8(&'a LargeStringArray),
+    Utf8View(&'a StringViewArray),
+    /// Fallback for nested or uncommon types (e.g. List<List<T>>).
+    Other(&'a dyn Array),
+}
+
+/// Pre-resolved field data for a single FORMAT field in the genotypes struct.
+enum ResolvedFieldData<'a> {
+    List {
+        list: &'a ListArray,
+        values: TypedValues<'a>,
+    },
+    LargeList {
+        list: &'a LargeListArray,
+        values: TypedValues<'a>,
+    },
+    /// Field not found in the genotypes struct.
+    Missing,
+}
+
+/// Pre-resolved genotype field (name + resolved data).
+struct ResolvedGenotypeField<'a> {
+    name: &'a str,
+    data: ResolvedFieldData<'a>,
+}
+
+/// Pre-resolved genotypes for an entire batch. Type resolution is done once
+/// per batch instead of per-row x per-field x per-sample.
+struct ResolvedGenotypes<'a> {
+    struct_array: &'a StructArray,
+    fields: Vec<ResolvedGenotypeField<'a>>,
+}
+
+/// Resolves the typed values array from an Arrow array (single downcast per batch per field).
+fn resolve_typed_values(array: &dyn Array) -> TypedValues<'_> {
+    if let Some(a) = array.as_any().downcast_ref::<Int32Array>() {
+        TypedValues::Int32(a)
+    } else if let Some(a) = array.as_any().downcast_ref::<Float32Array>() {
+        TypedValues::Float32(a)
+    } else if let Some(a) = array.as_any().downcast_ref::<Float64Array>() {
+        TypedValues::Float64(a)
+    } else if let Some(a) = array.as_any().downcast_ref::<StringArray>() {
+        TypedValues::Utf8(a)
+    } else if let Some(a) = array.as_any().downcast_ref::<LargeStringArray>() {
+        TypedValues::LargeUtf8(a)
+    } else if let Some(a) = array.as_any().downcast_ref::<StringViewArray>() {
+        TypedValues::Utf8View(a)
+    } else {
+        TypedValues::Other(array)
+    }
+}
+
+/// Resolves the field data for a single FORMAT column (list array + typed values).
+fn resolve_field_data(array: &dyn Array) -> ResolvedFieldData<'_> {
+    if let Some(list) = array.as_any().downcast_ref::<ListArray>() {
+        let values = resolve_typed_values(list.values().as_ref());
+        ResolvedFieldData::List { list, values }
+    } else if let Some(list) = array.as_any().downcast_ref::<LargeListArray>() {
+        let values = resolve_typed_values(list.values().as_ref());
+        ResolvedFieldData::LargeList { list, values }
+    } else {
+        ResolvedFieldData::Missing
+    }
+}
+
+/// Pre-resolves all genotype columns for a batch. Returns `None` if there is
+/// no `genotypes` struct column (single-sample flat schema).
+fn resolve_batch_genotypes<'a>(
+    batch: &'a RecordBatch,
+    format_fields: &'a [String],
+) -> Option<ResolvedGenotypes<'a>> {
+    let idx = batch.schema().index_of("genotypes").ok()?;
+    let col = batch.column(idx);
+    let struct_array = col.as_any().downcast_ref::<StructArray>()?;
+
+    let fields = format_fields
+        .iter()
+        .map(|field_name| {
+            let data = match struct_array.column_by_name(field_name) {
+                Some(list_col) => resolve_field_data(list_col.as_ref()),
+                None => ResolvedFieldData::Missing,
+            };
+            ResolvedGenotypeField {
+                name: field_name.as_str(),
+                data,
+            }
+        })
+        .collect();
+
+    Some(ResolvedGenotypes {
+        struct_array,
+        fields,
+    })
+}
+
+/// Checks if a single value at `flat_idx` is missing (would produce "." in VCF output).
+fn is_value_missing(values: &TypedValues, flat_idx: usize) -> bool {
+    match values {
+        TypedValues::Int32(a) => a.is_null(flat_idx),
+        TypedValues::Float32(a) => a.is_null(flat_idx) || a.value(flat_idx).is_nan(),
+        TypedValues::Float64(a) => a.is_null(flat_idx) || a.value(flat_idx).is_nan(),
+        TypedValues::Utf8(a) => {
+            a.is_null(flat_idx) || {
+                let s = a.value(flat_idx);
+                s.is_empty() || s == "."
+            }
+        }
+        TypedValues::LargeUtf8(a) => {
+            a.is_null(flat_idx) || {
+                let s = a.value(flat_idx);
+                s.is_empty() || s == "."
+            }
+        }
+        TypedValues::Utf8View(a) => {
+            a.is_null(flat_idx) || {
+                let s = a.value(flat_idx);
+                s.is_empty() || s == "."
+            }
+        }
+        TypedValues::Other(a) => a.is_null(flat_idx),
+    }
+}
+
+/// Writes a single typed value at `flat_idx` directly into the line buffer.
+fn write_typed_value(values: &TypedValues, flat_idx: usize, buf: &mut String) -> Result<()> {
+    use std::fmt::Write;
+    match values {
+        TypedValues::Int32(a) => {
+            if a.is_null(flat_idx) {
+                buf.push('.');
+            } else {
+                write!(buf, "{}", a.value(flat_idx)).unwrap();
+            }
+        }
+        TypedValues::Float32(a) => {
+            if a.is_null(flat_idx) {
+                buf.push('.');
+            } else {
+                buf.push_str(&format_vcf_float(a.value(flat_idx) as f64));
+            }
+        }
+        TypedValues::Float64(a) => {
+            if a.is_null(flat_idx) {
+                buf.push('.');
+            } else {
+                buf.push_str(&format_vcf_float(a.value(flat_idx)));
+            }
+        }
+        TypedValues::Utf8(a) => {
+            if a.is_null(flat_idx) {
+                buf.push('.');
+            } else {
+                let s = a.value(flat_idx);
+                if s.is_empty() {
+                    buf.push('.');
+                } else {
+                    buf.push_str(s);
+                }
+            }
+        }
+        TypedValues::LargeUtf8(a) => {
+            if a.is_null(flat_idx) {
+                buf.push('.');
+            } else {
+                let s = a.value(flat_idx);
+                if s.is_empty() {
+                    buf.push('.');
+                } else {
+                    buf.push_str(s);
+                }
+            }
+        }
+        TypedValues::Utf8View(a) => {
+            if a.is_null(flat_idx) {
+                buf.push('.');
+            } else {
+                let s = a.value(flat_idx);
+                if s.is_empty() {
+                    buf.push('.');
+                } else {
+                    buf.push_str(s);
+                }
+            }
+        }
+        TypedValues::Other(a) => {
+            let val = extract_sample_value_string(*a, flat_idx)?;
+            buf.push_str(&val);
+        }
+    }
+    Ok(())
+}
+
+impl ResolvedFieldData<'_> {
+    /// Checks whether all samples have missing values for this field at the given row.
+    fn is_all_missing(&self, row: usize, num_samples: usize) -> bool {
+        match self {
+            ResolvedFieldData::Missing => true,
+            ResolvedFieldData::List { list, values } => {
+                if list.is_null(row) {
+                    return true;
+                }
+                let offsets = list.offsets();
+                let start = offsets[row] as usize;
+                let count = offsets[row + 1] as usize - start;
+                if count == 0 {
+                    return true;
+                }
+                for i in 0..num_samples.min(count) {
+                    if !is_value_missing(values, start + i) {
+                        return false;
+                    }
+                }
+                true
+            }
+            ResolvedFieldData::LargeList { list, values } => {
+                if list.is_null(row) {
+                    return true;
+                }
+                let offsets = list.offsets();
+                let start = offsets[row] as usize;
+                let count = offsets[row + 1] as usize - start;
+                if count == 0 {
+                    return true;
+                }
+                for i in 0..num_samples.min(count) {
+                    if !is_value_missing(values, start + i) {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// Writes a single sample's value directly to the line buffer.
+    fn write_value(&self, row: usize, sample_idx: usize, buf: &mut String) -> Result<()> {
+        match self {
+            ResolvedFieldData::Missing => {
+                buf.push('.');
+                Ok(())
+            }
+            ResolvedFieldData::List { list, values } => {
+                if list.is_null(row) {
+                    buf.push('.');
+                    return Ok(());
+                }
+                let offsets = list.offsets();
+                let start = offsets[row] as usize;
+                let count = offsets[row + 1] as usize - start;
+                if sample_idx >= count {
+                    buf.push('.');
+                    return Ok(());
+                }
+                write_typed_value(values, start + sample_idx, buf)
+            }
+            ResolvedFieldData::LargeList { list, values } => {
+                if list.is_null(row) {
+                    buf.push('.');
+                    return Ok(());
+                }
+                let offsets = list.offsets();
+                let start = offsets[row] as usize;
+                let count = offsets[row + 1] as usize - start;
+                if sample_idx >= count {
+                    buf.push('.');
+                    return Ok(());
+                }
+                write_typed_value(values, start + sample_idx, buf)
+            }
+        }
+    }
+}
+
+/// Writes FORMAT and sample columns directly to the line buffer using pre-resolved genotypes.
+fn write_resolved_format_and_samples(
+    resolved: &ResolvedGenotypes,
+    row: usize,
+    num_samples: usize,
+    line: &mut String,
+) -> Result<()> {
+    if resolved.struct_array.is_null(row) {
+        return Ok(());
+    }
+
+    // Compute which fields to keep (drop all-missing fields, matching bcftools behavior)
+    let keep: Vec<bool> = resolved
+        .fields
+        .iter()
+        .map(|f| !f.data.is_all_missing(row, num_samples))
+        .collect();
+
+    if !keep.iter().any(|&k| k) {
+        return Ok(());
+    }
+
+    // Write FORMAT column
+    line.push('\t');
+    let mut first = true;
+    for (field, &k) in resolved.fields.iter().zip(keep.iter()) {
+        if !k {
+            continue;
+        }
+        if !first {
+            line.push(':');
+        }
+        line.push_str(field.name);
+        first = false;
+    }
+
+    // Write each sample's values
+    for sample_idx in 0..num_samples {
+        line.push('\t');
+        first = true;
+        for (field, &k) in resolved.fields.iter().zip(keep.iter()) {
+            if !k {
+                continue;
+            }
+            if !first {
+                line.push(':');
+            }
+            field.data.write_value(row, sample_idx, line)?;
+            first = false;
+        }
+    }
+
+    Ok(())
+}
+
 /// A serialized VCF record as a string line
 pub struct VcfRecordLine {
     /// The VCF line (without newline)
@@ -136,7 +475,15 @@ pub fn batch_to_vcf_lines(
 
     // Build column index maps for INFO and FORMAT fields
     let info_columns = build_info_column_map(batch, info_fields);
-    let format_columns = if sample_names.len() == 1 {
+    let num_samples = sample_names.len();
+
+    // Pre-resolve genotype columns for batch-level type resolution (multisample fast path)
+    let resolved_genotypes = if !sample_names.is_empty() && !format_fields.is_empty() {
+        resolve_batch_genotypes(batch, format_fields)
+    } else {
+        None
+    };
+    let format_columns = if resolved_genotypes.is_none() && num_samples == 1 {
         Some(build_format_column_map(batch, format_fields, sample_names))
     } else {
         None
@@ -190,26 +537,29 @@ pub fn batch_to_vcf_lines(
         // INFO
         let info_str = build_info_string(batch, row, info_fields, &info_columns)?;
 
-        // FORMAT and samples
-        let (format_str, samples_str) = build_format_and_samples(
-            batch,
-            row,
-            format_fields,
-            sample_names,
-            format_columns.as_ref(),
-        )?;
-
         // Build the VCF line
         let mut line = format!(
             "{chrom}\t{pos}\t{id_str}\t{ref_str}\t{alt_str}\t{qual_str}\t{filter_str}\t{info_str}"
         );
 
-        if !format_str.is_empty() {
-            line.push('\t');
-            line.push_str(&format_str);
-            for sample in &samples_str {
+        // FORMAT and samples
+        if let Some(ref resolved) = resolved_genotypes {
+            write_resolved_format_and_samples(resolved, row, num_samples, &mut line)?;
+        } else if !sample_names.is_empty() && !format_fields.is_empty() {
+            let (format_str, samples_str) = build_format_and_samples(
+                batch,
+                row,
+                format_fields,
+                sample_names,
+                format_columns.as_ref(),
+            )?;
+            if !format_str.is_empty() {
                 line.push('\t');
-                line.push_str(sample);
+                line.push_str(&format_str);
+                for sample in &samples_str {
+                    line.push('\t');
+                    line.push_str(sample);
+                }
             }
         }
 
@@ -484,7 +834,7 @@ fn build_format_and_samples(
         let field_values =
             collect_nested_multisample_values(batch, row, format_fields, sample_names)?;
         let (format_str, samples) =
-            assemble_format_and_samples(format_fields, &field_values, sample_names.len());
+            filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
         return Ok((format_str, samples));
     }
 
@@ -511,7 +861,7 @@ fn build_format_and_samples(
     }
 
     let (format_str, samples) =
-        assemble_format_and_samples(format_fields, &field_values, sample_names.len());
+        filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
     Ok((format_str, samples))
 }
 
@@ -564,21 +914,38 @@ fn collect_nested_multisample_values(
     Ok(field_values)
 }
 
-/// Assembles FORMAT string and per-sample value strings from field × sample values.
-fn assemble_format_and_samples(
+/// Filters out FORMAT fields where ALL samples have missing values for this row.
+/// Returns the filtered FORMAT string and filtered sample value strings.
+/// This matches bcftools behavior of omitting per-row all-missing FORMAT fields.
+fn filter_all_missing_format_fields(
     format_fields: &[String],
     field_values: &[Vec<String>],
     num_samples: usize,
 ) -> (String, Vec<String>) {
-    let format_str = format_fields.join(":");
+    let keep: Vec<bool> = field_values
+        .iter()
+        .map(|sample_vals| sample_vals.iter().any(|v| v != "."))
+        .collect();
+
+    let filtered_fields: Vec<&str> = format_fields
+        .iter()
+        .zip(keep.iter())
+        .filter(|&(_, &k)| k)
+        .map(|(f, _)| f.as_str())
+        .collect();
+    let format_str = filtered_fields.join(":");
+
     let mut samples = Vec::with_capacity(num_samples);
     for sample_idx in 0..num_samples {
         let vals: Vec<&str> = field_values
             .iter()
-            .map(|sv| sv[sample_idx].as_str())
+            .zip(keep.iter())
+            .filter(|&(_, &k)| k)
+            .map(|(sv, _)| sv[sample_idx].as_str())
             .collect();
         samples.push(vals.join(":"));
     }
+
     (format_str, samples)
 }
 
@@ -1070,9 +1437,9 @@ mod tests {
     }
 
     #[test]
-    fn test_format_preserves_all_missing_fields() {
+    fn test_format_drops_all_missing_fields() {
         // Multi-sample with GT, GQ, PL where PL is all-missing for all samples
-        // All FORMAT fields should be preserved (matching bcftools behavior)
+        // PL should be dropped from FORMAT (matching bcftools behavior)
         let schema = Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, false),
             Field::new("start", DataType::UInt32, false),
@@ -1178,10 +1545,10 @@ mod tests {
         let line = &lines[0].line;
         let parts: Vec<&str> = line.split('\t').collect();
 
-        // FORMAT should preserve all fields including all-missing PL
-        assert_eq!(parts[8], "GT:GQ:PL");
-        // Sample values should have 3 components with PL as "."
-        assert_eq!(parts[9], "0/1:30:.");
-        assert_eq!(parts[10], "1/1:40:.");
+        // FORMAT should drop all-missing PL field
+        assert_eq!(parts[8], "GT:GQ");
+        // Sample values should have 2 components (PL omitted)
+        assert_eq!(parts[9], "0/1:30");
+        assert_eq!(parts[10], "1/1:40");
     }
 }

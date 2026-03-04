@@ -814,8 +814,24 @@ impl ScalarUDFImpl for ListAndUdf {
             let right_bools = right_inner.as_any().downcast_ref::<BooleanArray>().unwrap();
             let len = left_bools.len().min(right_bools.len());
             for j in 0..len {
-                if left_bools.is_null(j) || right_bools.is_null(j) {
+                let l_null = left_bools.is_null(j);
+                let r_null = right_bools.is_null(j);
+                if l_null && r_null {
                     builder.values().append_null();
+                } else if l_null {
+                    // SQL 3VL: null AND false = false, null AND true = null
+                    if right_bools.value(j) {
+                        builder.values().append_null();
+                    } else {
+                        builder.values().append_value(false);
+                    }
+                } else if r_null {
+                    // SQL 3VL: false AND null = false, true AND null = null
+                    if left_bools.value(j) {
+                        builder.values().append_null();
+                    } else {
+                        builder.values().append_value(false);
+                    }
                 } else {
                     builder
                         .values()
@@ -930,13 +946,16 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
             };
 
             for j in 0..gt_strings.len() {
+                // null mask → keep original GT (matches bcftools: missing filter
+                // values don't trigger the exclude condition)
                 let keep = mask_bools
                     .as_ref()
-                    .is_some_and(|m| j < m.len() && !m.is_null(j) && m.value(j));
+                    .map(|m| j >= m.len() || m.is_null(j) || m.value(j))
+                    .unwrap_or(true);
                 if keep {
                     if gt_strings.is_null(j) {
-                        let fallback = explicit_replacement.as_deref().unwrap_or("./.");
-                        builder.values().append_value(fallback);
+                        // Preserve null GT as null — serializer writes "."
+                        builder.values().append_null();
                     } else {
                         builder.values().append_value(gt_strings.value(j));
                     }
@@ -969,8 +988,12 @@ impl ScalarUDFImpl for VcfSetGtsUdf {
 /// - `"0"` → `"."`
 /// - `"0/1/2"` → `"././."`
 fn make_ploidy_aware_missing(original_gt: &str) -> String {
-    if original_gt.is_empty() || original_gt == "." {
+    if original_gt.is_empty() {
         return "./.".to_string();
+    }
+    // A single "." is haploid missing — preserve it as-is
+    if original_gt == "." {
+        return ".".to_string();
     }
 
     // Determine separator: '|' for phased, '/' for unphased (default)
@@ -1177,11 +1200,12 @@ mod tests {
         assert_eq!(strings0.value(0), "0/1");
         assert_eq!(strings0.value(1), "1/1");
         assert_eq!(strings0.value(2), "./.");
-        // Row 1: GQ=[5,null,15], gte(15)=[F,null,T] → GT=["./.","./.", "1/1"]
+        // Row 1: GQ=[5,null,15], gte(15)=[F,null,T] → GT=["./.", "0/1", "1/1"]
+        // null mask → keep original GT (matches bcftools: missing values don't trigger filter)
         let inner1 = list.value(1);
         let strings1 = inner1.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(strings1.value(0), "./.");
-        assert_eq!(strings1.value(1), "./.");
+        assert_eq!(strings1.value(1), "0/1"); // null mask → preserve original
         assert_eq!(strings1.value(2), "1/1");
     }
 
@@ -1207,11 +1231,12 @@ mod tests {
         assert!(bools0.value(1));
         assert!(bools0.value(2));
         // Row 1: GQ=[5,null,15], DP=[10,200,100]
-        // gte(GQ,10)=[F,null,T], lte(DP,100)=[T,F,T] → and=[F,null,T]
+        // gte(GQ,10)=[F,null,T], lte(DP,100)=[T,F,T]
+        // SQL 3VL: F AND T=F, null AND F=F, T AND T=T → and=[F,F,T]
         let inner1 = list.value(1);
         let bools1 = inner1.as_any().downcast_ref::<BooleanArray>().unwrap();
         assert!(!bools1.value(0));
-        assert!(bools1.is_null(1));
+        assert!(!bools1.value(1)); // null AND false = false (SQL 3VL)
         assert!(bools1.value(2));
     }
 
@@ -1622,7 +1647,7 @@ mod tests {
         assert_eq!(make_ploidy_aware_missing("0"), ".");
         assert_eq!(make_ploidy_aware_missing("0/1/2"), "././.");
         assert_eq!(make_ploidy_aware_missing("./."), "./.");
-        assert_eq!(make_ploidy_aware_missing("."), "./.");
+        assert_eq!(make_ploidy_aware_missing("."), ".");
         assert_eq!(make_ploidy_aware_missing(""), "./.");
         assert_eq!(make_ploidy_aware_missing("0|1|2"), ".|.|.");
     }
