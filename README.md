@@ -114,6 +114,47 @@ async fn main() -> datafusion::error::Result<()> {
 }
 ```
 
+### Multi-Sample VCF Analytical Queries
+
+For multi-sample VCFs, FORMAT fields are stored in a columnar `genotypes: Struct<GT: List<Utf8>, DP: List<Int32>, ...>` layout. Register the built-in UDFs to run bcftools-style analytical pipelines in SQL:
+
+```rust
+use datafusion_bio_format_vcf::register_vcf_udfs;
+
+// Register analytical UDFs: list_avg, list_gte, list_lte, list_and, vcf_set_gts
+register_vcf_udfs(&ctx);
+```
+
+```sql
+-- Filter variants by average genotype quality across all samples
+SELECT chrom, start, qual, list_avg(genotypes."GQ") AS avg_gq
+FROM variants
+WHERE qual >= 20
+  AND list_avg(genotypes."GQ") >= 15
+  AND list_avg(genotypes."DP") BETWEEN 15 AND 150;
+
+-- Set genotypes to missing where per-sample DP or GQ are too low
+SELECT chrom, start, "ref", alt,
+    vcf_set_gts(genotypes."GT",
+        list_and(list_gte(genotypes."GQ", 10),
+            list_and(list_gte(genotypes."DP", 10), list_lte(genotypes."DP", 200)))
+    ) AS masked_gt
+FROM variants;
+```
+
+A companion `{table}_long` view can be auto-registered for per-sample lookups:
+
+```rust
+use datafusion_bio_format_vcf::auto_register_vcf_long_view;
+auto_register_vcf_long_view(&ctx, "variants").await?;
+```
+
+```sql
+SELECT sample_id, "GT", "DP" FROM variants_long WHERE sample_id = 'NA12878';
+```
+
+See the [VCF crate README](datafusion/bio-format-vcf) for full documentation on the columnar schema, UDF reference, and query patterns.
+
 ### Query a Pairs (Hi-C) file
 
 ```rust
