@@ -45,8 +45,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
-    let num_samples = samples.len();
-
     // Read ALL format fields (pass None)
     let source_provider = VcfTableProvider::new_with_samples(
         VCF.to_string(),
@@ -66,11 +64,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_default();
 
     // Get FORMAT field names from the genotypes struct
-    if let Some(genotypes_field) = source_schema.field_with_name("genotypes").ok() {
+    if let Ok(genotypes_field) = source_schema.field_with_name("genotypes") {
         if let datafusion::arrow::datatypes::DataType::Struct(fields) = genotypes_field.data_type()
         {
             let field_names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
-            eprintln!("FORMAT fields from schema: {:?}", field_names);
+            eprintln!("FORMAT fields from schema: {field_names:?}");
         }
     }
 
