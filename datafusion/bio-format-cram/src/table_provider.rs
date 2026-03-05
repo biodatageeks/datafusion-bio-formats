@@ -33,7 +33,7 @@ use std::sync::Arc;
 /// 1. File inference (`inferred_tags`) — actual data always wins
 /// 2. User-specified hints (`tag_type_hints`) — explicit user knowledge
 /// 3. SAM spec registry — standard tag definitions from
-///    https://samtools.github.io/hts-specs/SAMtags.pdf
+///    <https://samtools.github.io/hts-specs/SAMtags.pdf>
 /// 4. Default Utf8 — last resort with warning
 #[allow(clippy::too_many_arguments)]
 fn determine_schema(

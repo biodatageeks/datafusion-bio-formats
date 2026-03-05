@@ -17,7 +17,7 @@ pub struct TagDefinition {
 /// Returns the registry of standard SAM specification alignment tags.
 ///
 /// Contains 63 tags from the SAM specification (SAMtags.pdf, 9 Sep 2024):
-/// https://samtools.github.io/hts-specs/SAMtags.pdf
+/// <https://samtools.github.io/hts-specs/SAMtags.pdf>
 ///
 /// Categories:
 /// - Alignment scoring: NM, MD, AS, MQ, H0, H1, H2
@@ -597,7 +597,7 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
 /// Each hint is in `"TAG:TYPE"` format where TYPE is a SAM type character:
 /// - `i` → Int32, `f` → Float32, `Z` → Utf8, `A` → Utf8 (char), `H` → Utf8 (hex)
 ///
-/// See https://samtools.github.io/hts-specs/SAMtags.pdf for tag type syntax.
+/// See <https://samtools.github.io/hts-specs/SAMtags.pdf> for tag type syntax.
 ///
 /// Returns an error if any hint is malformed.
 pub fn parse_tag_type_hints(hints: &[String]) -> Result<HashMap<String, (char, DataType)>, String> {
@@ -617,6 +617,12 @@ pub fn parse_tag_type_hints(hints: &[String]) -> Result<HashMap<String, (char, D
             ));
         }
         let sam_type = type_str.chars().next().unwrap();
+        if !matches!(sam_type, 'A' | 'i' | 'f' | 'Z' | 'H') {
+            return Err(format!(
+                "Invalid tag type hint '{hint}': unsupported SAM type '{sam_type}'. \
+                 Supported types: A (character), i (integer), f (float), Z (string), H (hex)"
+            ));
+        }
         let arrow_type = sam_tag_type_to_arrow_type(sam_type);
         map.insert(tag.to_string(), (sam_type, arrow_type));
     }
@@ -625,7 +631,7 @@ pub fn parse_tag_type_hints(hints: &[String]) -> Result<HashMap<String, (char, D
 
 /// Convert SAM tag type character to Arrow DataType.
 ///
-/// See https://samtools.github.io/hts-specs/SAMtags.pdf for type definitions.
+/// See <https://samtools.github.io/hts-specs/SAMtags.pdf> for type definitions.
 pub fn sam_tag_type_to_arrow_type(sam_type: char) -> DataType {
     match sam_type {
         'A' => DataType::Utf8,    // Character
@@ -730,5 +736,8 @@ mod tests {
         assert!(parse_tag_type_hints(&["pt".to_string()]).is_err());
         assert!(parse_tag_type_hints(&["pt:X:extra".to_string()]).is_err());
         assert!(parse_tag_type_hints(&["pt:ii".to_string()]).is_err());
+        // Unsupported SAM type character
+        assert!(parse_tag_type_hints(&["pt:X".to_string()]).is_err());
+        assert!(parse_tag_type_hints(&["pt:z".to_string()]).is_err());
     }
 }

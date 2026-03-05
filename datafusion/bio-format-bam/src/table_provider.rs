@@ -36,7 +36,7 @@ use std::sync::Arc;
 /// 1. File inference (`inferred_tags`) — actual data always wins
 /// 2. User-specified hints (`tag_type_hints`) — explicit user knowledge
 /// 3. SAM spec registry — standard tag definitions from
-///    https://samtools.github.io/hts-specs/SAMtags.pdf
+///    <https://samtools.github.io/hts-specs/SAMtags.pdf>
 /// 4. Default Utf8 — last resort with warning
 #[allow(clippy::too_many_arguments)]
 fn determine_schema(
@@ -348,7 +348,7 @@ impl BamTableProvider {
     ///   in the SAM specification registry. When false, unknown tags default to Utf8.
     /// * `infer_tag_sample_size` - Number of records to sample for type inference (typically 100)
     /// * `tag_type_hints` - Optional explicit type hints in SAM syntax, e.g. `["pt:i", "de:f"]`.
-    ///   See https://samtools.github.io/hts-specs/SAMtags.pdf for tag type syntax.
+    ///   See <https://samtools.github.io/hts-specs/SAMtags.pdf> for tag type syntax.
     ///
     /// # Returns
     ///
