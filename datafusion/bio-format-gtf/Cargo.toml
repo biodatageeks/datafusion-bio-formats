@@ -11,7 +11,6 @@ edition.workspace = true
 [dependencies]
 datafusion.workspace = true
 tokio.workspace = true
-bytes.workspace = true
 async-stream.workspace = true
 datafusion-bio-format-core = { path = "../bio-format-core" }
 futures.workspace = true

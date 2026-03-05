@@ -290,17 +290,22 @@ async fn get_local_gtf(
         None => false,
     };
 
-    let mut builder = vec![OptionalField::new(
-        &DataType::List(FieldRef::new(Field::new(
-            "attribute",
-            DataType::Struct(Fields::from(vec![
-                Field::new("tag", DataType::Utf8, false),
-                Field::new("value", DataType::Utf8, true),
-            ])),
-            true,
-        ))),
-        batch_size,
-    )?];
+    // Only allocate the nested builder when actually needed (not in unnest mode)
+    let mut builder = if !unnest_enable {
+        vec![OptionalField::new(
+            &DataType::List(FieldRef::new(Field::new(
+                "item",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("tag", DataType::Utf8, false),
+                    Field::new("value", DataType::Utf8, true),
+                ])),
+                true,
+            ))),
+            batch_size,
+        )?]
+    } else {
+        Vec::new()
+    };
 
     let mut record_num = 0;
 
@@ -309,7 +314,7 @@ async fn get_local_gtf(
             let record = result?;
 
             let attributes_str = record.attributes_string();
-            if !crate::filter_utils::evaluate_filters_against_record(&record, &filters, &attributes_str) {
+            if !crate::filter_utils::evaluate_filters_against_record(&record, &filters, &attributes_str, coordinate_system_zero_based) {
                 continue;
             }
 
@@ -339,24 +344,11 @@ async fn get_local_gtf(
                 phase.push(record.phase().map(|p| p as u32));
             }
 
-            let needs_attributes = if !unnest_enable {
-                true
+            if unnest_enable {
+                load_attributes_unnest_from_string(&attributes_str, &mut attribute_builders, projection.clone())?;
             } else {
-                !attribute_builders.0.is_empty()
-            };
-            if needs_attributes {
-                if unnest_enable && !attribute_builders.0.is_empty() {
-                    load_attributes_unnest_from_string(&attributes_str, &mut attribute_builders, projection.clone())?;
-                } else if !unnest_enable {
-                    let attributes = parse_gtf_attributes_to_vec(&attributes_str);
-                    load_attributes_from_vec(attributes, &mut builder)?;
-                }
-            } else if unnest_enable {
-                for b in &mut attribute_builders.2 {
-                    b.append_null()?;
-                }
-            } else {
-                builder[0].append_null()?;
+                let attributes = parse_gtf_attributes_to_vec(&attributes_str);
+                load_attributes_from_vec(attributes, &mut builder)?;
             }
 
             record_num += 1;

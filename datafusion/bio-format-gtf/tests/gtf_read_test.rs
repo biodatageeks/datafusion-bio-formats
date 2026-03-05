@@ -555,3 +555,169 @@ async fn test_gtf_verify_phase_values() {
         }
     }
 }
+
+// ─── Coordinate filter boundary tests ─────────────────────────────
+// These verify that filter pushdown correctly converts coordinates
+// to the output coordinate system (0-based vs 1-based)
+
+#[tokio::test]
+async fn test_gtf_filter_exact_start_zero_based() {
+    // First record has 1-based start=6534012, so 0-based start=6534011
+    let ctx = setup_ctx(None, true).await;
+    let df = ctx
+        .sql("SELECT start FROM gtf WHERE start = 6534011")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    // transcript + exon + UTR all start at 6534012 (1-based) = 6534011 (0-based)
+    assert_eq!(total_rows(&results), 3);
+    for batch in &results {
+        let start = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(start.value(i), 6534011);
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_gtf_filter_exact_start_one_based() {
+    // Same query in 1-based mode
+    let ctx = setup_ctx(None, false).await;
+    let df = ctx
+        .sql("SELECT start FROM gtf WHERE start = 6534012")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 3);
+    for batch in &results {
+        let start = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(start.value(i), 6534012);
+        }
+    }
+}
+
+// ─── Phase filter pushdown ────────────────────────────────────────
+
+#[tokio::test]
+async fn test_gtf_filter_phase_equals() {
+    let ctx = setup_ctx(None, true).await;
+    let df = ctx
+        .sql("SELECT type, phase FROM gtf WHERE phase = 0")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let count = total_rows(&results);
+    assert!(count > 0, "Should have records with phase = 0");
+    for batch in &results {
+        let phase = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert!(!phase.is_null(i));
+            assert_eq!(phase.value(i), 0);
+        }
+    }
+}
+
+// ─── Comment/header handling ──────────────────────────────────────
+
+#[tokio::test]
+async fn test_gtf_with_comments() {
+    use tokio::fs;
+
+    // Create a GTF file with comment/header lines
+    let content = "# This is a comment\n\
+                   #!genome-build GRCh38\n\
+                   chr1\ttest\tgene\t100\t200\t.\t+\t.\tgene_id \"G1\";\n\
+                   chr1\ttest\texon\t100\t150\t.\t+\t.\tgene_id \"G1\";\n";
+    let temp_file = format!(
+        "/tmp/test_gtf_comments_{}.gtf",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    fs::write(&temp_file, content).await.unwrap();
+
+    let table = GtfTableProvider::new(temp_file, None, true).unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("gtf_comments", Arc::new(table)).unwrap();
+
+    let df = ctx.sql("SELECT chrom FROM gtf_comments").await.unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 2, "Comments should be skipped");
+}
+
+// ─── GZIP compressed file ─────────────────────────────────────────
+
+#[tokio::test]
+async fn test_gtf_gzip_reading() {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let content = "chr1\ttest\tgene\t100\t200\t50.0\t+\t.\tgene_id \"G1\";\n\
+                   chr1\ttest\texon\t100\t150\t.\t+\t0\tgene_id \"G1\";\n";
+    let temp_file = format!(
+        "/tmp/test_gtf_gz_{}.gtf.gz",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let f = std::fs::File::create(&temp_file).unwrap();
+    let mut encoder = GzEncoder::new(f, Compression::default());
+    encoder.write_all(content.as_bytes()).unwrap();
+    encoder.finish().unwrap();
+
+    let table = GtfTableProvider::new(temp_file, None, true).unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("gtf_gz", Arc::new(table)).unwrap();
+
+    let df = ctx.sql("SELECT chrom, type FROM gtf_gz").await.unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 2, "Should read 2 records from gzip");
+}
+
+// ─── Stronger assertions for previously weak tests ────────────────
+
+#[tokio::test]
+async fn test_gtf_filter_start_range_exact() {
+    let ctx = setup_ctx(None, true).await;
+    // 0-based range covering 1-based starts 6536494, 6536684, 6536920
+    // 0-based: 6536493, 6536683, 6536919 — each has exon+CDS = 6 records
+    let df = ctx
+        .sql("SELECT chrom FROM gtf WHERE start >= 6536493 AND start <= 6536919")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 6);
+}
+
+#[tokio::test]
+async fn test_gtf_nested_attributes_type_check() {
+    let ctx = setup_ctx(None, true).await;
+    let df = ctx.sql("SELECT attributes FROM gtf LIMIT 1").await.unwrap();
+    let results = df.collect().await.unwrap();
+    let batch = &results[0];
+    let arr = batch.column(0);
+    assert!(
+        matches!(
+            arr.data_type(),
+            datafusion::arrow::datatypes::DataType::List(_)
+        ),
+        "attributes should be List type, got {:?}",
+        arr.data_type()
+    );
+}

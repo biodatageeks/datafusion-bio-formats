@@ -165,8 +165,18 @@ fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
         seqid: fields[0].to_string(),
         source: fields[1].to_string(),
         ty: fields[2].to_string(),
-        start: fields[3].parse().unwrap_or(0),
-        end: fields[4].parse().unwrap_or(0),
+        start: fields[3].parse().map_err(|e| {
+            Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid start position '{}': {e}", fields[3]),
+            )
+        })?,
+        end: fields[4].parse().map_err(|e| {
+            Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid end position '{}': {e}", fields[4]),
+            )
+        })?,
         score,
         strand: fields[6].to_string(),
         phase: fields[7].to_string(),

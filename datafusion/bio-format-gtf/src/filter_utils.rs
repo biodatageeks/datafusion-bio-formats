@@ -54,35 +54,53 @@ fn can_push_down_gtf_attribute_in_list(in_list_expr: &InList) -> bool {
 }
 
 /// Evaluates filter expressions against a GTF record.
+///
+/// The `coordinate_system_zero_based` flag is needed because records store 1-based
+/// positions from the file, but user SQL predicates are in the output coordinate system.
+/// When true, record positions are converted to 0-based before comparison.
 pub fn evaluate_filters_against_record<T: GtfRecordTrait>(
     record: &T,
     filters: &[Expr],
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if filters.is_empty() {
         return true;
     }
 
-    filters
-        .iter()
-        .all(|filter| evaluate_single_filter(record, filter, attributes_str))
+    filters.iter().all(|filter| {
+        evaluate_single_filter(record, filter, attributes_str, coordinate_system_zero_based)
+    })
 }
 
 fn evaluate_single_filter<T: GtfRecordTrait>(
     record: &T,
     filter: &Expr,
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     match filter {
         Expr::BinaryExpr(binary_expr) if matches!(binary_expr.op, Operator::And) => {
-            evaluate_single_filter(record, &binary_expr.left, attributes_str)
-                && evaluate_single_filter(record, &binary_expr.right, attributes_str)
+            evaluate_single_filter(
+                record,
+                &binary_expr.left,
+                attributes_str,
+                coordinate_system_zero_based,
+            ) && evaluate_single_filter(
+                record,
+                &binary_expr.right,
+                attributes_str,
+                coordinate_system_zero_based,
+            )
         }
-        Expr::BinaryExpr(binary_expr) => {
-            evaluate_binary_filter(record, binary_expr, attributes_str)
-        }
+        Expr::BinaryExpr(binary_expr) => evaluate_binary_filter(
+            record,
+            binary_expr,
+            attributes_str,
+            coordinate_system_zero_based,
+        ),
         Expr::Between(between_expr) => {
-            evaluate_between_filter(record, between_expr, attributes_str)
+            evaluate_between_filter(record, between_expr, coordinate_system_zero_based)
         }
         Expr::InList(in_list_expr) => evaluate_in_list_filter(record, in_list_expr, attributes_str),
         _ => true,
@@ -93,6 +111,7 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
     record: &T,
     binary_expr: &datafusion::logical_expr::BinaryExpr,
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if let Expr::Column(column) = &*binary_expr.left {
         if let Expr::Literal(literal, _) = &*binary_expr.right {
@@ -104,8 +123,13 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
                     evaluate_string_comparison(&record_value, literal, &binary_expr.op)
                 }
                 "start" => {
-                    let record_value = record.start();
-                    evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op)
+                    let start_1based = record.start();
+                    let start_output = if coordinate_system_zero_based {
+                        start_1based - 1
+                    } else {
+                        start_1based
+                    };
+                    evaluate_numeric_comparison(start_output as f64, literal, &binary_expr.op)
                 }
                 "end" => {
                     let record_value = record.end();
@@ -130,6 +154,13 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
                     let record_value = record.strand();
                     evaluate_string_comparison(&record_value, literal, &binary_expr.op)
                 }
+                "phase" => {
+                    if let Some(phase) = record.phase() {
+                        evaluate_numeric_comparison(phase as f64, literal, &binary_expr.op)
+                    } else {
+                        false
+                    }
+                }
                 _ => {
                     evaluate_attribute_filter(field_name, attributes_str, literal, &binary_expr.op)
                 }
@@ -142,7 +173,7 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
 fn evaluate_between_filter<T: GtfRecordTrait>(
     record: &T,
     between_expr: &Between,
-    _attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if let Expr::Column(column) = &*between_expr.expr {
         if let (Expr::Literal(low_literal, _), Expr::Literal(high_literal, _)) =
@@ -152,12 +183,20 @@ fn evaluate_between_filter<T: GtfRecordTrait>(
             let negated = between_expr.negated;
 
             return match field_name.as_str() {
-                "start" => evaluate_between_comparison(
-                    record.start() as f64,
-                    low_literal,
-                    high_literal,
-                    negated,
-                ),
+                "start" => {
+                    let start_1based = record.start();
+                    let start_output = if coordinate_system_zero_based {
+                        start_1based - 1
+                    } else {
+                        start_1based
+                    };
+                    evaluate_between_comparison(
+                        start_output as f64,
+                        low_literal,
+                        high_literal,
+                        negated,
+                    )
+                }
                 "end" => evaluate_between_comparison(
                     record.end() as f64,
                     low_literal,

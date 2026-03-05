@@ -1124,7 +1124,6 @@ version = "0.5.4"
 dependencies = [
  "async-stream",
  "async-trait",
- "bytes",
  "datafusion",
  "datafusion-bio-format-core",
  "flate2",
