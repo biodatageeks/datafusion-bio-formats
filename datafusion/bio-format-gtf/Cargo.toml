@@ -1,0 +1,25 @@
+[package]
+name = "datafusion-bio-format-gtf"
+version = "0.5.4"
+description = "GTF file format support for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+
+[dependencies]
+datafusion.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+async-stream.workspace = true
+datafusion-bio-format-core = { path = "../bio-format-core" }
+futures.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
+flate2.workspace = true
+log = "0.4.27"
+
+[[example]]
+name = "test_gtf_reader"
+path = "./examples/test_gtf_reader.rs"

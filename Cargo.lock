@@ -1119,6 +1119,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-bio-format-gtf"
+version = "0.5.4"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "datafusion",
+ "datafusion-bio-format-core",
+ "flate2",
+ "futures",
+ "futures-util",
+ "log",
+ "tokio",
+]
+
+[[package]]
 name = "datafusion-bio-format-pairs"
 version = "0.5.4"
 dependencies = [
