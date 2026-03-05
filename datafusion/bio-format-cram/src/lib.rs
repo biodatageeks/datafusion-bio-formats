@@ -30,6 +30,9 @@
 //!     true,
 //!     Some(vec!["MD".to_string(), "NM".to_string(), "RG".to_string()]),
 //!     false,
+//!     true,
+//!     100,
+//!     None,
 //! ).await?;
 //! ctx.register_table("alignments", Arc::new(table))?;
 //!

@@ -120,6 +120,9 @@ async fn test_sam_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
 
@@ -267,6 +270,9 @@ async fn test_sam_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         true,
         Some(tag_fields),
         false,
+        true,
+        100,
+        None,
     )
     .await?;
 
@@ -438,6 +444,9 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     let bam_read_schema = read_bam.schema();
@@ -465,6 +474,9 @@ async fn test_bam_to_sam_conversion() -> Result<(), Box<dyn std::error::Error>> 
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("sam_data", Arc::new(read_sam))?;
@@ -571,6 +583,9 @@ async fn test_mapq_255_preserved() -> Result<(), Box<dyn std::error::Error>> {
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
@@ -647,6 +662,9 @@ async fn test_name_star_preserved() -> Result<(), Box<dyn std::error::Error>> {
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
@@ -729,6 +747,9 @@ async fn test_template_length_round_trip() -> Result<(), Box<dyn std::error::Err
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("test_sam", Arc::new(read_provider))?;
@@ -791,6 +812,9 @@ async fn test_binary_cigar_read_round_trip() -> Result<(), Box<dyn std::error::E
         true,
         None,
         true, // binary_cigar
+        true,
+        100,
+        None,
     )
     .await?;
 

@@ -14,12 +14,15 @@ pub struct TagDefinition {
     pub description: String,
 }
 
-/// Returns a comprehensive registry of SAM/BAM alignment tags
+/// Returns the registry of standard SAM specification alignment tags.
 ///
-/// Contains 75 tags organized into categories:
-/// - Alignment scoring: NM, MD, AS, XS, MQ, H0, H1, H2
+/// Contains 63 tags from the SAM specification (SAMtags.pdf, 9 Sep 2024):
+/// <https://samtools.github.io/hts-specs/SAMtags.pdf>
+///
+/// Categories:
+/// - Alignment scoring: NM, MD, AS, MQ, H0, H1, H2
 /// - Read groups: RG, LB, PU, PG
-/// - Single-cell: CB, UB, UR, CR, CY, UY
+/// - Single-cell: CB, CR, CY
 /// - Barcoding & molecular IDs: BC, BZ, MI, OX, QT, QX, RX
 /// - Base modifications: ML, MM, MN
 /// - Quality: BQ, OQ, E2, PQ, Q2, U2, UQ
@@ -28,9 +31,12 @@ pub struct TagDefinition {
 /// - Platform: FI, TC, FS, FZ
 /// - Color space: CM, CQ, CS
 /// - Annotations: CO, CT, PT, TS
-/// - Other: NH, HI, IH, SM, AM, X0, X1, XA, XN, XM, XO, XG, XT
+/// - Other: NH, HI, IH, SM, AM
 /// - BAM-specific: CG
 /// - Reserved: GC, GQ, GS, MF, RT, S2, SQ
+///
+/// Tags not in this registry (tool-specific, X/Y/Z-prefix, lowercase) are
+/// handled by file-based type inference when `infer_tag_types` is enabled.
 pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     let mut tags = HashMap::new();
 
@@ -57,14 +63,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
             sam_type: 'i',
             arrow_type: DataType::Int32,
             description: "Alignment score".to_string(),
-        },
-    );
-    tags.insert(
-        "XS".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Suboptimal alignment score".to_string(),
         },
     );
     tags.insert(
@@ -120,23 +118,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
         },
     );
     tags.insert(
-        "UB".to_string(),
-        TagDefinition {
-            sam_type: 'Z',
-            arrow_type: DataType::Utf8,
-            description: "Unique molecular identifier (UMI) barcode sequence (corrected)"
-                .to_string(),
-        },
-    );
-    tags.insert(
-        "UR".to_string(),
-        TagDefinition {
-            sam_type: 'Z',
-            arrow_type: DataType::Utf8,
-            description: "UMI barcode sequence (uncorrected)".to_string(),
-        },
-    );
-    tags.insert(
         "CR".to_string(),
         TagDefinition {
             sam_type: 'Z',
@@ -152,15 +133,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
             description: "Cell barcode quality scores".to_string(),
         },
     );
-    tags.insert(
-        "UY".to_string(),
-        TagDefinition {
-            sam_type: 'Z',
-            arrow_type: DataType::Utf8,
-            description: "UMI barcode quality scores".to_string(),
-        },
-    );
-
     // Quality tags
     tags.insert(
         "BQ".to_string(),
@@ -307,71 +279,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
                 .to_string(),
         },
     );
-    tags.insert(
-        "X0".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of best hits".to_string(),
-        },
-    );
-    tags.insert(
-        "X1".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of suboptimal hits".to_string(),
-        },
-    );
-    tags.insert(
-        "XA".to_string(),
-        TagDefinition {
-            sam_type: 'Z',
-            arrow_type: DataType::Utf8,
-            description: "Alternative hits".to_string(),
-        },
-    );
-    tags.insert(
-        "XN".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of ambiguous bases in the reference".to_string(),
-        },
-    );
-    tags.insert(
-        "XM".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of mismatches in the alignment".to_string(),
-        },
-    );
-    tags.insert(
-        "XO".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of gap opens".to_string(),
-        },
-    );
-    tags.insert(
-        "XG".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of gap extensions".to_string(),
-        },
-    );
-    tags.insert(
-        "XT".to_string(),
-        TagDefinition {
-            sam_type: 'A',
-            arrow_type: DataType::Utf8,
-            description: "Type: Unique/Repeat/N/Mate-sw".to_string(),
-        },
-    );
-
     // Barcoding and molecular identifiers
     tags.insert(
         "BC".to_string(),
@@ -612,41 +519,6 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
         },
     );
 
-    // 10X Genomics Cell Ranger tags
-    tags.insert(
-        "RE".to_string(),
-        TagDefinition {
-            sam_type: 'A',
-            arrow_type: DataType::Utf8,
-            description: "10X: read type indicator (I=intronic, N=intergenic, E=exonic)"
-                .to_string(),
-        },
-    );
-    tags.insert(
-        "xf".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "10X: extra alignment flags".to_string(),
-        },
-    );
-    tags.insert(
-        "nM".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of mismatches per (nM:i tag, lowercase)".to_string(),
-        },
-    );
-    tags.insert(
-        "ts".to_string(),
-        TagDefinition {
-            sam_type: 'i',
-            arrow_type: DataType::Int32,
-            description: "Number of trimmed bases at transcript start".to_string(),
-        },
-    );
-
     // BAM-specific
     tags.insert(
         "CG".to_string(),
@@ -720,8 +592,46 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
     tags
 }
 
-/// Convert SAM tag type character to Arrow DataType
-#[allow(dead_code)]
+/// Parse SAM-style type hint strings into a tag type map.
+///
+/// Each hint is in `"TAG:TYPE"` format where TYPE is a SAM type character:
+/// - `i` → Int32, `f` → Float32, `Z` → Utf8, `A` → Utf8 (char), `H` → Utf8 (hex)
+///
+/// See <https://samtools.github.io/hts-specs/SAMtags.pdf> for tag type syntax.
+///
+/// Returns an error if any hint is malformed.
+pub fn parse_tag_type_hints(hints: &[String]) -> Result<HashMap<String, (char, DataType)>, String> {
+    let mut map = HashMap::new();
+    for hint in hints {
+        let parts: Vec<&str> = hint.split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "Invalid tag type hint '{hint}': expected 'TAG:TYPE' format (e.g., 'pt:i', 'de:f', 'sv:Z')"
+            ));
+        }
+        let tag = parts[0];
+        let type_str = parts[1];
+        if type_str.len() != 1 {
+            return Err(format!(
+                "Invalid tag type hint '{hint}': TYPE must be a single character (i, f, Z, A, H)"
+            ));
+        }
+        let sam_type = type_str.chars().next().unwrap();
+        if !matches!(sam_type, 'A' | 'i' | 'f' | 'Z' | 'H') {
+            return Err(format!(
+                "Invalid tag type hint '{hint}': unsupported SAM type '{sam_type}'. \
+                 Supported types: A (character), i (integer), f (float), Z (string), H (hex)"
+            ));
+        }
+        let arrow_type = sam_tag_type_to_arrow_type(sam_type);
+        map.insert(tag.to_string(), (sam_type, arrow_type));
+    }
+    Ok(map)
+}
+
+/// Convert SAM tag type character to Arrow DataType.
+///
+/// See <https://samtools.github.io/hts-specs/SAMtags.pdf> for type definitions.
 pub fn sam_tag_type_to_arrow_type(sam_type: char) -> DataType {
     match sam_type {
         'A' => DataType::Utf8,    // Character
@@ -787,10 +697,9 @@ mod tests {
 
         // Test single-cell tags
         assert!(tags.contains_key("CB"));
-        assert!(tags.contains_key("UB"));
 
-        // Should have ~75 tags (40 original + 30 from SAM spec + 10X tags)
-        assert!(tags.len() >= 75);
+        // Should have 63 standard SAM specification tags
+        assert_eq!(tags.len(), 63, "Expected 63 standard SAM spec tags");
     }
 
     #[test]
@@ -810,5 +719,25 @@ mod tests {
         assert!(!tags["NM"].description.is_empty());
         assert!(!tags["AS"].description.is_empty());
         assert!(!tags["CB"].description.is_empty());
+    }
+
+    #[test]
+    fn test_parse_tag_type_hints() {
+        let hints = vec!["pt:i".to_string(), "de:f".to_string(), "sv:Z".to_string()];
+        let map = parse_tag_type_hints(&hints).unwrap();
+        assert_eq!(map.len(), 3);
+        assert_eq!(map["pt"], ('i', DataType::Int32));
+        assert_eq!(map["de"], ('f', DataType::Float32));
+        assert_eq!(map["sv"], ('Z', DataType::Utf8));
+    }
+
+    #[test]
+    fn test_parse_tag_type_hints_invalid() {
+        assert!(parse_tag_type_hints(&["pt".to_string()]).is_err());
+        assert!(parse_tag_type_hints(&["pt:X:extra".to_string()]).is_err());
+        assert!(parse_tag_type_hints(&["pt:ii".to_string()]).is_err());
+        // Unsupported SAM type character
+        assert!(parse_tag_type_hints(&["pt:X".to_string()]).is_err());
+        assert!(parse_tag_type_hints(&["pt:z".to_string()]).is_err());
     }
 }

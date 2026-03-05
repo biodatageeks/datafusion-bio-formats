@@ -41,6 +41,9 @@ async fn setup_bam_ctx() -> datafusion::error::Result<SessionContext> {
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("bam", Arc::new(provider))?;

@@ -6,8 +6,8 @@
 /// tags since they can be calculated on-the-fly from the alignment features.
 ///
 /// References:
-/// - SAM specification: https://samtools.github.io/hts-specs/SAMtags.pdf
-/// - samtools calmd: http://www.htslib.org/doc/samtools-calmd.html
+/// - SAM specification: <https://samtools.github.io/hts-specs/SAMtags.pdf>
+/// - samtools calmd: <http://www.htslib.org/doc/samtools-calmd.html>
 use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::Cigar;
 use noodles_sam::alignment::record::Sequence;

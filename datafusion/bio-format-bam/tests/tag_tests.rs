@@ -1,4 +1,5 @@
 use datafusion::arrow::array::Array;
+use datafusion::datasource::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_bam::table_provider::BamTableProvider;
 use std::sync::Arc;
@@ -12,6 +13,9 @@ async fn test_bam_without_tags() {
         true,
         None,  // No tags
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -38,6 +42,9 @@ async fn test_bam_with_specified_tags() {
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -74,6 +81,9 @@ async fn test_query_with_tag_projection() {
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -106,6 +116,9 @@ async fn test_query_without_tag_projection() {
         true,
         Some(vec!["NM".to_string(), "MD".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -138,6 +151,9 @@ async fn test_count_query() {
         true,
         Some(vec!["NM".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -155,12 +171,16 @@ async fn test_count_query() {
 #[tokio::test]
 async fn test_unknown_tag_accepted() {
     // Test that unknown tags are accepted and treated as Utf8 by default
+    // Uses infer_tag_types=false to test the static fallback path
     let provider = BamTableProvider::new(
         "tests/rev_reads.bam".to_string(),
         None,
         true,
         Some(vec!["UNKNOWN_TAG".to_string()]),
         false,
+        false,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -206,6 +226,9 @@ async fn test_multiple_tags() {
             "RG".to_string(),
         ]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -233,6 +256,9 @@ async fn test_empty_tag_list() {
         true,
         Some(vec![]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -269,6 +295,9 @@ async fn test_read_10x_genomics_tags() {
         true, // 0-based coordinates
         Some(tag_fields),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -450,6 +479,9 @@ async fn test_read_all_13_tags() {
         true, // 0-based coordinates
         Some(tag_fields),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -469,7 +501,8 @@ async fn test_read_all_13_tags() {
     let md_field = schema.field_with_name(None, "MD").unwrap();
     assert_eq!(md_field.data_type(), &DataType::Utf8);
     let xt_field = schema.field_with_name(None, "XT").unwrap();
-    assert_eq!(xt_field.data_type(), &DataType::Utf8); // SAM type 'A' -> Utf8
+    // XT is not in the SAM spec registry; inferred from BAM binary as Int32 (encoded as Int8)
+    assert_eq!(xt_field.data_type(), &DataType::Int32);
     let mq_field = schema.field_with_name(None, "MQ").unwrap();
     assert_eq!(mq_field.data_type(), &DataType::Int32);
     let rg_field = schema.field_with_name(None, "RG").unwrap();
@@ -490,15 +523,18 @@ async fn test_read_all_13_tags() {
 
 #[tokio::test]
 async fn test_xt_tag_character_values() {
-    // Specifically tests that the XT tag (SAM type 'A' / character) is correctly
-    // read even when the BAM binary encodes it as Int8 instead of Character.
-    // The XT tag values should be ASCII characters like 'S', 'V', 'W'.
+    // XT is not in the SAM spec registry; it's inferred from the BAM binary.
+    // BAM encodes XT as Int8, so with inference it's detected as Int32.
+    // The values are ASCII codes for characters like 'S' (83), 'U' (85), etc.
     let provider = BamTableProvider::new(
         "tests/bam_with_tags.bam".to_string(),
         None,
         true,
         Some(vec!["XT".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -513,17 +549,17 @@ async fn test_xt_tag_character_values() {
         .unwrap();
     let results = df.collect().await.unwrap();
 
-    use datafusion::arrow::array::StringArray;
-    let mut xt_values: Vec<String> = Vec::new();
+    use datafusion::arrow::array::Int32Array;
+    let mut xt_values: Vec<i32> = Vec::new();
     for batch in &results {
         let xt_col = batch
             .column(1)
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<Int32Array>()
             .unwrap();
         for i in 0..xt_col.len() {
             if !xt_col.is_null(i) {
-                xt_values.push(xt_col.value(i).to_string());
+                xt_values.push(xt_col.value(i));
             }
         }
     }
@@ -531,12 +567,11 @@ async fn test_xt_tag_character_values() {
     // Should have XT values (reads with XT in the test file)
     assert!(!xt_values.is_empty(), "Should find reads with XT tag");
 
-    // All XT values should be single ASCII characters
+    // All XT values should be valid ASCII character codes
     for val in &xt_values {
-        assert_eq!(val.len(), 1, "XT value '{val}' should be single character");
         assert!(
-            val.chars().next().unwrap().is_ascii(),
-            "XT value '{val}' should be ASCII",
+            (32..=126).contains(val),
+            "XT value {val} should be a printable ASCII code",
         );
     }
 }
@@ -551,6 +586,9 @@ async fn test_integer_tags_from_int8_encoding() {
         true,
         Some(vec!["NM".to_string(), "MQ".to_string(), "UQ".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -602,6 +640,9 @@ async fn test_nullable_tags_with_mixed_presence() {
             "OC".to_string(),
         ]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -633,7 +674,7 @@ async fn test_nullable_tags_with_mixed_presence() {
         let xt_col = batch
             .column(1)
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<Int32Array>()
             .unwrap();
         let xn_col = batch
             .column(2)
@@ -689,10 +730,18 @@ async fn test_nullable_tags_with_mixed_presence() {
 async fn test_describe_discovers_tags() {
     use datafusion::prelude::*;
 
-    let provider =
-        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None, false)
-            .await
-            .unwrap();
+    let provider = BamTableProvider::new(
+        "tests/rev_reads.bam".to_string(),
+        None,
+        true,
+        None,
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
 
     let ctx = SessionContext::new();
 
@@ -745,10 +794,18 @@ async fn test_describe_discovers_tags() {
 async fn test_describe_with_display() {
     use datafusion::prelude::*;
 
-    let provider =
-        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None, false)
-            .await
-            .unwrap();
+    let provider = BamTableProvider::new(
+        "tests/rev_reads.bam".to_string(),
+        None,
+        true,
+        None,
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
 
     let ctx = SessionContext::new();
     let schema_df = provider.describe(&ctx, Some(100)).await.unwrap();
@@ -763,12 +820,458 @@ async fn test_describe_method_signature() {
     // Test that describe method exists with correct signature
     use datafusion::prelude::*;
 
-    let provider =
-        BamTableProvider::new("tests/rev_reads.bam".to_string(), None, true, None, false)
-            .await
-            .unwrap();
+    let provider = BamTableProvider::new(
+        "tests/rev_reads.bam".to_string(),
+        None,
+        true,
+        None,
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
 
     let ctx = SessionContext::new();
     let result = provider.describe(&ctx, Some(10)).await;
     assert!(result.is_ok(), "Should successfully describe BAM schema");
+}
+
+// --- Nanopore custom tag inference tests ---
+
+const NANOPORE_BAM: &str = "tests/nanopore_custom_tags.bam";
+
+#[tokio::test]
+async fn test_unknown_integer_tag_inferred_by_new() {
+    // pt (poly-T tail length) is a nanopore-specific integer tag not in SAM spec registry.
+    // With infer_tag_types=true, it should be detected as Int32 from the file.
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    let pt_field = schema.field_with_name("pt").unwrap();
+    assert_eq!(
+        pt_field.data_type(),
+        &datafusion::arrow::datatypes::DataType::Int32,
+        "pt should be inferred as Int32"
+    );
+
+    // Verify actual values are integers
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+    let df = ctx
+        .sql("SELECT \"pt\" FROM bam WHERE \"pt\" IS NOT NULL")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let total: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert!(total > 0, "Should have records with pt tag");
+
+    use datafusion::arrow::array::Int32Array;
+    for batch in &results {
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..col.len() {
+            if !col.is_null(i) {
+                let v = col.value(i);
+                assert!(v >= 0, "pt value {v} should be non-negative");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_unknown_float_tag_inferred_by_new() {
+    // de (error rate) is a nanopore-specific float tag.
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["de".to_string()]),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    let de_field = schema.field_with_name("de").unwrap();
+    assert_eq!(
+        de_field.data_type(),
+        &datafusion::arrow::datatypes::DataType::Float32,
+        "de should be inferred as Float32"
+    );
+}
+
+#[tokio::test]
+async fn test_unknown_array_tag_inferred_by_new() {
+    // pa (poly-A boundaries) is a nanopore-specific B:i array tag.
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pa".to_string()]),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    let pa_field = schema.field_with_name("pa").unwrap();
+    assert!(
+        matches!(
+            pa_field.data_type(),
+            datafusion::arrow::datatypes::DataType::List(_)
+        ),
+        "pa should be inferred as List, got {:?}",
+        pa_field.data_type()
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_known_and_unknown_tags() {
+    // Mix of SAM spec tags (NM, MD) and nanopore custom tags (pt, de, pa).
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec![
+            "NM".to_string(),
+            "MD".to_string(),
+            "pt".to_string(),
+            "de".to_string(),
+            "pa".to_string(),
+        ]),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    use datafusion::arrow::datatypes::DataType;
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("NM").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("MD").unwrap().data_type(),
+        &DataType::Utf8
+    );
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("de").unwrap().data_type(),
+        &DataType::Float32
+    );
+    assert!(matches!(
+        schema.field_with_name("pa").unwrap().data_type(),
+        DataType::List(_)
+    ));
+}
+
+/// All 26 tags in the nanopore test BAM
+const NANOPORE_TAGS: [&str; 26] = [
+    "qs", "du", "ns", "ts", "mx", "ch", "st", "rn", "fn", "sm", "sd", "sv", "dx", "RG", "NM", "ms",
+    "AS", "nn", "de", "tp", "cm", "s1", "MD", "rl", "pt", "pa",
+];
+
+#[tokio::test]
+async fn test_all_nanopore_tags_inferred() {
+    let tag_fields: Vec<String> = NANOPORE_TAGS.iter().map(|s| s.to_string()).collect();
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(tag_fields),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    use datafusion::arrow::datatypes::DataType;
+    let schema = provider.schema();
+
+    // 12 core + 26 tags = 38 fields
+    assert_eq!(schema.fields().len(), 38);
+
+    // Verify known SAM spec tags
+    assert_eq!(
+        schema.field_with_name("NM").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("MD").unwrap().data_type(),
+        &DataType::Utf8
+    );
+    assert_eq!(
+        schema.field_with_name("AS").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("RG").unwrap().data_type(),
+        &DataType::Utf8
+    );
+
+    // Verify inferred nanopore integer tags
+    for tag in &[
+        "pt", "ch", "cm", "dx", "ms", "mx", "nn", "ns", "rl", "rn", "ts", "s1",
+    ] {
+        assert_eq!(
+            schema.field_with_name(tag).unwrap().data_type(),
+            &DataType::Int32,
+            "Tag {tag} should be Int32"
+        );
+    }
+
+    // Verify inferred nanopore float tags
+    for tag in &["de", "du", "qs", "sd", "sm"] {
+        assert_eq!(
+            schema.field_with_name(tag).unwrap().data_type(),
+            &DataType::Float32,
+            "Tag {tag} should be Float32"
+        );
+    }
+
+    // Verify inferred nanopore string tags
+    for tag in &["fn", "st", "sv"] {
+        assert_eq!(
+            schema.field_with_name(tag).unwrap().data_type(),
+            &DataType::Utf8,
+            "Tag {tag} should be Utf8"
+        );
+    }
+
+    // tp is type 'A' (character) → Utf8
+    assert_eq!(
+        schema.field_with_name("tp").unwrap().data_type(),
+        &DataType::Utf8
+    );
+
+    // pa is B:i array → List<Int32>
+    assert!(matches!(
+        schema.field_with_name("pa").unwrap().data_type(),
+        DataType::List(_)
+    ));
+
+    // Verify data can actually be read
+    let ctx = SessionContext::new();
+    ctx.register_table("bam", Arc::new(provider)).unwrap();
+    let df = ctx
+        .sql("SELECT \"pt\", \"de\", \"pa\" FROM bam")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let total: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 20);
+}
+
+#[tokio::test]
+async fn test_inferred_schema_matches_try_new() {
+    // new() with infer_tag_types=true and try_new_with_inferred_schema() should produce
+    // identical types for the same tags.
+    let tags = vec!["NM".to_string(), "pt".to_string(), "de".to_string()];
+
+    let provider_new = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(tags.clone()),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let provider_inferred = BamTableProvider::try_new_with_inferred_schema(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(tags),
+        Some(100),
+        false,
+    )
+    .await
+    .unwrap();
+
+    for tag in &["NM", "pt", "de"] {
+        let t1 = provider_new
+            .schema()
+            .field_with_name(tag)
+            .unwrap()
+            .data_type()
+            .clone();
+        let t2 = provider_inferred
+            .schema()
+            .field_with_name(tag)
+            .unwrap()
+            .data_type()
+            .clone();
+        assert_eq!(
+            t1, t2,
+            "Type mismatch for tag {tag}: new={t1:?} vs inferred={t2:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_inference_disabled_falls_back_to_utf8() {
+    // With infer_tag_types=false, unknown tags should default to Utf8 (old behavior).
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false, // inference disabled
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    let pt_field = schema.field_with_name("pt").unwrap();
+    assert_eq!(
+        pt_field.data_type(),
+        &datafusion::arrow::datatypes::DataType::Utf8,
+        "pt should fall back to Utf8 when inference is disabled"
+    );
+}
+
+#[tokio::test]
+async fn test_custom_sample_size() {
+    // Inference with a small sample size should still work.
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pt".to_string(), "de".to_string()]),
+        false,
+        true,
+        5, // Only sample 5 records
+        None,
+    )
+    .await
+    .unwrap();
+
+    use datafusion::arrow::datatypes::DataType;
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("de").unwrap().data_type(),
+        &DataType::Float32
+    );
+}
+
+#[tokio::test]
+async fn test_tag_type_hints_override_default() {
+    // With inference disabled, tag_type_hints should provide the type.
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false, // inference disabled
+        100,
+        Some(vec!["pt:i".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &datafusion::arrow::datatypes::DataType::Int32,
+        "pt should be Int32 from type hint"
+    );
+}
+
+#[tokio::test]
+async fn test_inference_overrides_hints() {
+    // Inference should win over hints: hint says Utf8, but file says Int32.
+    let provider = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        true, // inference enabled
+        100,
+        Some(vec!["pt:Z".to_string()]), // hint says string
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &datafusion::arrow::datatypes::DataType::Int32,
+        "Inference (Int32) should override hint (Utf8)"
+    );
+}
+
+#[tokio::test]
+async fn test_invalid_hint_format_error() {
+    // Malformed hints should return an error.
+    let result = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false,
+        100,
+        Some(vec!["pt".to_string()]), // missing :TYPE
+    )
+    .await;
+    assert!(result.is_err(), "Should error on malformed hint 'pt'");
+
+    let result = BamTableProvider::new(
+        NANOPORE_BAM.to_string(),
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false,
+        100,
+        Some(vec!["pt:X:extra".to_string()]), // too many colons
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "Should error on malformed hint 'pt:X:extra'"
+    );
 }

@@ -17,6 +17,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         true,  // 0-based coordinates
         None,  // No pre-specified tags
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await?;
 

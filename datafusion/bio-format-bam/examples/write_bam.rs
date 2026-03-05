@@ -22,6 +22,9 @@ async fn main() -> datafusion::error::Result<()> {
         true,  // 0-based coordinates
         None,  // tag fields
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("input_bam", Arc::new(input_table))?;
@@ -77,6 +80,9 @@ async fn main() -> datafusion::error::Result<()> {
         true,  // 0-based coordinates
         None,  // tag fields
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("input_sam", Arc::new(sam_input))?;

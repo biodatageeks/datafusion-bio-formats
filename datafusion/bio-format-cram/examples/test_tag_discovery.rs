@@ -50,6 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         true,
         None, // No tags specified
         false,
+        true,
+        100,
+        None,
     )
     .await?;
 
