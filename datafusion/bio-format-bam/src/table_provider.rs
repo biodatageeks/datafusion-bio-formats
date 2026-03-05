@@ -25,16 +25,29 @@ use datafusion_bio_format_core::{
     BAM_BINARY_CIGAR_KEY, BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY,
     BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
-use log::debug;
+use log::{debug, warn};
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Build the Arrow schema for BAM/SAM records.
+///
+/// Tag type resolution priority (highest to lowest):
+/// 1. File inference (`inferred_tags`) — actual data always wins
+/// 2. User-specified hints (`tag_type_hints`) — explicit user knowledge
+/// 3. SAM spec registry — standard tag definitions from
+///    https://samtools.github.io/hts-specs/SAMtags.pdf
+/// 4. Default Utf8 — last resort with warning
+#[allow(clippy::too_many_arguments)]
 fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
     header_metadata: Option<HashMap<String, String>>,
     binary_cigar: bool,
+    inferred_tags: Option<&HashMap<String, (char, DataType)>>,
+    tag_type_hints: Option<&HashMap<String, (char, DataType)>>,
+    infer_tag_types: bool,
+    infer_tag_sample_size: usize,
 ) -> datafusion::common::Result<SchemaRef> {
     let cigar_type = if binary_cigar {
         DataType::Binary
@@ -63,15 +76,42 @@ fn determine_schema(
             let mut field_metadata = HashMap::new();
             field_metadata.insert(BAM_TAG_TAG_KEY.to_string(), tag.clone());
 
-            // Use known tag definition if available, otherwise use default (String/Utf8)
-            let (sam_type, arrow_type, description) = if let Some(tag_def) = known_tags.get(tag) {
+            // Priority: inferred > hints > registry > default Utf8
+            let (sam_type, arrow_type, description) = if let Some((sam_t, arrow_t)) =
+                inferred_tags.and_then(|m| m.get(tag))
+            {
+                let desc = known_tags
+                    .get(tag)
+                    .map(|t| t.description.clone())
+                    .unwrap_or_else(|| format!("Tag type discovered from file ({sam_t})"));
+                (*sam_t, arrow_t.clone(), desc)
+            } else if let Some((sam_t, arrow_t)) = tag_type_hints.and_then(|m| m.get(tag)) {
+                let desc = known_tags
+                    .get(tag)
+                    .map(|t| t.description.clone())
+                    .unwrap_or_else(|| format!("Tag type from user hint ({sam_t})"));
+                (*sam_t, arrow_t.clone(), desc)
+            } else if let Some(tag_def) = known_tags.get(tag) {
                 (
                     tag_def.sam_type,
                     tag_def.arrow_type.clone(),
                     tag_def.description.clone(),
                 )
             } else {
-                // Default for unknown tags: treat as string (most flexible)
+                // Unknown tag — emit warning depending on inference state
+                if infer_tag_types {
+                    warn!(
+                        "Tag '{tag}' was not found in the first {infer_tag_sample_size} sampled records. \
+                             Defaulting to Utf8 (string) type, which may result in incorrect data decoding. \
+                             Increase infer_tag_sample_size if this tag appears later in the file."
+                    );
+                } else {
+                    warn!(
+                        "Tag '{tag}' is not in the SAM specification registry and schema inference is disabled. \
+                             Defaulting to Utf8 (string) type, which may result in incorrect data decoding \
+                             for non-string tags. Enable infer_tag_types to auto-detect the correct type."
+                    );
+                }
                 ('Z', DataType::Utf8, "Unknown tag".to_string())
             };
 
@@ -96,10 +136,69 @@ fn determine_schema(
     Ok(Arc::new(schema))
 }
 
-/// Determines schema by scanning actual BAM file records to infer tag types
+/// Discover tag types by sampling records from a stream.
+///
+/// Used by both `determine_schema_from_file()` and `new()` for tag type inference.
+async fn discover_tags_from_stream<S, R, E>(
+    mut records: S,
+    tags: &[String],
+    sample_size: usize,
+) -> HashMap<String, (char, DataType)>
+where
+    S: futures_util::Stream<Item = Result<R, E>> + Unpin,
+    R: noodles_sam::alignment::Record,
+    E: std::fmt::Debug,
+{
+    use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
+    use futures_util::StreamExt;
+
+    let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
+    let mut count = 0;
+
+    while let Some(result) = records.next().await {
+        if count >= sample_size {
+            break;
+        }
+
+        match result {
+            Ok(record) => {
+                let data = record.data();
+                for tag_name in tags {
+                    if discovered_tags.contains_key(tag_name) {
+                        continue;
+                    }
+                    let tag_bytes = tag_name.as_bytes();
+                    if tag_bytes.len() == 2 {
+                        let tag = noodles_sam::alignment::record::data::field::Tag::from([
+                            tag_bytes[0],
+                            tag_bytes[1],
+                        ]);
+                        if let Some(Ok(value)) = data.get(&tag) {
+                            let (sam_type, arrow_type) = infer_type_from_noodles_value(&value);
+                            debug!(
+                                "Found tag {tag_name} in record {count}: sam_type={sam_type}, arrow_type={arrow_type:?}"
+                            );
+                            discovered_tags.insert(tag_name.clone(), (sam_type, arrow_type));
+                        }
+                    }
+                }
+                count += 1;
+            }
+            Err(e) => {
+                debug!("Error reading record during schema inference: {e:?}");
+                continue;
+            }
+        }
+    }
+    debug!("Schema inference completed after {count} records");
+    discovered_tags
+}
+
+/// Determines schema by scanning actual BAM file records to infer tag types.
 ///
 /// This is more accurate than using only the static registry, as it discovers
-/// the actual types used in the file.
+/// the actual types used in the file. Delegates to `determine_schema()` after
+/// discovering tags.
 async fn determine_schema_from_file(
     file_path: String,
     object_storage_options: Option<ObjectStorageOptions>,
@@ -109,32 +208,10 @@ async fn determine_schema_from_file(
     binary_cigar: bool,
 ) -> datafusion::common::Result<SchemaRef> {
     use crate::storage::BamReader;
-    use datafusion_bio_format_core::tag_registry::infer_type_from_noodles_value;
-    use futures_util::StreamExt;
-
-    let cigar_type = if binary_cigar {
-        DataType::Binary
-    } else {
-        DataType::Utf8
-    };
-    let mut fields = vec![
-        Field::new("name", DataType::Utf8, true),
-        Field::new("chrom", DataType::Utf8, true),
-        Field::new("start", DataType::UInt32, true),
-        Field::new("end", DataType::UInt32, true),
-        Field::new("flags", DataType::UInt32, false),
-        Field::new("cigar", cigar_type, false),
-        Field::new("mapping_quality", DataType::UInt32, false),
-        Field::new("mate_chrom", DataType::Utf8, true),
-        Field::new("mate_start", DataType::UInt32, true),
-        Field::new("sequence", DataType::Utf8, false),
-        Field::new("quality_scores", DataType::Utf8, false),
-        Field::new("template_length", DataType::Int32, false),
-    ];
 
     use crate::storage::{SamReader, is_sam_file};
 
-    // Extract header metadata from the file (always done, regardless of tag_fields)
+    // Extract header metadata from the file
     let header_metadata = if is_sam_file(&file_path) {
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
         let storage_type = get_storage_type(file_path.clone());
@@ -151,69 +228,12 @@ async fn determine_schema_from_file(
         extract_header_metadata(&header)
     };
 
-    // If tag fields are specified, discover their actual types from the file
-    if let Some(tags) = tag_fields {
-        let known_tags = get_known_tags();
-
-        // Helper to discover tags from a stream of records implementing the Record trait
-        async fn discover_tags_from_stream<S, R, E>(
-            mut records: S,
-            tags: &[String],
-            sample_size: usize,
-        ) -> HashMap<String, (char, DataType)>
-        where
-            S: futures_util::Stream<Item = Result<R, E>> + Unpin,
-            R: noodles_sam::alignment::Record,
-            E: std::fmt::Debug,
-        {
-            let mut discovered_tags: HashMap<String, (char, DataType)> = HashMap::new();
-            let mut count = 0;
-
-            while let Some(result) = records.next().await {
-                if count >= sample_size {
-                    break;
-                }
-
-                match result {
-                    Ok(record) => {
-                        let data = record.data();
-                        for tag_name in tags {
-                            if discovered_tags.contains_key(tag_name) {
-                                continue;
-                            }
-                            let tag_bytes = tag_name.as_bytes();
-                            if tag_bytes.len() == 2 {
-                                let tag = noodles_sam::alignment::record::data::field::Tag::from([
-                                    tag_bytes[0],
-                                    tag_bytes[1],
-                                ]);
-                                if let Some(Ok(value)) = data.get(&tag) {
-                                    let (sam_type, arrow_type) =
-                                        infer_type_from_noodles_value(&value);
-                                    debug!(
-                                        "Found tag {tag_name} in record {count}: sam_type={sam_type}, arrow_type={arrow_type:?}"
-                                    );
-                                    discovered_tags
-                                        .insert(tag_name.clone(), (sam_type, arrow_type));
-                                }
-                            }
-                        }
-                        count += 1;
-                    }
-                    Err(e) => {
-                        debug!("Error reading record during schema inference: {e:?}");
-                        continue;
-                    }
-                }
-            }
-            debug!("Schema inference completed after {count} records");
-            discovered_tags
-        }
-
+    // Discover tag types from the file if tags are requested
+    let discovered_tags = if let Some(tags) = tag_fields {
         debug!("Starting schema inference by sampling {sample_size} records");
         debug!("Looking for tags: {tags:?}");
 
-        let discovered_tags = if is_sam_file(&file_path) {
+        let discovered = if is_sam_file(&file_path) {
             use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
             let storage_type = get_storage_type(file_path.clone());
             if !matches!(storage_type, StorageType::LOCAL) {
@@ -233,62 +253,23 @@ async fn determine_schema_from_file(
 
         debug!(
             "Discovered tags: {:?}",
-            discovered_tags.keys().collect::<Vec<_>>()
+            discovered.keys().collect::<Vec<_>>()
         );
+        Some(discovered)
+    } else {
+        None
+    };
 
-        // Build fields for all requested tags
-        for tag in tags {
-            let mut field_metadata = HashMap::new();
-            field_metadata.insert(BAM_TAG_TAG_KEY.to_string(), tag.clone());
-
-            // Use discovered type if found, otherwise fall back to registry, then default
-            let (sam_type, arrow_type, description) =
-                if let Some((sam_t, arrow_t)) = discovered_tags.get(tag) {
-                    // Use actual discovered type from file
-                    let desc = known_tags
-                        .get(tag)
-                        .map(|t| t.description.clone())
-                        .unwrap_or_else(|| format!("Tag type discovered from file ({sam_t})"));
-                    debug!("Using discovered type for {tag}: {sam_t} -> {arrow_t:?}");
-                    (*sam_t, arrow_t.clone(), desc)
-                } else if let Some(tag_def) = known_tags.get(tag) {
-                    // Fall back to registry definition
-                    debug!(
-                        "Using registry type for {}: {} -> {:?}",
-                        tag, tag_def.sam_type, tag_def.arrow_type
-                    );
-                    (
-                        tag_def.sam_type,
-                        tag_def.arrow_type.clone(),
-                        tag_def.description.clone(),
-                    )
-                } else {
-                    // Default for unknown tags
-                    debug!("Using default type for {tag}: Z -> Utf8");
-                    ('Z', DataType::Utf8, "Unknown tag".to_string())
-                };
-
-            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), sam_type.to_string());
-            field_metadata.insert(BAM_TAG_DESCRIPTION_KEY.to_string(), description);
-
-            fields.push(
-                Field::new(tag.clone(), arrow_type.clone(), true).with_metadata(field_metadata),
-            );
-        }
-    }
-
-    // Merge header metadata with coordinate system and binary_cigar metadata
-    let mut metadata = header_metadata;
-    metadata.insert(
-        COORDINATE_SYSTEM_METADATA_KEY.to_string(),
-        coordinate_system_zero_based.to_string(),
-    );
-    if binary_cigar {
-        metadata.insert(BAM_BINARY_CIGAR_KEY.to_string(), "true".to_string());
-    }
-    let schema = Schema::new_with_metadata(fields, metadata);
-    debug!("Schema (from file): {schema:?}");
-    Ok(Arc::new(schema))
+    determine_schema(
+        tag_fields,
+        coordinate_system_zero_based,
+        Some(header_metadata),
+        binary_cigar,
+        discovered_tags.as_ref(),
+        None,
+        true,
+        sample_size,
+    )
 }
 
 /// Appends a dedicated partition for global no-coor records when present.
@@ -358,17 +339,16 @@ impl BamTableProvider {
     /// * `tag_fields` - Optional list of BAM alignment tag names to include as columns.
     ///   `None` = no tags included (only 12 core fields),
     ///   `Some(vec!["NM", "MD", "AS"])` = include specified tags as columns
+    /// * `binary_cigar` - If true, expose CIGAR as Binary instead of Utf8 string
+    /// * `infer_tag_types` - When true, sample the file to auto-detect types for tags not
+    ///   in the SAM specification registry. When false, unknown tags default to Utf8.
+    /// * `infer_tag_sample_size` - Number of records to sample for type inference (typically 100)
+    /// * `tag_type_hints` - Optional explicit type hints in SAM syntax, e.g. `["pt:i", "de:f"]`.
+    ///   See https://samtools.github.io/hts-specs/SAMtags.pdf for tag type syntax.
     ///
     /// # Returns
     ///
     /// A new BamTableProvider or a DataFusion error if schema determination fails
-    ///
-    /// # Note
-    ///
-    /// This method uses the static tag registry for schema determination. If your BAM file
-    /// contains tags with non-standard types (e.g., XS as float instead of int), consider
-    /// using `try_new_with_inferred_schema()` instead, which samples the file to discover
-    /// actual tag types.
     ///
     /// # Example
     ///
@@ -383,19 +363,34 @@ impl BamTableProvider {
     ///     true,     // Use 0-based coordinates (default)
     ///     None,     // No tag fields
     ///     false,    // String CIGAR (default)
+    ///     true,     // Enable tag type inference
+    ///     100,      // Sample 100 records
+    ///     None,     // No type hints
     /// ).await?;
     /// # Ok(())
     /// # }
     /// ```
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         file_path: String,
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
         binary_cigar: bool,
+        infer_tag_types: bool,
+        infer_tag_sample_size: usize,
+        tag_type_hints: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
         use crate::storage::{SamReader, is_sam_file};
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+        use datafusion_bio_format_core::tag_registry::parse_tag_type_hints;
+
+        // Parse tag type hints
+        let parsed_hints = if let Some(ref hints) = tag_type_hints {
+            Some(parse_tag_type_hints(hints).map_err(DataFusionError::Configuration)?)
+        } else {
+            None
+        };
 
         // Best-effort header reading: extract metadata if possible, fall back to empty
         let storage_type = get_storage_type(file_path.clone());
@@ -441,11 +436,65 @@ impl BamTableProvider {
         let reference_names: Vec<String> = ref_seqs.iter().map(|r| r.name.clone()).collect();
         let reference_lengths: Vec<u64> = ref_seqs.iter().map(|r| r.length as u64).collect();
 
+        // Infer types for unknown tags by sampling the file
+        let inferred_tags = if infer_tag_types {
+            if let Some(ref tags) = tag_fields {
+                let known_tags = get_known_tags();
+                let unknown_tags: Vec<String> = tags
+                    .iter()
+                    .filter(|t| !known_tags.contains_key(t.as_str()))
+                    .cloned()
+                    .collect();
+
+                if !unknown_tags.is_empty() {
+                    debug!(
+                        "Inferring types for {} unknown tags: {:?}",
+                        unknown_tags.len(),
+                        unknown_tags
+                    );
+                    let discovered = if is_sam_file(&file_path) {
+                        if matches!(storage_type, StorageType::LOCAL) {
+                            let mut reader = SamReader::new(file_path.clone());
+                            let records = reader.read_records();
+                            discover_tags_from_stream(records, &unknown_tags, infer_tag_sample_size)
+                                .await
+                        } else {
+                            HashMap::new()
+                        }
+                    } else {
+                        use crate::storage::BamReader;
+                        let mut reader =
+                            BamReader::new(file_path.clone(), object_storage_options.clone()).await;
+                        let _header = reader.read_header().await;
+                        let records = reader.read_records().await;
+                        discover_tags_from_stream(records, &unknown_tags, infer_tag_sample_size)
+                            .await
+                    };
+                    debug!(
+                        "Inferred types for {} of {} unknown tags",
+                        discovered.len(),
+                        unknown_tags.len()
+                    );
+                    Some(discovered)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let schema = determine_schema(
             &tag_fields,
             coordinate_system_zero_based,
             Some(header_metadata),
             binary_cigar,
+            inferred_tags.as_ref(),
+            parsed_hints.as_ref(),
+            infer_tag_types,
+            infer_tag_sample_size,
         )?;
 
         // Auto-discover index file for local files
@@ -636,10 +685,7 @@ impl BamTableProvider {
     /// let ctx = SessionContext::new();
     /// let provider = BamTableProvider::new(
     ///     "data/alignments.bam".to_string(),
-    ///     None,
-    ///     true,
-    ///     None,
-    ///     false,
+    ///     None, true, None, false, true, 100, None,
     /// ).await?;
     ///
     /// let schema_df = provider.describe(&ctx, Some(100)).await?;

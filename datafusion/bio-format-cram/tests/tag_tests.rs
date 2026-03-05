@@ -1,4 +1,5 @@
 use datafusion::arrow::array::Array;
+use datafusion::datasource::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_cram::table_provider::CramTableProvider;
 use std::sync::Arc;
@@ -27,6 +28,9 @@ async fn test_cram_read_with_tags() {
             "RG".to_string(),
         ]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -126,6 +130,9 @@ async fn test_cram_nullable_tags_with_mixed_presence() {
         true,
         Some(vec!["NM".to_string(), "MQ".to_string(), "E2".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -170,6 +177,9 @@ async fn test_cram_tag_projection_pushdown() {
             "RG".to_string(),
         ]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -200,6 +210,9 @@ async fn test_cram_tag_with_filter() {
         true,
         Some(vec!["NM".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await
     .unwrap();
@@ -220,4 +233,318 @@ async fn test_cram_tag_with_filter() {
     if let Some(batch) = results.first() {
         assert_eq!(batch.num_columns(), 2);
     }
+}
+
+// --- Nanopore custom tag inference tests (CRAM parity with BAM) ---
+
+const NANOPORE_CRAM: &str = "tests/nanopore_custom_tags.cram";
+
+#[tokio::test]
+async fn test_cram_unknown_integer_tag_inferred() {
+    let provider = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    let pt_field = schema.field_with_name("pt").unwrap();
+    assert_eq!(
+        pt_field.data_type(),
+        &datafusion::arrow::datatypes::DataType::Int32,
+        "pt should be inferred as Int32"
+    );
+
+    let ctx = SessionContext::new();
+    ctx.register_table("cram", Arc::new(provider)).unwrap();
+    let df = ctx
+        .sql("SELECT \"pt\" FROM cram WHERE \"pt\" IS NOT NULL")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let total: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert!(total > 0, "Should have records with pt tag");
+
+    use datafusion::arrow::array::Int32Array;
+    for batch in &results {
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..col.len() {
+            if !col.is_null(i) {
+                let v = col.value(i);
+                assert!(v >= 0, "pt value {v} should be non-negative");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_cram_unknown_float_tag_inferred() {
+    let provider = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["de".to_string()]),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    let de_field = schema.field_with_name("de").unwrap();
+    assert_eq!(
+        de_field.data_type(),
+        &datafusion::arrow::datatypes::DataType::Float32,
+        "de should be inferred as Float32"
+    );
+}
+
+#[tokio::test]
+async fn test_cram_mixed_known_and_unknown_tags() {
+    let provider = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec![
+            "NM".to_string(),
+            "MD".to_string(),
+            "pt".to_string(),
+            "de".to_string(),
+        ]),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    use datafusion::arrow::datatypes::DataType;
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("NM").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("MD").unwrap().data_type(),
+        &DataType::Utf8
+    );
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("de").unwrap().data_type(),
+        &DataType::Float32
+    );
+}
+
+#[tokio::test]
+async fn test_cram_all_nanopore_tags_inferred() {
+    // Note: pa (B:i array) is excluded — CRAM's noodles decoder doesn't reliably
+    // round-trip B-type array tags. BAM test covers pa array inference.
+    let tag_fields: Vec<String> = [
+        "qs", "du", "ns", "ts", "mx", "ch", "st", "rn", "fn", "sm", "sd", "sv", "dx", "RG", "NM",
+        "ms", "AS", "nn", "de", "tp", "cm", "s1", "MD", "rl", "pt",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    let provider = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(tag_fields),
+        false,
+        true,
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    use datafusion::arrow::datatypes::DataType;
+    let schema = provider.schema();
+
+    // 12 core + 25 tags = 37 fields
+    assert_eq!(schema.fields().len(), 37);
+
+    // Known SAM spec tags
+    assert_eq!(
+        schema.field_with_name("NM").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("MD").unwrap().data_type(),
+        &DataType::Utf8
+    );
+    assert_eq!(
+        schema.field_with_name("AS").unwrap().data_type(),
+        &DataType::Int32
+    );
+    assert_eq!(
+        schema.field_with_name("RG").unwrap().data_type(),
+        &DataType::Utf8
+    );
+
+    // Inferred integer tags
+    for tag in &[
+        "pt", "ch", "cm", "dx", "ms", "mx", "nn", "ns", "rl", "rn", "ts", "s1",
+    ] {
+        assert_eq!(
+            schema.field_with_name(tag).unwrap().data_type(),
+            &DataType::Int32,
+            "Tag {tag} should be Int32"
+        );
+    }
+
+    // Inferred float tags
+    for tag in &["de", "du", "qs", "sd", "sm"] {
+        assert_eq!(
+            schema.field_with_name(tag).unwrap().data_type(),
+            &DataType::Float32,
+            "Tag {tag} should be Float32"
+        );
+    }
+
+    // Inferred string tags
+    for tag in &["fn", "st", "sv"] {
+        assert_eq!(
+            schema.field_with_name(tag).unwrap().data_type(),
+            &DataType::Utf8,
+            "Tag {tag} should be Utf8"
+        );
+    }
+
+    // Verify data can be read
+    let ctx = SessionContext::new();
+    ctx.register_table("cram", Arc::new(provider)).unwrap();
+    let df = ctx.sql("SELECT \"pt\", \"de\" FROM cram").await.unwrap();
+    let results = df.collect().await.unwrap();
+    let total: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert!(total >= 20, "Should have at least 20 reads, got {total}");
+}
+
+#[tokio::test]
+async fn test_cram_inference_disabled_falls_back_to_utf8() {
+    let provider = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false, // inference disabled
+        100,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &datafusion::arrow::datatypes::DataType::Utf8,
+        "pt should fall back to Utf8 when inference is disabled"
+    );
+}
+
+#[tokio::test]
+async fn test_cram_tag_type_hints_override_default() {
+    let provider = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false,
+        100,
+        Some(vec!["pt:i".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &datafusion::arrow::datatypes::DataType::Int32,
+        "pt should be Int32 from type hint"
+    );
+}
+
+#[tokio::test]
+async fn test_cram_inference_overrides_hints() {
+    let provider = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        true,
+        100,
+        Some(vec!["pt:Z".to_string()]),
+    )
+    .await
+    .unwrap();
+
+    let schema = provider.schema();
+    assert_eq!(
+        schema.field_with_name("pt").unwrap().data_type(),
+        &datafusion::arrow::datatypes::DataType::Int32,
+        "Inference (Int32) should override hint (Utf8)"
+    );
+}
+
+#[tokio::test]
+async fn test_cram_invalid_hint_format_error() {
+    let result = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false,
+        100,
+        Some(vec!["pt".to_string()]),
+    )
+    .await;
+    assert!(result.is_err(), "Should error on malformed hint 'pt'");
+
+    let result = CramTableProvider::new(
+        NANOPORE_CRAM.to_string(),
+        None,
+        None,
+        true,
+        Some(vec!["pt".to_string()]),
+        false,
+        false,
+        100,
+        Some(vec!["pt:X:extra".to_string()]),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "Should error on malformed hint 'pt:X:extra'"
+    );
 }

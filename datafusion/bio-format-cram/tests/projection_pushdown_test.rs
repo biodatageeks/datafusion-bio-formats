@@ -19,6 +19,9 @@ async fn setup_cram_ctx(table_name: &str) -> Result<SessionContext, Box<dyn std:
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     let ctx = SessionContext::new();

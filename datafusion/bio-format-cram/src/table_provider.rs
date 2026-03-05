@@ -27,11 +27,24 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Build the Arrow schema for CRAM records.
+///
+/// Tag type resolution priority (highest to lowest):
+/// 1. File inference (`inferred_tags`) — actual data always wins
+/// 2. User-specified hints (`tag_type_hints`) — explicit user knowledge
+/// 3. SAM spec registry — standard tag definitions from
+///    https://samtools.github.io/hts-specs/SAMtags.pdf
+/// 4. Default Utf8 — last resort with warning
+#[allow(clippy::too_many_arguments)]
 fn determine_schema(
     tag_fields: &Option<Vec<String>>,
     coordinate_system_zero_based: bool,
     binary_cigar: bool,
     header_metadata: Option<HashMap<String, String>>,
+    inferred_tags: Option<&HashMap<String, (char, DataType)>>,
+    tag_type_hints: Option<&HashMap<String, (char, DataType)>>,
+    infer_tag_types: bool,
+    infer_tag_sample_size: usize,
 ) -> datafusion::common::Result<SchemaRef> {
     let cigar_type = if binary_cigar {
         DataType::Binary
@@ -60,15 +73,41 @@ fn determine_schema(
             let mut field_metadata = HashMap::new();
             field_metadata.insert(BAM_TAG_TAG_KEY.to_string(), tag.clone());
 
-            // Use known tag definition if available, otherwise use default (String/Utf8)
-            let (sam_type, arrow_type, description) = if let Some(tag_def) = known_tags.get(tag) {
+            // Priority: inferred > hints > registry > default Utf8
+            let (sam_type, arrow_type, description) = if let Some((sam_t, arrow_t)) =
+                inferred_tags.and_then(|m| m.get(tag))
+            {
+                let desc = known_tags
+                    .get(tag)
+                    .map(|t| t.description.clone())
+                    .unwrap_or_else(|| format!("Tag type discovered from file ({sam_t})"));
+                (*sam_t, arrow_t.clone(), desc)
+            } else if let Some((sam_t, arrow_t)) = tag_type_hints.and_then(|m| m.get(tag)) {
+                let desc = known_tags
+                    .get(tag)
+                    .map(|t| t.description.clone())
+                    .unwrap_or_else(|| format!("Tag type from user hint ({sam_t})"));
+                (*sam_t, arrow_t.clone(), desc)
+            } else if let Some(tag_def) = known_tags.get(tag) {
                 (
                     tag_def.sam_type,
                     tag_def.arrow_type.clone(),
                     tag_def.description.clone(),
                 )
             } else {
-                // Default for unknown tags: treat as string (most flexible)
+                if infer_tag_types {
+                    warn!(
+                        "Tag '{tag}' was not found in the first {infer_tag_sample_size} sampled records. \
+                             Defaulting to Utf8 (string) type, which may result in incorrect data decoding. \
+                             Increase infer_tag_sample_size if this tag appears later in the file."
+                    );
+                } else {
+                    warn!(
+                        "Tag '{tag}' is not in the SAM specification registry and schema inference is disabled. \
+                             Defaulting to Utf8 (string) type, which may result in incorrect data decoding \
+                             for non-string tags. Enable infer_tag_types to auto-detect the correct type."
+                    );
+                }
                 ('Z', DataType::Utf8, "Unknown tag".to_string())
             };
 
@@ -154,10 +193,15 @@ impl CramTableProvider {
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
     /// * `tag_fields` - Optional list of BAM/SAM tags to extract as columns (e.g., "NM", "MD")
+    /// * `binary_cigar` - If true, expose CIGAR as Binary instead of Utf8 string
+    /// * `infer_tag_types` - When true, sample the file to auto-detect types for unknown tags
+    /// * `infer_tag_sample_size` - Number of records to sample for type inference
+    /// * `tag_type_hints` - Optional explicit type hints in SAM syntax, e.g. `["pt:i", "de:f"]`
     ///
     /// # Returns
     /// * `Ok(provider)` - Successfully created provider
     /// * `Err` - Failed to determine schema
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         file_path: String,
         reference_path: Option<String>,
@@ -165,8 +209,20 @@ impl CramTableProvider {
         coordinate_system_zero_based: bool,
         tag_fields: Option<Vec<String>>,
         binary_cigar: bool,
+        infer_tag_types: bool,
+        infer_tag_sample_size: usize,
+        tag_type_hints: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
+        use datafusion::common::DataFusionError;
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
+        use datafusion_bio_format_core::tag_registry::parse_tag_type_hints;
+
+        // Parse tag type hints
+        let parsed_hints = if let Some(ref hints) = tag_type_hints {
+            Some(parse_tag_type_hints(hints).map_err(DataFusionError::Configuration)?)
+        } else {
+            None
+        };
 
         // Best-effort header reading: extract metadata if possible, fall back to empty
         let storage_type = get_storage_type(file_path.clone());
@@ -207,11 +263,89 @@ impl CramTableProvider {
         let reference_names: Vec<String> = ref_seqs.iter().map(|r| r.name.clone()).collect();
         let reference_lengths: Vec<u64> = ref_seqs.iter().map(|r| r.length as u64).collect();
 
+        // Infer types for unknown tags by sampling the file
+        let inferred_tags = if infer_tag_types {
+            if let Some(ref tags) = tag_fields {
+                let known_tags = get_known_tags();
+                let unknown_tags: Vec<String> = tags
+                    .iter()
+                    .filter(|t| !known_tags.contains_key(t.as_str()))
+                    .cloned()
+                    .collect();
+
+                if !unknown_tags.is_empty() {
+                    debug!(
+                        "Inferring types for {} unknown CRAM tags: {:?}",
+                        unknown_tags.len(),
+                        unknown_tags
+                    );
+                    use crate::storage::CramReader;
+                    use futures_util::StreamExt;
+
+                    let mut reader = CramReader::new(
+                        file_path.clone(),
+                        reference_path.clone(),
+                        object_storage_options.clone(),
+                    )
+                    .await;
+
+                    let mut discovered: HashMap<String, (char, DataType)> = HashMap::new();
+                    let mut records = reader.read_records().await;
+                    let mut count = 0;
+
+                    while let Some(result) = records.next().await {
+                        if count >= infer_tag_sample_size {
+                            break;
+                        }
+                        if let Ok(record) = result {
+                            let data = record.data();
+                            for tag_name in &unknown_tags {
+                                if discovered.contains_key(tag_name) {
+                                    continue;
+                                }
+                                let tag_bytes = tag_name.as_bytes();
+                                if tag_bytes.len() == 2 {
+                                    let tag =
+                                        noodles_sam::alignment::record::data::field::Tag::from([
+                                            tag_bytes[0],
+                                            tag_bytes[1],
+                                        ]);
+                                    if let Some(value) = data.get(&tag) {
+                                        discovered.insert(
+                                            tag_name.clone(),
+                                            infer_type_from_cram_value(value),
+                                        );
+                                    }
+                                }
+                            }
+                            count += 1;
+                        }
+                    }
+                    debug!(
+                        "Inferred types for {} of {} unknown CRAM tags",
+                        discovered.len(),
+                        unknown_tags.len()
+                    );
+                    Some(discovered)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let schema = determine_schema(
             &tag_fields,
             coordinate_system_zero_based,
             binary_cigar,
             Some(header_metadata),
+            inferred_tags.as_ref(),
+            parsed_hints.as_ref(),
+            infer_tag_types,
+            infer_tag_sample_size,
         )?;
 
         // Auto-discover index file for local files
@@ -325,12 +459,16 @@ impl CramTableProvider {
         // Convert discovered tags to tag_fields format
         let tag_fields: Vec<String> = discovered_tags.keys().cloned().collect();
 
-        // Build schema with header metadata included
+        // Build schema with header metadata and discovered tags
         let schema = determine_schema(
             &Some(tag_fields.clone()),
             coordinate_system_zero_based,
             binary_cigar,
             Some(header_metadata.clone()),
+            Some(&discovered_tags),
+            None,
+            true,
+            sample_size,
         )?;
 
         // Extract reference names and lengths from header metadata

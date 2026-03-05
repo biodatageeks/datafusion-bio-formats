@@ -52,6 +52,9 @@ async fn setup_bam_ctx() -> datafusion::error::Result<SessionContext> {
         true,  // zero-based coordinates
         None,  // tag_fields
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("bam", Arc::new(provider))?;
@@ -246,6 +249,9 @@ async fn test_bam_full_scan_no_coor_only_file() -> datafusion::error::Result<()>
         true, // zero-based coordinates
         Some(vec!["CB".to_string(), "CR".to_string()]),
         false,
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("bam", Arc::new(provider))?;
@@ -276,6 +282,9 @@ async fn setup_bam_ctx_with_partitions(
         true, // zero-based coordinates
         None,
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("bam", Arc::new(provider))?;

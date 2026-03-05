@@ -233,9 +233,18 @@ async fn register_table(
         }
         "bam" => {
             use datafusion_bio_format_bam::table_provider::BamTableProvider;
-            let provider = BamTableProvider::new(file_path.to_string(), None, true, None, false)
-                .await
-                .context("Failed to create BAM table provider")?;
+            let provider = BamTableProvider::new(
+                file_path.to_string(),
+                None,
+                true,
+                None,
+                false,
+                true,
+                100,
+                None,
+            )
+            .await
+            .context("Failed to create BAM table provider")?;
             ctx.register_table(table_name, std::sync::Arc::new(provider))
                 .context("Failed to register BAM table")?;
         }

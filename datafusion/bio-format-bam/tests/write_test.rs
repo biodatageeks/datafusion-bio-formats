@@ -128,6 +128,9 @@ async fn test_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         true, // 0-based coordinates
         Some(tag_fields.clone()),
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await?;
 
@@ -789,6 +792,9 @@ async fn test_sort_on_write_coordinate_order() -> Result<(), Box<dyn std::error:
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
 
@@ -914,6 +920,9 @@ async fn test_sort_on_write_false_sets_unsorted() -> Result<(), Box<dyn std::err
         true,
         None,
         false,
+        true,
+        100,
+        None,
     )
     .await?;
 

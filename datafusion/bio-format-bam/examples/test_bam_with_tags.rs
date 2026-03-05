@@ -11,6 +11,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         true, // 0-based coordinates
         Some(vec!["NM".to_string(), "MD".to_string(), "AS".to_string()]),
         false, // String CIGAR (default)
+        true,
+        100,
+        None,
     )
     .await?;
 

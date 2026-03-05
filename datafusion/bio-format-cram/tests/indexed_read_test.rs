@@ -55,6 +55,9 @@ async fn setup_cram_ctx() -> datafusion::error::Result<SessionContext> {
         true,  // zero-based coordinates
         None,  // tag_fields
         false, // binary_cigar
+        true,
+        100,
+        None,
     )
     .await?;
     ctx.register_table("cram", Arc::new(provider))?;
