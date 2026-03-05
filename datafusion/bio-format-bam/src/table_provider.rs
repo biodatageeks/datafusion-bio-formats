@@ -180,6 +180,10 @@ where
                             );
                             discovered_tags.insert(tag_name.clone(), (sam_type, arrow_type));
                         }
+                    } else {
+                        warn!(
+                            "Tag name '{tag_name}' is not a valid 2-character SAM tag — skipping inference"
+                        );
                     }
                 }
                 count += 1;

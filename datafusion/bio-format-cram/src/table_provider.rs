@@ -149,10 +149,19 @@ fn infer_type_from_cram_value(
         CramValue::Float(_) => ('f', DataType::Float32),
         CramValue::String(_) => ('Z', DataType::Utf8),
         CramValue::Hex(_) => ('H', DataType::Utf8),
-        CramValue::Array(_) => (
-            'B',
-            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
-        ),
+        CramValue::Array(arr) => {
+            use noodles_sam::alignment::record_buf::data::field::value::Array as CramArray;
+            match arr {
+                CramArray::Float(_) => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+                ),
+                _ => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                ),
+            }
+        }
     }
 }
 
@@ -297,28 +306,37 @@ impl CramTableProvider {
                         if count >= infer_tag_sample_size {
                             break;
                         }
-                        if let Ok(record) = result {
-                            let data = record.data();
-                            for tag_name in &unknown_tags {
-                                if discovered.contains_key(tag_name) {
-                                    continue;
-                                }
-                                let tag_bytes = tag_name.as_bytes();
-                                if tag_bytes.len() == 2 {
-                                    let tag =
-                                        noodles_sam::alignment::record::data::field::Tag::from([
-                                            tag_bytes[0],
-                                            tag_bytes[1],
-                                        ]);
-                                    if let Some(value) = data.get(&tag) {
-                                        discovered.insert(
-                                            tag_name.clone(),
-                                            infer_type_from_cram_value(value),
+                        match result {
+                            Ok(record) => {
+                                let data = record.data();
+                                for tag_name in &unknown_tags {
+                                    if discovered.contains_key(tag_name) {
+                                        continue;
+                                    }
+                                    let tag_bytes = tag_name.as_bytes();
+                                    if tag_bytes.len() == 2 {
+                                        let tag =
+                                            noodles_sam::alignment::record::data::field::Tag::from(
+                                                [tag_bytes[0], tag_bytes[1]],
+                                            );
+                                        if let Some(value) = data.get(&tag) {
+                                            discovered.insert(
+                                                tag_name.clone(),
+                                                infer_type_from_cram_value(value),
+                                            );
+                                        }
+                                    } else {
+                                        warn!(
+                                            "Tag name '{tag_name}' is not a valid 2-character SAM tag — skipping inference"
                                         );
                                     }
                                 }
+                                count += 1;
                             }
-                            count += 1;
+                            Err(e) => {
+                                debug!("Skipping corrupt record during CRAM tag inference: {e:?}");
+                                continue;
+                            }
                         }
                     }
                     debug!(
@@ -436,7 +454,10 @@ impl CramTableProvider {
                     }
                     count += 1;
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    debug!("Skipping corrupt record during CRAM schema inference: {e:?}");
+                    continue;
+                }
             }
         }
 
@@ -594,7 +615,10 @@ impl CramTableProvider {
                     }
                     count += 1;
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    debug!("Skipping corrupt record during CRAM schema inference: {e:?}");
+                    continue;
+                }
             }
         }
 
