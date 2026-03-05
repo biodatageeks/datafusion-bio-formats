@@ -1,5 +1,6 @@
 use crate::filter_utils::can_push_down_filter;
 use crate::physical_exec::GtfExec;
+use crate::storage::IndexedGtfReader;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Fields, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
@@ -11,6 +12,11 @@ use datafusion::physical_plan::{
     execution_plan::{Boundedness, EmissionType},
 };
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use datafusion_bio_format_core::genomic_filter::{
+    build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
+};
+use datafusion_bio_format_core::index_utils::discover_gff_index;
+use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use log::debug;
 use std::any::Any;
 use std::collections::HashMap;
@@ -77,6 +83,7 @@ fn determine_schema_on_demand(
 /// Features include:
 /// - Projection-driven schema construction for attribute columns
 /// - Filter pushdown support for efficient predicate evaluation
+/// - BGZF compression and tabix index support for region-based queries
 /// - Compressed and uncompressed file handling
 #[derive(Clone, Debug)]
 pub struct GtfTableProvider {
@@ -85,6 +92,10 @@ pub struct GtfTableProvider {
     schema: SchemaRef,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
+    /// Path to the TBI/CSI index file, if discovered
+    index_path: Option<String>,
+    /// Contig names extracted from the index header
+    contig_names: Vec<String>,
 }
 
 impl GtfTableProvider {
@@ -103,6 +114,23 @@ impl GtfTableProvider {
     ) -> datafusion::common::Result<Self> {
         let schema = determine_schema_on_demand(attr_fields.clone(), coordinate_system_zero_based)?;
 
+        // Auto-discover index file for BGZF-compressed GTF files
+        // Reuses GFF index discovery since GTF uses the same tabix format
+        let (index_path, contig_names) =
+            if let Some((idx_path, idx_fmt)) = discover_gff_index(&file_path) {
+                debug!("Discovered GTF index: {idx_path} (format: {idx_fmt:?})");
+                let names = match IndexedGtfReader::new(&file_path, &idx_path) {
+                    Ok(reader) => reader.contig_names().to_vec(),
+                    Err(e) => {
+                        debug!("Failed to read GTF index contig names: {e}");
+                        Vec::new()
+                    }
+                };
+                (Some(idx_path), names)
+            } else {
+                (None, Vec::new())
+            };
+
         debug!("GtfTableProvider::new - constructed schema for file: {file_path}");
 
         Ok(Self {
@@ -110,6 +138,8 @@ impl GtfTableProvider {
             attr_fields,
             schema,
             coordinate_system_zero_based,
+            index_path,
+            contig_names,
         })
     }
 }
@@ -135,8 +165,11 @@ impl TableProvider for GtfTableProvider {
         let pushdown_support = filters
             .iter()
             .map(|expr| {
-                if can_push_down_filter(expr, &self.schema) {
-                    debug!("GTF filter can be pushed down: {expr:?}");
+                if self.index_path.is_some() && is_genomic_coordinate_filter(expr) {
+                    debug!("GTF filter can be pushed down (indexed): {expr:?}");
+                    TableProviderFilterPushDown::Inexact
+                } else if can_push_down_filter(expr, &self.schema) {
+                    debug!("GTF filter can be pushed down (record-level): {expr:?}");
                     TableProviderFilterPushDown::Inexact
                 } else {
                     debug!("GTF filter cannot be pushed down: {expr:?}");
@@ -150,7 +183,7 @@ impl TableProvider for GtfTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         _limit: Option<usize>,
@@ -184,6 +217,72 @@ impl TableProvider for GtfTableProvider {
             .cloned()
             .collect();
 
+        // Indexed path: use TBI/CSI index for region-based queries
+        if let Some(ref index_path) = self.index_path {
+            let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
+
+            let regions = if !analysis.regions.is_empty() {
+                debug!(
+                    "GTF scan: using {} filter-derived region(s)",
+                    analysis.regions.len()
+                );
+                analysis.regions
+            } else if !self.contig_names.is_empty() {
+                debug!(
+                    "GTF scan: no genomic filters pushed down, using full-scan on {} contig(s)",
+                    self.contig_names.len()
+                );
+                build_full_scan_regions(&self.contig_names)
+            } else {
+                Vec::new()
+            };
+
+            if !regions.is_empty() {
+                let target_partitions = state.config().target_partitions();
+                let estimates = crate::storage::estimate_sizes_from_tbi(
+                    index_path,
+                    &regions,
+                    &self.contig_names,
+                    &[],
+                );
+                let assignments = balance_partitions(estimates, target_partitions);
+                let num_partitions = assignments.len();
+
+                let residual_filters: Vec<Expr> = filters
+                    .iter()
+                    .filter(|expr| can_push_down_filter(expr, &self.schema))
+                    .cloned()
+                    .collect();
+
+                debug!(
+                    "GTF indexed scan: {} partitions (from {} regions, target {}), {} residual filters",
+                    num_partitions,
+                    assignments.iter().map(|a| a.regions.len()).sum::<usize>(),
+                    target_partitions,
+                    residual_filters.len()
+                );
+
+                return Ok(Arc::new(GtfExec {
+                    cache: PlanProperties::new(
+                        EquivalenceProperties::new(projected_schema.clone()),
+                        Partitioning::UnknownPartitioning(num_partitions),
+                        EmissionType::Final,
+                        Boundedness::Bounded,
+                    ),
+                    file_path: self.file_path.clone(),
+                    attr_fields: self.attr_fields.clone(),
+                    schema: projected_schema,
+                    projection: projection.cloned(),
+                    filters: pushable_filters,
+                    coordinate_system_zero_based: self.coordinate_system_zero_based,
+                    partition_assignments: Some(assignments),
+                    index_path: Some(index_path.clone()),
+                    residual_filters,
+                }));
+            }
+        }
+
+        // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(GtfExec {
             cache: PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
@@ -197,6 +296,9 @@ impl TableProvider for GtfTableProvider {
             projection: projection.cloned(),
             filters: pushable_filters,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
+            partition_assignments: None,
+            index_path: None,
+            residual_filters: Vec::new(),
         }))
     }
 }

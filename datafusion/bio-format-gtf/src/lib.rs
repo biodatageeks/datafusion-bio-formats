@@ -10,7 +10,8 @@
 //!
 //! - Direct SQL queries on GTF files via DataFusion
 //! - GTF-style attribute parsing (`key "value"` format)
-//! - GZIP compression support
+//! - GZIP and BGZF compression support
+//! - Tabix index support for region-based queries with partition balancing
 //! - Efficient annotation queries
 //!
 //! # Example
@@ -44,11 +45,12 @@ mod physical_exec;
 
 /// Storage abstraction for local GTF files
 ///
-/// Supports plain text, GZIP compressed GTF file reading.
+/// Supports plain text, GZIP, and BGZF compressed GTF file reading,
+/// as well as tabix-indexed region queries.
 pub mod storage;
 
 /// Apache DataFusion table provider for GTF format
 ///
 /// Implements the DataFusion TableProvider trait for seamless SQL query support
-/// on GTF files with schema projection and filter pushdown capabilities.
+/// on GTF files with schema projection, filter pushdown, and tabix index capabilities.
 pub mod table_provider;

@@ -1,4 +1,5 @@
 use flate2::read::GzDecoder;
+use noodles_csi::BinningIndex;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Error};
 use std::path::Path;
@@ -85,24 +86,36 @@ impl GtfRecordTrait for GtfRecord {
     }
 }
 
-/// Local GTF file reader supporting plain and GZIP compressed files
+/// Local GTF file reader supporting plain, GZIP, and BGZF compressed files
 pub enum GtfLocalReader {
     /// Plain text reader
     Plain(BufReader<File>),
     /// GZIP compressed reader
     Gzip(Box<BufReader<GzDecoder<File>>>),
+    /// BGZF compressed reader (block-gzipped, used with tabix indexes)
+    Bgzf(Box<BufReader<noodles_bgzf::Reader<File>>>),
 }
 
 impl GtfLocalReader {
-    /// Create a new GTF local reader, auto-detecting compression from the file extension
+    /// Create a new GTF local reader, auto-detecting compression.
+    ///
+    /// For `.gz` files, checks the BGZF magic bytes to distinguish BGZF from plain GZIP.
     pub fn new(file_path: &str) -> Result<Self, Error> {
         let path = Path::new(file_path);
-        let file = File::open(path)?;
 
         if file_path.ends_with(".gz") || file_path.ends_with(".gzip") {
-            let decoder = GzDecoder::new(file);
-            Ok(GtfLocalReader::Gzip(Box::new(BufReader::new(decoder))))
+            // Check if this is BGZF by reading the first few bytes
+            if is_bgzf(path)? {
+                let file = File::open(path)?;
+                let bgzf_reader = noodles_bgzf::Reader::new(file);
+                Ok(GtfLocalReader::Bgzf(Box::new(BufReader::new(bgzf_reader))))
+            } else {
+                let file = File::open(path)?;
+                let decoder = GzDecoder::new(file);
+                Ok(GtfLocalReader::Gzip(Box::new(BufReader::new(decoder))))
+            }
         } else {
+            let file = File::open(path)?;
             Ok(GtfLocalReader::Plain(BufReader::new(file)))
         }
     }
@@ -116,8 +129,31 @@ impl GtfLocalReader {
             GtfLocalReader::Gzip(reader) => GtfSyncIterator {
                 lines: Box::new((*reader).lines()),
             },
+            GtfLocalReader::Bgzf(reader) => GtfSyncIterator {
+                lines: Box::new((*reader).lines()),
+            },
         }
     }
+}
+
+/// Check if a file is BGZF by examining magic bytes.
+/// BGZF files start with `1f 8b 08 04` (gzip with FEXTRA) and contain
+/// the BGZF extra field `42 43` at offset 12.
+fn is_bgzf(path: &Path) -> Result<bool, Error> {
+    use std::io::Read;
+    let mut file = File::open(path)?;
+    let mut buf = [0u8; 18];
+    let n = file.read(&mut buf)?;
+    if n < 18 {
+        return Ok(false);
+    }
+    // Check gzip magic + FEXTRA flag
+    if buf[0] != 0x1f || buf[1] != 0x8b || buf[2] != 0x08 || (buf[3] & 0x04) == 0 {
+        return Ok(false);
+    }
+    // Check for BC extra field (BGZF signature)
+    // Extra field starts at offset 12, first 2 bytes are subfield ID
+    Ok(buf[12] == b'B' && buf[13] == b'C')
 }
 
 /// Synchronous iterator over GTF records
@@ -146,7 +182,7 @@ impl Iterator for GtfSyncIterator {
 }
 
 /// Parse a single GTF line into a GtfRecord
-fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
+pub(crate) fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
     let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() < 9 {
         return Err(Error::new(
@@ -182,4 +218,196 @@ fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
         phase: fields[7].to_string(),
         attributes: fields[8].to_string(),
     })
+}
+
+/// A local indexed GTF reader for region-based queries.
+///
+/// Uses noodles' tabix `IndexedReader::Builder` to support random-access queries on
+/// BGZF-compressed, tabix-indexed GTF files. This is used when an index file (.tbi/.csi)
+/// is available and genomic region filters are present.
+pub struct IndexedGtfReader {
+    reader:
+        noodles_csi::io::IndexedReader<noodles_bgzf_gtf::io::Reader<File>, noodles_tabix::Index>,
+    contig_names: Vec<String>,
+}
+
+impl IndexedGtfReader {
+    /// Creates a new indexed GTF reader.
+    ///
+    /// # Arguments
+    /// * `file_path` - Path to the BGZF-compressed GTF file (.gtf.gz)
+    /// * `index_path` - Path to the TBI or CSI index file
+    pub fn new(file_path: &str, index_path: &str) -> Result<Self, Error> {
+        let index = noodles_tabix::fs::read(index_path)?;
+
+        let contig_names = index
+            .header()
+            .map(|h| {
+                h.reference_sequence_names()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let reader = noodles_tabix::io::indexed_reader::Builder::default()
+            .set_index(index)
+            .build_from_path(Path::new(file_path))
+            .map_err(Error::other)?;
+
+        Ok(Self {
+            reader,
+            contig_names,
+        })
+    }
+
+    /// Returns the contig names from the tabix index header.
+    pub fn contig_names(&self) -> &[String] {
+        &self.contig_names
+    }
+
+    /// Query records overlapping a genomic region.
+    pub fn query<'a>(
+        &'a mut self,
+        region: &'a noodles_core::Region,
+    ) -> Result<
+        impl Iterator<Item = Result<noodles_csi::io::indexed_records::Record, Error>> + 'a,
+        Error,
+    > {
+        self.reader.query(region)
+    }
+}
+
+/// Estimate compressed byte sizes per region from a TBI (tabix) index.
+///
+/// Reads the tabix index and estimates the compressed byte range for each genomic region
+/// by examining the chunks in each reference's bins using VirtualPosition offsets.
+pub fn estimate_sizes_from_tbi(
+    index_path: &str,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+    contig_names: &[String],
+    contig_lengths: &[u64],
+) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+    use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
+
+    let index = match noodles_tabix::fs::read(index_path) {
+        Ok(idx) => idx,
+        Err(e) => {
+            log::debug!("Failed to read TBI index for size estimation: {e}");
+            return regions
+                .iter()
+                .map(|r| RegionSizeEstimate {
+                    region: r.clone(),
+                    estimated_bytes: 1,
+                    contig_length: None,
+                    unmapped_count: 0,
+                    nonempty_bin_positions: Vec::new(),
+                    leaf_bin_span: 0,
+                })
+                .collect();
+        }
+    };
+
+    let contig_name_to_idx: std::collections::HashMap<&str, usize> = contig_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+
+    regions
+        .iter()
+        .map(|region| {
+            let ref_idx = contig_name_to_idx.get(region.chrom.as_str()).copied();
+            let estimated_bytes = ref_idx
+                .and_then(|idx| {
+                    index.reference_sequences().get(idx).map(|ref_seq| {
+                        let mut min_offset = u64::MAX;
+                        let mut max_offset = 0u64;
+                        for (_bin_id, bin) in ref_seq.bins() {
+                            for chunk in bin.chunks() {
+                                let start = chunk.start().compressed();
+                                let end = chunk.end().compressed();
+                                min_offset = min_offset.min(start);
+                                max_offset = max_offset.max(end);
+                            }
+                        }
+                        max_offset.saturating_sub(min_offset)
+                    })
+                })
+                .unwrap_or(1);
+
+            // Collect non-empty leaf bin positions for data-aware splitting.
+            // TBI uses the same binning scheme as BAI (min_shift=14, depth=5).
+            const TBI_LEAF_FIRST: usize = 4681;
+            const TBI_LEAF_LAST: usize = 37448;
+            const TBI_LEAF_SPAN: u64 = 16384;
+
+            let mut nonempty_bin_positions: Vec<u64> = ref_idx
+                .and_then(|idx| index.reference_sequences().get(idx))
+                .map(|ref_seq| {
+                    ref_seq
+                        .bins()
+                        .keys()
+                        .copied()
+                        .filter(|&bin_id| (TBI_LEAF_FIRST..=TBI_LEAF_LAST).contains(&bin_id))
+                        .map(|bin_id| ((bin_id - TBI_LEAF_FIRST) as u64) * TBI_LEAF_SPAN + 1)
+                        .collect()
+                })
+                .unwrap_or_default();
+            nonempty_bin_positions.sort_unstable();
+
+            let contig_length = ref_idx
+                .and_then(|idx| contig_lengths.get(idx).copied())
+                .filter(|&len| len > 0)
+                .or_else(|| {
+                    nonempty_bin_positions
+                        .last()
+                        .map(|&max_pos| max_pos + TBI_LEAF_SPAN - 1)
+                })
+                .or_else(|| {
+                    const LEVEL_OFFSETS: [(usize, u64); 6] = [
+                        (0, 1 << 29),
+                        (1, 1 << 26),
+                        (9, 1 << 23),
+                        (73, 1 << 20),
+                        (585, 1 << 17),
+                        (4681, 1 << 14),
+                    ];
+                    ref_idx
+                        .and_then(|idx| index.reference_sequences().get(idx))
+                        .and_then(|ref_seq| {
+                            ref_seq
+                                .bins()
+                                .keys()
+                                .copied()
+                                .filter_map(|bin_id| {
+                                    LEVEL_OFFSETS.iter().rev().find_map(|&(offset, span)| {
+                                        if bin_id >= offset
+                                            && bin_id
+                                                < LEVEL_OFFSETS
+                                                    .iter()
+                                                    .find(|&&(o, _)| o > offset)
+                                                    .map_or(37449, |&(o, _)| o)
+                                        {
+                                            let idx_in_level = (bin_id - offset) as u64;
+                                            Some((idx_in_level + 1) * span)
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                })
+                                .max()
+                        })
+                });
+
+            RegionSizeEstimate {
+                region: region.clone(),
+                estimated_bytes,
+                contig_length,
+                unmapped_count: 0,
+                nonempty_bin_positions,
+                leaf_bin_span: TBI_LEAF_SPAN,
+            }
+        })
+        .collect()
 }
