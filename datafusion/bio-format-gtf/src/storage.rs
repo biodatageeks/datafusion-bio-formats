@@ -1,8 +1,17 @@
+use async_compression::tokio::bufread::GzipDecoder;
+use bytes::Bytes;
+use datafusion_bio_format_core::object_storage::{
+    ObjectStorageOptions, get_compression_type, get_remote_stream, get_remote_stream_bgzf_async,
+    get_remote_stream_gz_async,
+};
 use flate2::read::GzDecoder;
 use noodles_csi::BinningIndex;
+use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Error};
 use std::path::Path;
+use tokio::io::AsyncBufReadExt;
+use tokio_util::io::StreamReader;
 
 /// A parsed GTF record with all 9 fields
 pub struct GtfRecord {
@@ -134,6 +143,63 @@ impl GtfLocalReader {
             GtfLocalReader::Bgzf(reader) => GtfSyncIterator {
                 lines: Box::new((*reader).lines()),
             },
+        }
+    }
+}
+
+/// Async remote GTF file reader supporting plain, GZIP, and BGZF compressed streams
+pub enum GtfRemoteReader {
+    /// Plain text remote reader
+    Plain(tokio::io::BufReader<StreamReader<FuturesBytesStream, Bytes>>),
+    /// GZIP compressed remote reader
+    Gzip(tokio::io::BufReader<GzipDecoder<StreamReader<FuturesBytesStream, Bytes>>>),
+    /// BGZF compressed remote reader
+    Bgzf(tokio::io::BufReader<noodles_bgzf::AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>),
+}
+
+impl GtfRemoteReader {
+    /// Create a new remote GTF reader, auto-detecting compression.
+    pub async fn new(
+        file_path: String,
+        object_storage_options: ObjectStorageOptions,
+    ) -> Result<Self, Error> {
+        use datafusion_bio_format_core::object_storage::CompressionType;
+
+        let compression =
+            get_compression_type(file_path.clone(), None, object_storage_options.clone())
+                .await
+                .map_err(Error::other)?;
+
+        match compression {
+            CompressionType::BGZF => {
+                let inner = get_remote_stream_bgzf_async(file_path, object_storage_options)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(GtfRemoteReader::Bgzf(tokio::io::BufReader::new(inner)))
+            }
+            CompressionType::GZIP => {
+                let inner = get_remote_stream_gz_async(file_path, object_storage_options)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(GtfRemoteReader::Gzip(tokio::io::BufReader::new(inner)))
+            }
+            _ => {
+                let stream = get_remote_stream(file_path, object_storage_options, None)
+                    .await
+                    .map_err(Error::other)?;
+                Ok(GtfRemoteReader::Plain(tokio::io::BufReader::new(
+                    StreamReader::new(stream),
+                )))
+            }
+        }
+    }
+
+    /// Read a line from the remote stream.
+    pub async fn read_line(&mut self, buf: &mut String) -> Result<usize, Error> {
+        match self {
+            GtfRemoteReader::Plain(r) => r.read_line(buf).await,
+            GtfRemoteReader::Gzip(r) => r.read_line(buf).await,
+            GtfRemoteReader::Bgzf(r) => r.read_line(buf).await,
         }
     }
 }

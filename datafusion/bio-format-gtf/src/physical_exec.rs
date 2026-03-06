@@ -1,4 +1,6 @@
-use crate::storage::{GtfLocalReader, GtfRecordTrait, IndexedGtfReader, parse_gtf_line};
+use crate::storage::{
+    GtfLocalReader, GtfRecordTrait, GtfRemoteReader, IndexedGtfReader, parse_gtf_line,
+};
 use async_stream::try_stream;
 use datafusion::arrow::array::{
     Array, Float32Builder, NullArray, RecordBatch, StringArray, UInt32Array, UInt32Builder,
@@ -11,6 +13,7 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::{
     genomic_filter::GenomicRegion,
+    object_storage::{ObjectStorageOptions, StorageType, get_storage_type},
     partition_balancer::PartitionAssignment,
     table_utils::{Attribute, OptionalField, builders_to_arrays},
 };
@@ -29,6 +32,8 @@ pub struct GtfExec {
     pub(crate) filters: Vec<Expr>,
     pub(crate) cache: PlanProperties,
     pub(crate) coordinate_system_zero_based: bool,
+    /// Optional cloud storage configuration for remote files
+    pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// Partition assignments for index-based queries (None = full scan)
     pub(crate) partition_assignments: Option<Vec<PartitionAssignment>>,
     /// Path to the TBI/CSI index file
@@ -124,18 +129,33 @@ impl ExecutionPlan for GtfExec {
             }
         }
 
-        // Fallback: full scan
-        let fut = get_local_gtf(
-            self.file_path.clone(),
-            self.attr_fields.clone(),
-            schema.clone(),
-            batch_size,
-            self.projection.clone(),
-            self.filters.clone(),
-            self.coordinate_system_zero_based,
-        );
-        let stream = futures::stream::once(fut).try_flatten();
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
+        // Fallback: full scan (local or remote)
+        let file_path = self.file_path.clone();
+        let attr_fields = self.attr_fields.clone();
+        let projection = self.projection.clone();
+        let filters = self.filters.clone();
+        let object_storage_options = self.object_storage_options.clone();
+        let coordinate_system_zero_based = self.coordinate_system_zero_based;
+
+        let stream = futures::stream::once(async move {
+            let stream: SendableRecordBatchStream = get_stream(
+                file_path,
+                attr_fields,
+                schema.clone(),
+                batch_size,
+                projection,
+                filters,
+                object_storage_options,
+                coordinate_system_zero_based,
+            )
+            .await?;
+            Ok::<_, DataFusionError>(stream)
+        })
+        .try_flatten();
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            self.schema.clone(),
+            stream,
+        )))
     }
 }
 
@@ -400,6 +420,262 @@ async fn get_local_gtf(
             record_num += 1;
             if record_num % batch_size == 0 {
                 debug!("GTF record number: {record_num}");
+                let batch = build_record_batch_optimized(
+                    Arc::clone(&schema),
+                    &chroms,
+                    &poss,
+                    &pose,
+                    &ty,
+                    &source,
+                    &scores,
+                    &strand,
+                    &phase,
+                    Some(&builders_to_arrays(
+                        if unnest_enable {
+                            &mut attribute_builders.2
+                        } else {
+                            &mut builder
+                        })),
+                    projection.clone(),
+                    batch_size,
+                )?;
+                yield batch;
+                chroms.clear();
+                poss.clear();
+                pose.clear();
+                ty.clear();
+                source.clear();
+                scores.clear();
+                strand.clear();
+                phase.clear();
+            }
+        }
+        let remaining_records = record_num % batch_size;
+        if remaining_records != 0 {
+            let batch = build_record_batch_optimized(
+                Arc::clone(&schema),
+                &chroms,
+                &poss,
+                &pose,
+                &ty,
+                &source,
+                &scores,
+                &strand,
+                &phase,
+                Some(&builders_to_arrays(
+                    if unnest_enable {
+                        &mut attribute_builders.2
+                    } else {
+                        &mut builder
+                    })),
+                projection.clone(),
+                remaining_records,
+            )?;
+            yield batch;
+        }
+    };
+    Ok(stream)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn get_stream(
+    file_path: String,
+    attr_fields: Option<Vec<String>>,
+    schema_ref: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
+    object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
+) -> datafusion::error::Result<SendableRecordBatchStream> {
+    let store_type = get_storage_type(file_path.clone());
+    let schema = schema_ref.clone();
+
+    match store_type {
+        StorageType::LOCAL => {
+            let stream = get_local_gtf(
+                file_path,
+                attr_fields,
+                schema,
+                batch_size,
+                projection,
+                filters,
+                coordinate_system_zero_based,
+            )
+            .await?;
+            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+        }
+        StorageType::GCS | StorageType::S3 | StorageType::AZBLOB => {
+            let stream = get_remote_gtf_stream(
+                file_path,
+                attr_fields,
+                schema,
+                batch_size,
+                projection,
+                filters,
+                object_storage_options,
+                coordinate_system_zero_based,
+            )
+            .await?;
+            Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
+        }
+        _ => Err(DataFusionError::Execution(format!(
+            "Unsupported storage type for GTF: {store_type:?}"
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn get_remote_gtf_stream(
+    file_path: String,
+    attr_fields: Option<Vec<String>>,
+    schema: SchemaRef,
+    batch_size: usize,
+    projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
+    object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
+) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
+{
+    let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+    let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+    let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+    let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
+    let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
+    let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
+    let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
+    let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
+
+    let mut chroms: Vec<String> = if needs_chrom {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut poss: Vec<u32> = if needs_start {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut pose: Vec<u32> = if needs_end {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut ty: Vec<String> = if needs_type {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut source: Vec<String> = if needs_source {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut scores: Vec<Option<f32>> = if needs_score {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut strand: Vec<String> = if needs_strand {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+    let mut phase: Vec<Option<u32>> = if needs_phase {
+        Vec::with_capacity(batch_size)
+    } else {
+        Vec::new()
+    };
+
+    let mut reader = GtfRemoteReader::new(
+        file_path.clone(),
+        object_storage_options.ok_or_else(|| {
+            DataFusionError::Execution(
+                "Object storage options required for remote GTF files".into(),
+            )
+        })?,
+    )
+    .await
+    .map_err(|e| {
+        DataFusionError::Execution(format!("Failed to open remote GTF file '{file_path}': {e}"))
+    })?;
+
+    let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
+        (Vec::new(), Vec::new(), Vec::new());
+
+    let unnest_enable = match &attr_fields {
+        Some(attrs) => {
+            set_attribute_builders(batch_size, attrs, &mut attribute_builders);
+            true
+        }
+        None => false,
+    };
+
+    let mut builder = if !unnest_enable {
+        new_nested_builder(batch_size)?
+    } else {
+        Vec::new()
+    };
+
+    let mut record_num = 0;
+
+    let stream = try_stream! {
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            let bytes_read = reader.read_line(&mut buf).await?;
+            if bytes_read == 0 {
+                break;
+            }
+
+            let line = buf.trim_end();
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+
+            let record = parse_gtf_line(line)?;
+
+            let attributes_str = record.attributes_string();
+            if !crate::filter_utils::evaluate_filters_against_record(&record, &filters, attributes_str, coordinate_system_zero_based) {
+                continue;
+            }
+
+            if needs_chrom {
+                chroms.push(record.reference_sequence_name().to_owned());
+            }
+            if needs_start {
+                let start_pos = record.start();
+                poss.push(if coordinate_system_zero_based { start_pos.saturating_sub(1) } else { start_pos });
+            }
+            if needs_end {
+                pose.push(record.end());
+            }
+            if needs_type {
+                ty.push(record.ty().to_owned());
+            }
+            if needs_source {
+                source.push(record.source().to_owned());
+            }
+            if needs_score {
+                scores.push(record.score());
+            }
+            if needs_strand {
+                strand.push(record.strand().to_owned());
+            }
+            if needs_phase {
+                phase.push(record.phase().map(|p| p as u32));
+            }
+
+            if unnest_enable {
+                load_attributes_unnest_from_string(attributes_str, &mut attribute_builders, projection.clone())?;
+            } else {
+                let attributes = parse_gtf_attributes_to_vec(attributes_str);
+                load_attributes_from_vec(attributes, &mut builder)?;
+            }
+
+            record_num += 1;
+            if record_num % batch_size == 0 {
+                debug!("GTF remote record number: {record_num}");
                 let batch = build_record_batch_optimized(
                     Arc::clone(&schema),
                     &chroms,

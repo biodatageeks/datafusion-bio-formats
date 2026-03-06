@@ -16,6 +16,9 @@ use datafusion_bio_format_core::genomic_filter::{
     build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
 };
 use datafusion_bio_format_core::index_utils::discover_gff_index;
+use datafusion_bio_format_core::object_storage::{
+    ObjectStorageOptions, StorageType, get_storage_type,
+};
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use log::debug;
 use std::any::Any;
@@ -90,6 +93,8 @@ pub struct GtfTableProvider {
     file_path: String,
     attr_fields: Option<Vec<String>>,
     schema: SchemaRef,
+    /// Optional cloud storage configuration for remote files (S3, GCS, Azure)
+    object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
     coordinate_system_zero_based: bool,
     /// Path to the TBI/CSI index file, if discovered
@@ -105,29 +110,34 @@ impl GtfTableProvider {
     ///
     /// * `file_path` - Path to the GTF file
     /// * `attr_fields` - Optional list of attribute fields to include
+    /// * `object_storage_options` - Optional cloud storage configuration (S3, GCS, Azure)
     /// * `coordinate_system_zero_based` - If true (default), output 0-based half-open coordinates;
     ///   if false, output 1-based closed coordinates
     pub fn new(
         file_path: String,
         attr_fields: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
         let schema = determine_schema_on_demand(attr_fields.clone(), coordinate_system_zero_based)?;
 
-        // Auto-discover index file for BGZF-compressed GTF files
+        // Auto-discover index file for local BGZF-compressed GTF files
         // Reuses GFF index discovery since GTF uses the same tabix format
-        let (index_path, contig_names) = if let Some((idx_path, idx_fmt)) =
-            discover_gff_index(&file_path)
-        {
-            debug!("Discovered GTF index: {idx_path} (format: {idx_fmt:?})");
-            match IndexedGtfReader::new(&file_path, &idx_path) {
-                Ok(reader) => (Some(idx_path), reader.contig_names().to_vec()),
-                Err(e) => {
-                    debug!(
-                        "Failed to open indexed GTF reader, falling back to sequential scan: {e}"
-                    );
-                    (None, Vec::new())
+        let storage_type = get_storage_type(file_path.clone());
+        let (index_path, contig_names) = if matches!(storage_type, StorageType::LOCAL) {
+            if let Some((idx_path, idx_fmt)) = discover_gff_index(&file_path) {
+                debug!("Discovered GTF index: {idx_path} (format: {idx_fmt:?})");
+                match IndexedGtfReader::new(&file_path, &idx_path) {
+                    Ok(reader) => (Some(idx_path), reader.contig_names().to_vec()),
+                    Err(e) => {
+                        debug!(
+                            "Failed to open indexed GTF reader, falling back to sequential scan: {e}"
+                        );
+                        (None, Vec::new())
+                    }
                 }
+            } else {
+                (None, Vec::new())
             }
         } else {
             (None, Vec::new())
@@ -139,6 +149,7 @@ impl GtfTableProvider {
             file_path,
             attr_fields,
             schema,
+            object_storage_options,
             coordinate_system_zero_based,
             index_path,
             contig_names,
@@ -277,6 +288,7 @@ impl TableProvider for GtfTableProvider {
                     projection: projection.cloned(),
                     filters: pushable_filters,
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
+                    object_storage_options: self.object_storage_options.clone(),
                     partition_assignments: Some(assignments),
                     index_path: Some(index_path.clone()),
                     residual_filters,
@@ -298,6 +310,7 @@ impl TableProvider for GtfTableProvider {
             projection: projection.cloned(),
             filters: pushable_filters,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
+            object_storage_options: self.object_storage_options.clone(),
             partition_assignments: None,
             index_path: None,
             residual_filters: Vec::new(),

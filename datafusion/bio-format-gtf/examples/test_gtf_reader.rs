@@ -14,6 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "gene_name".to_string(),
             "gene_type".to_string(),
         ]),
+        None,
         true,
     )
     .unwrap();

@@ -9,7 +9,7 @@ fn test_gtf_path() -> String {
 }
 
 async fn setup_ctx(attr_fields: Option<Vec<String>>, zero_based: bool) -> SessionContext {
-    let table = GtfTableProvider::new(test_gtf_path(), attr_fields, zero_based).unwrap();
+    let table = GtfTableProvider::new(test_gtf_path(), attr_fields, None, zero_based).unwrap();
     let ctx = SessionContext::new();
     ctx.register_table("gtf", Arc::new(table)).unwrap();
     ctx
@@ -51,7 +51,7 @@ async fn test_gtf_row_count() {
 
 #[tokio::test]
 async fn test_gtf_schema_columns() {
-    let table = GtfTableProvider::new(test_gtf_path(), None, true).unwrap();
+    let table = GtfTableProvider::new(test_gtf_path(), None, None, true).unwrap();
     let schema = table.schema();
     assert_eq!(schema.fields().len(), 9);
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -73,7 +73,7 @@ async fn test_gtf_schema_columns() {
 
 #[tokio::test]
 async fn test_gtf_schema_metadata() {
-    let table = GtfTableProvider::new(test_gtf_path(), None, true).unwrap();
+    let table = GtfTableProvider::new(test_gtf_path(), None, None, true).unwrap();
     let schema = table.schema();
     assert!(
         schema
@@ -650,7 +650,7 @@ async fn test_gtf_with_comments() {
     );
     fs::write(&temp_file, content).await.unwrap();
 
-    let table = GtfTableProvider::new(temp_file, None, true).unwrap();
+    let table = GtfTableProvider::new(temp_file, None, None, true).unwrap();
     let ctx = SessionContext::new();
     ctx.register_table("gtf_comments", Arc::new(table)).unwrap();
 
@@ -681,7 +681,7 @@ async fn test_gtf_gzip_reading() {
     encoder.write_all(content.as_bytes()).unwrap();
     encoder.finish().unwrap();
 
-    let table = GtfTableProvider::new(temp_file, None, true).unwrap();
+    let table = GtfTableProvider::new(temp_file, None, None, true).unwrap();
     let ctx = SessionContext::new();
     ctx.register_table("gtf_gz", Arc::new(table)).unwrap();
 
@@ -783,7 +783,7 @@ async fn test_gtf_corrupt_index_falls_back_to_sequential() {
     // fall back to sequential scan instead of hard-failing.
     // We simulate this by pointing to a non-existent file path that
     // won't have an index — just verify the provider still works.
-    let table = GtfTableProvider::new(test_gtf_path(), None, true).unwrap();
+    let table = GtfTableProvider::new(test_gtf_path(), None, None, true).unwrap();
     let ctx = SessionContext::new();
     ctx.register_table("gtf_no_idx", Arc::new(table)).unwrap();
     let df = ctx.sql("SELECT chrom FROM gtf_no_idx").await.unwrap();

@@ -25,7 +25,7 @@
 //! let ctx = SessionContext::new();
 //!
 //! // Register a GTF file as a table
-//! let table = GtfTableProvider::new("data/annotations.gtf".to_string(), None, true)?;
+//! let table = GtfTableProvider::new("data/annotations.gtf".to_string(), None, None, true)?;
 //! ctx.register_table("annotations", Arc::new(table))?;
 //!
 //! // Query with SQL
