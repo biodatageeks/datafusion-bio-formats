@@ -224,21 +224,15 @@ fn evaluate_in_list_filter<T: GtfRecordTrait>(
             })
             .collect();
 
+        // Note: IN pushdown is only enabled for non-standard (attribute) fields
+        // via can_push_down_gtf_attribute_in_list. Standard column IN filters are
+        // evaluated by DataFusion on the output. The chrom/type/source/strand arms
+        // are kept defensively in case the pushdown policy changes.
         let contains = match field_name.as_str() {
             "chrom" => values.iter().any(|v| v == record.reference_sequence_name()),
             "type" => values.iter().any(|v| v == record.ty()),
             "source" => values.iter().any(|v| v == record.source()),
             "strand" => values.iter().any(|v| v == record.strand()),
-            "start" => values.contains(&record.start().to_string()),
-            "end" => values.contains(&record.end().to_string()),
-            "score" => record
-                .score()
-                .map(|s| values.contains(&s.to_string()))
-                .unwrap_or(false),
-            "phase" => record
-                .phase()
-                .map(|p| values.contains(&p.to_string()))
-                .unwrap_or(false),
             other => extract_gtf_attribute_value(other, attributes_str)
                 .map(|v| values.contains(&v))
                 .unwrap_or(false),

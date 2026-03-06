@@ -175,8 +175,8 @@ async fn test_gtf_filter_start_range() {
         .unwrap();
     let results = df.collect().await.unwrap();
     // Records with 1-based start in [6536000, 6537000]: exon/CDS at 6536494, 6536684, 6536920
-    // That's 6 records (exon+CDS for each position)
-    assert!(total_rows(&results) > 0);
+    // That's 6 records (exon+CDS for each of the 3 positions)
+    assert_eq!(total_rows(&results), 6);
 }
 
 #[tokio::test]
@@ -358,16 +358,17 @@ async fn test_gtf_attribute_duplicate_keys() {
 
 #[tokio::test]
 async fn test_gtf_nested_attributes() {
-    // Default mode should return nested List<Struct> attributes
+    // Default mode should return nested List<Struct{tag,value}> attributes
     let ctx = setup_ctx(None, true).await;
     let df = ctx.sql("SELECT attributes FROM gtf LIMIT 1").await.unwrap();
     let results = df.collect().await.unwrap();
     let batch = &results[0];
-    // attributes column should be a list
     let arr = batch.column(0);
-    assert!(
-        arr.data_type().to_string().contains("Struct"),
-        "attributes should be List<Struct>"
+    let expected_type = "List(Field { name: \"item\", data_type: Struct([Field { name: \"tag\", data_type: Utf8, nullable: false, dict_id: 0, dict_is_ordered: false, metadata: {} }, Field { name: \"value\", data_type: Utf8, nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} }]), nullable: true, dict_id: 0, dict_is_ordered: false, metadata: {} })";
+    assert_eq!(
+        arr.data_type().to_string(),
+        expected_type,
+        "attributes should be List<Struct<tag:Utf8, value:Utf8>>"
     );
 }
 
@@ -736,9 +737,10 @@ async fn test_gtf_filter_start_in_list() {
         .unwrap();
     let results = df.collect().await.unwrap();
     let rows = total_rows(&results);
-    assert!(
-        rows >= 1,
-        "IN filter on start should match at least 1 row, got {rows}"
+    // Lines 1,2,21 have 1-based start=6534012 → 0-based=6534011
+    assert_eq!(
+        rows, 3,
+        "IN filter on start should match 3 rows (transcript+exon+UTR)"
     );
 }
 
@@ -753,10 +755,8 @@ async fn test_gtf_filter_end_in_list() {
         .unwrap();
     let results = df.collect().await.unwrap();
     let rows = total_rows(&results);
-    assert!(
-        rows >= 1,
-        "IN filter on end should match at least 1 row, got {rows}"
-    );
+    // Lines 1,18,23 have end=6538371 (transcript, exon 9, UTR)
+    assert_eq!(rows, 3, "IN filter on end should match 3 rows");
 }
 
 #[tokio::test]
@@ -769,10 +769,8 @@ async fn test_gtf_filter_phase_in_list() {
         .unwrap();
     let results = df.collect().await.unwrap();
     let rows = total_rows(&results);
-    assert!(
-        rows >= 1,
-        "IN filter on phase should match CDS rows with phase=0, got {rows}"
-    );
+    // Lines 4,5,9,13,17,20 have phase=0 (CDS lines + start_codon + stop_codon)
+    assert_eq!(rows, 6, "IN filter on phase=0 should match 6 rows");
 }
 
 // ─── Index fallback on corrupt/missing index (P2 fix) ────────────

@@ -162,13 +162,12 @@ impl ExecutionPlan for GtfExec {
 fn set_attribute_builders(
     batch_size: usize,
     attr_fields: &[String],
-    attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
+    attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
 ) {
     for attr_name in attr_fields {
         let field = OptionalField::new(&DataType::Utf8, batch_size).unwrap();
         attribute_builders.0.push(attr_name.clone());
-        attribute_builders.1.push(DataType::Utf8);
-        attribute_builders.2.push(field);
+        attribute_builders.1.push(field);
     }
 }
 
@@ -214,7 +213,7 @@ fn parse_gtf_attributes_to_vec(attributes_str: &str) -> Vec<Attribute> {
 /// Load GTF attributes for specific attribute columns (unnested)
 fn load_attributes_unnest_from_string(
     attributes_str: &str,
-    attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
+    attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
     projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
     let mut attributes_map = HashMap::new();
@@ -247,16 +246,16 @@ fn load_attributes_unnest_from_string(
     let projected_attribute_indices: Option<Vec<usize>> =
         projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
 
-    for i in 0..attribute_builders.2.len() {
+    for i in 0..attribute_builders.1.len() {
         if let Some(indices) = &projected_attribute_indices {
             if !indices.contains(&i) {
-                attribute_builders.2[i].append_null()?;
+                attribute_builders.1[i].append_null()?;
                 continue;
             }
         }
 
         let name = &attribute_builders.0[i];
-        let builder = &mut attribute_builders.2[i];
+        let builder = &mut attribute_builders.1[i];
 
         if let Some(value) = attributes_map.get(name) {
             builder.append_string(value)?;
@@ -355,8 +354,7 @@ async fn get_local_gtf(
     })?;
     let sync_iter = reader.into_sync_iterator();
 
-    let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let mut attribute_builders: (Vec<String>, Vec<OptionalField>) = (Vec::new(), Vec::new());
 
     let unnest_enable = match &attr_fields {
         Some(attrs) => {
@@ -432,7 +430,7 @@ async fn get_local_gtf(
                     &phase,
                     Some(&builders_to_arrays(
                         if unnest_enable {
-                            &mut attribute_builders.2
+                            &mut attribute_builders.1
                         } else {
                             &mut builder
                         })),
@@ -464,7 +462,7 @@ async fn get_local_gtf(
                 &phase,
                 Some(&builders_to_arrays(
                     if unnest_enable {
-                        &mut attribute_builders.2
+                        &mut attribute_builders.1
                     } else {
                         &mut builder
                     })),
@@ -600,8 +598,7 @@ async fn get_remote_gtf_stream(
         DataFusionError::Execution(format!("Failed to open remote GTF file '{file_path}': {e}"))
     })?;
 
-    let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let mut attribute_builders: (Vec<String>, Vec<OptionalField>) = (Vec::new(), Vec::new());
 
     let unnest_enable = match &attr_fields {
         Some(attrs) => {
@@ -688,7 +685,7 @@ async fn get_remote_gtf_stream(
                     &phase,
                     Some(&builders_to_arrays(
                         if unnest_enable {
-                            &mut attribute_builders.2
+                            &mut attribute_builders.1
                         } else {
                             &mut builder
                         })),
@@ -720,7 +717,7 @@ async fn get_remote_gtf_stream(
                 &phase,
                 Some(&builders_to_arrays(
                     if unnest_enable {
-                        &mut attribute_builders.2
+                        &mut attribute_builders.1
                     } else {
                         &mut builder
                     })),
@@ -792,8 +789,8 @@ async fn get_indexed_gtf_stream(
             let mut phases: Vec<Option<u32>> = Vec::with_capacity(batch_size);
 
             let unnest_enable = attr_fields.is_some();
-            let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
-                (Vec::new(), Vec::new(), Vec::new());
+            let mut attribute_builders: (Vec<String>, Vec<OptionalField>) =
+                (Vec::new(), Vec::new());
             if let Some(ref attrs) = attr_fields {
                 set_attribute_builders(batch_size, attrs, &mut attribute_builders);
             }
@@ -918,7 +915,7 @@ async fn get_indexed_gtf_stream(
                             &strands,
                             &phases,
                             Some(&builders_to_arrays(if unnest_enable {
-                                &mut attribute_builders.2
+                                &mut attribute_builders.1
                             } else {
                                 &mut builder
                             })),
@@ -960,7 +957,7 @@ async fn get_indexed_gtf_stream(
                     &strands,
                     &phases,
                     Some(&builders_to_arrays(if unnest_enable {
-                        &mut attribute_builders.2
+                        &mut attribute_builders.1
                     } else {
                         &mut builder
                     })),
