@@ -237,6 +237,16 @@ fn evaluate_in_list_filter<T: GtfRecordTrait>(
             "type" => values.contains(&record.ty()),
             "source" => values.contains(&record.source()),
             "strand" => values.contains(&record.strand()),
+            "start" => values.contains(&record.start().to_string()),
+            "end" => values.contains(&record.end().to_string()),
+            "score" => record
+                .score()
+                .map(|s| values.contains(&s.to_string()))
+                .unwrap_or(false),
+            "phase" => record
+                .phase()
+                .map(|p| values.contains(&p.to_string()))
+                .unwrap_or(false),
             other => extract_gtf_attribute_value(other, attributes_str)
                 .map(|v| values.contains(&v))
                 .unwrap_or(false),

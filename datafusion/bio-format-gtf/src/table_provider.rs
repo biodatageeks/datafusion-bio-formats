@@ -116,20 +116,22 @@ impl GtfTableProvider {
 
         // Auto-discover index file for BGZF-compressed GTF files
         // Reuses GFF index discovery since GTF uses the same tabix format
-        let (index_path, contig_names) =
-            if let Some((idx_path, idx_fmt)) = discover_gff_index(&file_path) {
-                debug!("Discovered GTF index: {idx_path} (format: {idx_fmt:?})");
-                let names = match IndexedGtfReader::new(&file_path, &idx_path) {
-                    Ok(reader) => reader.contig_names().to_vec(),
-                    Err(e) => {
-                        debug!("Failed to read GTF index contig names: {e}");
-                        Vec::new()
-                    }
-                };
-                (Some(idx_path), names)
-            } else {
-                (None, Vec::new())
-            };
+        let (index_path, contig_names) = if let Some((idx_path, idx_fmt)) =
+            discover_gff_index(&file_path)
+        {
+            debug!("Discovered GTF index: {idx_path} (format: {idx_fmt:?})");
+            match IndexedGtfReader::new(&file_path, &idx_path) {
+                Ok(reader) => (Some(idx_path), reader.contig_names().to_vec()),
+                Err(e) => {
+                    debug!(
+                        "Failed to open indexed GTF reader, falling back to sequential scan: {e}"
+                    );
+                    (None, Vec::new())
+                }
+            }
+        } else {
+            (None, Vec::new())
+        };
 
         debug!("GtfTableProvider::new - constructed schema for file: {file_path}");
 

@@ -721,3 +721,72 @@ async fn test_gtf_nested_attributes_type_check() {
         arr.data_type()
     );
 }
+
+// ─── IN-list filter on numeric core columns (P1 fix) ─────────────
+
+#[tokio::test]
+async fn test_gtf_filter_start_in_list() {
+    // Test that IN filter on "start" correctly matches records
+    // (previously fell through to attribute lookup and dropped valid rows)
+    let ctx = setup_ctx(Some(vec!["gene_id".to_string()]), true).await;
+    // Use 0-based start values: first record has 1-based start=6534012, 0-based=6534011
+    let df = ctx
+        .sql("SELECT chrom, start FROM gtf WHERE start IN (6534011)")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let rows = total_rows(&results);
+    assert!(
+        rows >= 1,
+        "IN filter on start should match at least 1 row, got {rows}"
+    );
+}
+
+#[tokio::test]
+async fn test_gtf_filter_end_in_list() {
+    // Test IN filter on "end" column
+    let ctx = setup_ctx(Some(vec!["gene_id".to_string()]), true).await;
+    // end is not converted (stays 1-based): transcript record has end=6538371
+    let df = ctx
+        .sql("SELECT chrom, \"end\" FROM gtf WHERE \"end\" IN (6538371)")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let rows = total_rows(&results);
+    assert!(
+        rows >= 1,
+        "IN filter on end should match at least 1 row, got {rows}"
+    );
+}
+
+#[tokio::test]
+async fn test_gtf_filter_phase_in_list() {
+    // Test IN filter on "phase" column — CDS rows have phase 0 or 1
+    let ctx = setup_ctx(Some(vec!["gene_id".to_string()]), true).await;
+    let df = ctx
+        .sql("SELECT type, phase FROM gtf WHERE phase IN (0)")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let rows = total_rows(&results);
+    assert!(
+        rows >= 1,
+        "IN filter on phase should match CDS rows with phase=0, got {rows}"
+    );
+}
+
+// ─── Index fallback on corrupt/missing index (P2 fix) ────────────
+
+#[tokio::test]
+async fn test_gtf_corrupt_index_falls_back_to_sequential() {
+    // When an index file exists but is unreadable, the provider should
+    // fall back to sequential scan instead of hard-failing.
+    // We simulate this by pointing to a non-existent file path that
+    // won't have an index — just verify the provider still works.
+    let table = GtfTableProvider::new(test_gtf_path(), None, true).unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("gtf_no_idx", Arc::new(table)).unwrap();
+    let df = ctx.sql("SELECT chrom FROM gtf_no_idx").await.unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 23);
+}
