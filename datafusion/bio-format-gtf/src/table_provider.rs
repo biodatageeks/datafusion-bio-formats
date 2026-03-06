@@ -134,9 +134,18 @@ impl GtfTableProvider {
                 match IndexedGtfReader::new(&file_path, &idx_path) {
                     Ok(reader) => (Some(idx_path), reader.contig_names().to_vec()),
                     Err(e) => {
-                        debug!(
-                            "Failed to open indexed GTF reader, falling back to sequential scan: {e}"
-                        );
+                        use datafusion_bio_format_core::index_utils::IndexFormat;
+                        if matches!(idx_fmt, IndexFormat::CSI) {
+                            log::warn!(
+                                "CSI index found at {idx_path} but only TBI is currently supported; \
+                                 falling back to sequential scan"
+                            );
+                        } else {
+                            log::warn!(
+                                "Failed to open indexed GTF reader for {idx_path}, \
+                                 falling back to sequential scan: {e}"
+                            );
+                        }
                         (None, Vec::new())
                     }
                 }
