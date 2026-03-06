@@ -125,7 +125,7 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
                 "start" => {
                     let start_1based = record.start();
                     let start_output = if coordinate_system_zero_based {
-                        start_1based - 1
+                        start_1based.saturating_sub(1)
                     } else {
                         start_1based
                     };
@@ -186,7 +186,7 @@ fn evaluate_between_filter<T: GtfRecordTrait>(
                 "start" => {
                     let start_1based = record.start();
                     let start_output = if coordinate_system_zero_based {
-                        start_1based - 1
+                        start_1based.saturating_sub(1)
                     } else {
                         start_1based
                     };

@@ -200,6 +200,8 @@ fn load_attributes_unnest_from_string(
     let mut attributes_map = HashMap::new();
 
     if !attributes_str.is_empty() && attributes_str != "." {
+        let wanted: std::collections::HashSet<&str> =
+            attribute_builders.0.iter().map(|s| s.as_str()).collect();
         for pair in attributes_str.split(';') {
             let trimmed = pair.trim();
             if trimmed.is_empty() {
@@ -208,7 +210,7 @@ fn load_attributes_unnest_from_string(
             if let Some(space_pos) = trimmed.find(' ') {
                 let key = &trimmed[..space_pos];
 
-                if attribute_builders.0.contains(&key.to_string()) {
+                if wanted.contains(key) {
                     let value = trimmed[space_pos + 1..].trim();
                     let unquoted = if value.starts_with('"') && value.ends_with('"') {
                         value[1..value.len() - 1].to_string()
@@ -367,7 +369,7 @@ async fn get_local_gtf(
             }
             if needs_start {
                 let start_pos = record.start();
-                poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
+                poss.push(if coordinate_system_zero_based { start_pos.saturating_sub(1) } else { start_pos });
             }
             if needs_end {
                 pose.push(record.end());
@@ -598,7 +600,7 @@ async fn get_indexed_gtf_stream(
                     }
 
                     let start_val = if coordinate_system_zero_based {
-                        start_1based - 1
+                        start_1based.saturating_sub(1)
                     } else {
                         start_1based
                     };
