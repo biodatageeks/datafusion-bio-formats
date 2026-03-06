@@ -25,7 +25,11 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Constructs schema on-demand based on requested attribute fields
+/// Constructs schema on-demand based on requested attribute fields.
+///
+/// When `coordinate_system_zero_based` is true, `start` is converted from 1-based to
+/// 0-based (via `saturating_sub(1)`) but `end` stays unchanged, following the BED
+/// half-open `[start, end)` convention used across the project's format crates.
 fn determine_schema_on_demand(
     attr_fields: Option<Vec<String>>,
     coordinate_system_zero_based: bool,

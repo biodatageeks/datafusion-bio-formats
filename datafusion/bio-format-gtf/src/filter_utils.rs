@@ -1,4 +1,4 @@
-use crate::storage::GtfRecordTrait;
+use crate::storage::{GtfRecordTrait, parse_gtf_pair};
 use datafusion::arrow::datatypes::Schema;
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Between, Expr, Operator, expr::InList};
@@ -332,23 +332,9 @@ pub fn extract_gtf_attribute_value(field_name: &str, attributes_str: &str) -> Op
     }
 
     for pair in attributes_str.split(';') {
-        let trimmed = pair.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        // GTF format: key "value" or key value
-        if let Some(space_pos) = trimmed.find(' ') {
-            let key = &trimmed[..space_pos];
+        if let Some((key, value)) = parse_gtf_pair(pair) {
             if key == field_name {
-                let value = trimmed[space_pos + 1..].trim();
-                // Remove surrounding quotes if present
-                let unquoted = if value.starts_with('"') && value.ends_with('"') {
-                    &value[1..value.len() - 1]
-                } else {
-                    value
-                };
-                return Some(unquoted.to_string());
+                return Some(value.to_string());
             }
         }
     }

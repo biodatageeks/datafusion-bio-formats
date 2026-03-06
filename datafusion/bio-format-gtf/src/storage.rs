@@ -249,6 +249,26 @@ impl Iterator for GtfSyncIterator {
     }
 }
 
+/// Parse a single semicolon-delimited GTF attribute pair into (key, unquoted_value).
+///
+/// GTF format: `key "value"` or `key value` (space-separated).
+/// Handles trimming, space-splitting, and quote-stripping.
+pub(crate) fn parse_gtf_pair(pair: &str) -> Option<(&str, &str)> {
+    let trimmed = pair.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let space_pos = trimmed.find(' ')?;
+    let key = &trimmed[..space_pos];
+    let value = trimmed[space_pos + 1..].trim();
+    let unquoted = if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
+        &value[1..value.len() - 1]
+    } else {
+        value
+    };
+    Some((key, unquoted))
+}
+
 /// Parse a single GTF line into a GtfRecord
 pub(crate) fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
     let fields: Vec<&str> = line.split('\t').collect();

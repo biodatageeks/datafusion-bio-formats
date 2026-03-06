@@ -1,5 +1,6 @@
 use crate::storage::{
     GtfLocalReader, GtfRecordTrait, GtfRemoteReader, IndexedGtfReader, parse_gtf_line,
+    parse_gtf_pair,
 };
 use async_stream::try_stream;
 use datafusion::arrow::array::{
@@ -159,6 +160,210 @@ impl ExecutionPlan for GtfExec {
     }
 }
 
+/// Collects GTF record fields into columnar vectors and builds RecordBatches.
+///
+/// Encapsulates the projection flags, column vectors, attribute builders, and
+/// batch-building logic shared across `get_local_gtf`, `get_remote_gtf_stream`,
+/// and `get_indexed_gtf_stream`.
+struct GtfBatchCollector {
+    // Projection flags
+    needs_chrom: bool,
+    needs_start: bool,
+    needs_end: bool,
+    needs_type: bool,
+    needs_source: bool,
+    needs_score: bool,
+    needs_strand: bool,
+    needs_phase: bool,
+
+    // Column vectors
+    chroms: Vec<String>,
+    poss: Vec<u32>,
+    pose: Vec<u32>,
+    types: Vec<String>,
+    sources: Vec<String>,
+    scores: Vec<Option<f32>>,
+    strands: Vec<String>,
+    phases: Vec<Option<u32>>,
+
+    // Attribute handling
+    unnest_enable: bool,
+    attribute_builders: (Vec<String>, Vec<OptionalField>),
+    nested_builder: Vec<OptionalField>,
+
+    // Config
+    batch_size: usize,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    coordinate_system_zero_based: bool,
+    record_num: usize,
+}
+
+impl GtfBatchCollector {
+    fn new(
+        schema: SchemaRef,
+        batch_size: usize,
+        projection: Option<Vec<usize>>,
+        attr_fields: Option<&[String]>,
+        coordinate_system_zero_based: bool,
+    ) -> datafusion::common::Result<Self> {
+        let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+        let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+        let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+        let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
+        let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
+        let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
+        let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
+        let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
+
+        let cap = |needed: bool| -> usize { if needed { batch_size } else { 0 } };
+
+        let mut attribute_builders: (Vec<String>, Vec<OptionalField>) = (Vec::new(), Vec::new());
+        let unnest_enable = if let Some(attrs) = attr_fields {
+            set_attribute_builders(batch_size, attrs, &mut attribute_builders);
+            true
+        } else {
+            false
+        };
+
+        let nested_builder = if !unnest_enable {
+            new_nested_builder(batch_size)?
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self {
+            needs_chrom,
+            needs_start,
+            needs_end,
+            needs_type,
+            needs_source,
+            needs_score,
+            needs_strand,
+            needs_phase,
+            chroms: Vec::with_capacity(cap(needs_chrom)),
+            poss: Vec::with_capacity(cap(needs_start)),
+            pose: Vec::with_capacity(cap(needs_end)),
+            types: Vec::with_capacity(cap(needs_type)),
+            sources: Vec::with_capacity(cap(needs_source)),
+            scores: Vec::with_capacity(cap(needs_score)),
+            strands: Vec::with_capacity(cap(needs_strand)),
+            phases: Vec::with_capacity(cap(needs_phase)),
+            unnest_enable,
+            attribute_builders,
+            nested_builder,
+            batch_size,
+            schema,
+            projection,
+            coordinate_system_zero_based,
+            record_num: 0,
+        })
+    }
+
+    /// Push a record's fields into the column vectors.
+    fn push_record<T: GtfRecordTrait>(
+        &mut self,
+        record: &T,
+    ) -> Result<(), datafusion::arrow::error::ArrowError> {
+        if self.needs_chrom {
+            self.chroms
+                .push(record.reference_sequence_name().to_owned());
+        }
+        if self.needs_start {
+            let start_pos = record.start();
+            self.poss.push(if self.coordinate_system_zero_based {
+                start_pos.saturating_sub(1)
+            } else {
+                start_pos
+            });
+        }
+        if self.needs_end {
+            self.pose.push(record.end());
+        }
+        if self.needs_type {
+            self.types.push(record.ty().to_owned());
+        }
+        if self.needs_source {
+            self.sources.push(record.source().to_owned());
+        }
+        if self.needs_score {
+            self.scores.push(record.score());
+        }
+        if self.needs_strand {
+            self.strands.push(record.strand().to_owned());
+        }
+        if self.needs_phase {
+            self.phases.push(record.phase().map(|p| p as u32));
+        }
+
+        let attributes_str = record.attributes_string();
+        if self.unnest_enable {
+            load_attributes_unnest_from_string(
+                attributes_str,
+                &mut self.attribute_builders,
+                self.projection.clone(),
+            )?;
+        } else {
+            let attributes = parse_gtf_attributes_to_vec(attributes_str);
+            load_attributes_from_vec(attributes, &mut self.nested_builder)?;
+        }
+
+        self.record_num += 1;
+        Ok(())
+    }
+
+    /// Returns true when a full batch has been accumulated.
+    fn is_full(&self) -> bool {
+        self.record_num > 0 && self.record_num % self.batch_size == 0
+    }
+
+    /// Returns true when there are pending records that haven't been flushed.
+    fn has_pending(&self) -> bool {
+        self.record_num % self.batch_size != 0
+    }
+
+    /// Build a RecordBatch from accumulated data and clear the column vectors.
+    fn take_batch(&mut self) -> datafusion::error::Result<RecordBatch> {
+        let count = if self.is_full() {
+            self.batch_size
+        } else {
+            self.record_num % self.batch_size
+        };
+
+        let attr_arrays = builders_to_arrays(if self.unnest_enable {
+            &mut self.attribute_builders.1
+        } else {
+            &mut self.nested_builder
+        });
+
+        let batch = build_record_batch_optimized(
+            Arc::clone(&self.schema),
+            &self.chroms,
+            &self.poss,
+            &self.pose,
+            &self.types,
+            &self.sources,
+            &self.scores,
+            &self.strands,
+            &self.phases,
+            Some(&attr_arrays),
+            self.projection.clone(),
+            count,
+        )?;
+
+        self.chroms.clear();
+        self.poss.clear();
+        self.pose.clear();
+        self.types.clear();
+        self.sources.clear();
+        self.scores.clear();
+        self.strands.clear();
+        self.phases.clear();
+
+        Ok(batch)
+    }
+}
+
 fn set_attribute_builders(
     batch_size: usize,
     attr_fields: &[String],
@@ -185,24 +390,10 @@ fn parse_gtf_attributes_to_vec(attributes_str: &str) -> Vec<Attribute> {
     let mut attributes = Vec::with_capacity(estimated_pairs);
 
     for pair in attributes_str.split(';') {
-        let trimmed = pair.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Some(space_pos) = trimmed.find(' ') {
-            let key = &trimmed[..space_pos];
-            let value = trimmed[space_pos + 1..].trim();
-
-            let unquoted = if value.starts_with('"') && value.ends_with('"') {
-                value[1..value.len() - 1].to_string()
-            } else {
-                value.to_string()
-            };
-
+        if let Some((key, value)) = parse_gtf_pair(pair) {
             attributes.push(Attribute {
                 tag: key.to_string(),
-                value: Some(unquoted),
+                value: Some(value.to_string()),
             });
         }
     }
@@ -222,22 +413,12 @@ fn load_attributes_unnest_from_string(
         let wanted: std::collections::HashSet<&str> =
             attribute_builders.0.iter().map(|s| s.as_str()).collect();
         for pair in attributes_str.split(';') {
-            let trimmed = pair.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Some(space_pos) = trimmed.find(' ') {
-                let key = &trimmed[..space_pos];
-
+            if let Some((key, value)) = parse_gtf_pair(pair) {
                 if wanted.contains(key) {
-                    let value = trimmed[space_pos + 1..].trim();
-                    let unquoted = if value.starts_with('"') && value.ends_with('"') {
-                        value[1..value.len() - 1].to_string()
-                    } else {
-                        value.to_string()
-                    };
                     // For duplicate keys, keep the first value (consistent with attribute extraction)
-                    attributes_map.entry(key.to_string()).or_insert(unquoted);
+                    attributes_map
+                        .entry(key.to_string())
+                        .or_insert_with(|| value.to_string());
                 }
             }
         }
@@ -299,79 +480,18 @@ async fn get_local_gtf(
     coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
-    let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
-    let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
-    let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
-    let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
-    let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
-    let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
-    let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
-
-    let mut chroms: Vec<String> = if needs_chrom {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut poss: Vec<u32> = if needs_start {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut pose: Vec<u32> = if needs_end {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut ty: Vec<String> = if needs_type {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut source: Vec<String> = if needs_source {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut scores: Vec<Option<f32>> = if needs_score {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut strand: Vec<String> = if needs_strand {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut phase: Vec<Option<u32>> = if needs_phase {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
     let reader = GtfLocalReader::new(&file_path).map_err(|e| {
         DataFusionError::Execution(format!("Failed to open GTF file '{file_path}': {e}"))
     })?;
     let sync_iter = reader.into_sync_iterator();
 
-    let mut attribute_builders: (Vec<String>, Vec<OptionalField>) = (Vec::new(), Vec::new());
-
-    let unnest_enable = match &attr_fields {
-        Some(attrs) => {
-            set_attribute_builders(batch_size, attrs, &mut attribute_builders);
-            true
-        }
-        None => false,
-    };
-
-    // Only allocate the nested builder when actually needed (not in unnest mode)
-    let mut builder = if !unnest_enable {
-        new_nested_builder(batch_size)?
-    } else {
-        Vec::new()
-    };
-
-    let mut record_num = 0;
+    let mut collector = GtfBatchCollector::new(
+        schema,
+        batch_size,
+        projection,
+        attr_fields.as_deref(),
+        coordinate_system_zero_based,
+    )?;
 
     let stream = try_stream! {
         for result in sync_iter {
@@ -382,94 +502,15 @@ async fn get_local_gtf(
                 continue;
             }
 
-            if needs_chrom {
-                chroms.push(record.reference_sequence_name().to_owned());
-            }
-            if needs_start {
-                let start_pos = record.start();
-                poss.push(if coordinate_system_zero_based { start_pos.saturating_sub(1) } else { start_pos });
-            }
-            if needs_end {
-                pose.push(record.end());
-            }
-            if needs_type {
-                ty.push(record.ty().to_owned());
-            }
-            if needs_source {
-                source.push(record.source().to_owned());
-            }
-            if needs_score {
-                scores.push(record.score());
-            }
-            if needs_strand {
-                strand.push(record.strand().to_owned());
-            }
-            if needs_phase {
-                phase.push(record.phase().map(|p| p as u32));
-            }
+            collector.push_record(&record)?;
 
-            if unnest_enable {
-                load_attributes_unnest_from_string(attributes_str, &mut attribute_builders, projection.clone())?;
-            } else {
-                let attributes = parse_gtf_attributes_to_vec(attributes_str);
-                load_attributes_from_vec(attributes, &mut builder)?;
-            }
-
-            record_num += 1;
-            if record_num % batch_size == 0 {
-                debug!("GTF record number: {record_num}");
-                let batch = build_record_batch_optimized(
-                    Arc::clone(&schema),
-                    &chroms,
-                    &poss,
-                    &pose,
-                    &ty,
-                    &source,
-                    &scores,
-                    &strand,
-                    &phase,
-                    Some(&builders_to_arrays(
-                        if unnest_enable {
-                            &mut attribute_builders.1
-                        } else {
-                            &mut builder
-                        })),
-                    projection.clone(),
-                    batch_size,
-                )?;
-                yield batch;
-                chroms.clear();
-                poss.clear();
-                pose.clear();
-                ty.clear();
-                source.clear();
-                scores.clear();
-                strand.clear();
-                phase.clear();
+            if collector.is_full() {
+                debug!("GTF record number: {}", collector.record_num);
+                yield collector.take_batch()?;
             }
         }
-        let remaining_records = record_num % batch_size;
-        if remaining_records != 0 {
-            let batch = build_record_batch_optimized(
-                Arc::clone(&schema),
-                &chroms,
-                &poss,
-                &pose,
-                &ty,
-                &source,
-                &scores,
-                &strand,
-                &phase,
-                Some(&builders_to_arrays(
-                    if unnest_enable {
-                        &mut attribute_builders.1
-                    } else {
-                        &mut builder
-                    })),
-                projection.clone(),
-                remaining_records,
-            )?;
-            yield batch;
+        if collector.has_pending() {
+            yield collector.take_batch()?;
         }
     };
     Ok(stream)
@@ -535,56 +576,6 @@ async fn get_remote_gtf_stream(
     coordinate_system_zero_based: bool,
 ) -> datafusion::error::Result<impl futures::Stream<Item = datafusion::error::Result<RecordBatch>>>
 {
-    let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
-    let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
-    let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
-    let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
-    let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
-    let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
-    let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
-    let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
-
-    let mut chroms: Vec<String> = if needs_chrom {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut poss: Vec<u32> = if needs_start {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut pose: Vec<u32> = if needs_end {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut ty: Vec<String> = if needs_type {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut source: Vec<String> = if needs_source {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut scores: Vec<Option<f32>> = if needs_score {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut strand: Vec<String> = if needs_strand {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-    let mut phase: Vec<Option<u32>> = if needs_phase {
-        Vec::with_capacity(batch_size)
-    } else {
-        Vec::new()
-    };
-
     let mut reader = GtfRemoteReader::new(
         file_path.clone(),
         object_storage_options.ok_or_else(|| {
@@ -598,23 +589,13 @@ async fn get_remote_gtf_stream(
         DataFusionError::Execution(format!("Failed to open remote GTF file '{file_path}': {e}"))
     })?;
 
-    let mut attribute_builders: (Vec<String>, Vec<OptionalField>) = (Vec::new(), Vec::new());
-
-    let unnest_enable = match &attr_fields {
-        Some(attrs) => {
-            set_attribute_builders(batch_size, attrs, &mut attribute_builders);
-            true
-        }
-        None => false,
-    };
-
-    let mut builder = if !unnest_enable {
-        new_nested_builder(batch_size)?
-    } else {
-        Vec::new()
-    };
-
-    let mut record_num = 0;
+    let mut collector = GtfBatchCollector::new(
+        schema,
+        batch_size,
+        projection,
+        attr_fields.as_deref(),
+        coordinate_system_zero_based,
+    )?;
 
     let stream = try_stream! {
         let mut buf = String::new();
@@ -637,94 +618,15 @@ async fn get_remote_gtf_stream(
                 continue;
             }
 
-            if needs_chrom {
-                chroms.push(record.reference_sequence_name().to_owned());
-            }
-            if needs_start {
-                let start_pos = record.start();
-                poss.push(if coordinate_system_zero_based { start_pos.saturating_sub(1) } else { start_pos });
-            }
-            if needs_end {
-                pose.push(record.end());
-            }
-            if needs_type {
-                ty.push(record.ty().to_owned());
-            }
-            if needs_source {
-                source.push(record.source().to_owned());
-            }
-            if needs_score {
-                scores.push(record.score());
-            }
-            if needs_strand {
-                strand.push(record.strand().to_owned());
-            }
-            if needs_phase {
-                phase.push(record.phase().map(|p| p as u32));
-            }
+            collector.push_record(&record)?;
 
-            if unnest_enable {
-                load_attributes_unnest_from_string(attributes_str, &mut attribute_builders, projection.clone())?;
-            } else {
-                let attributes = parse_gtf_attributes_to_vec(attributes_str);
-                load_attributes_from_vec(attributes, &mut builder)?;
-            }
-
-            record_num += 1;
-            if record_num % batch_size == 0 {
-                debug!("GTF remote record number: {record_num}");
-                let batch = build_record_batch_optimized(
-                    Arc::clone(&schema),
-                    &chroms,
-                    &poss,
-                    &pose,
-                    &ty,
-                    &source,
-                    &scores,
-                    &strand,
-                    &phase,
-                    Some(&builders_to_arrays(
-                        if unnest_enable {
-                            &mut attribute_builders.1
-                        } else {
-                            &mut builder
-                        })),
-                    projection.clone(),
-                    batch_size,
-                )?;
-                yield batch;
-                chroms.clear();
-                poss.clear();
-                pose.clear();
-                ty.clear();
-                source.clear();
-                scores.clear();
-                strand.clear();
-                phase.clear();
+            if collector.is_full() {
+                debug!("GTF remote record number: {}", collector.record_num);
+                yield collector.take_batch()?;
             }
         }
-        let remaining_records = record_num % batch_size;
-        if remaining_records != 0 {
-            let batch = build_record_batch_optimized(
-                Arc::clone(&schema),
-                &chroms,
-                &poss,
-                &pose,
-                &ty,
-                &source,
-                &scores,
-                &strand,
-                &phase,
-                Some(&builders_to_arrays(
-                    if unnest_enable {
-                        &mut attribute_builders.1
-                    } else {
-                        &mut builder
-                    })),
-                projection.clone(),
-                remaining_records,
-            )?;
-            yield batch;
+        if collector.has_pending() {
+            yield collector.take_batch()?;
         }
     };
     Ok(stream)
@@ -764,45 +666,19 @@ async fn get_indexed_gtf_stream(
     let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
     std::thread::spawn(move || {
-        let mut read_and_send = || -> Result<(), DataFusionError> {
+        let read_and_send = || -> Result<(), DataFusionError> {
             let mut indexed_reader =
                 IndexedGtfReader::new(&file_path, &index_path).map_err(|e| {
                     DataFusionError::Execution(format!("Failed to open indexed GTF: {e}"))
                 })?;
 
-            let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
-            let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
-            let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
-            let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
-            let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
-            let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
-            let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
-            let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
-
-            let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
-            let mut poss: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut pose: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut types: Vec<String> = Vec::with_capacity(batch_size);
-            let mut sources: Vec<String> = Vec::with_capacity(batch_size);
-            let mut scores: Vec<Option<f32>> = Vec::with_capacity(batch_size);
-            let mut strands: Vec<String> = Vec::with_capacity(batch_size);
-            let mut phases: Vec<Option<u32>> = Vec::with_capacity(batch_size);
-
-            let unnest_enable = attr_fields.is_some();
-            let mut attribute_builders: (Vec<String>, Vec<OptionalField>) =
-                (Vec::new(), Vec::new());
-            if let Some(ref attrs) = attr_fields {
-                set_attribute_builders(batch_size, attrs, &mut attribute_builders);
-            }
-
-            let mut builder = if !unnest_enable {
-                new_nested_builder(batch_size)
-                    .map_err(|e| DataFusionError::Execution(format!("Builder init error: {e}")))?
-            } else {
-                Vec::new()
-            };
-
-            let mut total_records = 0usize;
+            let mut collector = GtfBatchCollector::new(
+                schema.clone(),
+                batch_size,
+                projection,
+                attr_fields.as_deref(),
+                coordinate_system_zero_based,
+            )?;
 
             for region in &regions {
                 if region.unmapped_tail {
@@ -827,102 +703,36 @@ async fn get_indexed_gtf_stream(
                     let record = parse_gtf_line(line)
                         .map_err(|e| DataFusionError::Execution(format!("GTF parse error: {e}")))?;
 
-                    let start_1based = record.start;
-                    let end_1based = record.end;
-
                     // Skip records outside the sub-region bounds
                     if let Some(rs) = region_start_1based {
-                        if start_1based < rs {
+                        if record.start < rs {
                             continue;
                         }
                     }
                     if let Some(re) = region_end_1based {
-                        if start_1based > re {
+                        if record.start > re {
                             continue;
                         }
                     }
-
-                    let attributes_str = record.attributes.clone();
 
                     // Apply residual filters
                     if !residual_filters.is_empty()
                         && !crate::filter_utils::evaluate_filters_against_record(
                             &record,
                             &residual_filters,
-                            &attributes_str,
+                            &record.attributes,
                             coordinate_system_zero_based,
                         )
                     {
                         continue;
                     }
 
-                    let start_val = if coordinate_system_zero_based {
-                        start_1based.saturating_sub(1)
-                    } else {
-                        start_1based
-                    };
-
-                    if needs_chrom {
-                        chroms.push(record.seqid);
-                    }
-                    if needs_start {
-                        poss.push(start_val);
-                    }
-                    if needs_end {
-                        pose.push(end_1based);
-                    }
-                    if needs_type {
-                        types.push(record.ty);
-                    }
-                    if needs_source {
-                        sources.push(record.source);
-                    }
-                    if needs_score {
-                        scores.push(record.score);
-                    }
-                    if needs_strand {
-                        strands.push(record.strand);
-                    }
-                    if needs_phase {
-                        let phase_val: Option<u8> = record.phase.parse().ok();
-                        phases.push(phase_val.map(|p| p as u32));
-                    }
-
-                    if unnest_enable && !attribute_builders.0.is_empty() {
-                        load_attributes_unnest_from_string(
-                            &attributes_str,
-                            &mut attribute_builders,
-                            projection.clone(),
-                        )
+                    collector
+                        .push_record(&record)
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                    } else if !unnest_enable {
-                        let attributes = parse_gtf_attributes_to_vec(&attributes_str);
-                        load_attributes_from_vec(attributes, &mut builder)
-                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                    }
 
-                    total_records += 1;
-
-                    if total_records % batch_size == 0 {
-                        let batch = build_record_batch_optimized(
-                            Arc::clone(&schema),
-                            &chroms,
-                            &poss,
-                            &pose,
-                            &types,
-                            &sources,
-                            &scores,
-                            &strands,
-                            &phases,
-                            Some(&builders_to_arrays(if unnest_enable {
-                                &mut attribute_builders.1
-                            } else {
-                                &mut builder
-                            })),
-                            projection.clone(),
-                            batch_size,
-                        )?;
-
+                    if collector.is_full() {
+                        let batch = collector.take_batch()?;
                         loop {
                             match tx.try_send(Ok(batch.clone())) {
                                 Ok(()) => break,
@@ -930,40 +740,12 @@ async fn get_indexed_gtf_stream(
                                 Err(_) => std::thread::yield_now(),
                             }
                         }
-
-                        chroms.clear();
-                        poss.clear();
-                        pose.clear();
-                        types.clear();
-                        sources.clear();
-                        scores.clear();
-                        strands.clear();
-                        phases.clear();
                     }
                 }
             }
 
-            // Remaining records
-            let remaining = total_records % batch_size;
-            if remaining > 0 {
-                let batch = build_record_batch_optimized(
-                    Arc::clone(&schema),
-                    &chroms,
-                    &poss,
-                    &pose,
-                    &types,
-                    &sources,
-                    &scores,
-                    &strands,
-                    &phases,
-                    Some(&builders_to_arrays(if unnest_enable {
-                        &mut attribute_builders.1
-                    } else {
-                        &mut builder
-                    })),
-                    projection.clone(),
-                    remaining,
-                )?;
+            if collector.has_pending() {
+                let batch = collector.take_batch()?;
                 loop {
                     match tx.try_send(Ok(batch.clone())) {
                         Ok(()) => break,
@@ -975,7 +757,7 @@ async fn get_indexed_gtf_stream(
 
             debug!(
                 "Indexed GTF scan: {} records for {} regions",
-                total_records,
+                collector.record_num,
                 regions.len()
             );
             Ok(())
