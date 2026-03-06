@@ -360,12 +360,12 @@ async fn get_local_gtf(
             let record = result?;
 
             let attributes_str = record.attributes_string();
-            if !crate::filter_utils::evaluate_filters_against_record(&record, &filters, &attributes_str, coordinate_system_zero_based) {
+            if !crate::filter_utils::evaluate_filters_against_record(&record, &filters, attributes_str, coordinate_system_zero_based) {
                 continue;
             }
 
             if needs_chrom {
-                chroms.push(record.reference_sequence_name());
+                chroms.push(record.reference_sequence_name().to_owned());
             }
             if needs_start {
                 let start_pos = record.start();
@@ -375,25 +375,25 @@ async fn get_local_gtf(
                 pose.push(record.end());
             }
             if needs_type {
-                ty.push(record.ty());
+                ty.push(record.ty().to_owned());
             }
             if needs_source {
-                source.push(record.source());
+                source.push(record.source().to_owned());
             }
             if needs_score {
                 scores.push(record.score());
             }
             if needs_strand {
-                strand.push(record.strand());
+                strand.push(record.strand().to_owned());
             }
             if needs_phase {
                 phase.push(record.phase().map(|p| p as u32));
             }
 
             if unnest_enable {
-                load_attributes_unnest_from_string(&attributes_str, &mut attribute_builders, projection.clone())?;
+                load_attributes_unnest_from_string(attributes_str, &mut attribute_builders, projection.clone())?;
             } else {
-                let attributes = parse_gtf_attributes_to_vec(&attributes_str);
+                let attributes = parse_gtf_attributes_to_vec(attributes_str);
                 load_attributes_from_vec(attributes, &mut builder)?;
             }
 
@@ -417,14 +417,6 @@ async fn get_local_gtf(
                             &mut builder
                         })),
                     projection.clone(),
-                    needs_chrom,
-                    needs_start,
-                    needs_end,
-                    needs_type,
-                    needs_source,
-                    needs_score,
-                    needs_strand,
-                    needs_phase,
                     batch_size,
                 )?;
                 yield batch;
@@ -457,14 +449,6 @@ async fn get_local_gtf(
                         &mut builder
                     })),
                 projection.clone(),
-                needs_chrom,
-                needs_start,
-                needs_end,
-                needs_type,
-                needs_source,
-                needs_score,
-                needs_strand,
-                needs_phase,
                 remaining_records,
             )?;
             yield batch;
@@ -663,14 +647,6 @@ async fn get_indexed_gtf_stream(
                                 &mut builder
                             })),
                             projection.clone(),
-                            needs_chrom,
-                            needs_start,
-                            needs_end,
-                            needs_type,
-                            needs_source,
-                            needs_score,
-                            needs_strand,
-                            needs_phase,
                             batch_size,
                         )?;
 
@@ -713,14 +689,6 @@ async fn get_indexed_gtf_stream(
                         &mut builder
                     })),
                     projection.clone(),
-                    needs_chrom,
-                    needs_start,
-                    needs_end,
-                    needs_type,
-                    needs_source,
-                    needs_score,
-                    needs_strand,
-                    needs_phase,
                     remaining,
                 )?;
                 loop {
@@ -761,86 +729,42 @@ fn build_record_batch_optimized(
     phase: &[Option<u32>],
     attributes: Option<&Vec<Arc<dyn Array>>>,
     projection: Option<Vec<usize>>,
-    needs_chrom: bool,
-    needs_start: bool,
-    needs_end: bool,
-    needs_type: bool,
-    needs_source: bool,
-    needs_score: bool,
-    needs_strand: bool,
-    needs_phase: bool,
     record_count: usize,
 ) -> datafusion::error::Result<RecordBatch> {
-    let chrom_array = if needs_chrom {
-        Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
+    // Helper closures to build arrays on-demand, avoiding allocation for unprojected columns
+    let make_chrom = || Arc::new(StringArray::from(chroms.to_vec())) as Arc<dyn Array>;
+    let make_start = || Arc::new(UInt32Array::from(poss.to_vec())) as Arc<dyn Array>;
+    let make_end = || Arc::new(UInt32Array::from(pose.to_vec())) as Arc<dyn Array>;
+    let make_type = || Arc::new(StringArray::from(ty.to_vec())) as Arc<dyn Array>;
+    let make_source = || Arc::new(StringArray::from(source.to_vec())) as Arc<dyn Array>;
+    let make_score = || {
+        let mut builder = Float32Builder::new();
+        for s in score {
+            builder.append_option(*s);
+        }
+        Arc::new(builder.finish()) as Arc<dyn Array>
+    };
+    let make_strand = || Arc::new(StringArray::from(strand.to_vec())) as Arc<dyn Array>;
+    let make_phase = || {
+        let mut builder = UInt32Builder::new();
+        for s in phase {
+            builder.append_option(*s);
+        }
+        Arc::new(builder.finish()) as Arc<dyn Array>
     };
 
-    let pos_start_array = if needs_start {
-        Arc::new(UInt32Array::from(poss.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(UInt32Array::from(vec![0u32; record_count])) as Arc<dyn Array>
-    };
-
-    let pos_end_array = if needs_end {
-        Arc::new(UInt32Array::from(pose.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(UInt32Array::from(vec![0u32; record_count])) as Arc<dyn Array>
-    };
-
-    let ty_array = if needs_type {
-        Arc::new(StringArray::from(ty.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
-    };
-
-    let source_array = if needs_source {
-        Arc::new(StringArray::from(source.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
-    };
-
-    let score_array = if needs_score {
-        Arc::new({
-            let mut builder = Float32Builder::new();
-            for s in score {
-                builder.append_option(*s);
-            }
-            builder.finish()
-        }) as Arc<dyn Array>
-    } else {
-        Arc::new({
-            let mut builder = Float32Builder::new();
-            for _ in 0..record_count {
-                builder.append_null();
-            }
-            builder.finish()
-        }) as Arc<dyn Array>
-    };
-
-    let strand_array = if needs_strand {
-        Arc::new(StringArray::from(strand.to_vec())) as Arc<dyn Array>
-    } else {
-        Arc::new(StringArray::from(vec![String::new(); record_count])) as Arc<dyn Array>
-    };
-
-    let phase_array = if needs_phase {
-        Arc::new({
-            let mut builder = UInt32Builder::new();
-            for s in phase {
-                builder.append_option(*s);
-            }
-            builder.finish()
-        }) as Arc<dyn Array>
-    } else {
-        Arc::new({
-            let mut builder = UInt32Builder::new();
-            for _ in 0..record_count {
-                builder.append_null();
-            }
-            builder.finish()
-        }) as Arc<dyn Array>
+    let build_core_array = |idx: usize| -> Arc<dyn Array> {
+        match idx {
+            0 => make_chrom(),
+            1 => make_start(),
+            2 => make_end(),
+            3 => make_type(),
+            4 => make_source(),
+            5 => make_score(),
+            6 => make_strand(),
+            7 => make_phase(),
+            _ => unreachable!(),
+        }
     };
 
     let arrays = match projection {
@@ -848,16 +772,7 @@ fn build_record_batch_optimized(
             if schema.fields().is_empty() {
                 Vec::new()
             } else {
-                let mut arrays: Vec<Arc<dyn Array>> = vec![
-                    chrom_array,
-                    pos_start_array,
-                    pos_end_array,
-                    ty_array,
-                    source_array,
-                    score_array,
-                    strand_array,
-                    phase_array,
-                ];
+                let mut arrays: Vec<Arc<dyn Array>> = (0..8).map(&build_core_array).collect();
                 if let Some(attr_arrays) = attributes {
                     arrays.append(&mut attr_arrays.clone());
                 }
@@ -866,32 +781,17 @@ fn build_record_batch_optimized(
         }
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
-            if !proj_ids.is_empty() {
-                for i in proj_ids {
-                    match i {
-                        0 => arrays.push(chrom_array.clone()),
-                        1 => arrays.push(pos_start_array.clone()),
-                        2 => arrays.push(pos_end_array.clone()),
-                        3 => arrays.push(ty_array.clone()),
-                        4 => arrays.push(source_array.clone()),
-                        5 => arrays.push(score_array.clone()),
-                        6 => arrays.push(strand_array.clone()),
-                        7 => arrays.push(phase_array.clone()),
-                        _ => {
-                            if let Some(attr_arrays) = attributes {
-                                if i >= 8 && (i - 8) < attr_arrays.len() {
-                                    arrays.push(attr_arrays[i - 8].clone());
-                                } else {
-                                    arrays
-                                        .push(Arc::new(NullArray::new(record_count))
-                                            as Arc<dyn Array>);
-                                }
-                            } else {
-                                arrays
-                                    .push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
-                            }
-                        }
+            for i in proj_ids {
+                if i < 8 {
+                    arrays.push(build_core_array(i));
+                } else if let Some(attr_arrays) = attributes {
+                    if (i - 8) < attr_arrays.len() {
+                        arrays.push(attr_arrays[i - 8].clone());
+                    } else {
+                        arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
                     }
+                } else {
+                    arrays.push(Arc::new(NullArray::new(record_count)) as Arc<dyn Array>);
                 }
             }
             arrays

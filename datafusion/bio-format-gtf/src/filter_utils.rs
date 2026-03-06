@@ -118,10 +118,11 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
             let field_name = &column.name;
 
             return match field_name.as_str() {
-                "chrom" => {
-                    let record_value = record.reference_sequence_name();
-                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
-                }
+                "chrom" => evaluate_string_comparison(
+                    record.reference_sequence_name(),
+                    literal,
+                    &binary_expr.op,
+                ),
                 "start" => {
                     let start_1based = record.start();
                     let start_output = if coordinate_system_zero_based {
@@ -135,14 +136,8 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
                     let record_value = record.end();
                     evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op)
                 }
-                "type" => {
-                    let record_value = record.ty();
-                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
-                }
-                "source" => {
-                    let record_value = record.source();
-                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
-                }
+                "type" => evaluate_string_comparison(record.ty(), literal, &binary_expr.op),
+                "source" => evaluate_string_comparison(record.source(), literal, &binary_expr.op),
                 "score" => {
                     if let Some(score) = record.score() {
                         evaluate_numeric_comparison(score as f64, literal, &binary_expr.op)
@@ -150,10 +145,7 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
                         false
                     }
                 }
-                "strand" => {
-                    let record_value = record.strand();
-                    evaluate_string_comparison(&record_value, literal, &binary_expr.op)
-                }
+                "strand" => evaluate_string_comparison(record.strand(), literal, &binary_expr.op),
                 "phase" => {
                     if let Some(phase) = record.phase() {
                         evaluate_numeric_comparison(phase as f64, literal, &binary_expr.op)
@@ -233,10 +225,10 @@ fn evaluate_in_list_filter<T: GtfRecordTrait>(
             .collect();
 
         let contains = match field_name.as_str() {
-            "chrom" => values.contains(&record.reference_sequence_name()),
-            "type" => values.contains(&record.ty()),
-            "source" => values.contains(&record.source()),
-            "strand" => values.contains(&record.strand()),
+            "chrom" => values.iter().any(|v| v == record.reference_sequence_name()),
+            "type" => values.iter().any(|v| v == record.ty()),
+            "source" => values.iter().any(|v| v == record.source()),
+            "strand" => values.iter().any(|v| v == record.strand()),
             "start" => values.contains(&record.start().to_string()),
             "end" => values.contains(&record.end().to_string()),
             "score" => record

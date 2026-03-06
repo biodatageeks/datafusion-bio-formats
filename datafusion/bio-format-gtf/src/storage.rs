@@ -27,30 +27,32 @@ pub struct GtfRecord {
 }
 
 /// Trait for unified GTF record access
+///
+/// Returns borrowed `&str` references to avoid per-record allocations in hot paths.
 pub trait GtfRecordTrait {
     /// Returns the reference sequence name (seqid) field
-    fn reference_sequence_name(&self) -> String;
+    fn reference_sequence_name(&self) -> &str;
     /// Returns the start position (1-based, inclusive)
     fn start(&self) -> u32;
     /// Returns the end position (1-based, inclusive)
     fn end(&self) -> u32;
     /// Returns the feature type
-    fn ty(&self) -> String;
+    fn ty(&self) -> &str;
     /// Returns the source of this annotation
-    fn source(&self) -> String;
+    fn source(&self) -> &str;
     /// Returns the score, or None if score is not available
     fn score(&self) -> Option<f32>;
     /// Returns the strand ('+', '-', or '.')
-    fn strand(&self) -> String;
+    fn strand(&self) -> &str;
     /// Returns the phase (0, 1, 2) for coding features, or None if not applicable
     fn phase(&self) -> Option<u8>;
     /// Returns the raw attributes string
-    fn attributes_string(&self) -> String;
+    fn attributes_string(&self) -> &str;
 }
 
 impl GtfRecordTrait for GtfRecord {
-    fn reference_sequence_name(&self) -> String {
-        self.seqid.clone()
+    fn reference_sequence_name(&self) -> &str {
+        &self.seqid
     }
 
     fn start(&self) -> u32 {
@@ -61,28 +63,28 @@ impl GtfRecordTrait for GtfRecord {
         self.end
     }
 
-    fn ty(&self) -> String {
-        self.ty.clone()
+    fn ty(&self) -> &str {
+        &self.ty
     }
 
-    fn source(&self) -> String {
-        self.source.clone()
+    fn source(&self) -> &str {
+        &self.source
     }
 
     fn score(&self) -> Option<f32> {
         self.score
     }
 
-    fn strand(&self) -> String {
-        self.strand.clone()
+    fn strand(&self) -> &str {
+        &self.strand
     }
 
     fn phase(&self) -> Option<u8> {
         self.phase.parse().ok()
     }
 
-    fn attributes_string(&self) -> String {
-        self.attributes.clone()
+    fn attributes_string(&self) -> &str {
+        &self.attributes
     }
 }
 
