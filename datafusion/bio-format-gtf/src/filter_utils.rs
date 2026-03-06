@@ -102,7 +102,12 @@ fn evaluate_single_filter<T: GtfRecordTrait>(
         Expr::Between(between_expr) => {
             evaluate_between_filter(record, between_expr, coordinate_system_zero_based)
         }
-        Expr::InList(in_list_expr) => evaluate_in_list_filter(record, in_list_expr, attributes_str),
+        Expr::InList(in_list_expr) => evaluate_in_list_filter(
+            record,
+            in_list_expr,
+            attributes_str,
+            coordinate_system_zero_based,
+        ),
         _ => true,
     }
 }
@@ -206,6 +211,7 @@ fn evaluate_in_list_filter<T: GtfRecordTrait>(
     record: &T,
     in_list_expr: &InList,
     attributes_str: &str,
+    coordinate_system_zero_based: bool,
 ) -> bool {
     if let Expr::Column(column) = &*in_list_expr.expr {
         let field_name = &column.name;
@@ -224,15 +230,32 @@ fn evaluate_in_list_filter<T: GtfRecordTrait>(
             })
             .collect();
 
-        // Note: IN pushdown is only enabled for non-standard (attribute) fields
-        // via can_push_down_gtf_attribute_in_list. Standard column IN filters are
-        // evaluated by DataFusion on the output. The chrom/type/source/strand arms
-        // are kept defensively in case the pushdown policy changes.
+        // Core columns are handled here because can_push_down_record_filter (from core)
+        // allows IN pushdown for any schema column. Without these arms, numeric columns
+        // would fall through to attribute lookup and silently drop valid rows.
         let contains = match field_name.as_str() {
             "chrom" => values.iter().any(|v| v == record.reference_sequence_name()),
+            "start" => {
+                let start_1based = record.start();
+                let start_output = if coordinate_system_zero_based {
+                    start_1based.saturating_sub(1)
+                } else {
+                    start_1based
+                };
+                values.contains(&start_output.to_string())
+            }
+            "end" => values.contains(&record.end().to_string()),
             "type" => values.iter().any(|v| v == record.ty()),
             "source" => values.iter().any(|v| v == record.source()),
+            "score" => record
+                .score()
+                .map(|s| values.contains(&s.to_string()))
+                .unwrap_or(false),
             "strand" => values.iter().any(|v| v == record.strand()),
+            "phase" => record
+                .phase()
+                .map(|p| values.contains(&p.to_string()))
+                .unwrap_or(false),
             other => extract_gtf_attribute_value(other, attributes_str)
                 .map(|v| values.contains(&v))
                 .unwrap_or(false),
