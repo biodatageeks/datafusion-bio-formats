@@ -662,7 +662,7 @@ fn process_partition(
                 EnsemblEntityKind::Exon => {
                     let mut exon_stop = false;
                     let mut exon_consumer_dropped = false;
-                    let cont = parse_exon_line_into(
+                    let _cont = parse_exon_line_into(
                         line_trimmed,
                         source_file_str,
                         &cache_info,

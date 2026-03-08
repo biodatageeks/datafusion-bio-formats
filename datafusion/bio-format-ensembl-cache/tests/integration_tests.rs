@@ -671,6 +671,209 @@ async fn transcript_backward_compat_existing_queries_work() -> datafusion::commo
 }
 
 // ---------------------------------------------------------------------------
+// Coding region (CDS) column tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn transcript_coding_region_populated_for_protein_coding() -> datafusion::common::Result<()> {
+    // Text fixture: ENST000001 is protein_coding with coding_region_start=1010, coding_region_end=1090
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT stable_id, coding_region_start, coding_region_end \
+             FROM tx WHERE stable_id = 'ENST000001'",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches[0].num_rows(), 1);
+    assert_eq!(first_i64_at(&batches, 1), 1010);
+    assert_eq!(first_i64_at(&batches, 2), 1090);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_coding_region_null_for_non_coding() -> datafusion::common::Result<()> {
+    // Text fixture: ENST000002 is lncRNA — coding_region_start/end should be null
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT coding_region_start, coding_region_end \
+             FROM tx WHERE stable_id = 'ENST000002'",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches[0].num_rows(), 1);
+    let crs = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let cre = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert!(
+        crs.is_null(0),
+        "coding_region_start should be null for lncRNA"
+    );
+    assert!(
+        cre.is_null(0),
+        "coding_region_end should be null for lncRNA"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::common::Result<()> {
+    // VEP storable binary stores coding_region_start/end as undef, but the
+    // parser derives them from cdna_coding_start/end + exon array.
+    let provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // Coding transcripts (those with cdna_coding_start) should have derived values.
+    let batches = ctx
+        .sql(
+            "SELECT coding_region_start, coding_region_end, start, \"end\" \
+             FROM tx WHERE cdna_coding_start IS NOT NULL",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let coding_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(coding_rows > 0, "expected some coding transcripts");
+
+    let mut populated = 0usize;
+    for batch in &batches {
+        let cr_starts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let cr_ends = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let tx_starts = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let tx_ends = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            if !cr_starts.is_null(i) && !cr_ends.is_null(i) {
+                populated += 1;
+                let cr_start = cr_starts.value(i);
+                let cr_end = cr_ends.value(i);
+                let tx_start = tx_starts.value(i);
+                let tx_end = tx_ends.value(i);
+                assert!(
+                    cr_start <= cr_end,
+                    "coding_region_start ({}) should be <= coding_region_end ({})",
+                    cr_start,
+                    cr_end
+                );
+                // Coding region must fall within (or equal) the transcript span
+                assert!(
+                    cr_start >= tx_start && cr_end <= tx_end,
+                    "coding region [{}, {}] should be within transcript [{}, {}]",
+                    cr_start,
+                    cr_end,
+                    tx_start,
+                    tx_end
+                );
+            }
+        }
+    }
+
+    assert!(
+        populated > 0,
+        "expected coding_region_start/end to be derived for coding transcripts"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_cdna_coding_populated_in_real_115() -> datafusion::common::Result<()> {
+    // cdna_coding_start/end are populated for some coding transcripts in VEP
+    // storable binary (unlike coding_region_start/end which are always undef).
+    let provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT cdna_coding_start, cdna_coding_end \
+             FROM tx WHERE cdna_coding_start IS NOT NULL",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let non_null_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        non_null_rows > 0,
+        "expected some transcripts with cdna_coding_start populated in real VEP data"
+    );
+
+    // Verify cdna_coding_start <= cdna_coding_end
+    for batch in &batches {
+        let starts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            if !starts.is_null(i) && !ends.is_null(i) {
+                assert!(
+                    starts.value(i) <= ends.value(i),
+                    "cdna_coding_start ({}) should be <= cdna_coding_end ({})",
+                    starts.value(i),
+                    ends.value(i)
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Exon tests (real VEP 115 fixture)
 // ---------------------------------------------------------------------------
 
