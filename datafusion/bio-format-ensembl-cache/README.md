@@ -26,6 +26,24 @@ DataFusion `TableProvider` implementations for raw Ensembl VEP cache directories
   - `storable`: `JSON:{...}`
   - `sereal`: `SRL1{...}`
 
+## Filtering
+
+The following entries are automatically filtered out during extraction to match
+VEP's own annotation behaviour:
+
+- **Gnomon transcripts** (`source = 'Gnomon'`): NCBI automated gene predictions
+  (XM\_/XR\_ prefixed model transcripts) are excluded from transcript, exon, and
+  translation tables. VEP does not use Gnomon transcripts for annotation even in
+  `--merged` mode.
+- **Exon slice/padding artefacts**: Perl Storable serialization can embed
+  chromosome-spanning slice objects (`start=1`, `end=<chr_length>`, no
+  `stable_id`) into `_trans_exon_array`. These are skipped in all exon
+  extraction paths.
+- **Transcript/gene objects in exon arrays**: Occasionally `_trans_exon_array`
+  contains objects with transcript (`ENST*`) or gene (`ENSG*`) stable IDs
+  instead of exon IDs (`ENSE*`, `exon-*`). These are filtered out based on
+  the `stable_id` prefix.
+
 ## Entity Schemas
 
 ### Transcript
