@@ -6,6 +6,9 @@
 ///
 /// Output file: <output_dir>/<version>_<assembly>_<entity>[_<chrom>].parquet
 /// e.g. 115_GRCh38_transcript_22.parquet
+use datafusion::arrow::array::AsArray;
+use datafusion::arrow::compute;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
@@ -15,6 +18,7 @@ use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
 };
 use futures::StreamExt;
+use std::collections::HashSet;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Instant;
@@ -59,6 +63,73 @@ fn rss_mb() -> f64 {
         }
     }
     0.0
+}
+
+/// Remove rows whose dedup-key value has already been seen.  Each unique key
+/// produces exactly one output row (suitable for transcript/translation).
+fn dedup_batch(
+    batch: &RecordBatch,
+    col_idx: usize,
+    seen: &mut HashSet<String>,
+) -> datafusion::common::Result<RecordBatch> {
+    let col = batch.column(col_idx).as_string::<i32>();
+    let mut keep = Vec::with_capacity(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        if let Some(val) = col.value(i).into() {
+            let val: &str = val;
+            if seen.insert(val.to_string()) {
+                keep.push(i as u32);
+            }
+        } else {
+            keep.push(i as u32); // keep nulls
+        }
+    }
+    if keep.len() == batch.num_rows() {
+        return Ok(batch.clone());
+    }
+    let indices = datafusion::arrow::array::UInt32Array::from(keep);
+    let columns: Vec<_> = batch
+        .columns()
+        .iter()
+        .map(|col| compute::take(col.as_ref(), &indices, None))
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(RecordBatch::try_new(batch.schema(), columns)?)
+}
+
+/// Remove rows whose group key has already been fully written.  Keeps ALL rows
+/// for a key that hasn't been seen yet (suitable for exons — many rows per
+/// transcript_id).
+fn dedup_batch_grouped(
+    batch: &RecordBatch,
+    col_idx: usize,
+    seen: &mut HashSet<String>,
+) -> datafusion::common::Result<RecordBatch> {
+    let col = batch.column(col_idx).as_string::<i32>();
+    let mut keep = Vec::with_capacity(batch.num_rows());
+    let mut new_ids: HashSet<String> = HashSet::new();
+    for i in 0..batch.num_rows() {
+        if let Some(val) = col.value(i).into() {
+            let val: &str = val;
+            if !seen.contains(val) {
+                keep.push(i as u32);
+                new_ids.insert(val.to_string());
+            }
+        } else {
+            keep.push(i as u32);
+        }
+    }
+    // Register all newly seen group keys.
+    seen.extend(new_ids);
+    if keep.len() == batch.num_rows() {
+        return Ok(batch.clone());
+    }
+    let indices = datafusion::arrow::array::UInt32Array::from(keep);
+    let columns: Vec<_> = batch
+        .columns()
+        .iter()
+        .map(|col| compute::take(col.as_ref(), &indices, None))
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(RecordBatch::try_new(batch.schema(), columns)?)
 }
 
 #[tokio::main]
@@ -183,6 +254,24 @@ async fn main() -> datafusion::common::Result<()> {
         .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
     let mut writer = ArrowWriter::try_new(file, schema.clone().into(), Some(writer_props.clone()))?;
 
+    // Determine dedup column for entity types that can produce cross-partition
+    // duplicates (transcripts binned by region can appear in multiple files).
+    // Exons have many rows per transcript so writer-level dedup by transcript_id
+    // is handled differently — we track which transcripts' exons were already
+    // written and skip entire groups.
+    let dedup_col_idx = match kind {
+        EnsemblEntityKind::Transcript => schema.index_of("stable_id").ok(),
+        EnsemblEntityKind::Translation => schema.index_of("transcript_id").ok(),
+        _ => None,
+    };
+    // For exons, dedup entire transcript groups in the writer.
+    let exon_dedup_col_idx = if kind == EnsemblEntityKind::Exon {
+        schema.index_of("transcript_id").ok()
+    } else {
+        None
+    };
+
+    let mut seen: HashSet<String> = HashSet::new();
     let mut total_rows: usize = 0;
     let mut total_batches: usize = 0;
 
@@ -192,6 +281,16 @@ async fn main() -> datafusion::common::Result<()> {
 
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
+            let batch = if let Some(col_idx) = dedup_col_idx {
+                dedup_batch(&batch, col_idx, &mut seen)?
+            } else if let Some(col_idx) = exon_dedup_col_idx {
+                dedup_batch_grouped(&batch, col_idx, &mut seen)?
+            } else {
+                batch
+            };
+            if batch.num_rows() == 0 {
+                continue;
+            }
             partition_rows += batch.num_rows();
             partition_batches += 1;
             writer.write(&batch)?;

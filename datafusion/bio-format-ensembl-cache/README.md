@@ -62,9 +62,12 @@ VEP's own annotation behaviour:
   transcript exon lists based on the `stable_id` prefix.
 - **Duplicate transcripts across region bins**: The VEP cache bins
   transcripts by genomic region. A transcript near a bin boundary can appear
-  in multiple bins within the same file. The extractor deduplicates by
-  `stable_id` (for transcripts) or `transcript_id` (for exons and
-  translations), keeping the first occurrence per partition.
+  in multiple bins, potentially across files assigned to different partitions.
+  Deduplication is two-tier: (1) per-partition `HashSet` in the parser
+  catches intra-partition duplicates; (2) the parquet export writer
+  (`storable_to_parquet`) applies cross-partition dedup by `stable_id`
+  (transcripts), `transcript_id` groups (exons), or `transcript_id`
+  (translations), keeping the first occurrence.
 
 ## Exon Source Fallback
 

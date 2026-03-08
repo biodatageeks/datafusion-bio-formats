@@ -391,7 +391,8 @@ fn process_partition(
     let mut stop = false;
 
     // Per-partition deduplication: tracks seen stable_ids (or transcript_ids
-    // for exon/translation) across all files in this partition.
+    // for exon/translation) across all files in this partition.  Cross-partition
+    // duplicates are handled downstream (e.g. dedup in the parquet writer).
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for source_file in &files {
