@@ -52,7 +52,7 @@ impl RegulatoryColumnIndices {
             start: col_map.get("start"),
             end: col_map.get("end"),
             strand: col_map.get("strand"),
-            stable_id: col_map.get("stable_id"),
+            stable_id: col_map.get("stable_id").or(col_map.get("motif_id")),
             db_id: col_map.get("db_id"),
             feature_type: col_map.get("feature_type"),
             epigenome_count: col_map.get("epigenome_count"),

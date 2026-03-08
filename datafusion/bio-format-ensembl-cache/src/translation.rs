@@ -31,6 +31,7 @@ pub(crate) struct TranslationColumnIndices {
     gene_stable_id: Option<usize>,
     cdna_coding_start: Option<usize>,
     cdna_coding_end: Option<usize>,
+    cds_len: Option<usize>,
     peptide_seq: Option<usize>,
     cdna_seq: Option<usize>,
     sequences_projected: bool,
@@ -58,6 +59,7 @@ impl TranslationColumnIndices {
             gene_stable_id: col_map.get("gene_stable_id"),
             cdna_coding_start,
             cdna_coding_end,
+            cds_len: col_map.get("cds_len"),
             peptide_seq,
             cdna_seq,
             sequences_projected,
@@ -218,11 +220,20 @@ pub(crate) fn parse_translation_line_into(
     if let Some(idx) = col_idx.gene_stable_id {
         batch.set_opt_utf8_owned(idx, gene_stable_id.as_ref());
     }
+    let cdna_coding_start_val = json_i64(object.get("cdna_coding_start"));
+    let cdna_coding_end_val = json_i64(object.get("cdna_coding_end"));
     if let Some(idx) = col_idx.cdna_coding_start {
-        batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_start")));
+        batch.set_opt_i64(idx, cdna_coding_start_val);
     }
     if let Some(idx) = col_idx.cdna_coding_end {
-        batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_end")));
+        batch.set_opt_i64(idx, cdna_coding_end_val);
+    }
+    if let Some(idx) = col_idx.cds_len {
+        let cds_len = match (cdna_coding_start_val, cdna_coding_end_val) {
+            (Some(s), Some(e)) => Some(e - s + 1),
+            _ => None,
+        };
+        batch.set_opt_i64(idx, cds_len);
     }
 
     // Sequences from _variation_effect_feature_cache — only parse when projected
@@ -370,11 +381,20 @@ where
         if let Some(idx) = col_idx.gene_stable_id {
             batch.set_opt_utf8_owned(idx, gene_stable_id.as_ref());
         }
+        let cdna_coding_start_val = sv_i64(obj.get("cdna_coding_start"));
+        let cdna_coding_end_val = sv_i64(obj.get("cdna_coding_end"));
         if let Some(idx) = col_idx.cdna_coding_start {
-            batch.set_opt_i64(idx, sv_i64(obj.get("cdna_coding_start")));
+            batch.set_opt_i64(idx, cdna_coding_start_val);
         }
         if let Some(idx) = col_idx.cdna_coding_end {
-            batch.set_opt_i64(idx, sv_i64(obj.get("cdna_coding_end")));
+            batch.set_opt_i64(idx, cdna_coding_end_val);
+        }
+        if let Some(idx) = col_idx.cds_len {
+            let cds_len = match (cdna_coding_start_val, cdna_coding_end_val) {
+                (Some(s), Some(e)) => Some(e - s + 1),
+                _ => None,
+            };
+            batch.set_opt_i64(idx, cds_len);
         }
 
         // Sequences from _variation_effect_feature_cache — only parse when projected
