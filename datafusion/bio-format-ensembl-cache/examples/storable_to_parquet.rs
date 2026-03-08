@@ -1,10 +1,11 @@
-/// Convert Ensembl VEP cache storable entities to Parquet with memory monitoring.
+/// Convert Ensembl VEP cache storable entities to a single Parquet file.
 ///
 /// Usage: cargo run --release --example storable_to_parquet -- <cache_root> <output_dir> <entity> [partitions] [--chrom CHROM]
 ///
 /// entity: transcript | exon | translation | regulatory | motif | variation
 ///
-/// Uses streaming Parquet writers to avoid buffering all data in memory.
+/// Output file: <output_dir>/<version>_<assembly>_<entity>[_<chrom>].parquet
+/// e.g. 115_GRCh38_transcript_22.parquet
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
@@ -63,8 +64,8 @@ fn rss_mb() -> f64 {
 #[tokio::main]
 async fn main() -> datafusion::common::Result<()> {
     let cache_root = std::env::args().nth(1).expect(
-        "Usage: storable_to_parquet <cache_root> <output_dir> <entity> [partitions]\n\
-         entity: transcript | exon | translation | regulatory | motif",
+        "Usage: storable_to_parquet <cache_root> <output_dir> <entity> [partitions] [--chrom CHROM]\n\
+         entity: transcript | exon | translation | regulatory | motif | variation",
     );
     let output_dir = std::env::args().nth(2).expect("Missing output_dir");
     let entity_str = std::env::args().nth(3).expect("Missing entity type");
@@ -85,13 +86,13 @@ async fn main() -> datafusion::common::Result<()> {
         }
     }
 
-    let (kind, table_name) = match entity_str.as_str() {
-        "transcript" | "tx" => (EnsemblEntityKind::Transcript, "tx"),
-        "exon" => (EnsemblEntityKind::Exon, "exon"),
-        "translation" | "tl" => (EnsemblEntityKind::Translation, "tl"),
-        "regulatory" | "reg" => (EnsemblEntityKind::RegulatoryFeature, "reg"),
-        "motif" => (EnsemblEntityKind::MotifFeature, "motif"),
-        "variation" | "var" => (EnsemblEntityKind::Variation, "var"),
+    let (kind, table_name, entity_label) = match entity_str.as_str() {
+        "transcript" | "tx" => (EnsemblEntityKind::Transcript, "tx", "transcript"),
+        "exon" => (EnsemblEntityKind::Exon, "exon", "exon"),
+        "translation" | "tl" => (EnsemblEntityKind::Translation, "tl", "translation"),
+        "regulatory" | "reg" => (EnsemblEntityKind::RegulatoryFeature, "reg", "regulatory"),
+        "motif" => (EnsemblEntityKind::MotifFeature, "motif", "motif"),
+        "variation" | "var" => (EnsemblEntityKind::Variation, "var", "variation"),
         other => {
             eprintln!(
                 "Unknown entity: {other}. Use: transcript, exon, translation, regulatory, motif, variation"
@@ -100,9 +101,22 @@ async fn main() -> datafusion::common::Result<()> {
         }
     };
 
+    // Derive version and assembly from cache_root path (e.g. .../115_GRCh38)
+    let cache_dir_name = std::path::Path::new(&cache_root)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("unknown");
+
+    // Build output filename: <version_assembly>_<entity>[_<chrom>].parquet
+    let output_file = if let Some(ref chrom) = chrom_filter {
+        format!("{output_dir}/{cache_dir_name}_{entity_label}_{chrom}.parquet")
+    } else {
+        format!("{output_dir}/{cache_dir_name}_{entity_label}.parquet")
+    };
+
     println!("Cache root:  {cache_root}");
     println!("Entity:      {entity_str} ({kind:?})");
-    println!("Output dir:  {output_dir}");
+    println!("Output file: {output_file}");
     println!("Partitions:  {partitions}");
     if let Some(ref chrom) = chrom_filter {
         println!("Chrom filter: {chrom}");
@@ -119,16 +133,12 @@ async fn main() -> datafusion::common::Result<()> {
 
     println!("After provider init RSS: {:.1} MB", rss_mb());
 
-    // Create output directory (clean first)
-    let output_path = std::path::Path::new(&output_dir);
-    if output_path.exists() {
-        std::fs::remove_dir_all(output_path)
+    // Ensure output directory exists
+    let output_path = std::path::Path::new(&output_file);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
             .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
     }
-    std::fs::create_dir_all(output_path)
-        .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
-
-    println!("Writing to:  {output_dir}/");
 
     // Memory monitor
     let monitor_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -168,16 +178,15 @@ async fn main() -> datafusion::common::Result<()> {
         .set_max_row_group_size(100_000)
         .build();
 
+    // Single output file — all partitions stream into one writer
+    let file = File::create(&output_file)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone().into(), Some(writer_props.clone()))?;
+
     let mut total_rows: usize = 0;
     let mut total_batches: usize = 0;
 
     for (partition_idx, mut stream) in streams.into_iter().enumerate() {
-        let file_path = format!("{output_dir}/part-{partition_idx:04}.parquet");
-        let file = File::create(&file_path)
-            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
-        let mut writer =
-            ArrowWriter::try_new(file, schema.clone().into(), Some(writer_props.clone()))?;
-
         let mut partition_rows = 0usize;
         let mut partition_batches = 0usize;
 
@@ -188,38 +197,34 @@ async fn main() -> datafusion::common::Result<()> {
             writer.write(&batch)?;
         }
 
-        writer.close()?;
         total_rows += partition_rows;
         total_batches += partition_batches;
 
-        let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
-        println!(
-            "  Partition {partition_idx}: {partition_rows} rows, {partition_batches} batches, {:.1} MB | RSS: {:.1} MB",
-            file_size as f64 / 1024.0 / 1024.0,
-            rss_mb()
-        );
+        if partition_rows > 0 {
+            println!(
+                "  Partition {partition_idx}: {partition_rows} rows, {partition_batches} batches | RSS: {:.1} MB",
+                rss_mb()
+            );
+        }
     }
+
+    writer.close()?;
 
     let elapsed = start.elapsed();
 
     monitor_flag.store(false, std::sync::atomic::Ordering::Relaxed);
     let peak_rss = monitor_handle.join().unwrap_or(0.0);
 
-    let total_bytes: u64 = std::fs::read_dir(&output_dir)
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "parquet"))
-        .filter_map(|e| e.metadata().ok())
+    let file_size = std::fs::metadata(&output_file)
         .map(|m| m.len())
-        .sum();
+        .unwrap_or(0);
 
     println!();
-    println!("=== Summary ({entity_str}) ===");
+    println!("=== Summary ({entity_label}) ===");
     println!("Rows written:   {total_rows}");
     println!(
-        "Parquet files:  {num_partitions} ({:.1} MB total)",
-        total_bytes as f64 / 1024.0 / 1024.0
+        "Output:         {output_file} ({:.1} MB)",
+        file_size as f64 / 1024.0 / 1024.0
     );
     println!("Batches:        {total_batches}");
     println!("Elapsed:        {elapsed:.2?}");
