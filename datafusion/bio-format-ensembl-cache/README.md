@@ -56,6 +56,14 @@ VEP's own annotation behaviour:
   and do not represent actual exon boundaries. VEP treats the underlying
   individual exons, not the merged entry. Filtered from exon tables and
   transcript exon lists based on the `stable_id` prefix.
+- **Ambiguous CDS/peptide sequences**: The VEP cache pre-computes
+  `translateable_seq` and `peptide` without the reference genome. Some
+  transcripts (~1–2%) have ambiguous bases (`N` in DNA, `X` in protein) at
+  incomplete codon boundaries. These sequences do not match the genomic
+  reference and would cause incorrect codon-level consequence calls. They
+  are set to NULL during extraction so that consumers can derive the CDS
+  from the reference genome instead. Applies to `cdna_seq`/`peptide_seq`
+  in transcripts and `cds_sequence`/`translation_seq` in translations.
 - **Duplicate transcripts across region bins**: The VEP cache bins
   transcripts by genomic region. A transcript near a bin boundary can appear
   in multiple bins, potentially across files assigned to different partitions.
@@ -109,8 +117,8 @@ of transcripts that would otherwise have no exon entries.
 | `translation_end` | Int64 | yes | Translation end |
 | `exon_count` | Int32 | yes | Number of exons |
 | `exons` | `List<Struct<start:Int64, end:Int64, phase:Int8>>` | yes | Exon boundaries with reading frame phase |
-| `cdna_seq` | Utf8 | yes | Translatable cDNA sequence |
-| `peptide_seq` | Utf8 | yes | Protein sequence |
+| `cdna_seq` | Utf8 | yes | Translatable CDS nucleotide sequence (NULL when ambiguous bases present) |
+| `peptide_seq` | Utf8 | yes | Protein sequence (NULL when ambiguous amino acids present) |
 | `codon_table` | Int32 | yes | NCBI genetic code table ID (1 = standard) |
 | `tsl` | Int32 | yes | Transcript support level |
 | `mane_select` | Utf8 | yes | MANE Select transcript identifier |
@@ -155,8 +163,8 @@ Standalone translation table — one row per coding transcript.
 | `cdna_coding_start` | Int64 | yes | cDNA coding start offset |
 | `cdna_coding_end` | Int64 | yes | cDNA coding end offset |
 | `cds_len` | Int64 | yes | CDS length (derived: `cdna_coding_end - cdna_coding_start + 1`) |
-| `translation_seq` | Utf8 | yes | Protein/peptide sequence |
-| `cds_sequence` | Utf8 | yes | Translatable CDS nucleotide sequence |
+| `translation_seq` | Utf8 | yes | Protein/peptide sequence (NULL when ambiguous amino acids present) |
+| `cds_sequence` | Utf8 | yes | Translatable CDS nucleotide sequence (NULL when ambiguous bases present) |
 
 ### Regulatory Feature
 

@@ -753,24 +753,23 @@ pub(crate) fn parse_transcript_line_into(
         }
     }
 
-    // Sequences from _variation_effect_feature_cache — only parse when projected
+    // Sequences from _variation_effect_feature_cache — only parse when projected.
+    // Sequences containing ambiguous bases (N in DNA, X in protein) are set to
+    // NULL because the VEP cache pre-computes them without the reference genome
+    // and they may not match the actual reference at those positions.
     if col_idx.sequences_projected {
         let vef_cache = object
             .get("_variation_effect_feature_cache")
             .and_then(unwrap_blessed_object_optional);
         if let Some(idx) = col_idx.cdna_seq {
-            batch.set_opt_utf8_owned(
-                idx,
-                vef_cache
-                    .and_then(|c| json_str(c.get("translateable_seq")))
-                    .as_ref(),
-            );
+            let value = vef_cache.and_then(|c| json_str(c.get("translateable_seq")));
+            let clean = value.as_ref().filter(|s| !s.contains('N'));
+            batch.set_opt_utf8_owned(idx, clean);
         }
         if let Some(idx) = col_idx.peptide_seq {
-            batch.set_opt_utf8_owned(
-                idx,
-                vef_cache.and_then(|c| json_str(c.get("peptide"))).as_ref(),
-            );
+            let value = vef_cache.and_then(|c| json_str(c.get("peptide")));
+            let clean = value.as_ref().filter(|s| !s.contains('X'));
+            batch.set_opt_utf8_owned(idx, clean);
         }
     }
 
@@ -1139,7 +1138,10 @@ fn append_transcript_storable_row_into(
         }
     }
 
-    // Sequences from _variation_effect_feature_cache — only parse when projected
+    // Sequences from _variation_effect_feature_cache — only parse when projected.
+    // Sequences containing ambiguous bases (N in DNA, X in protein) are set to
+    // NULL because the VEP cache pre-computes them without the reference genome
+    // and they may not match the actual reference at those positions.
     if col_idx.sequences_projected {
         if let Some(vef_cache) = object
             .get("_variation_effect_feature_cache")
@@ -1147,11 +1149,13 @@ fn append_transcript_storable_row_into(
         {
             if let Some(idx) = col_idx.cdna_seq {
                 let value = sv_str(vef_cache.get("translateable_seq"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
+                let clean = value.as_ref().filter(|s| !s.contains('N'));
+                batch.set_opt_utf8_owned(idx, clean);
             }
             if let Some(idx) = col_idx.peptide_seq {
                 let value = sv_str(vef_cache.get("peptide"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
+                let clean = value.as_ref().filter(|s| !s.contains('X'));
+                batch.set_opt_utf8_owned(idx, clean);
             }
         }
     }
