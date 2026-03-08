@@ -14,6 +14,7 @@ use crate::util::{
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
 use serde_json::Value;
+use std::collections::HashSet;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -316,6 +317,7 @@ pub(crate) fn parse_transcript_line_into(
     batch: &mut BatchBuilder,
     col_idx: &TranscriptColumnIndices,
     provenance: &ProvenanceWriter,
+    seen: &mut HashSet<String>,
 ) -> Result<bool> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -460,6 +462,12 @@ pub(crate) fn parse_transcript_line_into(
         if is_excluded_biotype(&bt) {
             return Ok(false);
         }
+    }
+
+    // Deduplicate: a transcript near a region boundary can appear in
+    // multiple region bins. Keep only the first occurrence.
+    if !seen.insert(stable_id.clone()) {
+        return Ok(false);
     }
 
     // Write required columns (direct index access, no HashMap lookups)
@@ -704,6 +712,7 @@ pub(crate) fn parse_transcript_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &TranscriptColumnIndices,
     provenance: &ProvenanceWriter,
+    seen: &mut HashSet<String>,
     mut on_row_added: F,
 ) -> Result<()>
 where
@@ -776,6 +785,11 @@ where
             if is_excluded_biotype(&bt) {
                 return Ok(true);
             }
+        }
+
+        // Deduplicate: same transcript can appear in multiple region bins.
+        if !seen.insert(stable_id.clone()) {
+            return Ok(true);
         }
 
         let core = TranscriptRowCore {

@@ -60,6 +60,11 @@ VEP's own annotation behaviour:
   and do not represent actual exon boundaries. VEP treats the underlying
   individual exons, not the merged entry. Filtered from exon tables and
   transcript exon lists based on the `stable_id` prefix.
+- **Duplicate transcripts across region bins**: The VEP cache bins
+  transcripts by genomic region. A transcript near a bin boundary can appear
+  in multiple bins within the same file. The extractor deduplicates by
+  `stable_id` (for transcripts) or `transcript_id` (for exons and
+  translations), keeping the first occurrence per partition.
 
 ## Exon Source Fallback
 

@@ -13,6 +13,7 @@ use crate::util::{
     BatchBuilder, ColumnMap, canonical_json_string, json_i32, json_i64, json_str,
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
+use std::collections::HashSet;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ pub(crate) fn parse_translation_line_into(
     batch: &mut BatchBuilder,
     col_idx: &TranslationColumnIndices,
     provenance: &ProvenanceWriter,
+    seen: &mut HashSet<String>,
 ) -> Result<bool> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -205,6 +207,11 @@ pub(crate) fn parse_translation_line_into(
         }
     }
 
+    // Deduplicate: same transcript can appear in multiple region bins.
+    if !seen.insert(transcript_stable_id.clone()) {
+        return Ok(false);
+    }
+
     if let Some(idx) = col_idx.chrom {
         batch.set_utf8(idx, &chrom);
     }
@@ -304,6 +311,7 @@ pub(crate) fn parse_translation_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &TranslationColumnIndices,
     provenance: &ProvenanceWriter,
+    seen: &mut HashSet<String>,
     mut on_row_added: F,
 ) -> Result<()>
 where
@@ -374,6 +382,11 @@ where
             if is_excluded_biotype(&bt) {
                 return Ok(true);
             }
+        }
+
+        // Deduplicate: same transcript can appear in multiple region bins.
+        if !seen.insert(transcript_stable_id.clone()) {
+            return Ok(true);
         }
 
         if let Some(idx) = col_idx.chrom {
