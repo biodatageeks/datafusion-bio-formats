@@ -164,6 +164,8 @@ fn extract_exon_coords_storable(
         .iter()
         .filter_map(|exon_val| {
             let exon_obj = exon_val.as_hash()?;
+            // Skip slice/padding artefacts that lack a real exon stable ID.
+            sv_str(exon_obj.get("stable_id"))?;
             let start = sv_i64(exon_obj.get("start"))?;
             let end = sv_i64(exon_obj.get("end"))?;
             Some((start, end))
@@ -183,6 +185,8 @@ fn extract_exon_coords_json(object: &serde_json::Map<String, Value>) -> Option<V
         .iter()
         .filter_map(|exon_val| {
             let exon_obj = unwrap_blessed_object_optional(exon_val)?;
+            // Skip slice/padding artefacts that lack a real exon stable ID.
+            json_str(exon_obj.get("stable_id"))?;
             let start = json_i64(exon_obj.get("start"))?;
             let end = json_i64(exon_obj.get("end"))?;
             Some((start, end))
@@ -534,6 +538,8 @@ pub(crate) fn parse_transcript_line_into(
                     arr.iter()
                         .filter_map(|exon_val| {
                             let exon_obj = unwrap_blessed_object_optional(exon_val)?;
+                            // Skip slice/padding artefacts without a stable ID.
+                            json_str(exon_obj.get("stable_id"))?;
                             let start = json_i64(exon_obj.get("start")).map(|v| {
                                 normalize_genomic_start(v, coordinate_system_zero_based)
                             })?;
@@ -899,6 +905,8 @@ fn append_transcript_storable_row_into(
                         .iter()
                         .filter_map(|exon_val| {
                             let exon_obj = exon_val.as_hash()?;
+                            // Skip slice/padding artefacts without a stable ID.
+                            sv_str(exon_obj.get("stable_id"))?;
                             let start = sv_i64(exon_obj.get("start")).map(|v| {
                                 normalize_genomic_start(v, coordinate_system_zero_based)
                             })?;

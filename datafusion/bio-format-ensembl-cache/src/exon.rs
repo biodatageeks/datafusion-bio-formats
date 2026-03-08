@@ -196,6 +196,14 @@ where
         let exon_end = json_i64(exon_obj.get("end"))
             .map(|v| normalize_genomic_end(v, coordinate_system_zero_based));
 
+        // Skip slice/padding objects that lack a real exon stable identifier.
+        // These are Perl Storable artefacts (e.g. chromosome-spanning slices)
+        // that sneak into _trans_exon_array during serialization.
+        let exon_stable_id = json_str(exon_obj.get("stable_id"));
+        if exon_stable_id.is_none() {
+            continue;
+        }
+
         let (es, ee) = match (exon_start, exon_end) {
             (Some(s), Some(e)) => (s, e),
             _ => continue,
@@ -214,7 +222,7 @@ where
             batch.set_i8(idx, strand);
         }
         if let Some(idx) = col_idx.stable_id {
-            batch.set_opt_utf8_owned(idx, json_str(exon_obj.get("stable_id")).as_ref());
+            batch.set_opt_utf8_owned(idx, exon_stable_id.as_ref());
         }
         if let Some(idx) = col_idx.version {
             batch.set_opt_i32(idx, json_i32(exon_obj.get("version")));
@@ -359,6 +367,12 @@ where
             let exon_end = sv_i64(exon_obj.get("end"))
                 .map(|v| normalize_genomic_end(v, coordinate_system_zero_based));
 
+            // Skip slice/padding objects that lack a real exon stable identifier.
+            let exon_stable_id = sv_str(exon_obj.get("stable_id"));
+            if exon_stable_id.is_none() {
+                continue;
+            }
+
             let (es, ee) = match (exon_start, exon_end) {
                 (Some(s), Some(e)) => (s, e),
                 _ => continue,
@@ -377,8 +391,7 @@ where
                 batch.set_i8(idx, strand);
             }
             if let Some(idx) = col_idx.stable_id {
-                let value = sv_str(exon_obj.get("stable_id"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
+                batch.set_opt_utf8_owned(idx, exon_stable_id.as_ref());
             }
             if let Some(idx) = col_idx.version {
                 batch.set_opt_i32(
