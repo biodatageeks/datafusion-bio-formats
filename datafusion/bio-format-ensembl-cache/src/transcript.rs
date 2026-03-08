@@ -5,6 +5,7 @@ use crate::decode::storable_binary::{
     stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader,
 };
 use crate::errors::{Result, exec_err};
+use crate::exon::is_exon_stable_id;
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
@@ -164,8 +165,11 @@ fn extract_exon_coords_storable(
         .iter()
         .filter_map(|exon_val| {
             let exon_obj = exon_val.as_hash()?;
-            // Skip slice/padding artefacts that lack a real exon stable ID.
-            sv_str(exon_obj.get("stable_id"))?;
+            // Skip non-exon objects (slices, transcripts, genes).
+            let id = sv_str(exon_obj.get("stable_id"))?;
+            if !is_exon_stable_id(&id) {
+                return None;
+            }
             let start = sv_i64(exon_obj.get("start"))?;
             let end = sv_i64(exon_obj.get("end"))?;
             Some((start, end))
@@ -185,8 +189,11 @@ fn extract_exon_coords_json(object: &serde_json::Map<String, Value>) -> Option<V
         .iter()
         .filter_map(|exon_val| {
             let exon_obj = unwrap_blessed_object_optional(exon_val)?;
-            // Skip slice/padding artefacts that lack a real exon stable ID.
-            json_str(exon_obj.get("stable_id"))?;
+            // Skip non-exon objects (slices, transcripts, genes).
+            let id = json_str(exon_obj.get("stable_id"))?;
+            if !is_exon_stable_id(&id) {
+                return None;
+            }
             let start = json_i64(exon_obj.get("start"))?;
             let end = json_i64(exon_obj.get("end"))?;
             Some((start, end))
@@ -538,8 +545,11 @@ pub(crate) fn parse_transcript_line_into(
                     arr.iter()
                         .filter_map(|exon_val| {
                             let exon_obj = unwrap_blessed_object_optional(exon_val)?;
-                            // Skip slice/padding artefacts without a stable ID.
-                            json_str(exon_obj.get("stable_id"))?;
+                            // Skip non-exon objects (slices, transcripts, genes).
+                            let id = json_str(exon_obj.get("stable_id"))?;
+                            if !is_exon_stable_id(&id) {
+                                return None;
+                            }
                             let start = json_i64(exon_obj.get("start")).map(|v| {
                                 normalize_genomic_start(v, coordinate_system_zero_based)
                             })?;
@@ -905,8 +915,11 @@ fn append_transcript_storable_row_into(
                         .iter()
                         .filter_map(|exon_val| {
                             let exon_obj = exon_val.as_hash()?;
-                            // Skip slice/padding artefacts without a stable ID.
-                            sv_str(exon_obj.get("stable_id"))?;
+                            // Skip non-exon objects (slices, transcripts, genes).
+                            let sid = sv_str(exon_obj.get("stable_id"))?;
+                            if !is_exon_stable_id(&sid) {
+                                return None;
+                            }
                             let start = sv_i64(exon_obj.get("start")).map(|v| {
                                 normalize_genomic_start(v, coordinate_system_zero_based)
                             })?;

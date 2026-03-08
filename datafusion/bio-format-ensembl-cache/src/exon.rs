@@ -196,12 +196,14 @@ where
         let exon_end = json_i64(exon_obj.get("end"))
             .map(|v| normalize_genomic_end(v, coordinate_system_zero_based));
 
-        // Skip slice/padding objects that lack a real exon stable identifier.
-        // These are Perl Storable artefacts (e.g. chromosome-spanning slices)
-        // that sneak into _trans_exon_array during serialization.
+        // Skip non-exon objects that leak into _trans_exon_array during Perl
+        // Storable serialization: slice objects (no stable_id) and transcript/
+        // gene objects (ENST*/ENSG* stable_id).
         let exon_stable_id = json_str(exon_obj.get("stable_id"));
-        if exon_stable_id.is_none() {
-            continue;
+        match &exon_stable_id {
+            None => continue,
+            Some(id) if !is_exon_stable_id(id) => continue,
+            _ => {}
         }
 
         let (es, ee) = match (exon_start, exon_end) {
@@ -367,10 +369,12 @@ where
             let exon_end = sv_i64(exon_obj.get("end"))
                 .map(|v| normalize_genomic_end(v, coordinate_system_zero_based));
 
-            // Skip slice/padding objects that lack a real exon stable identifier.
+            // Skip non-exon objects (see is_exon_stable_id).
             let exon_stable_id = sv_str(exon_obj.get("stable_id"));
-            if exon_stable_id.is_none() {
-                continue;
+            match &exon_stable_id {
+                None => continue,
+                Some(id) if !is_exon_stable_id(id) => continue,
+                _ => {}
             }
 
             let (es, ee) = match (exon_start, exon_end) {
@@ -479,6 +483,14 @@ where
     Ok(())
 }
 
+/// Returns `true` when the identifier looks like a real exon (`ENSE*`, `exon-*`,
+/// or other non-transcript/gene patterns).  Transcript (`ENST*`) and gene
+/// (`ENSG*`) objects sometimes leak into `_trans_exon_array` during Perl
+/// Storable serialization and must be skipped.
+pub(crate) fn is_exon_stable_id(id: &str) -> bool {
+    !id.starts_with("ENST") && !id.starts_with("ENSG")
+}
+
 fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
     let mut current = value;
     for _ in 0..4 {
@@ -515,4 +527,33 @@ fn sv_i64(value: Option<&SValue>) -> Option<i64> {
 
 fn sv_bool(value: Option<&SValue>) -> Option<bool> {
     value.and_then(SValue::as_bool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_exon_stable_id_accepts_ensembl_exons() {
+        assert!(is_exon_stable_id("ENSE00001376379"));
+        assert!(is_exon_stable_id("ENSE00004152042"));
+    }
+
+    #[test]
+    fn is_exon_stable_id_accepts_refseq_exons() {
+        assert!(is_exon_stable_id("exon-NM_001001929.3-1"));
+        assert!(is_exon_stable_id("exon-XM_047441694.1-5"));
+    }
+
+    #[test]
+    fn is_exon_stable_id_rejects_transcripts() {
+        assert!(!is_exon_stable_id("ENST00000780622"));
+        assert!(!is_exon_stable_id("ENST00000381051"));
+    }
+
+    #[test]
+    fn is_exon_stable_id_rejects_genes() {
+        assert!(!is_exon_stable_id("ENSG00000100316"));
+        assert!(!is_exon_stable_id("ENSG00000283761"));
+    }
 }
