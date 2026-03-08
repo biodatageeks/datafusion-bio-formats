@@ -29,12 +29,22 @@ pub(crate) struct TranslationColumnIndices {
     protein_length: Option<usize>,
     transcript_stable_id: Option<usize>,
     gene_stable_id: Option<usize>,
+    cdna_coding_start: Option<usize>,
+    cdna_coding_end: Option<usize>,
+    peptide_seq: Option<usize>,
+    cdna_seq: Option<usize>,
+    sequences_projected: bool,
     raw_object_json: Option<usize>,
     object_hash: Option<usize>,
 }
 
 impl TranslationColumnIndices {
     pub fn new(col_map: &ColumnMap) -> Self {
+        let cdna_coding_start = col_map.get("cdna_coding_start");
+        let cdna_coding_end = col_map.get("cdna_coding_end");
+        let peptide_seq = col_map.get("peptide_seq");
+        let cdna_seq = col_map.get("cdna_seq");
+        let sequences_projected = peptide_seq.is_some() || cdna_seq.is_some();
         Self {
             chrom: col_map.get("chrom"),
             start: col_map.get("start"),
@@ -46,6 +56,11 @@ impl TranslationColumnIndices {
             protein_length: col_map.get("protein_length"),
             transcript_stable_id: col_map.get("transcript_stable_id"),
             gene_stable_id: col_map.get("gene_stable_id"),
+            cdna_coding_start,
+            cdna_coding_end,
+            peptide_seq,
+            cdna_seq,
+            sequences_projected,
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
@@ -203,6 +218,33 @@ pub(crate) fn parse_translation_line_into(
     if let Some(idx) = col_idx.gene_stable_id {
         batch.set_opt_utf8_owned(idx, gene_stable_id.as_ref());
     }
+    if let Some(idx) = col_idx.cdna_coding_start {
+        batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_start")));
+    }
+    if let Some(idx) = col_idx.cdna_coding_end {
+        batch.set_opt_i64(idx, json_i64(object.get("cdna_coding_end")));
+    }
+
+    // Sequences from _variation_effect_feature_cache — only parse when projected
+    if col_idx.sequences_projected {
+        let vef_cache = object
+            .get("_variation_effect_feature_cache")
+            .and_then(unwrap_blessed_object_optional);
+        if let Some(idx) = col_idx.peptide_seq {
+            batch.set_opt_utf8_owned(
+                idx,
+                vef_cache.and_then(|c| json_str(c.get("peptide"))).as_ref(),
+            );
+        }
+        if let Some(idx) = col_idx.cdna_seq {
+            batch.set_opt_utf8_owned(
+                idx,
+                vef_cache
+                    .and_then(|c| json_str(c.get("translateable_seq")))
+                    .as_ref(),
+            );
+        }
+    }
 
     let need_json = col_idx.raw_object_json.is_some();
     let need_hash = col_idx.object_hash.is_some();
@@ -327,6 +369,29 @@ where
         }
         if let Some(idx) = col_idx.gene_stable_id {
             batch.set_opt_utf8_owned(idx, gene_stable_id.as_ref());
+        }
+        if let Some(idx) = col_idx.cdna_coding_start {
+            batch.set_opt_i64(idx, sv_i64(obj.get("cdna_coding_start")));
+        }
+        if let Some(idx) = col_idx.cdna_coding_end {
+            batch.set_opt_i64(idx, sv_i64(obj.get("cdna_coding_end")));
+        }
+
+        // Sequences from _variation_effect_feature_cache — only parse when projected
+        if col_idx.sequences_projected {
+            if let Some(vef_cache) = obj
+                .get("_variation_effect_feature_cache")
+                .and_then(SValue::as_hash)
+            {
+                if let Some(idx) = col_idx.peptide_seq {
+                    let value = sv_str(vef_cache.get("peptide"));
+                    batch.set_opt_utf8_owned(idx, value.as_ref());
+                }
+                if let Some(idx) = col_idx.cdna_seq {
+                    let value = sv_str(vef_cache.get("translateable_seq"));
+                    batch.set_opt_utf8_owned(idx, value.as_ref());
+                }
+            }
         }
 
         let need_json = col_idx.raw_object_json.is_some();

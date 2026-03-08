@@ -1322,3 +1322,106 @@ async fn translation_projection_pushdown() -> datafusion::common::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn translation_sequence_columns_populated() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("translations", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT cdna_coding_start, cdna_coding_end, peptide_seq, cdna_seq \
+             FROM translations",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(total_rows > 0, "expected translation rows");
+
+    // At least some rows should have cdna_coding_start and cdna_coding_end populated
+    let mut has_cdna_coding_start = false;
+    let mut has_cdna_coding_end = false;
+    for batch in &batches {
+        let start_col = batch
+            .column_by_name("cdna_coding_start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let end_col = batch
+            .column_by_name("cdna_coding_end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        if start_col.null_count() < start_col.len() {
+            has_cdna_coding_start = true;
+        }
+        if end_col.null_count() < end_col.len() {
+            has_cdna_coding_end = true;
+        }
+        // When both are present, end >= start
+        for i in 0..batch.num_rows() {
+            if !start_col.is_null(i) && !end_col.is_null(i) {
+                assert!(
+                    end_col.value(i) >= start_col.value(i),
+                    "cdna_coding_end ({}) < cdna_coding_start ({})",
+                    end_col.value(i),
+                    start_col.value(i)
+                );
+            }
+        }
+    }
+    assert!(
+        has_cdna_coding_start,
+        "expected some translations with cdna_coding_start"
+    );
+    assert!(
+        has_cdna_coding_end,
+        "expected some translations with cdna_coding_end"
+    );
+
+    // Verify sequence columns exist in output (may be null if VEF cache
+    // was evicted in the fixture, but columns must be present and queryable)
+    assert!(batches[0].column_by_name("peptide_seq").is_some());
+    assert!(batches[0].column_by_name("cdna_seq").is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_sequence_projection_pushdown() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("translations", Arc::new(provider))?;
+
+    // Project only the new sequence columns — triggers sequences_projected flag
+    let batches = ctx
+        .sql("SELECT peptide_seq, cdna_seq FROM translations")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_columns(), 2);
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(total_rows > 0, "expected translation rows");
+
+    // Project only cdna_coding columns (non-VEF path)
+    let batches2 = ctx
+        .sql("SELECT cdna_coding_start, cdna_coding_end FROM translations")
+        .await?
+        .collect()
+        .await?;
+    assert!(!batches2.is_empty());
+    assert_eq!(batches2[0].num_columns(), 2);
+
+    Ok(())
+}

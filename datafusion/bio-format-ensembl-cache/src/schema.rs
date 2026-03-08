@@ -221,6 +221,10 @@ pub(crate) fn translation_schema(
         Field::new("protein_length", DataType::Int64, true),
         Field::new("transcript_stable_id", DataType::Utf8, false),
         Field::new("gene_stable_id", DataType::Utf8, true),
+        Field::new("cdna_coding_start", DataType::Int64, true),
+        Field::new("cdna_coding_end", DataType::Int64, true),
+        Field::new("peptide_seq", DataType::Utf8, true),
+        Field::new("cdna_seq", DataType::Utf8, true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];
