@@ -47,6 +47,19 @@ VEP's own annotation behaviour:
   contains objects with transcript (`ENST*`) or gene (`ENSG*`) stable IDs
   instead of exon IDs (`ENSE*`, `exon-*`). These are filtered out based on
   the `stable_id` prefix.
+- **Generic `pseudogene` biotype**: The bare `pseudogene` biotype (as opposed
+  to specific subtypes like `processed_pseudogene`, `unprocessed_pseudogene`,
+  `transcribed_processed_pseudogene`, etc.) is not used by VEP for consequence
+  annotation. Filtered from transcript, exon, and translation tables.
+- **`aligned_transcript` biotype**: An Ensembl-internal biotype that VEP does
+  not evaluate for consequence annotation. Filtered from transcript, exon, and
+  translation tables.
+- **`compmerge.*` pseudo-exons**: Collapsed/merged exon entries (e.g.
+  `compmerge.435.pooled.chr22`) found in havana\_tagene and lncRNA transcripts.
+  These span entire intron regions (~25 kb average vs ~320 bp for real exons)
+  and do not represent actual exon boundaries. VEP treats the underlying
+  individual exons, not the merged entry. Filtered from exon tables and
+  transcript exon lists based on the `stable_id` prefix.
 
 ## Exon Source Fallback
 

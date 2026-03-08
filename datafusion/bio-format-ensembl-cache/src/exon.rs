@@ -190,19 +190,33 @@ where
     if transcript_stable_id.starts_with("LOC") {
         return Ok(true);
     }
+    if let Some(bt) = json_str(object.get("biotype")) {
+        if is_excluded_biotype(&bt) {
+            return Ok(true);
+        }
+    }
 
-    // Try _trans_exon_array first; fall back to sorted_exons from the
-    // _variation_effect_feature_cache (which is always fully materialised).
-    let exon_array = object
-        .get("_trans_exon_array")
-        .and_then(Value::as_array)
-        .or_else(|| {
-            object
-                .get("_variation_effect_feature_cache")
-                .and_then(unwrap_blessed_object_optional)
-                .and_then(|vef| vef.get("sorted_exons"))
-                .and_then(Value::as_array)
-        });
+    // Try _trans_exon_array first. If it's missing or contains only
+    // unparseable entries (integer refs / Mapper objects), fall back to
+    // sorted_exons from _variation_effect_feature_cache.
+    let primary = object.get("_trans_exon_array").and_then(Value::as_array);
+    let has_parseable_exons = primary
+        .map(|arr| {
+            arr.iter()
+                .any(|v| unwrap_blessed_object_optional(v).is_some())
+        })
+        .unwrap_or(false);
+
+    let exon_array = if has_parseable_exons {
+        primary
+    } else {
+        object
+            .get("_variation_effect_feature_cache")
+            .and_then(unwrap_blessed_object_optional)
+            .and_then(|vef| vef.get("sorted_exons"))
+            .and_then(Value::as_array)
+            .or(primary)
+    };
     let Some(exon_array) = exon_array else {
         return Ok(true); // no exons in this transcript
     };
@@ -383,16 +397,35 @@ where
         if transcript_stable_id.starts_with("LOC") {
             return Ok(true);
         }
+        if let Some(bt) = sv_str(obj.get("biotype")) {
+            if is_excluded_biotype(&bt) {
+                return Ok(true);
+            }
+        }
 
-        let exon_array = obj
-            .get("_trans_exon_array")
-            .and_then(SValue::as_array)
-            .or_else(|| {
-                obj.get("_variation_effect_feature_cache")
-                    .and_then(SValue::as_hash)
-                    .and_then(|vef| vef.get("sorted_exons"))
-                    .and_then(SValue::as_array)
-            });
+        // Try _trans_exon_array first. If it's missing or contains only
+        // unparseable entries (integer refs / Mapper objects), fall back to
+        // sorted_exons from _variation_effect_feature_cache.
+        let primary = obj.get("_trans_exon_array").and_then(SValue::as_array);
+        let has_parseable_exons = primary
+            .map(|arr| {
+                arr.iter().any(|v| {
+                    v.as_hash()
+                        .and_then(|h| sv_str(h.get("stable_id")))
+                        .is_some()
+                })
+            })
+            .unwrap_or(false);
+
+        let exon_array = if has_parseable_exons {
+            primary
+        } else {
+            obj.get("_variation_effect_feature_cache")
+                .and_then(SValue::as_hash)
+                .and_then(|vef| vef.get("sorted_exons"))
+                .and_then(SValue::as_array)
+                .or(primary)
+        };
         let Some(exon_array) = exon_array else {
             return Ok(true);
         };
@@ -522,11 +555,25 @@ where
 }
 
 /// Returns `true` when the identifier looks like a real exon (`ENSE*`, `exon-*`,
-/// or other non-transcript/gene patterns).  Transcript (`ENST*`) and gene
-/// (`ENSG*`) objects sometimes leak into `_trans_exon_array` during Perl
-/// Storable serialization and must be skipped.
+/// or other non-transcript/gene patterns).  Returns `false` for:
+/// - Transcript (`ENST*`) and gene (`ENSG*`) objects that sometimes leak into
+///   `_trans_exon_array` during Perl Storable serialization.
+/// - `compmerge.*` pseudo-exons — collapsed/merged exon entries in havana_tagene
+///   and lncRNA transcripts whose boundaries span entire intron regions.  VEP
+///   treats the underlying individual exons, not the merged entry.
 pub(crate) fn is_exon_stable_id(id: &str) -> bool {
-    !id.starts_with("ENST") && !id.starts_with("ENSG")
+    !id.starts_with("ENST") && !id.starts_with("ENSG") && !id.starts_with("compmerge")
+}
+
+/// Returns `true` for biotypes that VEP does not use for consequence
+/// annotation and should be excluded from transcript, exon, and translation
+/// tables.
+///
+/// - `pseudogene` — the generic biotype (keep specific subtypes like
+///   `processed_pseudogene`, `unprocessed_pseudogene`, etc.)
+/// - `aligned_transcript` — Ensembl-internal biotype not evaluated by VEP
+pub(crate) fn is_excluded_biotype(biotype: &str) -> bool {
+    biotype == "pseudogene" || biotype == "aligned_transcript"
 }
 
 fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
@@ -593,5 +640,38 @@ mod tests {
     fn is_exon_stable_id_rejects_genes() {
         assert!(!is_exon_stable_id("ENSG00000100316"));
         assert!(!is_exon_stable_id("ENSG00000283761"));
+    }
+
+    #[test]
+    fn is_exon_stable_id_rejects_compmerge() {
+        assert!(!is_exon_stable_id("compmerge.435.pooled.chr22"));
+        assert!(!is_exon_stable_id("compmerge.123.pooled.chr1"));
+    }
+
+    #[test]
+    fn excluded_biotype_generic_pseudogene() {
+        assert!(is_excluded_biotype("pseudogene"));
+    }
+
+    #[test]
+    fn excluded_biotype_aligned_transcript() {
+        assert!(is_excluded_biotype("aligned_transcript"));
+    }
+
+    #[test]
+    fn excluded_biotype_keeps_specific_pseudogene_subtypes() {
+        assert!(!is_excluded_biotype("processed_pseudogene"));
+        assert!(!is_excluded_biotype("unprocessed_pseudogene"));
+        assert!(!is_excluded_biotype("transcribed_processed_pseudogene"));
+        assert!(!is_excluded_biotype("transcribed_unprocessed_pseudogene"));
+        assert!(!is_excluded_biotype("unitary_pseudogene"));
+    }
+
+    #[test]
+    fn excluded_biotype_keeps_normal_biotypes() {
+        assert!(!is_excluded_biotype("protein_coding"));
+        assert!(!is_excluded_biotype("lncRNA"));
+        assert!(!is_excluded_biotype("miRNA"));
+        assert!(!is_excluded_biotype("snRNA"));
     }
 }

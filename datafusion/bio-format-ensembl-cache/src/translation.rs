@@ -5,6 +5,7 @@ use crate::decode::storable_binary::{
     stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader,
 };
 use crate::errors::{Result, exec_err};
+use crate::exon::is_excluded_biotype;
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
@@ -198,6 +199,11 @@ pub(crate) fn parse_translation_line_into(
     if transcript_stable_id.starts_with("LOC") {
         return Ok(false);
     }
+    if let Some(bt) = json_str(object.get("biotype")) {
+        if is_excluded_biotype(&bt) {
+            return Ok(false);
+        }
+    }
 
     if let Some(idx) = col_idx.chrom {
         batch.set_utf8(idx, &chrom);
@@ -363,6 +369,11 @@ where
         }
         if transcript_stable_id.starts_with("LOC") {
             return Ok(true);
+        }
+        if let Some(bt) = sv_str(obj.get("biotype")) {
+            if is_excluded_biotype(&bt) {
+                return Ok(true);
+            }
         }
 
         if let Some(idx) = col_idx.chrom {

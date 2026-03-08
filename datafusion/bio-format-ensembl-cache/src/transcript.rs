@@ -5,7 +5,7 @@ use crate::decode::storable_binary::{
     stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader,
 };
 use crate::errors::{Result, exec_err};
-use crate::exon::is_exon_stable_id;
+use crate::exon::{is_excluded_biotype, is_exon_stable_id};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
@@ -158,34 +158,60 @@ fn cdna_to_genomic(exon_coords: &[(i64, i64)], strand: i8, cdna_pos: i64) -> Opt
 
 /// Returns the storable exon array, trying `_trans_exon_array` first and
 /// falling back to `_variation_effect_feature_cache.sorted_exons`.
+///
+/// The primary array is only used when it contains at least one parseable
+/// exon hash (with a `stable_id`).  Otherwise we fall back to `sorted_exons`
+/// which always contains fully materialised exon objects.
 fn storable_exon_array<'a>(
     object: &'a std::collections::BTreeMap<String, SValue>,
 ) -> Option<&'a [SValue]> {
-    object
-        .get("_trans_exon_array")
-        .and_then(SValue::as_array)
-        .or_else(|| {
-            object
-                .get("_variation_effect_feature_cache")
-                .and_then(SValue::as_hash)
-                .and_then(|vef| vef.get("sorted_exons"))
-                .and_then(SValue::as_array)
+    let primary = object.get("_trans_exon_array").and_then(SValue::as_array);
+    let has_parseable = primary
+        .map(|arr| {
+            arr.iter().any(|v| {
+                v.as_hash()
+                    .and_then(|h| sv_str(h.get("stable_id")))
+                    .is_some()
+            })
         })
+        .unwrap_or(false);
+
+    if has_parseable {
+        primary
+    } else {
+        object
+            .get("_variation_effect_feature_cache")
+            .and_then(SValue::as_hash)
+            .and_then(|vef| vef.get("sorted_exons"))
+            .and_then(SValue::as_array)
+            .or(primary)
+    }
 }
 
 /// Returns the JSON exon array, trying `_trans_exon_array` first and
 /// falling back to `_variation_effect_feature_cache.sorted_exons`.
+///
+/// The primary array is only used when it contains at least one parseable
+/// blessed object.  Otherwise we fall back to `sorted_exons`.
 fn json_exon_array<'a>(object: &'a serde_json::Map<String, Value>) -> Option<&'a Vec<Value>> {
-    object
-        .get("_trans_exon_array")
-        .and_then(Value::as_array)
-        .or_else(|| {
-            object
-                .get("_variation_effect_feature_cache")
-                .and_then(unwrap_blessed_object_optional)
-                .and_then(|vef| vef.get("sorted_exons"))
-                .and_then(Value::as_array)
+    let primary = object.get("_trans_exon_array").and_then(Value::as_array);
+    let has_parseable = primary
+        .map(|arr| {
+            arr.iter()
+                .any(|v| unwrap_blessed_object_optional(v).is_some())
         })
+        .unwrap_or(false);
+
+    if has_parseable {
+        primary
+    } else {
+        object
+            .get("_variation_effect_feature_cache")
+            .and_then(unwrap_blessed_object_optional)
+            .and_then(|vef| vef.get("sorted_exons"))
+            .and_then(Value::as_array)
+            .or(primary)
+    }
 }
 
 /// Extracts exon (start, end) pairs from a storable transcript object.
@@ -426,6 +452,14 @@ pub(crate) fn parse_transcript_line_into(
     // not real transcripts. VEP skips them during annotation.
     if stable_id.starts_with("LOC") {
         return Ok(false);
+    }
+
+    // Skip generic pseudogene / aligned_transcript biotypes — VEP does not
+    // use these for consequence annotation.
+    if let Some(bt) = json_str(object.get("biotype")) {
+        if is_excluded_biotype(&bt) {
+            return Ok(false);
+        }
     }
 
     // Write required columns (direct index access, no HashMap lookups)
@@ -735,6 +769,13 @@ where
         // Skip LOC-prefixed gene pseudo-records.
         if stable_id.starts_with("LOC") {
             return Ok(true);
+        }
+
+        // Skip generic pseudogene / aligned_transcript biotypes.
+        if let Some(bt) = sv_str(obj.get("biotype")) {
+            if is_excluded_biotype(&bt) {
+                return Ok(true);
+            }
         }
 
         let core = TranscriptRowCore {
