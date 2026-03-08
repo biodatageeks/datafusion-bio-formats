@@ -156,11 +156,43 @@ fn cdna_to_genomic(exon_coords: &[(i64, i64)], strand: i8, cdna_pos: i64) -> Opt
     None
 }
 
-/// Extracts exon (start, end) pairs from a storable `_trans_exon_array`.
+/// Returns the storable exon array, trying `_trans_exon_array` first and
+/// falling back to `_variation_effect_feature_cache.sorted_exons`.
+fn storable_exon_array<'a>(
+    object: &'a std::collections::BTreeMap<String, SValue>,
+) -> Option<&'a [SValue]> {
+    object
+        .get("_trans_exon_array")
+        .and_then(SValue::as_array)
+        .or_else(|| {
+            object
+                .get("_variation_effect_feature_cache")
+                .and_then(SValue::as_hash)
+                .and_then(|vef| vef.get("sorted_exons"))
+                .and_then(SValue::as_array)
+        })
+}
+
+/// Returns the JSON exon array, trying `_trans_exon_array` first and
+/// falling back to `_variation_effect_feature_cache.sorted_exons`.
+fn json_exon_array<'a>(object: &'a serde_json::Map<String, Value>) -> Option<&'a Vec<Value>> {
+    object
+        .get("_trans_exon_array")
+        .and_then(Value::as_array)
+        .or_else(|| {
+            object
+                .get("_variation_effect_feature_cache")
+                .and_then(unwrap_blessed_object_optional)
+                .and_then(|vef| vef.get("sorted_exons"))
+                .and_then(Value::as_array)
+        })
+}
+
+/// Extracts exon (start, end) pairs from a storable transcript object.
 fn extract_exon_coords_storable(
     object: &std::collections::BTreeMap<String, SValue>,
 ) -> Option<Vec<(i64, i64)>> {
-    let arr = object.get("_trans_exon_array")?.as_array()?;
+    let arr = storable_exon_array(object)?;
     let coords: Vec<(i64, i64)> = arr
         .iter()
         .filter_map(|exon_val| {
@@ -182,9 +214,9 @@ fn extract_exon_coords_storable(
     }
 }
 
-/// Extracts exon (start, end) pairs from a JSON `_trans_exon_array`.
+/// Extracts exon (start, end) pairs from a JSON transcript object.
 fn extract_exon_coords_json(object: &serde_json::Map<String, Value>) -> Option<Vec<(i64, i64)>> {
-    let arr = object.get("_trans_exon_array")?.as_array()?;
+    let arr = json_exon_array(object)?;
     let coords: Vec<(i64, i64)> = arr
         .iter()
         .filter_map(|exon_val| {
@@ -390,6 +422,12 @@ pub(crate) fn parse_transcript_line_into(
         return Ok(false);
     }
 
+    // Skip LOC-prefixed gene pseudo-records — these are gene-level entries,
+    // not real transcripts. VEP skips them during annotation.
+    if stable_id.starts_with("LOC") {
+        return Ok(false);
+    }
+
     // Write required columns (direct index access, no HashMap lookups)
     if let Some(idx) = col_idx.chrom {
         batch.set_utf8(idx, &chrom);
@@ -533,42 +571,33 @@ pub(crate) fn parse_transcript_line_into(
         let exon_count = object
             .get("exon_count")
             .and_then(|v| json_i32(Some(v)))
-            .or_else(|| {
-                object
-                    .get("_trans_exon_array")
-                    .and_then(Value::as_array)
-                    .and_then(|arr| i32::try_from(arr.len()).ok())
-            });
+            .or_else(|| json_exon_array(object).and_then(|arr| i32::try_from(arr.len()).ok()));
         batch.set_opt_i32(idx, exon_count);
     }
 
     // Exon structured array — only parse when projected
     if col_idx.exons_projected {
         if let Some(idx) = col_idx.exons {
-            let exon_tuples = object
-                .get("_trans_exon_array")
-                .and_then(Value::as_array)
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|exon_val| {
-                            let exon_obj = unwrap_blessed_object_optional(exon_val)?;
-                            // Skip non-exon objects (slices, transcripts, genes).
-                            let id = json_str(exon_obj.get("stable_id"))?;
-                            if !is_exon_stable_id(&id) {
-                                return None;
-                            }
-                            let start = json_i64(exon_obj.get("start")).map(|v| {
-                                normalize_genomic_start(v, coordinate_system_zero_based)
-                            })?;
-                            let end = json_i64(exon_obj.get("end"))
-                                .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
-                            let phase = json_i64(exon_obj.get("phase"))
-                                .and_then(|v| i8::try_from(v).ok())
-                                .unwrap_or(-1);
-                            Some((start, end, phase))
-                        })
-                        .collect::<Vec<(i64, i64, i8)>>()
-                });
+            let exon_tuples = json_exon_array(object).map(|arr| {
+                arr.iter()
+                    .filter_map(|exon_val| {
+                        let exon_obj = unwrap_blessed_object_optional(exon_val)?;
+                        // Skip non-exon objects (slices, transcripts, genes).
+                        let id = json_str(exon_obj.get("stable_id"))?;
+                        if !is_exon_stable_id(&id) {
+                            return None;
+                        }
+                        let start = json_i64(exon_obj.get("start"))
+                            .map(|v| normalize_genomic_start(v, coordinate_system_zero_based))?;
+                        let end = json_i64(exon_obj.get("end"))
+                            .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
+                        let phase = json_i64(exon_obj.get("phase"))
+                            .and_then(|v| i8::try_from(v).ok())
+                            .unwrap_or(-1);
+                        Some((start, end, phase))
+                    })
+                    .collect::<Vec<(i64, i64, i8)>>()
+            });
             batch.set_exon_list(idx, exon_tuples.as_deref());
         }
     }
@@ -700,6 +729,11 @@ where
         // these even in --merged mode.
         let source_val = sv_str(obj.get("source").or_else(|| obj.get("_source_cache")));
         if source_val.as_deref() == Some("Gnomon") {
+            return Ok(true);
+        }
+
+        // Skip LOC-prefixed gene pseudo-records.
+        if stable_id.starts_with("LOC") {
             return Ok(true);
         }
 
@@ -909,43 +943,34 @@ fn append_transcript_storable_row_into(
     if let Some(idx) = col_idx.exon_count {
         let exon_count = sv_i64(object.get("exon_count"))
             .and_then(|v| i32::try_from(v).ok())
-            .or_else(|| {
-                object
-                    .get("_trans_exon_array")
-                    .and_then(SValue::as_array)
-                    .and_then(|arr| i32::try_from(arr.len()).ok())
-            });
+            .or_else(|| storable_exon_array(object).and_then(|arr| i32::try_from(arr.len()).ok()));
         batch.set_opt_i32(idx, exon_count);
     }
 
     // Exon structured array — only parse when projected
     if col_idx.exons_projected {
         if let Some(idx) = col_idx.exons {
-            let exon_tuples = object
-                .get("_trans_exon_array")
-                .and_then(SValue::as_array)
-                .map(|exon_arr| {
-                    exon_arr
-                        .iter()
-                        .filter_map(|exon_val| {
-                            let exon_obj = exon_val.as_hash()?;
-                            // Skip non-exon objects (slices, transcripts, genes).
-                            let sid = sv_str(exon_obj.get("stable_id"))?;
-                            if !is_exon_stable_id(&sid) {
-                                return None;
-                            }
-                            let start = sv_i64(exon_obj.get("start")).map(|v| {
-                                normalize_genomic_start(v, coordinate_system_zero_based)
-                            })?;
-                            let end = sv_i64(exon_obj.get("end"))
-                                .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
-                            let phase = sv_i64(exon_obj.get("phase"))
-                                .and_then(|v| i8::try_from(v).ok())
-                                .unwrap_or(-1);
-                            Some((start, end, phase))
-                        })
-                        .collect::<Vec<(i64, i64, i8)>>()
-                });
+            let exon_tuples = storable_exon_array(object).map(|exon_arr| {
+                exon_arr
+                    .iter()
+                    .filter_map(|exon_val| {
+                        let exon_obj = exon_val.as_hash()?;
+                        // Skip non-exon objects (slices, transcripts, genes).
+                        let sid = sv_str(exon_obj.get("stable_id"))?;
+                        if !is_exon_stable_id(&sid) {
+                            return None;
+                        }
+                        let start = sv_i64(exon_obj.get("start"))
+                            .map(|v| normalize_genomic_start(v, coordinate_system_zero_based))?;
+                        let end = sv_i64(exon_obj.get("end"))
+                            .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
+                        let phase = sv_i64(exon_obj.get("phase"))
+                            .and_then(|v| i8::try_from(v).ok())
+                            .unwrap_or(-1);
+                        Some((start, end, phase))
+                    })
+                    .collect::<Vec<(i64, i64, i8)>>()
+            });
             batch.set_exon_list(idx, exon_tuples.as_deref());
         }
     }

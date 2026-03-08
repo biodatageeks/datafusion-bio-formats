@@ -35,6 +35,10 @@ VEP's own annotation behaviour:
   (XM\_/XR\_ prefixed model transcripts) are excluded from transcript, exon, and
   translation tables. VEP does not use Gnomon transcripts for annotation even in
   `--merged` mode.
+- **LOC-prefixed gene pseudo-records**: Gene-level placeholder entries with
+  `LOC*` stable IDs (e.g. `LOC644525`) are not real transcripts. They have
+  `biotype = "pseudogene"`, empty exon arrays, and are skipped by VEP during
+  annotation. Filtered from transcript, exon, and translation tables.
 - **Exon slice/padding artefacts**: Perl Storable serialization can embed
   chromosome-spanning slice objects (`start=1`, `end=<chr_length>`, no
   `stable_id`) into `_trans_exon_array`. These are skipped in all exon
@@ -43,6 +47,19 @@ VEP's own annotation behaviour:
   contains objects with transcript (`ENST*`) or gene (`ENSG*`) stable IDs
   instead of exon IDs (`ENSE*`, `exon-*`). These are filtered out based on
   the `stable_id` prefix.
+
+## Exon Source Fallback
+
+The VEP Perl cache stores exon data in two locations within each transcript:
+
+1. `_trans_exon_array` — the primary source, but sometimes empty or containing
+   only integer/Mapper references instead of materialised exon objects.
+2. `_variation_effect_feature_cache.sorted_exons` — a fully materialised array
+   of `Bio::EnsEMBL::Exon` objects, always present when exon data exists.
+
+The extractor tries `_trans_exon_array` first and falls back to `sorted_exons`
+when the primary source is missing or empty. This recovers exon data for ~46%
+of transcripts that would otherwise have no exon entries.
 
 ## Entity Schemas
 

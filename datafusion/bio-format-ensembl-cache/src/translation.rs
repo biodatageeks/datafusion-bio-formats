@@ -190,9 +190,12 @@ pub(crate) fn parse_translation_line_into(
             .or_else(|| object.get("_gene_stable_id")),
     );
 
-    // Skip Gnomon transcripts — VEP excludes these even in --merged mode.
+    // Skip Gnomon transcripts and LOC-prefixed gene pseudo-records.
     let source_val = json_str(object.get("source").or_else(|| object.get("_source_cache")));
     if source_val.as_deref() == Some("Gnomon") {
+        return Ok(false);
+    }
+    if transcript_stable_id.starts_with("LOC") {
         return Ok(false);
     }
 
@@ -353,9 +356,12 @@ where
                 .or_else(|| obj.get("_gene_stable_id")),
         );
 
-        // Skip Gnomon transcripts — VEP excludes these even in --merged mode.
+        // Skip Gnomon transcripts and LOC-prefixed gene pseudo-records.
         let source_val = sv_str(obj.get("source").or_else(|| obj.get("_source_cache")));
         if source_val.as_deref() == Some("Gnomon") {
+            return Ok(true);
+        }
+        if transcript_stable_id.starts_with("LOC") {
             return Ok(true);
         }
 

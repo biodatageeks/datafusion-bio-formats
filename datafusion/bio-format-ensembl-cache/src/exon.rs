@@ -181,15 +181,30 @@ where
             .or_else(|| object.get("_gene_stable_id")),
     );
 
-    // Skip Gnomon transcripts — VEP excludes these even in --merged mode.
+    // Skip Gnomon transcripts and LOC-prefixed gene pseudo-records — VEP
+    // excludes these even in --merged mode.
     let source_val = json_str(object.get("source").or_else(|| object.get("_source_cache")));
     if source_val.as_deref() == Some("Gnomon") {
         return Ok(true);
     }
+    if transcript_stable_id.starts_with("LOC") {
+        return Ok(true);
+    }
 
-    let exon_array = match object.get("_trans_exon_array").and_then(Value::as_array) {
-        Some(arr) => arr,
-        None => return Ok(true), // no exons in this transcript
+    // Try _trans_exon_array first; fall back to sorted_exons from the
+    // _variation_effect_feature_cache (which is always fully materialised).
+    let exon_array = object
+        .get("_trans_exon_array")
+        .and_then(Value::as_array)
+        .or_else(|| {
+            object
+                .get("_variation_effect_feature_cache")
+                .and_then(unwrap_blessed_object_optional)
+                .and_then(|vef| vef.get("sorted_exons"))
+                .and_then(Value::as_array)
+        });
+    let Some(exon_array) = exon_array else {
+        return Ok(true); // no exons in this transcript
     };
 
     for (rank, exon_val) in exon_array.iter().enumerate() {
@@ -360,15 +375,26 @@ where
                 .or_else(|| obj.get("_gene_stable_id")),
         );
 
-        // Skip Gnomon transcripts — VEP excludes these even in --merged mode.
+        // Skip Gnomon transcripts and LOC-prefixed gene pseudo-records.
         let source_val = sv_str(obj.get("source").or_else(|| obj.get("_source_cache")));
         if source_val.as_deref() == Some("Gnomon") {
             return Ok(true);
         }
+        if transcript_stable_id.starts_with("LOC") {
+            return Ok(true);
+        }
 
-        let exon_array = match obj.get("_trans_exon_array").and_then(SValue::as_array) {
-            Some(arr) => arr,
-            None => return Ok(true),
+        let exon_array = obj
+            .get("_trans_exon_array")
+            .and_then(SValue::as_array)
+            .or_else(|| {
+                obj.get("_variation_effect_feature_cache")
+                    .and_then(SValue::as_hash)
+                    .and_then(|vef| vef.get("sorted_exons"))
+                    .and_then(SValue::as_array)
+            });
+        let Some(exon_array) = exon_array else {
+            return Ok(true);
         };
 
         for (rank, exon_val) in exon_array.iter().enumerate() {

@@ -1478,3 +1478,25 @@ async fn exon_gnomon_transcripts_excluded() -> datafusion::common::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn transcript_loc_pseudo_records_excluded() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT stable_id FROM tx WHERE stable_id LIKE 'LOC%'")
+        .await?
+        .collect()
+        .await?;
+
+    let loc_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        loc_rows, 0,
+        "LOC-prefixed gene pseudo-records should be filtered out, found {loc_rows}"
+    );
+
+    Ok(())
+}
