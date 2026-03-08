@@ -63,11 +63,13 @@ VEP's own annotation behaviour:
 - **Duplicate transcripts across region bins**: The VEP cache bins
   transcripts by genomic region. A transcript near a bin boundary can appear
   in multiple bins, potentially across files assigned to different partitions.
-  Deduplication is two-tier: (1) per-partition `HashSet` in the parser
-  catches intra-partition duplicates; (2) the parquet export writer
-  (`storable_to_parquet`) applies cross-partition dedup by `stable_id`
-  (transcripts), `transcript_id` groups (exons), or `transcript_id`
-  (translations), keeping the first occurrence.
+  The `TableProvider` emits all occurrences without dedup so that consumers
+  can choose their own strategy. The `storable_to_parquet` export example
+  applies SQL-level dedup using `ROW_NUMBER()` window functions that prefer
+  entries with non-null CDS boundaries: transcripts by `stable_id` (ordered
+  by `cds_start NULLS LAST`), translations by `transcript_id` (ordered by
+  `cdna_coding_start NULLS LAST`), and exons by `(transcript_id, exon_number)`
+  (ordered by `stable_id NULLS LAST`).
 
 ## Exon Source Fallback
 

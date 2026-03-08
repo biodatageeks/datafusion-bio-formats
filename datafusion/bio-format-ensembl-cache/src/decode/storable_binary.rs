@@ -747,6 +747,39 @@ impl<R: Read> Parser<R> {
             return self.resolve_alias(idx);
         }
 
+        // SX_BLESS (0x11/0x12) is a prefix opcode that does NOT allocate its own
+        // slot.  Perl's Storable assigns the slot to the *inner* value and then
+        // blesses it in-place.  We must mirror this: read the class info, let
+        // parse_value() allocate the slot for the inner value, then overwrite that
+        // slot with the Blessed wrapper so alias indices stay in sync with Perl.
+        if opcode == 0x11 || opcode == 0x12 {
+            let class = if opcode == 0x11 {
+                let class_len = self.read_u8()? as usize;
+                let class_bytes = self.read_bytes(class_len)?;
+                let class: Arc<str> = String::from_utf8_lossy(&class_bytes).into_owned().into();
+                self.classes.push(class.clone());
+                class
+            } else {
+                let class_idx = self.read_u8()? as usize;
+                self.classes.get(class_idx).cloned().ok_or_else(|| {
+                    exec_err(format!("Invalid storable class index: {}", class_idx))
+                })?
+            };
+            // parse_value() allocates the slot for the inner value.
+            let inner = self.parse_value()?;
+            let blessed = SValue::Blessed {
+                class,
+                value: Arc::new(inner),
+            };
+            // Overwrite the inner value's slot with the blessed wrapper so that
+            // aliases pointing to this slot resolve to the blessed object.
+            let inner_slot = self.next_slot.saturating_sub(1);
+            if self.should_retain_slot(inner_slot) {
+                self.refs.insert(inner_slot, blessed.clone());
+            }
+            return Ok(blessed);
+        }
+
         let slot = self.push_ref(None);
 
         let value = match opcode {
@@ -784,28 +817,6 @@ impl<R: Read> Parser<R> {
                 let len = self.read_u8()? as usize;
                 let bytes = self.read_bytes(len)?;
                 SValue::String(String::from_utf8_lossy(&bytes).into_owned().into())
-            }
-            0x11 => {
-                let class_len = self.read_u8()? as usize;
-                let class_bytes = self.read_bytes(class_len)?;
-                let class: Arc<str> = String::from_utf8_lossy(&class_bytes).into_owned().into();
-                self.classes.push(class.clone());
-                let value = self.parse_value()?;
-                SValue::Blessed {
-                    class,
-                    value: Arc::new(value),
-                }
-            }
-            0x12 => {
-                let class_idx = self.read_u8()? as usize;
-                let class = self.classes.get(class_idx).cloned().ok_or_else(|| {
-                    exec_err(format!("Invalid storable class index: {}", class_idx))
-                })?;
-                let value = self.parse_value()?;
-                SValue::Blessed {
-                    class,
-                    value: Arc::new(value),
-                }
             }
             // weak references can appear in cached object graphs; for tabular extraction
             // we treat them as regular references.

@@ -13,7 +13,6 @@ use crate::util::{
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -74,7 +73,6 @@ pub(crate) fn parse_exon_line_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &ExonColumnIndices,
     provenance: &ProvenanceWriter,
-    seen: &mut HashSet<String>,
     mut on_row_added: F,
 ) -> Result<bool>
 where
@@ -196,12 +194,6 @@ where
         if is_excluded_biotype(&bt) {
             return Ok(true);
         }
-    }
-
-    // Deduplicate: same transcript can appear in multiple region bins.
-    // Skip exons for transcripts already processed.
-    if !seen.insert(transcript_stable_id.clone()) {
-        return Ok(true);
     }
 
     // Try _trans_exon_array first. If it's missing or contains only
@@ -337,7 +329,6 @@ pub(crate) fn parse_exon_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &ExonColumnIndices,
     provenance: &ProvenanceWriter,
-    seen: &mut HashSet<String>,
     mut on_row_added: F,
 ) -> Result<()>
 where
@@ -410,11 +401,6 @@ where
             if is_excluded_biotype(&bt) {
                 return Ok(true);
             }
-        }
-
-        // Deduplicate: same transcript can appear in multiple region bins.
-        if !seen.insert(transcript_stable_id.clone()) {
-            return Ok(true);
         }
 
         // Try _trans_exon_array first. If it's missing or contains only

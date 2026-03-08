@@ -14,7 +14,6 @@ use crate::util::{
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
 use serde_json::Value;
-use std::collections::HashSet;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -303,6 +302,117 @@ fn derive_coding_region(
     }
 }
 
+/// Derives `(coding_region_start, coding_region_end)` from the Translation
+/// sub-object's `start_exon`/`end_exon` references.  This is VEP's own method
+/// (`Translation::genomic_start`/`genomic_end`) and works even when the
+/// transcript's exon array is incomplete due to storable alias eviction.
+///
+/// For + strand: `cds_start = start_exon.start + tl.start - 1`
+/// For − strand: `cds_start = start_exon.end - tl.start + 1`
+fn derive_coding_region_from_translation_json(
+    object: &serde_json::Map<String, Value>,
+    strand: i8,
+    tx_start: i64,
+    tx_end: i64,
+) -> (Option<i64>, Option<i64>) {
+    let tl = object
+        .get("translation")
+        .and_then(unwrap_blessed_object_optional);
+    let tl = match tl {
+        Some(t) => t,
+        None => return (None, None),
+    };
+    let tl_start = json_i64(tl.get("start"));
+    let tl_end = json_i64(tl.get("end"));
+    let se = tl
+        .get("start_exon")
+        .and_then(unwrap_blessed_object_optional);
+    let ee = tl.get("end_exon").and_then(unwrap_blessed_object_optional);
+    compute_cds_from_translation_exons(
+        tl_start,
+        tl_end,
+        se,
+        ee,
+        strand,
+        tx_start,
+        tx_end,
+        |obj, key| json_i64(obj.get(key)),
+    )
+}
+
+fn derive_coding_region_from_translation_storable(
+    object: &std::collections::BTreeMap<String, SValue>,
+    strand: i8,
+    tx_start: i64,
+    tx_end: i64,
+) -> (Option<i64>, Option<i64>) {
+    let tl = object.get("translation").and_then(SValue::as_hash);
+    let tl = match tl {
+        Some(t) => t,
+        None => return (None, None),
+    };
+    let tl_start = sv_i64(tl.get("start"));
+    let tl_end = sv_i64(tl.get("end"));
+    let se = tl.get("start_exon").and_then(SValue::as_hash);
+    let ee = tl.get("end_exon").and_then(SValue::as_hash);
+    compute_cds_from_translation_exons(
+        tl_start,
+        tl_end,
+        se,
+        ee,
+        strand,
+        tx_start,
+        tx_end,
+        |obj, key| sv_i64(obj.get(key)),
+    )
+}
+
+fn compute_cds_from_translation_exons<T>(
+    tl_start: Option<i64>,
+    tl_end: Option<i64>,
+    start_exon: Option<&T>,
+    end_exon: Option<&T>,
+    strand: i8,
+    tx_start: i64,
+    tx_end: i64,
+    get_i64: impl Fn(&T, &str) -> Option<i64>,
+) -> (Option<i64>, Option<i64>) {
+    let (Some(tl_s), Some(tl_e)) = (tl_start, tl_end) else {
+        return (None, None);
+    };
+    let (Some(se), Some(ee)) = (start_exon, end_exon) else {
+        return (None, None);
+    };
+    let (genomic_start, genomic_end) = if strand >= 0 {
+        let se_start = match get_i64(se, "start") {
+            Some(v) => v,
+            None => return (None, None),
+        };
+        let ee_start = match get_i64(ee, "start") {
+            Some(v) => v,
+            None => return (None, None),
+        };
+        (se_start + tl_s - 1, ee_start + tl_e - 1)
+    } else {
+        let se_end = match get_i64(se, "end") {
+            Some(v) => v,
+            None => return (None, None),
+        };
+        let ee_end = match get_i64(ee, "end") {
+            Some(v) => v,
+            None => return (None, None),
+        };
+        (ee_end - tl_e + 1, se_end - tl_s + 1)
+    };
+    let cr_start = genomic_start.min(genomic_end);
+    let cr_end = genomic_start.max(genomic_end);
+    if cr_start >= tx_start && cr_end <= tx_end {
+        (Some(cr_start), Some(cr_end))
+    } else {
+        (None, None)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Direct builder parser for text lines (Phase 1+2+6)
 // ---------------------------------------------------------------------------
@@ -317,7 +427,6 @@ pub(crate) fn parse_transcript_line_into(
     batch: &mut BatchBuilder,
     col_idx: &TranscriptColumnIndices,
     provenance: &ProvenanceWriter,
-    seen: &mut HashSet<String>,
 ) -> Result<bool> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -464,12 +573,6 @@ pub(crate) fn parse_transcript_line_into(
         }
     }
 
-    // Deduplicate: a transcript near a region boundary can appear in
-    // multiple region bins. Keep only the first occurrence.
-    if !seen.insert(stable_id.clone()) {
-        return Ok(false);
-    }
-
     // Write required columns (direct index access, no HashMap lookups)
     if let Some(idx) = col_idx.chrom {
         batch.set_utf8(idx, &chrom);
@@ -556,12 +659,25 @@ pub(crate) fn parse_transcript_line_into(
         && coding_region_start_val.is_none()
         && coding_region_end_val.is_none()
     {
+        // Primary: derive from cdna positions + exon array
         if let Some(exon_coords) = extract_exon_coords_json(object) {
             let (derived_start, derived_end) = derive_coding_region(
                 &exon_coords,
                 strand,
                 cdna_coding_start_val,
                 cdna_coding_end_val,
+                source_start,
+                source_end,
+            );
+            coding_region_start_val = derived_start;
+            coding_region_end_val = derived_end;
+        }
+        // Fallback: derive from translation.start_exon/end_exon (VEP's own method).
+        // Works even when exon array is incomplete due to storable alias eviction.
+        if coding_region_start_val.is_none() {
+            let (derived_start, derived_end) = derive_coding_region_from_translation_json(
+                object,
+                strand,
                 source_start,
                 source_end,
             );
@@ -712,7 +828,6 @@ pub(crate) fn parse_transcript_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &TranscriptColumnIndices,
     provenance: &ProvenanceWriter,
-    seen: &mut HashSet<String>,
     mut on_row_added: F,
 ) -> Result<()>
 where
@@ -785,11 +900,6 @@ where
             if is_excluded_biotype(&bt) {
                 return Ok(true);
             }
-        }
-
-        // Deduplicate: same transcript can appear in multiple region bins.
-        if !seen.insert(stable_id.clone()) {
-            return Ok(true);
         }
 
         let core = TranscriptRowCore {
@@ -944,12 +1054,25 @@ fn append_transcript_storable_row_into(
         && coding_region_start_val.is_none()
         && coding_region_end_val.is_none()
     {
+        // Primary: derive from cdna positions + exon array
         if let Some(exon_coords) = extract_exon_coords_storable(object) {
             let (derived_start, derived_end) = derive_coding_region(
                 &exon_coords,
                 strand,
                 cdna_coding_start_val,
                 cdna_coding_end_val,
+                source_start,
+                source_end,
+            );
+            coding_region_start_val = derived_start;
+            coding_region_end_val = derived_end;
+        }
+        // Fallback: derive from translation.start_exon/end_exon (VEP's own method).
+        // Works even when exon array is incomplete due to storable alias eviction.
+        if coding_region_start_val.is_none() {
+            let (derived_start, derived_end) = derive_coding_region_from_translation_storable(
+                object,
+                strand,
                 source_start,
                 source_end,
             );

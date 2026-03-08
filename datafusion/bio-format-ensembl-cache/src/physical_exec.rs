@@ -390,11 +390,6 @@ fn process_partition(
     let mut emitted_rows: usize = 0;
     let mut stop = false;
 
-    // Per-partition deduplication: tracks seen stable_ids (or transcript_ids
-    // for exon/translation) across all files in this partition.  Cross-partition
-    // duplicates are handled downstream (e.g. dedup in the parquet writer).
-    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
     for source_file in &files {
         if stop {
             break;
@@ -430,7 +425,6 @@ fn process_partition(
                         &mut batch_builder,
                         transcript_col_idx.as_ref().unwrap(),
                         &provenance,
-                        &mut seen_ids,
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -532,7 +526,6 @@ fn process_partition(
                         &mut batch_builder,
                         exon_col_idx.as_ref().unwrap(),
                         &provenance,
-                        &mut seen_ids,
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -566,7 +559,6 @@ fn process_partition(
                         &mut batch_builder,
                         translation_col_idx.as_ref().unwrap(),
                         &provenance,
-                        &mut seen_ids,
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -644,7 +636,6 @@ fn process_partition(
                     &mut batch_builder,
                     transcript_col_idx.as_ref().unwrap(),
                     &provenance,
-                    &mut seen_ids,
                 )?,
                 EnsemblEntityKind::RegulatoryFeature => parse_regulatory_line_into(
                     line_trimmed,
@@ -680,7 +671,6 @@ fn process_partition(
                         &mut batch_builder,
                         exon_col_idx.as_ref().unwrap(),
                         &provenance,
-                        &mut seen_ids,
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -723,7 +713,6 @@ fn process_partition(
                     &mut batch_builder,
                     translation_col_idx.as_ref().unwrap(),
                     &provenance,
-                    &mut seen_ids,
                 )?,
             };
 
