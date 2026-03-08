@@ -1319,7 +1319,7 @@ async fn translation_sequence_columns_populated() -> datafusion::common::Result<
 
     let batches = ctx
         .sql(
-            "SELECT cdna_coding_start, cdna_coding_end, translation_seq, cdna_seq \
+            "SELECT cdna_coding_start, cdna_coding_end, translation_seq, cds_sequence \
              FROM translations",
         )
         .await?
@@ -1375,7 +1375,7 @@ async fn translation_sequence_columns_populated() -> datafusion::common::Result<
     // Verify sequence columns exist in output (may be null if VEF cache
     // was evicted in the fixture, but columns must be present and queryable)
     assert!(batches[0].column_by_name("translation_seq").is_some());
-    assert!(batches[0].column_by_name("cdna_seq").is_some());
+    assert!(batches[0].column_by_name("cds_sequence").is_some());
 
     Ok(())
 }
@@ -1390,7 +1390,7 @@ async fn translation_sequence_projection_pushdown() -> datafusion::common::Resul
 
     // Project only the new sequence columns — triggers sequences_projected flag
     let batches = ctx
-        .sql("SELECT translation_seq, cdna_seq FROM translations")
+        .sql("SELECT translation_seq, cds_sequence FROM translations")
         .await?
         .collect()
         .await?;

@@ -224,7 +224,7 @@ pub(crate) fn translation_schema(
         Field::new("cdna_coding_start", DataType::Int64, true),
         Field::new("cdna_coding_end", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
-        Field::new("cdna_seq", DataType::Utf8, true),
+        Field::new("cds_sequence", DataType::Utf8, true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];

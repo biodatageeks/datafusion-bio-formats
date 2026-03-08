@@ -43,7 +43,7 @@ impl TranslationColumnIndices {
         let cdna_coding_start = col_map.get("cdna_coding_start");
         let cdna_coding_end = col_map.get("cdna_coding_end");
         let peptide_seq = col_map.get("translation_seq");
-        let cdna_seq = col_map.get("cdna_seq");
+        let cdna_seq = col_map.get("cds_sequence");
         let sequences_projected = peptide_seq.is_some() || cdna_seq.is_some();
         Self {
             chrom: col_map.get("chrom"),
