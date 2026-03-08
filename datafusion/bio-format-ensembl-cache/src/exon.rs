@@ -50,9 +50,9 @@ impl ExonColumnIndices {
             end_phase: col_map.get("end_phase"),
             is_current: col_map.get("is_current"),
             is_constitutive: col_map.get("is_constitutive"),
-            transcript_stable_id: col_map.get("transcript_stable_id"),
+            transcript_stable_id: col_map.get("transcript_id"),
             gene_stable_id: col_map.get("gene_stable_id"),
-            exon_rank: col_map.get("exon_rank"),
+            exon_rank: col_map.get("exon_number"),
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }

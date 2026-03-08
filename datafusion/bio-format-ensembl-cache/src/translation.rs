@@ -42,7 +42,7 @@ impl TranslationColumnIndices {
     pub fn new(col_map: &ColumnMap) -> Self {
         let cdna_coding_start = col_map.get("cdna_coding_start");
         let cdna_coding_end = col_map.get("cdna_coding_end");
-        let peptide_seq = col_map.get("peptide_seq");
+        let peptide_seq = col_map.get("translation_seq");
         let cdna_seq = col_map.get("cdna_seq");
         let sequences_projected = peptide_seq.is_some() || cdna_seq.is_some();
         Self {
@@ -53,8 +53,8 @@ impl TranslationColumnIndices {
             version: col_map.get("version"),
             translation_start: col_map.get("translation_start"),
             translation_end: col_map.get("translation_end"),
-            protein_length: col_map.get("protein_length"),
-            transcript_stable_id: col_map.get("transcript_stable_id"),
+            protein_length: col_map.get("protein_len"),
+            transcript_stable_id: col_map.get("transcript_id"),
             gene_stable_id: col_map.get("gene_stable_id"),
             cdna_coding_start,
             cdna_coding_end,

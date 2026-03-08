@@ -676,7 +676,7 @@ async fn transcript_backward_compat_existing_queries_work() -> datafusion::commo
 
 #[tokio::test]
 async fn transcript_coding_region_populated_for_protein_coding() -> datafusion::common::Result<()> {
-    // Text fixture: ENST000001 is protein_coding with coding_region_start=1010, coding_region_end=1090
+    // Text fixture: ENST000001 is protein_coding with cds_start=1010, cds_end=1090
     let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
         "transcript_storable",
     )))?;
@@ -686,7 +686,7 @@ async fn transcript_coding_region_populated_for_protein_coding() -> datafusion::
 
     let batches = ctx
         .sql(
-            "SELECT stable_id, coding_region_start, coding_region_end \
+            "SELECT stable_id, cds_start, cds_end \
              FROM tx WHERE stable_id = 'ENST000001'",
         )
         .await?
@@ -702,7 +702,7 @@ async fn transcript_coding_region_populated_for_protein_coding() -> datafusion::
 
 #[tokio::test]
 async fn transcript_coding_region_null_for_non_coding() -> datafusion::common::Result<()> {
-    // Text fixture: ENST000002 is lncRNA — coding_region_start/end should be null
+    // Text fixture: ENST000002 is lncRNA — cds_start/end should be null
     let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
         "transcript_storable",
     )))?;
@@ -712,7 +712,7 @@ async fn transcript_coding_region_null_for_non_coding() -> datafusion::common::R
 
     let batches = ctx
         .sql(
-            "SELECT coding_region_start, coding_region_end \
+            "SELECT cds_start, cds_end \
              FROM tx WHERE stable_id = 'ENST000002'",
         )
         .await?
@@ -730,21 +730,15 @@ async fn transcript_coding_region_null_for_non_coding() -> datafusion::common::R
         .as_any()
         .downcast_ref::<Int64Array>()
         .unwrap();
-    assert!(
-        crs.is_null(0),
-        "coding_region_start should be null for lncRNA"
-    );
-    assert!(
-        cre.is_null(0),
-        "coding_region_end should be null for lncRNA"
-    );
+    assert!(crs.is_null(0), "cds_start should be null for lncRNA");
+    assert!(cre.is_null(0), "cds_end should be null for lncRNA");
 
     Ok(())
 }
 
 #[tokio::test]
 async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::common::Result<()> {
-    // VEP storable binary stores coding_region_start/end as undef, but the
+    // VEP storable binary stores cds_start/end as undef, but the
     // parser derives them from cdna_coding_start/end + exon array.
     let provider =
         TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
@@ -755,7 +749,7 @@ async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::co
     // Coding transcripts (those with cdna_coding_start) should have derived values.
     let batches = ctx
         .sql(
-            "SELECT coding_region_start, coding_region_end, start, \"end\" \
+            "SELECT cds_start, cds_end, start, \"end\" \
              FROM tx WHERE cdna_coding_start IS NOT NULL",
         )
         .await?
@@ -796,7 +790,7 @@ async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::co
                 let tx_end = tx_ends.value(i);
                 assert!(
                     cr_start <= cr_end,
-                    "coding_region_start ({}) should be <= coding_region_end ({})",
+                    "cds_start ({}) should be <= cds_end ({})",
                     cr_start,
                     cr_end
                 );
@@ -815,7 +809,7 @@ async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::co
 
     assert!(
         populated > 0,
-        "expected coding_region_start/end to be derived for coding transcripts"
+        "expected cds_start/end to be derived for coding transcripts"
     );
 
     Ok(())
@@ -824,7 +818,7 @@ async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::co
 #[tokio::test]
 async fn transcript_cdna_coding_populated_in_real_115() -> datafusion::common::Result<()> {
     // cdna_coding_start/end are populated for some coding transcripts in VEP
-    // storable binary (unlike coding_region_start/end which are always undef).
+    // storable binary (unlike cds_start/end which are always undef).
     let provider =
         TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
 
@@ -887,7 +881,7 @@ async fn exon_real_115_query_returns_rows() -> datafusion::common::Result<()> {
     let batches = ctx
         .sql(
             "SELECT chrom, start, \"end\", strand, stable_id, \
-             transcript_stable_id, exon_rank FROM exons",
+             transcript_id, exon_number FROM exons",
         )
         .await?
         .collect()
@@ -918,9 +912,9 @@ async fn exon_schema_has_all_columns() -> datafusion::common::Result<()> {
         "end_phase",
         "is_current",
         "is_constitutive",
-        "transcript_stable_id",
+        "transcript_id",
         "gene_stable_id",
-        "exon_rank",
+        "exon_number",
         "raw_object_json",
         "object_hash",
     ] {
@@ -938,38 +932,34 @@ async fn exon_foreign_key_populated() -> datafusion::common::Result<()> {
     ctx.register_table("exons", Arc::new(provider))?;
 
     let batches = ctx
-        .sql("SELECT transcript_stable_id FROM exons")
+        .sql("SELECT transcript_id FROM exons")
         .await?
         .collect()
         .await?;
 
     for batch in &batches {
         let col = batch
-            .column_by_name("transcript_stable_id")
+            .column_by_name("transcript_id")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(
-            col.null_count(),
-            0,
-            "transcript_stable_id should never be null"
-        );
+        assert_eq!(col.null_count(), 0, "transcript_id should never be null");
     }
 
     Ok(())
 }
 
 #[tokio::test]
-async fn exon_rank_is_non_negative() -> datafusion::common::Result<()> {
+async fn exon_number_is_non_negative() -> datafusion::common::Result<()> {
     let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
 
-    // Verify exon_rank is always non-negative
+    // Verify exon_number is always non-negative
     let batches = ctx
-        .sql("SELECT exon_rank FROM exons")
+        .sql("SELECT exon_number FROM exons")
         .await?
         .collect()
         .await?;
@@ -983,7 +973,7 @@ async fn exon_rank_is_non_negative() -> datafusion::common::Result<()> {
         for i in 0..batch.num_rows() {
             assert!(
                 ranks.value(i) >= 0,
-                "exon_rank should be non-negative, got {}",
+                "exon_number should be non-negative, got {}",
                 ranks.value(i)
             );
         }
@@ -1104,7 +1094,7 @@ async fn exon_projection_pushdown() -> datafusion::common::Result<()> {
     ctx.register_table("exons", Arc::new(provider))?;
 
     let batches = ctx
-        .sql("SELECT stable_id, exon_rank FROM exons")
+        .sql("SELECT stable_id, exon_number FROM exons")
         .await?
         .collect()
         .await?;
@@ -1127,7 +1117,7 @@ async fn exon_text_format_works() -> datafusion::common::Result<()> {
     ctx.register_table("exons", Arc::new(provider))?;
 
     let batches = ctx
-        .sql("SELECT start, \"end\", phase, transcript_stable_id FROM exons")
+        .sql("SELECT start, \"end\", phase, transcript_id FROM exons")
         .await?
         .collect()
         .await?;
@@ -1157,7 +1147,7 @@ async fn translation_real_115_query_returns_rows() -> datafusion::common::Result
     let batches = ctx
         .sql(
             "SELECT chrom, start, \"end\", stable_id, \
-             transcript_stable_id FROM translations",
+             transcript_id FROM translations",
         )
         .await?
         .collect()
@@ -1207,23 +1197,19 @@ async fn translation_foreign_key_populated() -> datafusion::common::Result<()> {
     ctx.register_table("translations", Arc::new(provider))?;
 
     let batches = ctx
-        .sql("SELECT transcript_stable_id FROM translations")
+        .sql("SELECT transcript_id FROM translations")
         .await?
         .collect()
         .await?;
 
     for batch in &batches {
         let col = batch
-            .column_by_name("transcript_stable_id")
+            .column_by_name("transcript_id")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(
-            col.null_count(),
-            0,
-            "transcript_stable_id should never be null"
-        );
+        assert_eq!(col.null_count(), 0, "transcript_id should never be null");
     }
 
     Ok(())
@@ -1312,7 +1298,7 @@ async fn translation_projection_pushdown() -> datafusion::common::Result<()> {
     ctx.register_table("translations", Arc::new(provider))?;
 
     let batches = ctx
-        .sql("SELECT stable_id, transcript_stable_id FROM translations")
+        .sql("SELECT stable_id, transcript_id FROM translations")
         .await?
         .collect()
         .await?;
@@ -1333,7 +1319,7 @@ async fn translation_sequence_columns_populated() -> datafusion::common::Result<
 
     let batches = ctx
         .sql(
-            "SELECT cdna_coding_start, cdna_coding_end, peptide_seq, cdna_seq \
+            "SELECT cdna_coding_start, cdna_coding_end, translation_seq, cdna_seq \
              FROM translations",
         )
         .await?
@@ -1388,7 +1374,7 @@ async fn translation_sequence_columns_populated() -> datafusion::common::Result<
 
     // Verify sequence columns exist in output (may be null if VEF cache
     // was evicted in the fixture, but columns must be present and queryable)
-    assert!(batches[0].column_by_name("peptide_seq").is_some());
+    assert!(batches[0].column_by_name("translation_seq").is_some());
     assert!(batches[0].column_by_name("cdna_seq").is_some());
 
     Ok(())
@@ -1404,7 +1390,7 @@ async fn translation_sequence_projection_pushdown() -> datafusion::common::Resul
 
     // Project only the new sequence columns — triggers sequences_projected flag
     let batches = ctx
-        .sql("SELECT peptide_seq, cdna_seq FROM translations")
+        .sql("SELECT translation_seq, cdna_seq FROM translations")
         .await?
         .collect()
         .await?;
