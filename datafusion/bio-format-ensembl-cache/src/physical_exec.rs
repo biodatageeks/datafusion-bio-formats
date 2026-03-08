@@ -1,5 +1,6 @@
 use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
+use crate::exon::{ExonColumnIndices, parse_exon_line_into, parse_exon_storable_file_into};
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::regulatory::{
@@ -8,6 +9,9 @@ use crate::regulatory::{
 };
 use crate::transcript::{
     TranscriptColumnIndices, parse_transcript_line_into, parse_transcript_storable_file_into,
+};
+use crate::translation::{
+    TranslationColumnIndices, parse_translation_line_into, parse_translation_storable_file_into,
 };
 use crate::util::{
     BatchBuilder, ColumnMap, ProvenanceWriter, is_storable_binary_payload, open_text_reader,
@@ -370,6 +374,16 @@ fn process_partition(
     } else {
         None
     };
+    let exon_col_idx = if kind == EnsemblEntityKind::Exon {
+        Some(ExonColumnIndices::new(&col_map))
+    } else {
+        None
+    };
+    let translation_col_idx = if kind == EnsemblEntityKind::Translation {
+        Some(TranslationColumnIndices::new(&col_map))
+    } else {
+        None
+    };
 
     let batch_size = batch_size.max(1);
     let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size)?;
@@ -391,7 +405,9 @@ fn process_partition(
 
         let use_native_storable = (kind == EnsemblEntityKind::Transcript
             || kind == EnsemblEntityKind::RegulatoryFeature
-            || kind == EnsemblEntityKind::MotifFeature)
+            || kind == EnsemblEntityKind::MotifFeature
+            || kind == EnsemblEntityKind::Exon
+            || kind == EnsemblEntityKind::Translation)
             && cache_info.serializer_type.as_deref() == Some("storable")
             && is_storable_binary_payload(source_file)?;
 
@@ -501,6 +517,72 @@ fn process_partition(
                         },
                     )?;
                 }
+                EnsemblEntityKind::Exon => {
+                    parse_exon_storable_file_into(
+                        source_file,
+                        source_file_str,
+                        &predicate,
+                        coordinate_system_zero_based,
+                        &mut batch_builder,
+                        exon_col_idx.as_ref().unwrap(),
+                        &provenance,
+                        |batch_builder| {
+                            if let Some(err) = batch_builder.take_error() {
+                                return Err(err);
+                            }
+                            match dispatch_row(
+                                &tx,
+                                batch_builder,
+                                &mut emitted_rows,
+                                limit,
+                                batch_size,
+                            )? {
+                                RowDispatchState::Continue => Ok(true),
+                                RowDispatchState::Stop => {
+                                    reached_limit = true;
+                                    Ok(false)
+                                }
+                                RowDispatchState::ConsumerDropped => {
+                                    consumer_dropped = true;
+                                    Ok(false)
+                                }
+                            }
+                        },
+                    )?;
+                }
+                EnsemblEntityKind::Translation => {
+                    parse_translation_storable_file_into(
+                        source_file,
+                        source_file_str,
+                        &predicate,
+                        coordinate_system_zero_based,
+                        &mut batch_builder,
+                        translation_col_idx.as_ref().unwrap(),
+                        &provenance,
+                        |batch_builder| {
+                            if let Some(err) = batch_builder.take_error() {
+                                return Err(err);
+                            }
+                            match dispatch_row(
+                                &tx,
+                                batch_builder,
+                                &mut emitted_rows,
+                                limit,
+                                batch_size,
+                            )? {
+                                RowDispatchState::Continue => Ok(true),
+                                RowDispatchState::Stop => {
+                                    reached_limit = true;
+                                    Ok(false)
+                                }
+                                RowDispatchState::ConsumerDropped => {
+                                    consumer_dropped = true;
+                                    Ok(false)
+                                }
+                            }
+                        },
+                    )?;
+                }
                 EnsemblEntityKind::Variation => {}
             }
 
@@ -575,6 +657,61 @@ fn process_partition(
                     coordinate_system_zero_based,
                     &mut batch_builder,
                     regulatory_col_idx.as_ref().unwrap(),
+                    &provenance,
+                )?,
+                EnsemblEntityKind::Exon => {
+                    let mut exon_stop = false;
+                    let mut exon_consumer_dropped = false;
+                    let cont = parse_exon_line_into(
+                        line_trimmed,
+                        source_file_str,
+                        &cache_info,
+                        &predicate,
+                        coordinate_system_zero_based,
+                        &mut batch_builder,
+                        exon_col_idx.as_ref().unwrap(),
+                        &provenance,
+                        |batch_builder| {
+                            if let Some(err) = batch_builder.take_error() {
+                                return Err(err);
+                            }
+                            match dispatch_row(
+                                &tx,
+                                batch_builder,
+                                &mut emitted_rows,
+                                limit,
+                                batch_size,
+                            )? {
+                                RowDispatchState::Continue => Ok(true),
+                                RowDispatchState::Stop => {
+                                    exon_stop = true;
+                                    Ok(false)
+                                }
+                                RowDispatchState::ConsumerDropped => {
+                                    exon_consumer_dropped = true;
+                                    Ok(false)
+                                }
+                            }
+                        },
+                    )?;
+                    if exon_consumer_dropped {
+                        return Ok(());
+                    }
+                    if exon_stop {
+                        stop = true;
+                        break;
+                    }
+                    // Rows dispatched internally via on_row_added; don't double-dispatch
+                    false
+                }
+                EnsemblEntityKind::Translation => parse_translation_line_into(
+                    line_trimmed,
+                    source_file_str,
+                    &cache_info,
+                    &predicate,
+                    coordinate_system_zero_based,
+                    &mut batch_builder,
+                    translation_col_idx.as_ref().unwrap(),
                     &provenance,
                 )?,
             };

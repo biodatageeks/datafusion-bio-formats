@@ -8,8 +8,9 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::test_utils::find_leaf_exec;
 use datafusion_bio_format_ensembl_cache::{
-    EnsemblCacheOptions, MotifFeatureTableProvider, RegulatoryFeatureTableProvider,
-    TranscriptTableProvider, VariationTableProvider,
+    EnsemblCacheOptions, ExonTableProvider, MotifFeatureTableProvider,
+    RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,
+    VariationTableProvider,
 };
 use std::sync::Arc;
 
@@ -665,6 +666,456 @@ async fn transcript_backward_compat_existing_queries_work() -> datafusion::commo
         .downcast_ref::<StringArray>()
         .expect("expected StringArray");
     assert_eq!(stable_ids.value(0), "ENST000001");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Exon tests (real VEP 115 fixture)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn exon_real_115_query_returns_rows() -> datafusion::common::Result<()> {
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT chrom, start, \"end\", strand, stable_id, \
+             transcript_stable_id, exon_rank FROM exons",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        total_rows > 0,
+        "expected exon rows from real VEP 115 fixture"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_schema_has_all_columns() -> datafusion::common::Result<()> {
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let schema = provider.schema();
+
+    for col in &[
+        "chrom",
+        "start",
+        "end",
+        "strand",
+        "stable_id",
+        "version",
+        "phase",
+        "end_phase",
+        "is_current",
+        "is_constitutive",
+        "transcript_stable_id",
+        "gene_stable_id",
+        "exon_rank",
+        "raw_object_json",
+        "object_hash",
+    ] {
+        assert!(schema.field_with_name(col).is_ok(), "missing column: {col}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_foreign_key_populated() -> datafusion::common::Result<()> {
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT transcript_stable_id FROM exons")
+        .await?
+        .collect()
+        .await?;
+
+    for batch in &batches {
+        let col = batch
+            .column_by_name("transcript_stable_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            col.null_count(),
+            0,
+            "transcript_stable_id should never be null"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_rank_is_non_negative() -> datafusion::common::Result<()> {
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(provider))?;
+
+    // Verify exon_rank is always non-negative
+    let batches = ctx
+        .sql("SELECT exon_rank FROM exons")
+        .await?
+        .collect()
+        .await?;
+
+    for batch in &batches {
+        let ranks = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert!(
+                ranks.value(i) >= 0,
+                "exon_rank should be non-negative, got {}",
+                ranks.value(i)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_coordinates_valid() -> datafusion::common::Result<()> {
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT start, \"end\" FROM exons")
+        .await?
+        .collect()
+        .await?;
+
+    for batch in &batches {
+        let starts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+
+        for i in 0..batch.num_rows() {
+            assert!(
+                starts.value(i) <= ends.value(i),
+                "start ({}) should be <= end ({})",
+                starts.value(i),
+                ends.value(i)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_stable_id_populated() -> datafusion::common::Result<()> {
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT stable_id FROM exons WHERE stable_id IS NOT NULL")
+        .await?
+        .collect()
+        .await?;
+
+    let non_null_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        non_null_rows > 0,
+        "expected some exons with stable_id populated in real VEP data"
+    );
+
+    // Merged cache may contain both Ensembl (ENSE...) and RefSeq (id-...) exon IDs
+    if let Some(batch) = batches.first() {
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        if !col.is_empty() {
+            let id = col.value(0);
+            assert!(
+                id.starts_with("ENSE") || id.starts_with("id-"),
+                "exon stable_id should start with ENSE or id-, got: {id}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_parallel_row_count_invariant() -> datafusion::common::Result<()> {
+    let base_provider =
+        ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(base_provider))?;
+
+    let base_batches = ctx.sql("SELECT chrom FROM exons").await?.collect().await?;
+    let base_count: usize = base_batches.iter().map(|b| b.num_rows()).sum();
+
+    for partitions in [1usize, 2, 4] {
+        let mut options = EnsemblCacheOptions::new(fixture_path("exon_real_115"));
+        options.max_storable_partitions = Some(partitions);
+        let provider = ExonTableProvider::new(options)?;
+        let ctx = session_ctx_with_target_partitions(partitions);
+        ctx.register_table("exons", Arc::new(provider))?;
+
+        let batches = ctx.sql("SELECT chrom FROM exons").await?.collect().await?;
+        let count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            count, base_count,
+            "count mismatch with partitions={partitions}: got {count}, expected {base_count}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_projection_pushdown() -> datafusion::common::Result<()> {
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT stable_id, exon_rank FROM exons")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_columns(), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exon_text_format_works() -> datafusion::common::Result<()> {
+    // The transcript_storable text fixture lacks _trans_exon_array, so no exon
+    // rows will be produced — but the query must not error.
+    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exons", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT start, \"end\", phase, transcript_stable_id FROM exons")
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    // This fixture has no _trans_exon_array, so 0 rows is expected
+    assert_eq!(
+        total_rows, 0,
+        "expected 0 exon rows from text fixture without _trans_exon_array"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Translation tests (real VEP 115 fixture)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn translation_real_115_query_returns_rows() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("translations", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT chrom, start, \"end\", stable_id, \
+             transcript_stable_id FROM translations",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        total_rows > 0,
+        "expected translation rows from real VEP 115 fixture"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_count_leq_transcript_count() -> datafusion::common::Result<()> {
+    let tx_provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let tl_provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(tx_provider))?;
+    ctx.register_table("tl", Arc::new(tl_provider))?;
+
+    let tx_batches = ctx.sql("SELECT stable_id FROM tx").await?.collect().await?;
+    let tx_count: usize = tx_batches.iter().map(|b| b.num_rows()).sum();
+
+    let tl_batches = ctx.sql("SELECT stable_id FROM tl").await?.collect().await?;
+    let tl_count: usize = tl_batches.iter().map(|b| b.num_rows()).sum();
+
+    assert!(
+        tl_count <= tx_count,
+        "translations ({tl_count}) should be <= transcripts ({tx_count})"
+    );
+    assert!(tl_count > 0, "expected at least some translations");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_foreign_key_populated() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("translations", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT transcript_stable_id FROM translations")
+        .await?
+        .collect()
+        .await?;
+
+    for batch in &batches {
+        let col = batch
+            .column_by_name("transcript_stable_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            col.null_count(),
+            0,
+            "transcript_stable_id should never be null"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_stable_id_populated() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("translations", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT stable_id FROM translations WHERE stable_id IS NOT NULL")
+        .await?
+        .collect()
+        .await?;
+
+    let non_null_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        non_null_rows > 0,
+        "expected some translations with stable_id (ENSP)"
+    );
+
+    if let Some(batch) = batches.first() {
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        if !col.is_empty() {
+            assert!(
+                col.value(0).starts_with("ENSP"),
+                "translation stable_id should start with ENSP, got: {}",
+                col.value(0)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_parallel_row_count_invariant() -> datafusion::common::Result<()> {
+    let base_provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let ctx = SessionContext::new();
+    ctx.register_table("translations", Arc::new(base_provider))?;
+
+    let base_batches = ctx
+        .sql("SELECT chrom FROM translations")
+        .await?
+        .collect()
+        .await?;
+    let base_count: usize = base_batches.iter().map(|b| b.num_rows()).sum();
+
+    for partitions in [1usize, 2, 4] {
+        let mut options = EnsemblCacheOptions::new(fixture_path("exon_real_115"));
+        options.max_storable_partitions = Some(partitions);
+        let provider = TranslationTableProvider::new(options)?;
+        let ctx = session_ctx_with_target_partitions(partitions);
+        ctx.register_table("translations", Arc::new(provider))?;
+
+        let batches = ctx
+            .sql("SELECT chrom FROM translations")
+            .await?
+            .collect()
+            .await?;
+        let count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            count, base_count,
+            "count mismatch with partitions={partitions}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_projection_pushdown() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("translations", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT stable_id, transcript_stable_id FROM translations")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_columns(), 2);
 
     Ok(())
 }

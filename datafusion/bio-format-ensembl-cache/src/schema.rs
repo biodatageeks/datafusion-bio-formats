@@ -184,6 +184,50 @@ pub(crate) fn motif_feature_schema(
     new_schema(fields, coordinate_system_zero_based)
 }
 
+pub(crate) fn exon_schema(cache_info: &CacheInfo, coordinate_system_zero_based: bool) -> SchemaRef {
+    let mut fields = vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+        Field::new("strand", DataType::Int8, false),
+        Field::new("stable_id", DataType::Utf8, true),
+        Field::new("version", DataType::Int32, true),
+        Field::new("phase", DataType::Int8, true),
+        Field::new("end_phase", DataType::Int8, true),
+        Field::new("is_current", DataType::Boolean, true),
+        Field::new("is_constitutive", DataType::Boolean, true),
+        Field::new("transcript_stable_id", DataType::Utf8, false),
+        Field::new("gene_stable_id", DataType::Utf8, true),
+        Field::new("exon_rank", DataType::Int32, false),
+        Field::new("raw_object_json", DataType::Utf8, false),
+        Field::new("object_hash", DataType::Utf8, false),
+    ];
+    fields.extend(provenance_fields(cache_info));
+    new_schema(fields, coordinate_system_zero_based)
+}
+
+pub(crate) fn translation_schema(
+    cache_info: &CacheInfo,
+    coordinate_system_zero_based: bool,
+) -> SchemaRef {
+    let mut fields = vec![
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+        Field::new("stable_id", DataType::Utf8, true),
+        Field::new("version", DataType::Int32, true),
+        Field::new("translation_start", DataType::Int64, true),
+        Field::new("translation_end", DataType::Int64, true),
+        Field::new("protein_length", DataType::Int64, true),
+        Field::new("transcript_stable_id", DataType::Utf8, false),
+        Field::new("gene_stable_id", DataType::Utf8, true),
+        Field::new("raw_object_json", DataType::Utf8, false),
+        Field::new("object_hash", DataType::Utf8, false),
+    ];
+    fields.extend(provenance_fields(cache_info));
+    new_schema(fields, coordinate_system_zero_based)
+}
+
 fn provenance_fields(cache_info: &CacheInfo) -> Vec<Field> {
     let mut fields = vec![
         Field::new("species", DataType::Utf8, false),

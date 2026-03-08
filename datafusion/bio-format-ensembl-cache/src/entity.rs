@@ -9,4 +9,8 @@ pub enum EnsemblEntityKind {
     RegulatoryFeature,
     /// Motif feature cache objects.
     MotifFeature,
+    /// Individual exon objects (one row per exon, extracted from transcript cache).
+    Exon,
+    /// Translation objects (one row per coding transcript, extracted from transcript cache).
+    Translation,
 }

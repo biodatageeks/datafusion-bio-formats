@@ -7,7 +7,8 @@ use crate::filter::{extract_simple_predicate, is_pushdown_supported};
 use crate::info::CacheInfo;
 use crate::physical_exec::{EnsemblCacheExec, EnsemblCacheExecConfig};
 use crate::schema::{
-    motif_feature_schema, regulatory_feature_schema, transcript_schema, variation_schema,
+    exon_schema, motif_feature_schema, regulatory_feature_schema, transcript_schema,
+    translation_schema, variation_schema,
 };
 use crate::variation::detect_region_size;
 use async_trait::async_trait;
@@ -105,6 +106,18 @@ impl ProviderInner {
                 let schema =
                     motif_feature_schema(&cache_info, options.coordinate_system_zero_based);
                 let files = discover_regulatory_files(cache_root)?;
+                (schema, files, None)
+            }
+            EnsemblEntityKind::Exon => {
+                validate_serializer(&cache_info)?;
+                let schema = exon_schema(&cache_info, options.coordinate_system_zero_based);
+                let files = discover_transcript_files(cache_root)?;
+                (schema, files, None)
+            }
+            EnsemblEntityKind::Translation => {
+                validate_serializer(&cache_info)?;
+                let schema = translation_schema(&cache_info, options.coordinate_system_zero_based);
+                let files = discover_transcript_files(cache_root)?;
                 (schema, files, None)
             }
         };
@@ -241,6 +254,8 @@ impl EnsemblCacheTableProvider {
             EnsemblEntityKind::MotifFeature => {
                 Ok(Arc::new(MotifFeatureTableProvider::new(options)?))
             }
+            EnsemblEntityKind::Exon => Ok(Arc::new(ExonTableProvider::new(options)?)),
+            EnsemblEntityKind::Translation => Ok(Arc::new(TranslationTableProvider::new(options)?)),
         }
     }
 }
@@ -305,6 +320,36 @@ impl MotifFeatureTableProvider {
     }
 }
 
+/// DataFusion table provider for individual exon objects from VEP transcript cache.
+#[derive(Debug, Clone)]
+pub struct ExonTableProvider {
+    inner: ProviderInner,
+}
+
+impl ExonTableProvider {
+    /// Creates an exon provider from cache options.
+    pub fn new(options: EnsemblCacheOptions) -> Result<Self> {
+        Ok(Self {
+            inner: ProviderInner::new(EnsemblEntityKind::Exon, options)?,
+        })
+    }
+}
+
+/// DataFusion table provider for translation objects from VEP transcript cache.
+#[derive(Debug, Clone)]
+pub struct TranslationTableProvider {
+    inner: ProviderInner,
+}
+
+impl TranslationTableProvider {
+    /// Creates a translation provider from cache options.
+    pub fn new(options: EnsemblCacheOptions) -> Result<Self> {
+        Ok(Self {
+            inner: ProviderInner::new(EnsemblEntityKind::Translation, options)?,
+        })
+    }
+}
+
 macro_rules! impl_table_provider {
     ($provider:ty) => {
         #[async_trait]
@@ -345,3 +390,5 @@ impl_table_provider!(VariationTableProvider);
 impl_table_provider!(TranscriptTableProvider);
 impl_table_provider!(RegulatoryFeatureTableProvider);
 impl_table_provider!(MotifFeatureTableProvider);
+impl_table_provider!(ExonTableProvider);
+impl_table_provider!(TranslationTableProvider);

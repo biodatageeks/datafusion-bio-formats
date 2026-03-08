@@ -1,0 +1,6 @@
+species homo_sapiens
+assembly GRCh38
+cache_version 115
+serialiser_type storable
+var_type tabix
+variation_cols chr,variation_name,failed,somatic,start,end,allele_string,strand,clin_sig,phenotype_or_disease

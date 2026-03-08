@@ -9,6 +9,7 @@ mod decode;
 mod discovery;
 mod entity;
 mod errors;
+mod exon;
 mod filter;
 mod info;
 mod physical_exec;
@@ -16,11 +17,13 @@ mod regulatory;
 mod schema;
 mod table_provider;
 mod transcript;
+mod translation;
 mod util;
 mod variation;
 
 pub use entity::EnsemblEntityKind;
 pub use table_provider::{
-    EnsemblCacheOptions, EnsemblCacheTableProvider, MotifFeatureTableProvider,
-    RegulatoryFeatureTableProvider, TranscriptTableProvider, VariationTableProvider,
+    EnsemblCacheOptions, EnsemblCacheTableProvider, ExonTableProvider, MotifFeatureTableProvider,
+    RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,
+    VariationTableProvider,
 };
