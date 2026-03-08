@@ -1413,11 +1413,13 @@ async fn translation_sequence_projection_pushdown() -> datafusion::common::Resul
 }
 
 // ---------------------------------------------------------------------------
-// Gnomon filter tests (real VEP 115 fixture)
+// Gnomon / RefSeq predicted transcript tests (real VEP 115 fixture)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn transcript_gnomon_source_excluded() -> datafusion::common::Result<()> {
+async fn transcript_gnomon_source_included() -> datafusion::common::Result<()> {
+    // VEP evaluates Gnomon (XM_/XR_) transcripts in --merged mode.
+    // They must NOT be filtered out.
     let provider =
         TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
     let ctx = SessionContext::new();
@@ -1430,30 +1432,24 @@ async fn transcript_gnomon_source_excluded() -> datafusion::common::Result<()> {
         .await?;
 
     let gnomon_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-    assert_eq!(
-        gnomon_rows, 0,
-        "Gnomon transcripts should be filtered out, found {gnomon_rows}"
+    assert!(
+        gnomon_rows > 0,
+        "Gnomon transcripts should be present for VEP merged mode parity"
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn exon_gnomon_transcripts_excluded() -> datafusion::common::Result<()> {
-    // Exon table should not contain exons from Gnomon transcripts.
-    // We verify by checking that no exon's transcript_id matches a known
-    // Gnomon pattern (XM_/XR_ model transcripts from NCBI predictions).
+async fn exon_stable_ids_are_exon_patterns() -> datafusion::common::Result<()> {
+    // Exon stable_id column should contain ENSE*/exon-* patterns,
+    // never transcript (ENST*) or gene (ENSG*) IDs.
     let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
 
-    // All Gnomon transcripts have XM_ or XR_ prefixed stable IDs that are
-    // NOT also present as curated RefSeq (NM_/NR_) entries.  However, the
-    // simplest check is that the parent transcript is absent from the
-    // transcript table (which filters Gnomon).  Here we just verify stable_id
-    // column contains only ENSE* or exon-* patterns (no ENST/ENSG leaks).
     let batches = ctx
-        .sql("SELECT stable_id FROM exons")
+        .sql("SELECT stable_id FROM exons WHERE stable_id IS NOT NULL")
         .await?
         .collect()
         .await?;
@@ -1465,9 +1461,6 @@ async fn exon_gnomon_transcripts_excluded() -> datafusion::common::Result<()> {
             .downcast_ref::<StringArray>()
             .unwrap();
         for i in 0..ids.len() {
-            if ids.is_null(i) {
-                panic!("exon stable_id should never be null after filtering");
-            }
             let id = ids.value(i);
             assert!(
                 !id.starts_with("ENST") && !id.starts_with("ENSG"),

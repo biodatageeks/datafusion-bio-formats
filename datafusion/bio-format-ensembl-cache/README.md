@@ -31,10 +31,6 @@ DataFusion `TableProvider` implementations for raw Ensembl VEP cache directories
 The following entries are automatically filtered out during extraction to match
 VEP's own annotation behaviour:
 
-- **Gnomon transcripts** (`source = 'Gnomon'`): NCBI automated gene predictions
-  (XM\_/XR\_ prefixed model transcripts) are excluded from transcript, exon, and
-  translation tables. VEP does not use Gnomon transcripts for annotation even in
-  `--merged` mode.
 - **LOC-prefixed gene pseudo-records**: Gene-level placeholder entries with
   `LOC*` stable IDs (e.g. `LOC644525`) are not real transcripts. They have
   `biotype = "pseudogene"`, empty exon arrays, and are skipped by VEP during
