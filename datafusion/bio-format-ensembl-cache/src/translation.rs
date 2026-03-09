@@ -248,20 +248,17 @@ pub(crate) fn parse_translation_line_into(
     }
 
     // Sequences from _variation_effect_feature_cache — only parse when projected.
-    // Null out sequences with ambiguous bases (N/X) — see transcript.rs comment.
     if col_idx.sequences_projected {
         let vef_cache = object
             .get("_variation_effect_feature_cache")
             .and_then(unwrap_blessed_object_optional);
         if let Some(idx) = col_idx.peptide_seq {
             let value = vef_cache.and_then(|c| json_str(c.get("peptide")));
-            let clean = value.as_ref().filter(|s| !s.contains('X'));
-            batch.set_opt_utf8_owned(idx, clean);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
         }
         if let Some(idx) = col_idx.cdna_seq {
             let value = vef_cache.and_then(|c| json_str(c.get("translateable_seq")));
-            let clean = value.as_ref().filter(|s| !s.contains('N'));
-            batch.set_opt_utf8_owned(idx, clean);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
         }
     }
 
@@ -416,7 +413,6 @@ where
         }
 
         // Sequences from _variation_effect_feature_cache — only parse when projected.
-        // Null out sequences with ambiguous bases (N/X) — see transcript.rs comment.
         if col_idx.sequences_projected {
             if let Some(vef_cache) = obj
                 .get("_variation_effect_feature_cache")
@@ -424,13 +420,11 @@ where
             {
                 if let Some(idx) = col_idx.peptide_seq {
                     let value = sv_str(vef_cache.get("peptide"));
-                    let clean = value.as_ref().filter(|s| !s.contains('X'));
-                    batch.set_opt_utf8_owned(idx, clean);
+                    batch.set_opt_utf8_owned(idx, value.as_ref());
                 }
                 if let Some(idx) = col_idx.cdna_seq {
                     let value = sv_str(vef_cache.get("translateable_seq"));
-                    let clean = value.as_ref().filter(|s| !s.contains('N'));
-                    batch.set_opt_utf8_owned(idx, clean);
+                    batch.set_opt_utf8_owned(idx, value.as_ref());
                 }
             }
         }
