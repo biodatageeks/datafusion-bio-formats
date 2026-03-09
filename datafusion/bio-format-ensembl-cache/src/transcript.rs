@@ -633,7 +633,15 @@ pub(crate) fn parse_transcript_line_into(
         );
     }
     if let Some(idx) = col_idx.gene_hgnc_id {
-        batch.set_opt_utf8_owned(idx, json_str(object.get("gene_hgnc_id")).as_ref());
+        batch.set_opt_utf8_owned(
+            idx,
+            json_str(
+                object
+                    .get("gene_hgnc_id")
+                    .or_else(|| object.get("_gene_hgnc_id")),
+            )
+            .as_ref(),
+        );
     }
     if let Some(idx) = col_idx.refseq_id {
         let refseq_id = json_str(object.get("refseq_id").or_else(|| object.get("_refseq")))
@@ -1014,7 +1022,11 @@ fn append_transcript_storable_row_into(
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     if let Some(idx) = col_idx.gene_hgnc_id {
-        let value = sv_str(object.get("gene_hgnc_id"));
+        let value = sv_str(
+            object
+                .get("gene_hgnc_id")
+                .or_else(|| object.get("_gene_hgnc_id")),
+        );
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     if let Some(idx) = col_idx.refseq_id {

@@ -285,7 +285,7 @@ where
             batch.set_opt_utf8_owned(idx, gene_stable_id.as_ref());
         }
         if let Some(idx) = col_idx.exon_rank {
-            batch.set_opt_i32(idx, i32::try_from(rank).ok());
+            batch.set_opt_i32(idx, i32::try_from(rank + 1).ok());
         }
 
         let need_json = col_idx.raw_object_json.is_some();
@@ -491,7 +491,7 @@ where
                 batch.set_opt_utf8_owned(idx, gene_stable_id.as_ref());
             }
             if let Some(idx) = col_idx.exon_rank {
-                batch.set_opt_i32(idx, i32::try_from(rank).ok());
+                batch.set_opt_i32(idx, i32::try_from(rank + 1).ok());
             }
 
             let need_json = col_idx.raw_object_json.is_some();

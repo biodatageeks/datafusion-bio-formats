@@ -281,18 +281,99 @@ ctx.register_table("vep_cache", table)?;
 # }
 ```
 
-## Example: Parquet Export
+## Parquet Cache Generation
 
-Export any entity type to a single Parquet file:
+The `storable_to_parquet` example converts raw VEP cache directories into
+Parquet files suitable for downstream annotation engines.
+
+### Prerequisites
+
+1. **VEP cache**: Download and install an Ensembl VEP cache. For merged
+   (Ensembl + RefSeq) caches:
+
+   ```bash
+   # Example: VEP 115, GRCh38, merged cache
+   vep_install --CACHEDIR /data/vep --SPECIES homo_sapiens_merged --ASSEMBLY GRCh38 --VERSION 115
+   ```
+
+   The cache root is the version/assembly directory, e.g.
+   `/data/vep/homo_sapiens_merged/115_GRCh38`.
+
+2. **Build the converter** (release mode recommended for large caches):
+
+   ```bash
+   cargo build --release --example storable_to_parquet --package datafusion-bio-format-ensembl-cache
+   ```
+
+### Usage
+
+```
+cargo run --release --example storable_to_parquet -- \
+  <cache_root> <output_dir> <entity> [partitions] [--chrom CHROM]
+```
+
+| Argument | Description |
+|---|---|
+| `cache_root` | Path to VEP cache version directory (e.g. `.../115_GRCh38`) |
+| `output_dir` | Directory for output Parquet files |
+| `entity` | Entity type: `transcript`, `exon`, `translation`, `regulatory`, `motif`, `variation` |
+| `partitions` | Number of parallel partitions (default: 8) |
+| `--chrom CHROM` | Optional chromosome filter (e.g. `22`, `X`) |
+
+Output filename: `<output_dir>/<version>_<assembly>_<entity>[_<chrom>].parquet`
+
+### Example: Generate all chr22 Parquet files
+
+```bash
+CACHE=/data/vep/homo_sapiens_merged/115_GRCh38
+OUT=/data/vep/parquet
+
+for entity in transcript exon translation regulatory motif variation; do
+  cargo run --release --example storable_to_parquet -- \
+    $CACHE $OUT $entity 8 --chrom 22
+done
+```
+
+This produces:
+
+```
+115_GRCh38_transcript_22.parquet
+115_GRCh38_exon_22.parquet
+115_GRCh38_translation_22.parquet
+115_GRCh38_regulatory_22.parquet
+115_GRCh38_motif_22.parquet
+115_GRCh38_variation_22.parquet
+```
+
+### Example: Generate whole-genome Parquet files
+
+Omit `--chrom` to export all chromosomes into a single file per entity:
 
 ```bash
 cargo run --release --example storable_to_parquet -- \
-  /path/to/homo_sapiens_merged/115_GRCh38 \
-  /output/dir \
-  transcript \
-  8 \
-  --chrom 22
+  $CACHE $OUT transcript 8
 ```
 
-Supported entity types: `transcript`, `exon`, `translation`, `regulatory`, `motif`, `variation`.
-Output naming: `<output_dir>/115_GRCh38_transcript_22.parquet`.
+### Deduplication
+
+The VEP cache bins transcripts by genomic region, so transcripts near bin
+boundaries appear in multiple bins. The converter applies SQL-level dedup
+using `ROW_NUMBER()` window functions:
+
+- **Transcripts**: deduplicated by `stable_id`, preferring entries with
+  non-null `cds_start`
+- **Translations**: deduplicated by `transcript_id`, preferring entries
+  with non-null `cdna_coding_start`
+- **Exons**: deduplicated by `(transcript_id, exon_number)`, preferring
+  entries with non-null `stable_id`
+- **Regulatory/Motif/Variation**: no dedup needed (no cross-bin overlap)
+
+### Performance notes
+
+- Storable-format entities (transcript, exon, translation, regulatory, motif)
+  require full Perl Storable binary deserialization — expect ~80-90s per
+  entity for a single chromosome on an M-series Mac.
+- Memory scales with partition count. For Storable entities, 4-8 partitions
+  is a good balance; higher values increase RSS without improving throughput.
+- Variation entities use a lightweight TSV parser and are significantly faster.
+- Output uses ZSTD compression for good size/speed tradeoff.
