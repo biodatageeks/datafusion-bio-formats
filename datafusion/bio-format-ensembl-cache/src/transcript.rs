@@ -54,6 +54,16 @@ pub(crate) struct TranscriptColumnIndices {
     tsl: Option<usize>,
     mane_select: Option<usize>,
     mane_plus_clinical: Option<usize>,
+    gene_phenotype: Option<usize>,
+    ccds: Option<usize>,
+    swissprot: Option<usize>,
+    trembl: Option<usize>,
+    uniparc: Option<usize>,
+    uniprot_isoform: Option<usize>,
+    cds_start_nf: Option<usize>,
+    cds_end_nf: Option<usize>,
+    mature_mirna_regions: Option<usize>,
+    transcript_attributes_projected: bool,
     raw_object_json: Option<usize>,
     object_hash: Option<usize>,
 }
@@ -73,6 +83,12 @@ impl TranscriptColumnIndices {
         let cdna_seq = col_map.get("cdna_seq");
         let peptide_seq = col_map.get("peptide_seq");
         let sequences_projected = cdna_seq.is_some() || peptide_seq.is_some();
+
+        let cds_start_nf = col_map.get("cds_start_nf");
+        let cds_end_nf = col_map.get("cds_end_nf");
+        let mature_mirna_regions = col_map.get("mature_mirna_regions");
+        let transcript_attributes_projected =
+            cds_start_nf.is_some() || cds_end_nf.is_some() || mature_mirna_regions.is_some();
 
         Self {
             chrom: col_map.get("chrom"),
@@ -107,10 +123,27 @@ impl TranscriptColumnIndices {
             tsl: col_map.get("tsl"),
             mane_select: col_map.get("mane_select"),
             mane_plus_clinical: col_map.get("mane_plus_clinical"),
+            gene_phenotype: col_map.get("gene_phenotype"),
+            ccds: col_map.get("ccds"),
+            swissprot: col_map.get("swissprot"),
+            trembl: col_map.get("trembl"),
+            uniparc: col_map.get("uniparc"),
+            uniprot_isoform: col_map.get("uniprot_isoform"),
+            cds_start_nf,
+            cds_end_nf,
+            mature_mirna_regions,
+            transcript_attributes_projected,
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct TranscriptAttributes {
+    cds_start_nf: bool,
+    cds_end_nf: bool,
+    mature_mirna_regions: Vec<(i64, i64)>,
 }
 
 struct TranscriptRowCore {
@@ -413,6 +446,133 @@ fn compute_cds_from_translation_exons<T>(
     }
 }
 
+fn non_dash_string(value: Option<String>) -> Option<String> {
+    value.filter(|v| v != "-")
+}
+
+fn json_first_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| non_dash_string(json_str(object.get(*key))))
+}
+
+fn sv_first_string(
+    object: &std::collections::BTreeMap<String, SValue>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| non_dash_string(sv_str(object.get(*key))))
+}
+
+fn json_first_bool(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| json_bool(object.get(*key)))
+}
+
+fn sv_first_bool(
+    object: &std::collections::BTreeMap<String, SValue>,
+    keys: &[&str],
+) -> Option<bool> {
+    keys.iter().find_map(|key| sv_bool(object.get(*key)))
+}
+
+fn parse_cdna_range(value: &str) -> Option<(i64, i64)> {
+    let mut parts = value.splitn(2, '-');
+    let start = parts.next()?.trim().parse::<i64>().ok()?;
+    let end = parts.next()?.trim().parse::<i64>().ok()?;
+    Some((start, end))
+}
+
+fn mirna_cdna_to_genomic_range(
+    tx_start: i64,
+    tx_end: i64,
+    strand: i8,
+    cdna_start: i64,
+    cdna_end: i64,
+) -> (i64, i64) {
+    if strand >= 0 {
+        (tx_start + cdna_start - 1, tx_start + cdna_end - 1)
+    } else {
+        (tx_end - cdna_end + 1, tx_end - cdna_start + 1)
+    }
+}
+
+fn parse_transcript_attributes_json(
+    object: &serde_json::Map<String, Value>,
+    tx_start: i64,
+    tx_end: i64,
+    strand: i8,
+    parse_mirna_regions: bool,
+) -> TranscriptAttributes {
+    let mut out = TranscriptAttributes::default();
+    let Some(attributes) = object.get("attributes").and_then(Value::as_array) else {
+        return out;
+    };
+
+    for attr in attributes {
+        let Some(attr_obj) = unwrap_blessed_object_optional(attr) else {
+            continue;
+        };
+        let code = attr_obj.get("code").and_then(Value::as_str).unwrap_or("");
+        let value = attr_obj.get("value").and_then(Value::as_str).unwrap_or("");
+
+        match code {
+            "cds_start_NF" if value == "1" => out.cds_start_nf = true,
+            "cds_end_NF" if value == "1" => out.cds_end_nf = true,
+            "miRNA" if parse_mirna_regions => {
+                if let Some((cdna_start, cdna_end)) = parse_cdna_range(value) {
+                    out.mature_mirna_regions.push(mirna_cdna_to_genomic_range(
+                        tx_start, tx_end, strand, cdna_start, cdna_end,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn parse_transcript_attributes_storable(
+    object: &std::collections::BTreeMap<String, SValue>,
+    tx_start: i64,
+    tx_end: i64,
+    strand: i8,
+    parse_mirna_regions: bool,
+) -> TranscriptAttributes {
+    let mut out = TranscriptAttributes::default();
+    let Some(attributes) = object.get("attributes").and_then(SValue::as_array) else {
+        return out;
+    };
+
+    for attr in attributes {
+        let Some(attr_obj) = attr.as_hash() else {
+            continue;
+        };
+        let code = attr_obj
+            .get("code")
+            .and_then(SValue::as_string)
+            .unwrap_or_default();
+        let value = attr_obj
+            .get("value")
+            .and_then(SValue::as_string)
+            .unwrap_or_default();
+
+        match code.as_str() {
+            "cds_start_NF" if value == "1" => out.cds_start_nf = true,
+            "cds_end_NF" if value == "1" => out.cds_end_nf = true,
+            "miRNA" if parse_mirna_regions => {
+                if let Some((cdna_start, cdna_end)) = parse_cdna_range(&value) {
+                    out.mature_mirna_regions.push(mirna_cdna_to_genomic_range(
+                        tx_start, tx_end, strand, cdna_start, cdna_end,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Direct builder parser for text lines (Phase 1+2+6)
 // ---------------------------------------------------------------------------
@@ -558,12 +718,12 @@ pub(crate) fn parse_transcript_line_into(
         return Ok(false);
     }
 
+    let biotype = json_str(object.get("biotype"));
+
     // Skip generic pseudogene / aligned_transcript biotypes — VEP does not
     // use these for consequence annotation.
-    if let Some(bt) = json_str(object.get("biotype")) {
-        if is_excluded_biotype(&bt) {
-            return Ok(false);
-        }
+    if biotype.as_deref().is_some_and(is_excluded_biotype) {
+        return Ok(false);
     }
 
     // Write required columns (direct index access, no HashMap lookups)
@@ -588,7 +748,7 @@ pub(crate) fn parse_transcript_line_into(
         batch.set_opt_i32(idx, json_i32(object.get("version")));
     }
     if let Some(idx) = col_idx.biotype {
-        batch.set_opt_utf8_owned(idx, json_str(object.get("biotype")).as_ref());
+        batch.set_opt_utf8_owned(idx, biotype.as_ref());
     }
     if let Some(idx) = col_idx.source {
         batch.set_opt_utf8_owned(
@@ -790,6 +950,69 @@ pub(crate) fn parse_transcript_line_into(
         batch.set_opt_utf8_owned(idx, json_str(object.get("mane_plus_clinical")).as_ref());
     }
 
+    if let Some(idx) = col_idx.gene_phenotype {
+        batch.set_opt_bool(
+            idx,
+            json_first_bool(object, &["_gene_phenotype", "gene_phenotype"]),
+        );
+    }
+    if let Some(idx) = col_idx.ccds {
+        let value = json_first_string(object, &["_ccds", "ccds"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.swissprot {
+        let value = json_first_string(object, &["_swissprot", "swissprot"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.trembl {
+        let value = json_first_string(object, &["_trembl", "trembl"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.uniparc {
+        let value = json_first_string(object, &["_uniparc", "uniparc"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.uniprot_isoform {
+        let value = json_first_string(object, &["_uniprot_isoform", "uniprot_isoform"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+
+    if col_idx.transcript_attributes_projected {
+        let parse_mirna_regions =
+            biotype.as_deref() == Some("miRNA") && col_idx.mature_mirna_regions.is_some();
+        let attributes = parse_transcript_attributes_json(
+            object,
+            source_start,
+            source_end,
+            strand,
+            parse_mirna_regions,
+        );
+
+        if let Some(idx) = col_idx.cds_start_nf {
+            batch.set_opt_bool(idx, Some(attributes.cds_start_nf));
+        }
+        if let Some(idx) = col_idx.cds_end_nf {
+            batch.set_opt_bool(idx, Some(attributes.cds_end_nf));
+        }
+        if let Some(idx) = col_idx.mature_mirna_regions {
+            if parse_mirna_regions {
+                let regions = attributes
+                    .mature_mirna_regions
+                    .iter()
+                    .map(|&(region_start, region_end)| {
+                        (
+                            normalize_genomic_start(region_start, coordinate_system_zero_based),
+                            normalize_genomic_end(region_end, coordinate_system_zero_based),
+                        )
+                    })
+                    .collect::<Vec<(i64, i64)>>();
+                batch.set_mirna_region_list(idx, Some(regions.as_slice()));
+            } else {
+                batch.set_mirna_region_list(idx, None);
+            }
+        }
+    }
+
     // Only compute canonical JSON + hash if projected
     let need_json = col_idx.raw_object_json.is_some();
     let need_hash = col_idx.object_hash.is_some();
@@ -883,11 +1106,11 @@ where
             return Ok(true);
         }
 
+        let biotype = sv_str(obj.get("biotype"));
+
         // Skip generic pseudogene / aligned_transcript biotypes.
-        if let Some(bt) = sv_str(obj.get("biotype")) {
-            if is_excluded_biotype(&bt) {
-                return Ok(true);
-            }
+        if biotype.as_deref().is_some_and(is_excluded_biotype) {
+            return Ok(true);
         }
 
         let core = TranscriptRowCore {
@@ -961,6 +1184,7 @@ fn append_transcript_storable_row_into(
         strand,
         stable_id,
     } = core;
+    let biotype = sv_str(object.get("biotype"));
 
     // Required columns
     if let Some(idx) = col_idx.chrom {
@@ -987,8 +1211,7 @@ fn append_transcript_storable_row_into(
         );
     }
     if let Some(idx) = col_idx.biotype {
-        let value = sv_str(object.get("biotype"));
-        batch.set_opt_utf8_owned(idx, value.as_ref());
+        batch.set_opt_utf8_owned(idx, biotype.as_ref());
     }
     if let Some(idx) = col_idx.source {
         let value = sv_str(object.get("source").or_else(|| object.get("_source_cache")));
@@ -1184,6 +1407,69 @@ fn append_transcript_storable_row_into(
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
 
+    if let Some(idx) = col_idx.gene_phenotype {
+        batch.set_opt_bool(
+            idx,
+            sv_first_bool(object, &["_gene_phenotype", "gene_phenotype"]),
+        );
+    }
+    if let Some(idx) = col_idx.ccds {
+        let value = sv_first_string(object, &["_ccds", "ccds"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.swissprot {
+        let value = sv_first_string(object, &["_swissprot", "swissprot"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.trembl {
+        let value = sv_first_string(object, &["_trembl", "trembl"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.uniparc {
+        let value = sv_first_string(object, &["_uniparc", "uniparc"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.uniprot_isoform {
+        let value = sv_first_string(object, &["_uniprot_isoform", "uniprot_isoform"]);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+
+    if col_idx.transcript_attributes_projected {
+        let parse_mirna_regions =
+            biotype.as_deref() == Some("miRNA") && col_idx.mature_mirna_regions.is_some();
+        let attributes = parse_transcript_attributes_storable(
+            object,
+            source_start,
+            source_end,
+            strand,
+            parse_mirna_regions,
+        );
+
+        if let Some(idx) = col_idx.cds_start_nf {
+            batch.set_opt_bool(idx, Some(attributes.cds_start_nf));
+        }
+        if let Some(idx) = col_idx.cds_end_nf {
+            batch.set_opt_bool(idx, Some(attributes.cds_end_nf));
+        }
+        if let Some(idx) = col_idx.mature_mirna_regions {
+            if parse_mirna_regions {
+                let regions = attributes
+                    .mature_mirna_regions
+                    .iter()
+                    .map(|&(region_start, region_end)| {
+                        (
+                            normalize_genomic_start(region_start, coordinate_system_zero_based),
+                            normalize_genomic_end(region_end, coordinate_system_zero_based),
+                        )
+                    })
+                    .collect::<Vec<(i64, i64)>>();
+                batch.set_mirna_region_list(idx, Some(regions.as_slice()));
+            } else {
+                batch.set_mirna_region_list(idx, None);
+            }
+        }
+    }
+
     // Only compute canonical JSON + hash if projected
     let need_json = col_idx.raw_object_json.is_some();
     let need_hash = col_idx.object_hash.is_some();
@@ -1240,4 +1526,100 @@ fn sv_i64(value: Option<&SValue>) -> Option<i64> {
 
 fn sv_bool(value: Option<&SValue>) -> Option<bool> {
     value.and_then(SValue::as_bool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn json_transcript_attributes_parse_flags_and_mirna_regions_plus_strand() {
+        let payload = json!({
+            "attributes": [
+                { "code": "cds_start_NF", "value": "1" },
+                { "code": "miRNA", "value": "42-59" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, true);
+
+        assert!(parsed.cds_start_nf);
+        assert!(!parsed.cds_end_nf);
+        assert_eq!(parsed.mature_mirna_regions, vec![(141, 158)]);
+    }
+
+    #[test]
+    fn json_transcript_attributes_parse_wrapped_minus_strand_regions() {
+        let payload = json!({
+            "attributes": [
+                {
+                    "__class": "Bio::EnsEMBL::Attribute",
+                    "__value": { "code": "cds_end_NF", "value": "1" }
+                },
+                {
+                    "__class": "Bio::EnsEMBL::Attribute",
+                    "__value": { "code": "miRNA", "value": "42-59" }
+                }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+
+        let parsed = parse_transcript_attributes_json(object, 100, 200, -1, true);
+
+        assert!(!parsed.cds_start_nf);
+        assert!(parsed.cds_end_nf);
+        assert_eq!(parsed.mature_mirna_regions, vec![(142, 159)]);
+    }
+
+    #[test]
+    fn storable_transcript_attributes_parse_flags_and_mirna_regions() {
+        let mut attr_start = BTreeMap::new();
+        attr_start.insert(
+            "code".to_string(),
+            SValue::String(Arc::from("cds_start_NF")),
+        );
+        attr_start.insert("value".to_string(), SValue::String(Arc::from("1")));
+
+        let mut attr_region = BTreeMap::new();
+        attr_region.insert("code".to_string(), SValue::String(Arc::from("miRNA")));
+        attr_region.insert("value".to_string(), SValue::String(Arc::from("42-59")));
+
+        let mut object = BTreeMap::new();
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![
+                SValue::Hash(Arc::new(attr_start)),
+                SValue::Hash(Arc::new(attr_region)),
+            ])),
+        );
+
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, true);
+
+        assert!(parsed.cds_start_nf);
+        assert!(!parsed.cds_end_nf);
+        assert_eq!(parsed.mature_mirna_regions, vec![(141, 158)]);
+    }
+
+    #[test]
+    fn json_first_string_filters_exact_dash_only() {
+        let payload = json!({
+            "_trembl": "-",
+            "trembl": "Q9TEST",
+            "_uniprot_isoform": "P05546-1"
+        });
+        let object = payload.as_object().unwrap();
+
+        assert_eq!(
+            json_first_string(object, &["_trembl", "trembl"]).as_deref(),
+            Some("Q9TEST")
+        );
+        assert_eq!(
+            json_first_string(object, &["_uniprot_isoform"]).as_deref(),
+            Some("P05546-1")
+        );
+    }
 }

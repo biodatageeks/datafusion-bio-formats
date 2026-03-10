@@ -11,6 +11,9 @@ Variant Effect Predictor (VEP) annotation is a critical step in genomic analysis
 The VEP annotation engine spans two repositories with clear separation of concerns:
 
 1. **`datafusion-bio-formats`** (this repo) — Extend the Ensembl cache transcript table provider with structured columns needed for consequence prediction (exon arrays, coding sequences, peptide sequences, codon tables, MANE annotations)
+   and promote frequently used VEP CSQ metadata out of `raw_object_json`
+   (gene phenotype, CCDS/UniProt IDs, CDS incompleteness flags, mature miRNA
+   regions, motif transcription factors)
 
 2. **`datafusion-bio-functions`** (separate repo) — New `bio-function-vep` crate containing:
    - Variant lookup against cached known variants (`lookup_variants()` table function)
@@ -36,8 +39,11 @@ The VEP engine is format-agnostic. It consumes cache data through DataFusion `Ta
 
 **This repo (`datafusion-bio-formats`):**
 - `datafusion/bio-format-ensembl-cache/src/schema.rs` — Add structured columns to `transcript_schema()`
-- `datafusion/bio-format-ensembl-cache/src/transcript.rs` — Parse exons, sequences, codon tables from JSON/storable
+- `datafusion/bio-format-ensembl-cache/src/transcript.rs` — Parse exons, sequences, transcript flags, miRNA regions, and CSQ metadata from JSON/storable
+- `datafusion/bio-format-ensembl-cache/src/regulatory.rs` — Parse motif transcription factors from JSON/storable
 - `datafusion/bio-format-ensembl-cache/src/util.rs` — Add `List<Struct>` builder support
+- `datafusion/bio-format-ensembl-cache/tests/integration_tests.rs` — Cover promoted transcript and motif columns
+- `datafusion/bio-format-ensembl-cache/README.md` — Document the expanded schema contract
 
 **Separate repo (`datafusion-bio-functions`):**
 - New crate `datafusion/bio-function-vep/` with consequence engine, index layer, execution layer, and UDFs

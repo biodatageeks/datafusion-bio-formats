@@ -39,6 +39,7 @@ pub(crate) struct RegulatoryColumnIndices {
     score: Option<usize>,
     binding_matrix: Option<usize>,
     overlapping_regulatory_feature: Option<usize>,
+    transcription_factors: Option<usize>,
     // Shared
     cell_types: Option<usize>,
     raw_object_json: Option<usize>,
@@ -60,11 +61,38 @@ impl RegulatoryColumnIndices {
             score: col_map.get("score"),
             binding_matrix: col_map.get("binding_matrix"),
             overlapping_regulatory_feature: col_map.get("overlapping_regulatory_feature"),
+            transcription_factors: col_map.get("transcription_factors"),
             cell_types: col_map.get("cell_types"),
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
     }
+}
+
+fn json_transcription_factors(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    [
+        "_transcription_factors",
+        "transcription_factors",
+        "_transcription_factor",
+        "transcription_factor",
+    ]
+    .into_iter()
+    .find_map(|key| json_str(object.get(key)).filter(|value| value != "-"))
+}
+
+fn storable_transcription_factors(
+    object: &std::collections::BTreeMap<String, SValue>,
+) -> Option<String> {
+    [
+        "_transcription_factors",
+        "transcription_factors",
+        "_transcription_factor",
+        "transcription_factor",
+    ]
+    .into_iter()
+    .find_map(|key| sv_str(object.get(key)).filter(|value| value != "-"))
 }
 
 struct RegulatoryRowCore {
@@ -254,6 +282,10 @@ pub(crate) fn parse_regulatory_line_into(
             }
             if let Some(idx) = col_idx.binding_matrix {
                 batch.set_opt_utf8_owned(idx, json_str(object.get("binding_matrix")).as_ref());
+            }
+            if let Some(idx) = col_idx.transcription_factors {
+                let value = json_transcription_factors(object);
+                batch.set_opt_utf8_owned(idx, value.as_ref());
             }
             if let Some(idx) = col_idx.cell_types {
                 batch.set_opt_utf8_owned(idx, json_str(object.get("cell_types")).as_ref());
@@ -537,6 +569,10 @@ fn append_regulatory_storable_row_into(
                 let value = sv_str(object.get("binding_matrix"));
                 batch.set_opt_utf8_owned(idx, value.as_ref());
             }
+            if let Some(idx) = col_idx.transcription_factors {
+                let value = storable_transcription_factors(object);
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
             if let Some(idx) = col_idx.cell_types {
                 let value = sv_str(object.get("cell_types"));
                 batch.set_opt_utf8_owned(idx, value.as_ref());
@@ -590,4 +626,40 @@ fn sv_f64(value: Option<&SValue>) -> Option<f64> {
     value
         .and_then(SValue::as_string)
         .and_then(|v| v.parse::<f64>().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    #[test]
+    fn json_transcription_factors_supports_aliases_and_dash_filtering() {
+        let payload = json!({
+            "_transcription_factors": "-",
+            "transcription_factors": ["TFAP2A", "GATA3"]
+        });
+        let object = payload.as_object().unwrap();
+
+        assert_eq!(
+            json_transcription_factors(object).as_deref(),
+            Some("TFAP2A,GATA3")
+        );
+    }
+
+    #[test]
+    fn storable_transcription_factors_supports_aliases() {
+        let mut object = BTreeMap::new();
+        object.insert(
+            "transcription_factor".to_string(),
+            SValue::String(Arc::from("CTCF")),
+        );
+
+        assert_eq!(
+            storable_transcription_factors(&object).as_deref(),
+            Some("CTCF")
+        );
+    }
 }

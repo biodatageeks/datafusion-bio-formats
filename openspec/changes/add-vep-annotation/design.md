@@ -162,7 +162,11 @@ stable_id: Utf8, gene_symbol: Utf8, biotype: Utf8,
 is_canonical: Boolean,
 coding_region_start: Int64, coding_region_end: Int64,
 exons: List<Struct<start:Int64, end:Int64, phase:Int8>>,
-cdna_seq: Utf8, peptide_seq: Utf8, codon_table: Int32
+cdna_seq: Utf8, peptide_seq: Utf8, codon_table: Int32,
+gene_phenotype: Boolean, ccds: Utf8, swissprot: Utf8,
+trembl: Utf8, uniparc: Utf8, uniprot_isoform: Utf8,
+cds_start_nf: Boolean, cds_end_nf: Boolean,
+mature_mirna_regions: List<Struct<start:Int64, end:Int64>>
 ```
 
 **Variation table contract:**
@@ -170,6 +174,12 @@ cdna_seq: Utf8, peptide_seq: Utf8, codon_table: Int32
 chrom: Utf8, start: Int64, end: Int64,
 variation_name: Utf8, allele_string: Utf8,
 clin_sig: Utf8, gnomADg_AF: Float64, ...
+```
+
+**Motif table contract (optional context table):**
+```
+chrom: Utf8, start: Int64, end: Int64,
+motif_id: Utf8, transcription_factors: Utf8
 ```
 
 ### Migration Path
@@ -283,7 +293,9 @@ Post-join allele matching: `AND match_allele(a.alt, b.allele_string)`
 
 ## Transcript Model Expansion (bio-formats)
 
-### New columns in `transcript_schema()`
+### New columns in `transcript_schema()` and `motif_feature_schema()`
+
+Transcript schema additions:
 
 ```
 exons               List<Struct<start:Int64, end:Int64, phase:Int8>>
@@ -293,6 +305,21 @@ codon_table         Int32 (nullable, default 1 = standard)
 tsl                 Int32 (nullable, transcript support level)
 mane_select         Utf8 (nullable)
 mane_plus_clinical  Utf8 (nullable)
+gene_phenotype      Boolean (nullable)
+ccds                Utf8 (nullable)
+swissprot           Utf8 (nullable)
+trembl              Utf8 (nullable)
+uniparc             Utf8 (nullable)
+uniprot_isoform     Utf8 (nullable)
+cds_start_nf        Boolean (nullable)
+cds_end_nf          Boolean (nullable)
+mature_mirna_regions List<Struct<start:Int64, end:Int64>>
+```
+
+Motif schema additions:
+
+```
+transcription_factors Utf8 (nullable, motif schema)
 ```
 
 ### Parser changes
@@ -302,12 +329,32 @@ In `parse_transcript_line_into()` and `parse_transcript_storable_file()`:
 - Parse `_variation_effect_feature_cache.translateable_seq` -> `cdna_seq`
 - Parse `_variation_effect_feature_cache.peptide` -> `peptide_seq`
 - Parse `codon_table`, `tsl`, `mane_select`, `mane_plus_clinical`
+- Parse `_gene_phenotype`, `_ccds`, `_swissprot`, `_trembl`, `_uniparc`,
+  `_uniprot_isoform` into top-level transcript columns
+- Parse transcript `attributes` entries into `cds_start_nf`, `cds_end_nf`,
+  and `mature_mirna_regions`
+
+In `parse_regulatory_line_into()` and `parse_regulatory_storable_file_into()`:
+- Parse motif `_transcription_factors` into `transcription_factors`
+
+Notes:
+- `raw_object_json` remains available for provenance and deferred payloads
+  such as SIFT, PolyPhen, and DOMAINS.
+- `mature_mirna_regions` should only be parsed for `biotype = 'miRNA'`.
+- Promoting `cds_start_nf` and `cds_end_nf` removes the common-case
+  dependency on `annotate_provider.rs:parse_transcript_flags()` in
+  `datafusion-bio-functions`.
+- Boolean flags alone do not preserve VEP attribute encounter order. If exact
+  `FLAGS` string parity remains required downstream, either reconstruct a
+  canonical order there or add a later `flags_str` column as a follow-up.
 
 ### Projection pushdown
 
 New projection flags (same pattern as existing `translation_projected`):
 - `exons_projected: bool` — skip `_trans_exon_array` parsing if not selected
 - `sequences_projected: bool` — skip `_variation_effect_feature_cache` if cdna_seq/peptide_seq not selected
+- `mature_mirna_regions_projected: bool` — skip transcript attribute scanning
+  for miRNA region extraction when not selected
 
 Critical: `cdna_seq` + `peptide_seq` can be 500+ bytes per transcript. Only parse when projected.
 

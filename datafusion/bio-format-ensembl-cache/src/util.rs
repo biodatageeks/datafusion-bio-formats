@@ -1,5 +1,5 @@
 use crate::errors::{Result, exec_err};
-use crate::schema::exon_list_data_type;
+use crate::schema::{exon_list_data_type, mirna_region_list_data_type};
 use datafusion::arrow::array::{
     ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int8Builder, Int32Builder,
     Int64Builder, ListBuilder, StringBuilder, StructBuilder,
@@ -568,6 +568,51 @@ impl BatchBuilder {
         self.mark_written(col);
     }
 
+    /// Append a list of mature miRNA genomic regions to a `List<Struct>` column.
+    pub fn set_mirna_region_list(&mut self, col: usize, regions: Option<&[(i64, i64)]>) {
+        let mut overflow: Option<(usize, usize)> = None;
+        if let AnyBuilder::MirnaRegionList(list_builder) = &mut self.builders[col] {
+            match regions {
+                Some(region_slice) => {
+                    let current_child_len = list_builder.values().len();
+                    let next_child_len = current_child_len.saturating_add(region_slice.len());
+                    if next_child_len > i32::MAX as usize {
+                        overflow = Some((current_child_len, region_slice.len()));
+                        list_builder.append(false);
+                        self.mark_written(col);
+                    } else {
+                        let struct_builder = list_builder.values();
+                        for &(start, end) in region_slice {
+                            struct_builder
+                                .field_builder::<Int64Builder>(0)
+                                .unwrap()
+                                .append_value(start);
+                            struct_builder
+                                .field_builder::<Int64Builder>(1)
+                                .unwrap()
+                                .append_value(end);
+                            struct_builder.append(true);
+                        }
+                        list_builder.append(true);
+                    }
+                }
+                None => {
+                    list_builder.append(false);
+                }
+            }
+        }
+        if let Some((current_child_len, added)) = overflow {
+            let col_name = self.schema.field(col).name().clone();
+            self.set_pending_error_once(format!(
+                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
+                 Reduce batch_size_hint.",
+                col_name, current_child_len, added
+            ));
+            return;
+        }
+        self.mark_written(col);
+    }
+
     #[inline]
     pub fn set_null(&mut self, col: usize) {
         self.builders[col].append_null();
@@ -642,6 +687,7 @@ enum AnyBuilder {
     Float64(Float64Builder),
     Boolean(BooleanBuilder),
     ExonList(ListBuilder<StructBuilder>),
+    MirnaRegionList(ListBuilder<StructBuilder>),
 }
 
 impl AnyBuilder {
@@ -655,6 +701,7 @@ impl AnyBuilder {
             Self::Float64(b) => b.append_null(),
             Self::Boolean(b) => b.append_null(),
             Self::ExonList(b) => b.append(false),
+            Self::MirnaRegionList(b) => b.append(false),
         }
     }
 
@@ -685,6 +732,20 @@ impl AnyBuilder {
                 );
                 Ok(Self::ExonList(ListBuilder::new(struct_builder)))
             }
+            dt if *dt == mirna_region_list_data_type() => {
+                let fields = vec![
+                    Field::new("start", DataType::Int64, false),
+                    Field::new("end", DataType::Int64, false),
+                ];
+                let struct_builder = StructBuilder::new(
+                    fields,
+                    vec![
+                        Box::new(Int64Builder::with_capacity(capacity * 4)),
+                        Box::new(Int64Builder::with_capacity(capacity * 4)),
+                    ],
+                );
+                Ok(Self::MirnaRegionList(ListBuilder::new(struct_builder)))
+            }
             _ => Err(exec_err(format!(
                 "Unsupported data type in Ensembl cache schema: {data_type:?}"
             ))),
@@ -700,6 +761,7 @@ impl AnyBuilder {
             Self::Float64(mut builder) => Arc::new(builder.finish()),
             Self::Boolean(mut builder) => Arc::new(builder.finish()),
             Self::ExonList(mut builder) => Arc::new(builder.finish()),
+            Self::MirnaRegionList(mut builder) => Arc::new(builder.finish()),
         }
     }
 }
@@ -714,6 +776,14 @@ mod tests {
         Arc::new(Schema::new(vec![Field::new(
             "exons",
             exon_list_data_type(),
+            true,
+        )]))
+    }
+
+    fn mirna_regions_only_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new(
+            "mature_mirna_regions",
+            mirna_region_list_data_type(),
             true,
         )]))
     }
@@ -883,5 +953,66 @@ mod tests {
         // Row 2: empty
         assert!(!list.is_null(2));
         assert_eq!(list.value(2).len(), 0);
+    }
+
+    #[test]
+    fn set_mirna_region_list_single_region() {
+        let schema = mirna_regions_only_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.set_mirna_region_list(0, Some(&[(100, 120)]));
+        builder.finish_row();
+
+        let batch = builder.finish().unwrap();
+        let list = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let structs = list
+            .value(0)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .clone();
+        assert_eq!(structs.len(), 1);
+
+        let starts = structs
+            .column_by_name("start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = structs
+            .column_by_name("end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+
+        assert_eq!(starts.value(0), 100);
+        assert_eq!(ends.value(0), 120);
+    }
+
+    #[test]
+    fn set_mirna_region_list_null_and_empty() {
+        let schema = mirna_regions_only_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.set_mirna_region_list(0, None);
+        builder.finish_row();
+        builder.set_mirna_region_list(0, Some(&[]));
+        builder.finish_row();
+
+        let batch = builder.finish().unwrap();
+        let list = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+
+        assert!(list.is_null(0));
+        assert!(!list.is_null(1));
+        assert_eq!(list.value(1).len(), 0);
     }
 }

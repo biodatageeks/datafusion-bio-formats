@@ -80,6 +80,30 @@
 - [x] 2.5.3 Write test verifying projection pushdown skips sequence parsing when not selected
 - [x] 2.5.4 Write test verifying backward compatibility — existing queries still work with new schema
 
+### 2.6 Promote Transcript CSQ Metadata (`raw_object_json` -> columns)
+- [x] 2.6.1 Add transcript columns `gene_phenotype`, `ccds`, `swissprot`, `trembl`, `uniparc`, and `uniprot_isoform` to `transcript_schema()`
+- [x] 2.6.2 Add transcript columns `cds_start_nf`, `cds_end_nf`, and `mature_mirna_regions` to `transcript_schema()`
+- [x] 2.6.3 Extend `BatchBuilder` with reusable support for `List<Struct<start:Int64, end:Int64>>` so `mature_mirna_regions` does not require JSON fallback
+- [x] 2.6.4 Parse the six simple transcript metadata fields from both JSON and storable payloads in `transcript.rs`
+- [x] 2.6.5 Parse transcript `attributes` into `cds_start_nf` and `cds_end_nf` in both parser branches
+- [x] 2.6.6 Parse `mature_mirna_regions` as genomic coordinates in both parser branches, strand-aware and only for `biotype = 'miRNA'`
+- [x] 2.6.7 Add projection gating so `mature_mirna_regions` skips attribute scanning when not selected
+- [x] 2.6.8 Decide and document null-vs-false semantics for CDS flags and null-vs-empty semantics for `mature_mirna_regions`
+- [x] 2.6.9 Confirm downstream `FLAGS` canonical fallback is acceptable without a new `flags_str` column
+
+### 2.7 Promote Motif Metadata
+- [x] 2.7.1 Add `transcription_factors` to `motif_feature_schema()`
+- [x] 2.7.2 Parse motif transcription factors from JSON payloads in `regulatory.rs`
+- [x] 2.7.3 Parse motif transcription factors from storable payloads in `regulatory.rs`
+- [x] 2.7.4 Support known key aliases if Ensembl cache variants use `_transcription_factors` naming differences across serializers
+
+### 2.8 Test and Document Promoted Columns
+- [x] 2.8.1 Add transcript integration tests covering the new simple metadata columns on real fixture data
+- [x] 2.8.2 Add tests covering `cds_start_nf` and `cds_end_nf`
+- [x] 2.8.3 Add tests covering `mature_mirna_regions` genomic mapping and queryability
+- [x] 2.8.4 Add motif tests covering `transcription_factors` schema/queryability and alias extraction
+- [x] 2.8.5 Update `bio-format-ensembl-cache` README schema tables and projection-pushdown notes for the promoted columns
+
 ## 3. Phase 3: Consequence Engine (bio-functions)
 
 ### 3.1 Implement Genetic Code Tables (`codon.rs`)

@@ -115,6 +115,15 @@ of transcripts that would otherwise have no exon entries.
 | `tsl` | Int32 | yes | Transcript support level |
 | `mane_select` | Utf8 | yes | MANE Select transcript identifier |
 | `mane_plus_clinical` | Utf8 | yes | MANE Plus Clinical transcript identifier |
+| `gene_phenotype` | Boolean | yes | Gene phenotype flag used by VEP `GENE_PHENO` |
+| `ccds` | Utf8 | yes | CCDS identifier |
+| `swissprot` | Utf8 | yes | UniProt Swiss-Prot accession |
+| `trembl` | Utf8 | yes | UniProt TrEMBL accession |
+| `uniparc` | Utf8 | yes | UniParc identifier |
+| `uniprot_isoform` | Utf8 | yes | UniProt isoform identifier |
+| `cds_start_nf` | Boolean | yes | Transcript has incomplete CDS start (`cds_start_NF`); `false` when absent |
+| `cds_end_nf` | Boolean | yes | Transcript has incomplete CDS end (`cds_end_NF`); `false` when absent |
+| `mature_mirna_regions` | `List<Struct<start:Int64, end:Int64>>` | yes | Mature miRNA genomic regions derived from transcript attributes; null for non-miRNA transcripts |
 
 ### Exon
 
@@ -187,6 +196,7 @@ Standalone translation table — one row per coding transcript.
 | `binding_matrix` | Utf8 | yes | Binding matrix identifier |
 | `cell_types` | Utf8 | yes | Cell types (JSON) |
 | `overlapping_regulatory_feature` | Utf8 | yes | Overlapping regulatory feature ID |
+| `transcription_factors` | Utf8 | yes | Transcription factor annotation for TFBS consequences |
 
 ### Variation
 
@@ -214,9 +224,9 @@ All entity schemas also include **provenance columns**: `species`, `assembly`, `
 ## Projection Pushdown
 
 Transcript, exon, and translation schemas support projection pushdown. When VEP-related
-columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `translation_seq`, `cds_sequence`) are
-not selected in a query, the parser skips extracting those fields, significantly reducing
-parse overhead.
+columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `mature_mirna_regions`,
+`translation_seq`, `cds_sequence`) are not selected in a query, the parser skips
+extracting those fields, significantly reducing parse overhead.
 
 ## Parallel Scanning
 

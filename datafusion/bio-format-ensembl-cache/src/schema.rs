@@ -20,6 +20,20 @@ pub(crate) fn exon_list_data_type() -> DataType {
     )))
 }
 
+/// Returns the Arrow `DataType` for mature miRNA genomic regions:
+/// `List<Struct<start:Int64, end:Int64>>`.
+pub(crate) fn mirna_region_list_data_type() -> DataType {
+    let region_fields = Fields::from(vec![
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+    ]);
+    DataType::List(Arc::new(Field::new(
+        "item",
+        DataType::Struct(region_fields),
+        true,
+    )))
+}
+
 const REQUIRED_VARIATION_COLUMNS: [&str; 6] = [
     "chrom",
     "start",
@@ -133,6 +147,15 @@ pub(crate) fn transcript_schema(
         Field::new("tsl", DataType::Int32, true),
         Field::new("mane_select", DataType::Utf8, true),
         Field::new("mane_plus_clinical", DataType::Utf8, true),
+        Field::new("gene_phenotype", DataType::Boolean, true),
+        Field::new("ccds", DataType::Utf8, true),
+        Field::new("swissprot", DataType::Utf8, true),
+        Field::new("trembl", DataType::Utf8, true),
+        Field::new("uniparc", DataType::Utf8, true),
+        Field::new("uniprot_isoform", DataType::Utf8, true),
+        Field::new("cds_start_nf", DataType::Boolean, true),
+        Field::new("cds_end_nf", DataType::Boolean, true),
+        Field::new("mature_mirna_regions", mirna_region_list_data_type(), true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];
@@ -177,6 +200,7 @@ pub(crate) fn motif_feature_schema(
         Field::new("binding_matrix", DataType::Utf8, true),
         Field::new("cell_types", DataType::Utf8, true),
         Field::new("overlapping_regulatory_feature", DataType::Utf8, true),
+        Field::new("transcription_factors", DataType::Utf8, true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];

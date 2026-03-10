@@ -1,5 +1,5 @@
 use datafusion::arrow::array::{
-    Array, Int32Array, Int64Array, ListArray, StringArray, StructArray,
+    Array, BooleanArray, Int32Array, Int64Array, ListArray, StringArray, StructArray,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
@@ -419,6 +419,51 @@ async fn regulatory_and_motif_sereal_work() -> datafusion::common::Result<()> {
 }
 
 #[tokio::test]
+async fn motif_schema_contains_transcription_factors() -> datafusion::common::Result<()> {
+    let provider = MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "regulatory_storable",
+    )))?;
+    assert!(
+        provider
+            .schema()
+            .field_with_name("transcription_factors")
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn motif_transcription_factors_queryable() -> datafusion::common::Result<()> {
+    for fixture in ["regulatory_storable", "regulatory_sereal"] {
+        let provider =
+            MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(fixture)))?;
+        let ctx = SessionContext::new();
+        ctx.register_table("motif", Arc::new(provider))?;
+
+        let batches = ctx
+            .sql("SELECT transcription_factors FROM motif")
+            .await?
+            .collect()
+            .await?;
+
+        assert!(
+            !batches.is_empty(),
+            "expected motif rows for fixture {fixture}"
+        );
+        assert!(
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .is_some(),
+            "transcription_factors should be StringArray for fixture {fixture}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn regulatory_and_motif_coordinate_system_metadata_and_values_work()
 -> datafusion::common::Result<()> {
     let mut reg_options = EnsemblCacheOptions::new(fixture_path("regulatory_sereal"));
@@ -489,6 +534,25 @@ async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<
     assert!(schema.field_with_name("tsl").is_ok());
     assert!(schema.field_with_name("mane_select").is_ok());
     assert!(schema.field_with_name("mane_plus_clinical").is_ok());
+    let gene_phenotype = schema
+        .field_with_name("gene_phenotype")
+        .expect("gene_phenotype column missing");
+    assert_eq!(gene_phenotype.data_type(), &DataType::Boolean);
+    assert!(schema.field_with_name("ccds").is_ok());
+    assert!(schema.field_with_name("swissprot").is_ok());
+    assert!(schema.field_with_name("trembl").is_ok());
+    assert!(schema.field_with_name("uniparc").is_ok());
+    assert!(schema.field_with_name("uniprot_isoform").is_ok());
+    assert!(schema.field_with_name("cds_start_nf").is_ok());
+    assert!(schema.field_with_name("cds_end_nf").is_ok());
+    let mirna_regions = schema
+        .field_with_name("mature_mirna_regions")
+        .expect("mature_mirna_regions column missing");
+    assert!(
+        matches!(mirna_regions.data_type(), DataType::List(_)),
+        "mature_mirna_regions should be List type, got {:?}",
+        mirna_regions.data_type()
+    );
 
     Ok(())
 }
@@ -611,6 +675,92 @@ async fn transcript_vep_sequences_queryable() -> datafusion::common::Result<()> 
     assert!(batch.column_by_name("cdna_seq").is_some());
     assert!(batch.column_by_name("peptide_seq").is_some());
     assert!(batch.column_by_name("codon_table").is_some());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_promoted_metadata_columns_queryable() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT gene_phenotype, ccds, swissprot, trembl, uniparc, \
+             uniprot_isoform, cds_start_nf, cds_end_nf FROM tx",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_columns(), 8);
+    assert!(
+        batches[0]
+            .column_by_name("gene_phenotype")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .is_some(),
+        "gene_phenotype should be BooleanArray"
+    );
+
+    let metadata_present = ctx
+        .sql(
+            "SELECT COUNT(*) FROM tx \
+             WHERE ccds IS NOT NULL OR swissprot IS NOT NULL OR trembl IS NOT NULL \
+                OR uniparc IS NOT NULL OR uniprot_isoform IS NOT NULL \
+                OR gene_phenotype IS NOT NULL",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert!(
+        first_i64(&metadata_present) > 0,
+        "expected at least one transcript row with promoted CSQ metadata"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_mature_mirna_regions_queryable() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT stable_id, mature_mirna_regions FROM tx LIMIT 10")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let regions_col = batches[0]
+        .column_by_name("mature_mirna_regions")
+        .expect("mature_mirna_regions column missing");
+    let list_array = regions_col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("mature_mirna_regions should be ListArray");
+
+    for row in 0..list_array.len() {
+        if !list_array.is_null(row) {
+            let regions_value = list_array.value(row);
+            let regions = regions_value
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("mature_mirna_regions values should be StructArray");
+            assert!(regions.column_by_name("start").is_some());
+            assert!(regions.column_by_name("end").is_some());
+        }
+    }
 
     Ok(())
 }

@@ -166,3 +166,30 @@ The system SHALL provide structured columns in the Ensembl cache transcript tabl
 - **WHEN** a query does not select `cdna_seq` or `peptide_seq`
 - **THEN** the parser skips extraction of `_variation_effect_feature_cache.translateable_seq` and `peptide`
 - **AND** parsing throughput increases due to reduced per-record processing
+
+### Requirement: Promoted VEP Cache Attribute Columns
+The system SHALL expose transcript and motif attributes that are currently embedded only in `raw_object_json` as top-level nullable columns so downstream VEP annotation can avoid query-time JSON parsing for common CSQ fields.
+
+#### Scenario: Query transcript CSQ metadata without selecting raw JSON
+- **WHEN** a user executes `SELECT stable_id, gene_phenotype, ccds, swissprot, trembl, uniparc, uniprot_isoform FROM vep_transcript`
+- **THEN** those values are returned from dedicated top-level columns
+- **AND** the query does not require selecting `raw_object_json`
+
+#### Scenario: Query CDS incompleteness flags
+- **WHEN** transcript attributes contain `cds_start_NF` or `cds_end_NF` with value `1`
+- **THEN** the top-level `cds_start_nf` and `cds_end_nf` columns reflect those flags
+- **AND** downstream annotation can determine `FLAGS` without reparsing JSON in the common case
+
+#### Scenario: Query mature miRNA regions
+- **WHEN** a user executes `SELECT stable_id, mature_mirna_regions FROM vep_transcript WHERE biotype = 'miRNA'`
+- **THEN** `mature_mirna_regions` contains a `List<Struct<start:Int64, end:Int64>>` of genomic intervals derived from the transcript attributes
+- **AND** strand orientation is respected when mapping from cDNA coordinates to genomic coordinates
+
+#### Scenario: Projection pushdown skips miRNA attribute parsing
+- **WHEN** a query does not select `mature_mirna_regions`
+- **THEN** the parser skips the transcript-attribute walk needed to derive those intervals
+
+#### Scenario: Query motif transcription factors
+- **WHEN** a user executes `SELECT motif_id, transcription_factors FROM vep_motif_feature`
+- **THEN** the motif transcription factor annotation is returned from a dedicated top-level column
+- **AND** downstream TFBS annotation does not need to parse motif `raw_object_json` for that field
