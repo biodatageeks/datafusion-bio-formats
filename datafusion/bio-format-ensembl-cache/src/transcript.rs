@@ -143,6 +143,7 @@ impl TranscriptColumnIndices {
 struct TranscriptAttributes {
     cds_start_nf: bool,
     cds_end_nf: bool,
+    tsl: Option<i32>,
     mature_mirna_regions: Vec<(i64, i64)>,
 }
 
@@ -474,6 +475,16 @@ fn sv_first_bool(
     keys.iter().find_map(|key| sv_bool(object.get(*key)))
 }
 
+/// Parse TSL attribute value like "tsl1" → 1, "tsl5" → 5, or plain "1" → 1.
+/// Also handles extended format "tsl2 (assigned to previous version 1)".
+fn parse_tsl_value(value: &str) -> Option<i32> {
+    let stripped = value.strip_prefix("tsl").unwrap_or(value);
+    let digits: &str = &stripped[..stripped
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(stripped.len())];
+    digits.parse::<i32>().ok().filter(|&v| (1..=5).contains(&v))
+}
+
 fn parse_cdna_range(value: &str) -> Option<(i64, i64)> {
     let mut parts = value.splitn(2, '-');
     let start = parts.next()?.trim().parse::<i64>().ok()?;
@@ -517,6 +528,9 @@ fn parse_transcript_attributes_json(
         match code {
             "cds_start_NF" if value == "1" => out.cds_start_nf = true,
             "cds_end_NF" if value == "1" => out.cds_end_nf = true,
+            "TSL" => {
+                out.tsl = parse_tsl_value(value);
+            }
             "miRNA" if parse_mirna_regions => {
                 if let Some((cdna_start, cdna_end)) = parse_cdna_range(value) {
                     out.mature_mirna_regions.push(mirna_cdna_to_genomic_range(
@@ -559,6 +573,9 @@ fn parse_transcript_attributes_storable(
         match code.as_str() {
             "cds_start_NF" if value == "1" => out.cds_start_nf = true,
             "cds_end_NF" if value == "1" => out.cds_end_nf = true,
+            "TSL" => {
+                out.tsl = parse_tsl_value(&value);
+            }
             "miRNA" if parse_mirna_regions => {
                 if let Some((cdna_start, cdna_end)) = parse_cdna_range(&value) {
                     out.mature_mirna_regions.push(mirna_cdna_to_genomic_range(
@@ -940,8 +957,24 @@ pub(crate) fn parse_transcript_line_into(
     if let Some(idx) = col_idx.codon_table {
         batch.set_opt_i32(idx, json_i32(object.get("codon_table")));
     }
+    // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
+    // Fall back to top-level "tsl" for forward-compat with future cache formats.
     if let Some(idx) = col_idx.tsl {
-        batch.set_opt_i32(idx, json_i32(object.get("tsl")));
+        let tsl_from_attrs = object
+            .get("attributes")
+            .and_then(Value::as_array)
+            .and_then(|attrs| {
+                attrs.iter().find_map(|attr| {
+                    let obj = unwrap_blessed_object_optional(attr)?;
+                    let code = obj.get("code").and_then(Value::as_str)?;
+                    if code == "TSL" {
+                        parse_tsl_value(obj.get("value").and_then(Value::as_str).unwrap_or(""))
+                    } else {
+                        None
+                    }
+                })
+            });
+        batch.set_opt_i32(idx, tsl_from_attrs.or_else(|| json_i32(object.get("tsl"))));
     }
     if let Some(idx) = col_idx.mane_select {
         batch.set_opt_utf8_owned(idx, json_str(object.get("mane_select")).as_ref());
@@ -1392,10 +1425,30 @@ fn append_transcript_storable_row_into(
             sv_i64(object.get("codon_table")).and_then(|v| i32::try_from(v).ok()),
         );
     }
+    // TSL is stored as an attribute {"code":"TSL","value":"tsl1"}, not a top-level key.
     if let Some(idx) = col_idx.tsl {
+        let tsl_from_attrs = object
+            .get("attributes")
+            .and_then(SValue::as_array)
+            .and_then(|attrs| {
+                attrs.iter().find_map(|attr| {
+                    let obj = attr.as_hash()?;
+                    let code = obj.get("code").and_then(SValue::as_string)?;
+                    if code == "TSL" {
+                        parse_tsl_value(
+                            &obj.get("value")
+                                .and_then(SValue::as_string)
+                                .unwrap_or_default(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            });
         batch.set_opt_i32(
             idx,
-            sv_i64(object.get("tsl")).and_then(|v| i32::try_from(v).ok()),
+            tsl_from_attrs
+                .or_else(|| sv_i64(object.get("tsl")).and_then(|v| i32::try_from(v).ok())),
         );
     }
     if let Some(idx) = col_idx.mane_select {
@@ -1602,6 +1655,88 @@ mod tests {
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
         assert_eq!(parsed.mature_mirna_regions, vec![(141, 158)]);
+    }
+
+    #[test]
+    fn parse_tsl_value_prefixed() {
+        assert_eq!(parse_tsl_value("tsl1"), Some(1));
+        assert_eq!(parse_tsl_value("tsl5"), Some(5));
+        assert_eq!(parse_tsl_value("tsl3"), Some(3));
+    }
+
+    #[test]
+    fn parse_tsl_value_plain_numeric() {
+        assert_eq!(parse_tsl_value("1"), Some(1));
+        assert_eq!(parse_tsl_value("5"), Some(5));
+    }
+
+    #[test]
+    fn parse_tsl_value_with_parenthetical_suffix() {
+        assert_eq!(
+            parse_tsl_value("tsl2 (assigned to previous version 1)"),
+            Some(2)
+        );
+        assert_eq!(
+            parse_tsl_value("tsl4 (assigned to previous version 1)"),
+            Some(4)
+        );
+        assert_eq!(
+            parse_tsl_value("tsl1 (assigned to previous version 5)"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn parse_tsl_value_out_of_range() {
+        assert_eq!(parse_tsl_value("tsl0"), None);
+        assert_eq!(parse_tsl_value("tsl6"), None);
+        assert_eq!(parse_tsl_value("0"), None);
+        assert_eq!(parse_tsl_value(""), None);
+        assert_eq!(parse_tsl_value("NA"), None);
+    }
+
+    #[test]
+    fn json_transcript_attributes_parse_tsl() {
+        let payload = json!({
+            "attributes": [
+                { "code": "cds_start_NF", "value": "1" },
+                { "code": "TSL", "value": "tsl1" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false);
+        assert_eq!(parsed.tsl, Some(1));
+    }
+
+    #[test]
+    fn json_transcript_attributes_parse_tsl_wrapped() {
+        let payload = json!({
+            "attributes": [
+                {
+                    "__class": "Bio::EnsEMBL::Attribute",
+                    "__value": { "code": "TSL", "value": "tsl5" }
+                }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false);
+        assert_eq!(parsed.tsl, Some(5));
+    }
+
+    #[test]
+    fn storable_transcript_attributes_parse_tsl() {
+        let mut attr_tsl = BTreeMap::new();
+        attr_tsl.insert("code".to_string(), SValue::String(Arc::from("TSL")));
+        attr_tsl.insert("value".to_string(), SValue::String(Arc::from("tsl3")));
+
+        let mut object = BTreeMap::new();
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_tsl))])),
+        );
+
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, false);
+        assert_eq!(parsed.tsl, Some(3));
     }
 
     #[test]
