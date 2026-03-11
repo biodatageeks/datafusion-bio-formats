@@ -1,4 +1,4 @@
-use crate::errors::{Result, exec_err};
+use crate::errors::Result;
 use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::{
@@ -69,8 +69,10 @@ impl VariationColumnIndices {
 }
 
 // Maximum number of tab-separated fields we support per variation line.
-// Ensembl VEP variation lines typically have 20-30 fields.
-const MAX_VARIATION_FIELDS: usize = 48;
+// VEP 115 GRCh38 has ~39 columns (core + 1000G + gnomAD sub-populations).
+// Using 96 provides headroom for future cache versions with additional
+// population-specific frequency columns.
+const MAX_VARIATION_FIELDS: usize = 96;
 
 // ---------------------------------------------------------------------------
 // VariationContext – pre-computed per-partition field mapping
@@ -432,6 +434,22 @@ pub(crate) fn parse_region_from_filename(name: &str) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
+// Parse result
+// ---------------------------------------------------------------------------
+
+/// Outcome of parsing a single variation line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VariationParseResult {
+    /// Row was added to the batch.
+    Added,
+    /// Row was skipped (blank, comment, or predicate mismatch).
+    Skipped,
+    /// Row was dropped because a required field could not be parsed.
+    /// The caller should count this for diagnostics.
+    Malformed,
+}
+
+// ---------------------------------------------------------------------------
 // Direct builder parser
 // ---------------------------------------------------------------------------
 
@@ -447,10 +465,10 @@ pub(crate) fn parse_variation_line_into(
     ctx: &VariationContext,
     provenance: &ProvenanceWriter,
     source_id_writer: &mut SourceIdWriter,
-) -> Result<bool> {
+) -> Result<VariationParseResult> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Ok(false);
+        return Ok(VariationParseResult::Skipped);
     }
 
     // Stack-allocated field splitting – avoids per-line heap allocation
@@ -468,22 +486,16 @@ pub(crate) fn parse_variation_line_into(
     let field_at =
         |tab_idx: Option<usize>| -> Option<&str> { tab_idx.and_then(|i| fields.get(i).copied()) };
 
-    // Extract required fields using zero-copy refs
-    let chrom_ref = field_at(ctx.chrom_tab)
-        .and_then(normalize_nullable_ref)
-        .ok_or_else(|| {
-            exec_err(format!(
-                "Variation row missing required chrom in {}: {}",
-                source_file_str, trimmed
-            ))
-        })?;
+    // Extract required fields — return Malformed instead of Err so a single
+    // bad line does not abort the entire partition and silently drop all
+    // subsequent records.
+    let Some(chrom_ref) = field_at(ctx.chrom_tab).and_then(normalize_nullable_ref) else {
+        return Ok(VariationParseResult::Malformed);
+    };
 
-    let source_start = parse_i64_ref(field_at(ctx.start_tab)).ok_or_else(|| {
-        exec_err(format!(
-            "Variation row missing required start in {}: {}",
-            source_file_str, trimmed
-        ))
-    })?;
+    let Some(source_start) = parse_i64_ref(field_at(ctx.start_tab)) else {
+        return Ok(VariationParseResult::Malformed);
+    };
 
     let source_end = parse_i64_ref(field_at(ctx.end_tab)).unwrap_or(source_start);
 
@@ -491,26 +503,17 @@ pub(crate) fn parse_variation_line_into(
     let end = normalize_genomic_end(source_end, coordinate_system_zero_based);
 
     if !predicate.matches(chrom_ref, start, end) {
-        return Ok(false);
+        return Ok(VariationParseResult::Skipped);
     }
 
-    let variation_name_ref = field_at(ctx.var_name_tab)
-        .and_then(normalize_nullable_ref)
-        .ok_or_else(|| {
-            exec_err(format!(
-                "Variation row missing required variation_name in {}: {}",
-                source_file_str, trimmed
-            ))
-        })?;
+    let Some(variation_name_ref) = field_at(ctx.var_name_tab).and_then(normalize_nullable_ref)
+    else {
+        return Ok(VariationParseResult::Malformed);
+    };
 
-    let allele_string_ref = field_at(ctx.allele_tab)
-        .and_then(normalize_nullable_ref)
-        .ok_or_else(|| {
-            exec_err(format!(
-                "Variation row missing required allele_string in {}: {}",
-                source_file_str, trimmed
-            ))
-        })?;
+    let Some(allele_string_ref) = field_at(ctx.allele_tab).and_then(normalize_nullable_ref) else {
+        return Ok(VariationParseResult::Malformed);
+    };
 
     let region_bin = ((source_start.saturating_sub(1)) / cache_region_size.max(1)).max(0);
 
@@ -600,5 +603,5 @@ pub(crate) fn parse_variation_line_into(
     provenance.write(batch, source_file_str);
 
     batch.finish_row();
-    Ok(true)
+    Ok(VariationParseResult::Added)
 }

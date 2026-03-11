@@ -17,7 +17,8 @@ use crate::util::{
     BatchBuilder, ColumnMap, ProvenanceWriter, is_storable_binary_payload, open_text_reader,
 };
 use crate::variation::{
-    SourceIdWriter, VariationColumnIndices, VariationContext, parse_variation_line_into,
+    SourceIdWriter, VariationColumnIndices, VariationContext, VariationParseResult,
+    parse_variation_line_into,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -388,6 +389,7 @@ fn process_partition(
     let batch_size = batch_size.max(1);
     let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size)?;
     let mut emitted_rows: usize = 0;
+    let mut malformed_rows: usize = 0;
     let mut stop = false;
 
     for source_file in &files {
@@ -615,18 +617,27 @@ fn process_partition(
 
             let line_trimmed = line.trim_end_matches(['\n', '\r']);
             let added = match kind {
-                EnsemblEntityKind::Variation => parse_variation_line_into(
-                    line_trimmed,
-                    source_file_str,
-                    &predicate,
-                    variation_region_size,
-                    coordinate_system_zero_based,
-                    &mut batch_builder,
-                    variation_col_idx.as_ref().unwrap(),
-                    variation_ctx.as_ref().unwrap(),
-                    &provenance,
-                    source_id_writer.as_mut().unwrap(),
-                )?,
+                EnsemblEntityKind::Variation => {
+                    match parse_variation_line_into(
+                        line_trimmed,
+                        source_file_str,
+                        &predicate,
+                        variation_region_size,
+                        coordinate_system_zero_based,
+                        &mut batch_builder,
+                        variation_col_idx.as_ref().unwrap(),
+                        variation_ctx.as_ref().unwrap(),
+                        &provenance,
+                        source_id_writer.as_mut().unwrap(),
+                    )? {
+                        VariationParseResult::Added => true,
+                        VariationParseResult::Skipped => false,
+                        VariationParseResult::Malformed => {
+                            malformed_rows += 1;
+                            false
+                        }
+                    }
+                }
                 EnsemblEntityKind::Transcript => parse_transcript_line_into(
                     line_trimmed,
                     source_file_str,
@@ -747,6 +758,13 @@ fn process_partition(
         if tx.blocking_send(Ok(batch)).is_err() {
             return Ok(());
         }
+    }
+
+    if malformed_rows > 0 {
+        log::warn!(
+            "EnsemblCacheExec: skipped {malformed_rows} malformed variation line(s) \
+             (missing required chrom/start/variation_name/allele_string)"
+        );
     }
 
     Ok(())
