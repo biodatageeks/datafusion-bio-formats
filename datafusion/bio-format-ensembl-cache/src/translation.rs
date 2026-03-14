@@ -38,6 +38,9 @@ pub(crate) struct TranslationColumnIndices {
     sequences_projected: bool,
     protein_features: Option<usize>,
     protein_features_projected: bool,
+    sift_predictions: Option<usize>,
+    polyphen_predictions: Option<usize>,
+    predictions_projected: bool,
     raw_object_json: Option<usize>,
     object_hash: Option<usize>,
 }
@@ -51,6 +54,9 @@ impl TranslationColumnIndices {
         let sequences_projected = peptide_seq.is_some() || cdna_seq.is_some();
         let protein_features = col_map.get("protein_features");
         let protein_features_projected = protein_features.is_some();
+        let sift_predictions = col_map.get("sift_predictions");
+        let polyphen_predictions = col_map.get("polyphen_predictions");
+        let predictions_projected = sift_predictions.is_some() || polyphen_predictions.is_some();
         Self {
             chrom: col_map.get("chrom"),
             start: col_map.get("start"),
@@ -70,6 +76,9 @@ impl TranslationColumnIndices {
             sequences_projected,
             protein_features,
             protein_features_projected,
+            sift_predictions,
+            polyphen_predictions,
+            predictions_projected,
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
@@ -253,8 +262,11 @@ pub(crate) fn parse_translation_line_into(
         batch.set_opt_i64(idx, cds_len);
     }
 
-    // Sequences and protein features from _variation_effect_feature_cache — only parse when projected.
-    if col_idx.sequences_projected || col_idx.protein_features_projected {
+    // Sequences, protein features, and predictions from _variation_effect_feature_cache.
+    if col_idx.sequences_projected
+        || col_idx.protein_features_projected
+        || col_idx.predictions_projected
+    {
         let vef_cache = object
             .get("_variation_effect_feature_cache")
             .and_then(unwrap_blessed_object_optional);
@@ -269,6 +281,24 @@ pub(crate) fn parse_translation_line_into(
         if let Some(idx) = col_idx.protein_features {
             let features = vef_cache.and_then(extract_protein_features_json);
             batch.set_protein_feature_list(idx, features.as_deref());
+        }
+        // SIFT/PolyPhen predictions — populated from pre-decoded data.
+        // These are NULL when reading from raw VEP cache (binary matrices
+        // require external pre-processing); they become populated when
+        // reading from parquet caches that have been pre-computed.
+        if col_idx.predictions_projected {
+            let pfp = vef_cache.and_then(|c| {
+                c.get("protein_function_predictions")
+                    .and_then(unwrap_blessed_object_optional)
+            });
+            if let Some(idx) = col_idx.sift_predictions {
+                let preds = pfp.and_then(|p| extract_predictions_json(p, "sift"));
+                batch.set_prediction_list(idx, preds.as_deref());
+            }
+            if let Some(idx) = col_idx.polyphen_predictions {
+                let preds = pfp.and_then(|p| extract_predictions_json(p, "polyphen_humvar"));
+                batch.set_prediction_list(idx, preds.as_deref());
+            }
         }
     }
 
@@ -422,8 +452,11 @@ where
             batch.set_opt_i64(idx, cds_len);
         }
 
-        // Sequences and protein features from _variation_effect_feature_cache — only parse when projected.
-        if col_idx.sequences_projected || col_idx.protein_features_projected {
+        // Sequences, protein features, and predictions from _variation_effect_feature_cache.
+        if col_idx.sequences_projected
+            || col_idx.protein_features_projected
+            || col_idx.predictions_projected
+        {
             if let Some(vef_cache) = obj
                 .get("_variation_effect_feature_cache")
                 .and_then(SValue::as_hash)
@@ -439,6 +472,21 @@ where
                 if let Some(idx) = col_idx.protein_features {
                     let features = extract_protein_features_storable(vef_cache);
                     batch.set_protein_feature_list(idx, features.as_deref());
+                }
+                // SIFT/PolyPhen predictions — populated from pre-decoded data.
+                if col_idx.predictions_projected {
+                    let pfp = vef_cache
+                        .get("protein_function_predictions")
+                        .and_then(SValue::as_hash);
+                    if let Some(idx) = col_idx.sift_predictions {
+                        let preds = pfp.and_then(|p| extract_predictions_storable(p, "sift"));
+                        batch.set_prediction_list(idx, preds.as_deref());
+                    }
+                    if let Some(idx) = col_idx.polyphen_predictions {
+                        let preds =
+                            pfp.and_then(|p| extract_predictions_storable(p, "polyphen_humvar"));
+                        batch.set_prediction_list(idx, preds.as_deref());
+                    }
                 }
             }
         }
@@ -548,6 +596,83 @@ fn extract_protein_features_storable(
         None
     } else {
         Some(features)
+    }
+}
+
+/// A single SIFT/PolyPhen prediction entry: (position, amino_acid, prediction, score).
+type PredictionEntry = (i32, String, String, f32);
+
+/// Extract pre-decoded SIFT/PolyPhen predictions from JSON.
+/// The `key` is "sift" or "polyphen_humvar".
+///
+/// In raw VEP cache files, these are gzip-compressed binary matrices that
+/// cannot be decoded in Rust — this function returns None for those.
+/// When a pre-processing step has decoded them into a JSON array of
+/// `{position, amino_acid, prediction, score}` objects, this extracts them.
+fn extract_predictions_json(
+    pfp: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<Vec<PredictionEntry>> {
+    let predictor = pfp.get(key)?;
+    // Pre-decoded format: array of {position, amino_acid, prediction, score}
+    let arr = predictor.as_array().or_else(|| {
+        unwrap_blessed_object_optional(predictor)
+            .and_then(|obj| obj.get("predictions"))
+            .and_then(|v| v.as_array())
+    })?;
+    let entries: Vec<PredictionEntry> = arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item
+                .as_object()
+                .or_else(|| unwrap_blessed_object_optional(item))?;
+            let position = json_i64(obj.get("position")).and_then(|v| i32::try_from(v).ok())?;
+            let amino_acid = json_str(obj.get("amino_acid"))?;
+            let prediction = json_str(obj.get("prediction"))?;
+            let score = obj.get("score").and_then(|v| {
+                v.as_f64()
+                    .or_else(|| json_str(Some(v))?.parse::<f64>().ok())
+            })? as f32;
+            Some((position, amino_acid, prediction, score))
+        })
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// Extract pre-decoded SIFT/PolyPhen predictions from Storable.
+fn extract_predictions_storable(
+    pfp: &std::collections::BTreeMap<String, SValue>,
+    key: &str,
+) -> Option<Vec<PredictionEntry>> {
+    let predictor = pfp.get(key)?;
+    // Pre-decoded format: the predictor hash may contain a "predictions" array.
+    let arr = predictor.as_array().or_else(|| {
+        predictor
+            .as_hash()
+            .and_then(|obj| obj.get("predictions"))
+            .and_then(SValue::as_array)
+    })?;
+    let entries: Vec<PredictionEntry> = arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_hash()?;
+            let position = sv_i64(obj.get("position")).and_then(|v| i32::try_from(v).ok())?;
+            let amino_acid = sv_str(obj.get("amino_acid"))?;
+            let prediction = sv_str(obj.get("prediction"))?;
+            let score = sv_i64(obj.get("score"))
+                .map(|v| v as f32)
+                .or_else(|| sv_str(obj.get("score")).and_then(|s| s.parse::<f32>().ok()))?;
+            Some((position, amino_acid, prediction, score))
+        })
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
     }
 }
 

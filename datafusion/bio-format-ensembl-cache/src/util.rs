@@ -1,11 +1,11 @@
 use crate::errors::{Result, exec_err};
 use crate::schema::{
     cdna_mapper_segment_list_data_type, exon_list_data_type, mirna_region_list_data_type,
-    protein_feature_list_data_type,
+    prediction_list_data_type, protein_feature_list_data_type,
 };
 use datafusion::arrow::array::{
-    ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int8Builder, Int32Builder,
-    Int64Builder, ListBuilder, StringBuilder, StructBuilder,
+    ArrayBuilder, ArrayRef, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder,
+    Int32Builder, Int64Builder, ListBuilder, StringBuilder, StructBuilder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -751,6 +751,64 @@ impl BatchBuilder {
         self.mark_written(col);
     }
 
+    /// Append a list of SIFT/PolyPhen prediction entries to a `List<Struct>` column.
+    /// Each entry is `(position, amino_acid, prediction, score)`.
+    pub fn set_prediction_list(
+        &mut self,
+        col: usize,
+        predictions: Option<&[(i32, String, String, f32)]>,
+    ) {
+        let mut overflow: Option<(usize, usize)> = None;
+        if let AnyBuilder::PredictionList(list_builder) = &mut self.builders[col] {
+            match predictions {
+                Some(pred_slice) => {
+                    let current_child_len = list_builder.values().len();
+                    let next_child_len = current_child_len.saturating_add(pred_slice.len());
+                    if next_child_len > i32::MAX as usize {
+                        overflow = Some((current_child_len, pred_slice.len()));
+                        list_builder.append(false);
+                        self.mark_written(col);
+                    } else {
+                        let struct_builder = list_builder.values();
+                        for (position, amino_acid, prediction, score) in pred_slice {
+                            struct_builder
+                                .field_builder::<Int32Builder>(0)
+                                .unwrap()
+                                .append_value(*position);
+                            struct_builder
+                                .field_builder::<StringBuilder>(1)
+                                .unwrap()
+                                .append_value(amino_acid);
+                            struct_builder
+                                .field_builder::<StringBuilder>(2)
+                                .unwrap()
+                                .append_value(prediction);
+                            struct_builder
+                                .field_builder::<Float32Builder>(3)
+                                .unwrap()
+                                .append_value(*score);
+                            struct_builder.append(true);
+                        }
+                        list_builder.append(true);
+                    }
+                }
+                None => {
+                    list_builder.append(false);
+                }
+            }
+        }
+        if let Some((current_child_len, added)) = overflow {
+            let col_name = self.schema.field(col).name().clone();
+            self.set_pending_error_once(format!(
+                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
+                 Reduce batch_size_hint.",
+                col_name, current_child_len, added
+            ));
+            return;
+        }
+        self.mark_written(col);
+    }
+
     #[inline]
     pub fn set_null(&mut self, col: usize) {
         self.builders[col].append_null();
@@ -828,6 +886,7 @@ enum AnyBuilder {
     MirnaRegionList(ListBuilder<StructBuilder>),
     CdnaMapperList(ListBuilder<StructBuilder>),
     ProteinFeatureList(ListBuilder<StructBuilder>),
+    PredictionList(ListBuilder<StructBuilder>),
 }
 
 impl AnyBuilder {
@@ -844,6 +903,7 @@ impl AnyBuilder {
             Self::MirnaRegionList(b) => b.append(false),
             Self::CdnaMapperList(b) => b.append(false),
             Self::ProteinFeatureList(b) => b.append(false),
+            Self::PredictionList(b) => b.append(false),
         }
     }
 
@@ -926,6 +986,24 @@ impl AnyBuilder {
                 );
                 Ok(Self::ProteinFeatureList(ListBuilder::new(struct_builder)))
             }
+            dt if *dt == prediction_list_data_type() => {
+                let fields = vec![
+                    Field::new("position", DataType::Int32, false),
+                    Field::new("amino_acid", DataType::Utf8, false),
+                    Field::new("prediction", DataType::Utf8, false),
+                    Field::new("score", DataType::Float32, false),
+                ];
+                let struct_builder = StructBuilder::new(
+                    fields,
+                    vec![
+                        Box::new(Int32Builder::with_capacity(capacity * 4)),
+                        Box::new(StringBuilder::with_capacity(capacity * 4, capacity * 4)),
+                        Box::new(StringBuilder::with_capacity(capacity * 4, capacity * 32)),
+                        Box::new(Float32Builder::with_capacity(capacity * 4)),
+                    ],
+                );
+                Ok(Self::PredictionList(ListBuilder::new(struct_builder)))
+            }
             _ => Err(exec_err(format!(
                 "Unsupported data type in Ensembl cache schema: {data_type:?}"
             ))),
@@ -944,6 +1022,7 @@ impl AnyBuilder {
             Self::MirnaRegionList(mut builder) => Arc::new(builder.finish()),
             Self::CdnaMapperList(mut builder) => Arc::new(builder.finish()),
             Self::ProteinFeatureList(mut builder) => Arc::new(builder.finish()),
+            Self::PredictionList(mut builder) => Arc::new(builder.finish()),
         }
     }
 }

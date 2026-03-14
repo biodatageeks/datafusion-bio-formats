@@ -45,6 +45,18 @@ pub(crate) fn protein_feature_list_data_type() -> DataType {
     DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
 }
 
+/// Returns the Arrow `DataType` for SIFT/PolyPhen prediction entries:
+/// `List<Struct<position:Int32, amino_acid:Utf8, prediction:Utf8, score:Float32>>`.
+pub(crate) fn prediction_list_data_type() -> DataType {
+    let fields = Fields::from(vec![
+        Field::new("position", DataType::Int32, false),
+        Field::new("amino_acid", DataType::Utf8, false),
+        Field::new("prediction", DataType::Utf8, false),
+        Field::new("score", DataType::Float32, false),
+    ]);
+    DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
+}
+
 /// Returns the Arrow `DataType` for mature miRNA genomic regions:
 /// `List<Struct<start:Int64, end:Int64>>`.
 pub(crate) fn mirna_region_list_data_type() -> DataType {
@@ -288,6 +300,8 @@ pub(crate) fn translation_schema(
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
+        Field::new("sift_predictions", prediction_list_data_type(), true),
+        Field::new("polyphen_predictions", prediction_list_data_type(), true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];
