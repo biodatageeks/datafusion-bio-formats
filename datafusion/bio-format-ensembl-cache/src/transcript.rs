@@ -168,6 +168,8 @@ impl TranscriptColumnIndices {
 struct TranscriptAttributes {
     cds_start_nf: bool,
     cds_end_nf: bool,
+    /// CDS NF flags in attribute encounter order (for flags_str).
+    cds_nf_order: Vec<&'static str>,
     tsl: Option<i32>,
     mature_mirna_regions: Vec<(i64, i64)>,
     has_non_polya_rna_edit: bool,
@@ -635,8 +637,14 @@ fn parse_transcript_attributes_json(
         let value = attr_obj.get("value").and_then(Value::as_str).unwrap_or("");
 
         match code {
-            "cds_start_NF" if value == "1" => out.cds_start_nf = true,
-            "cds_end_NF" if value == "1" => out.cds_end_nf = true,
+            "cds_start_NF" if value == "1" => {
+                out.cds_start_nf = true;
+                out.cds_nf_order.push("cds_start_NF");
+            }
+            "cds_end_NF" if value == "1" => {
+                out.cds_end_nf = true;
+                out.cds_nf_order.push("cds_end_NF");
+            }
             "TSL" => {
                 out.tsl = parse_tsl_value(value);
             }
@@ -686,8 +694,14 @@ fn parse_transcript_attributes_storable(
             .unwrap_or_default();
 
         match code.as_str() {
-            "cds_start_NF" if value == "1" => out.cds_start_nf = true,
-            "cds_end_NF" if value == "1" => out.cds_end_nf = true,
+            "cds_start_NF" if value == "1" => {
+                out.cds_start_nf = true;
+                out.cds_nf_order.push("cds_start_NF");
+            }
+            "cds_end_NF" if value == "1" => {
+                out.cds_end_nf = true;
+                out.cds_nf_order.push("cds_end_NF");
+            }
             "TSL" => {
                 out.tsl = parse_tsl_value(&value);
             }
@@ -814,18 +828,12 @@ fn extract_mapper_pair_storable(
 
 /// Build the FLAGS string from transcript attributes.
 /// VEP convention: "cds_start_NF", "cds_end_NF", joined with "&".
+/// Build the FLAGS string preserving VEP attribute encounter order.
 fn build_flags_str(attrs: &TranscriptAttributes) -> Option<String> {
-    let mut parts = Vec::new();
-    if attrs.cds_start_nf {
-        parts.push("cds_start_NF");
-    }
-    if attrs.cds_end_nf {
-        parts.push("cds_end_NF");
-    }
-    if parts.is_empty() {
+    if attrs.cds_nf_order.is_empty() {
         None
     } else {
-        Some(parts.join("&"))
+        Some(attrs.cds_nf_order.join("&"))
     }
 }
 
