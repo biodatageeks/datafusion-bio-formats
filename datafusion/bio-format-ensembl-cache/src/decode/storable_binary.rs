@@ -11,9 +11,14 @@ pub(crate) enum SValue {
     Null,
     Int(i64),
     String(Arc<str>),
+    /// Raw binary data that is not valid UTF-8 (e.g., gzip-compressed matrices).
+    Bytes(Arc<[u8]>),
     Array(Arc<Vec<SValue>>),
     Hash(Arc<BTreeMap<String, SValue>>),
-    Blessed { class: Arc<str>, value: Arc<SValue> },
+    Blessed {
+        class: Arc<str>,
+        value: Arc<SValue>,
+    },
 }
 
 impl SValue {
@@ -62,6 +67,7 @@ impl SValue {
         match self.unbless() {
             Self::String(v) => Some(v.to_string()),
             Self::Int(v) => Some(v.to_string()),
+            Self::Bytes(v) => Some(String::from_utf8_lossy(v).into_owned()),
             Self::Array(items) => {
                 let values: Vec<String> = items.iter().filter_map(SValue::as_string).collect();
                 if values.is_empty() {
@@ -72,6 +78,23 @@ impl SValue {
             }
             _ => None,
         }
+    }
+
+    /// Returns raw bytes for Bytes variant, or UTF-8 bytes for String variant.
+    pub(crate) fn as_bytes(&self) -> Option<&[u8]> {
+        match self.unbless() {
+            Self::Bytes(v) => Some(v),
+            Self::String(v) => Some(v.as_bytes()),
+            _ => None,
+        }
+    }
+}
+
+/// Converts raw bytes to `SValue::String` if valid UTF-8, otherwise `SValue::Bytes`.
+fn bytes_to_svalue(bytes: Vec<u8>) -> SValue {
+    match String::from_utf8(bytes) {
+        Ok(s) => SValue::String(s.into()),
+        Err(e) => SValue::Bytes(e.into_bytes().into()),
     }
 }
 
@@ -265,6 +288,11 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
             SValue::Null => out.push_str("null"),
             SValue::Int(v) => out.push_str(&v.to_string()),
             SValue::String(v) => write_escaped_str(out, v),
+            SValue::Bytes(v) => {
+                // Represent binary data as hex-prefixed length in JSON for hashing.
+                // Full binary content is not meaningful as JSON text.
+                write_escaped_str(out, &format!("binary:{}bytes", v.len()));
+            }
             SValue::Array(items) => {
                 out.push('[');
                 for (idx, item) in items.iter().enumerate() {
@@ -786,7 +814,7 @@ impl<R: Read> Parser<R> {
             0x01 => {
                 let len = self.read_u32()? as usize;
                 let bytes = self.read_bytes(len)?;
-                SValue::String(String::from_utf8_lossy(&bytes).into_owned().into())
+                bytes_to_svalue(bytes)
             }
             0x02 => {
                 let len = self.read_u32()? as usize;
@@ -816,7 +844,7 @@ impl<R: Read> Parser<R> {
             0x0a => {
                 let len = self.read_u8()? as usize;
                 let bytes = self.read_bytes(len)?;
-                SValue::String(String::from_utf8_lossy(&bytes).into_owned().into())
+                bytes_to_svalue(bytes)
             }
             // weak references can appear in cached object graphs; for tabular extraction
             // we treat them as regular references.

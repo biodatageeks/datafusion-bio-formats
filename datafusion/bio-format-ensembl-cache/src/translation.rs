@@ -602,13 +602,117 @@ fn extract_protein_features_storable(
 /// A single SIFT/PolyPhen prediction entry: (position, amino_acid, prediction, score).
 type PredictionEntry = (i32, String, String, f32);
 
-/// Extract pre-decoded SIFT/PolyPhen predictions from JSON.
+// ---------------------------------------------------------------------------
+// VEP ProteinFunctionPredictionMatrix binary format decoder
+// ---------------------------------------------------------------------------
+
+/// VEP binary matrix header bytes.
+const MATRIX_HEADER: &[u8] = b"VEP";
+
+/// 20 standard amino acids in VEP's canonical order.
+const ALL_AAS: [char; 20] = [
+    'A', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'V', 'W',
+    'Y',
+];
+const NUM_AAS: usize = 20;
+const BYTES_PER_PRED: usize = 2;
+
+/// Number of bits used for the qualitative prediction code (ceil(log2(4)) = 2).
+const NUM_PRED_BITS: u16 = 2;
+
+/// Special marker for "no prediction" (reference amino acid at this position).
+const NO_PREDICTION: u16 = 0xFFFF;
+
+/// SIFT prediction codes (value → string).
+const SIFT_PREDICTIONS: [&str; 4] = [
+    "tolerated",
+    "deleterious",
+    "tolerated - low confidence",
+    "deleterious - low confidence",
+];
+
+/// PolyPhen prediction codes (value → string).
+const POLYPHEN_PREDICTIONS: [&str; 4] = [
+    "probably damaging",
+    "possibly damaging",
+    "benign",
+    "unknown",
+];
+
+/// Decode a VEP ProteinFunctionPredictionMatrix from raw bytes (already decompressed).
+/// Returns prediction entries for all non-null positions.
+fn decode_prediction_matrix(matrix: &[u8], analysis: &str) -> Option<Vec<PredictionEntry>> {
+    // Validate header
+    if matrix.len() < MATRIX_HEADER.len() || &matrix[..MATRIX_HEADER.len()] != MATRIX_HEADER {
+        return None;
+    }
+
+    let data = &matrix[MATRIX_HEADER.len()..];
+    let total_predictions = data.len() / BYTES_PER_PRED;
+    if total_predictions == 0 || data.len() % BYTES_PER_PRED != 0 {
+        return None;
+    }
+    let protein_length = total_predictions / NUM_AAS;
+    if protein_length == 0 {
+        return None;
+    }
+
+    let pred_labels = match analysis {
+        "sift" => &SIFT_PREDICTIONS,
+        "polyphen_humvar" | "polyphen" => &POLYPHEN_PREDICTIONS,
+        _ => return None,
+    };
+
+    let mut entries = Vec::new();
+    for pos in 0..protein_length {
+        for (aa_idx, &aa) in ALL_AAS.iter().enumerate() {
+            let offset = (pos * NUM_AAS + aa_idx) * BYTES_PER_PRED;
+            if offset + 1 >= data.len() {
+                break;
+            }
+            let val = u16::from_le_bytes([data[offset], data[offset + 1]]);
+            if val == NO_PREDICTION {
+                continue;
+            }
+            let pred_code = (val >> (16 - NUM_PRED_BITS)) as usize;
+            let score_raw = val & 0x3FF; // bottom 10 bits
+            let score = score_raw as f32 / 1000.0;
+
+            if pred_code < pred_labels.len() {
+                entries.push((
+                    (pos + 1) as i32, // 1-based position
+                    aa.to_string(),
+                    pred_labels[pred_code].to_string(),
+                    score,
+                ));
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries)
+    }
+}
+
+/// Decompress gzip data and decode the prediction matrix.
+fn decode_compressed_matrix(compressed: &[u8], analysis: &str) -> Option<Vec<PredictionEntry>> {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let mut decoder = GzDecoder::new(compressed);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed).ok()?;
+    decode_prediction_matrix(&decompressed, analysis)
+}
+
+/// Extract SIFT/PolyPhen predictions from JSON `protein_function_predictions`.
 /// The `key` is "sift" or "polyphen_humvar".
 ///
-/// In raw VEP cache files, these are gzip-compressed binary matrices that
-/// cannot be decoded in Rust — this function returns None for those.
-/// When a pre-processing step has decoded them into a JSON array of
-/// `{position, amino_acid, prediction, score}` objects, this extracts them.
+/// Supports pre-decoded format (array of {position, amino_acid, prediction, score}).
+/// Binary matrix data cannot be represented in JSON, so raw VEP cache files
+/// decoded through the JSON text path will return None.
 fn extract_predictions_json(
     pfp: &serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -643,29 +747,49 @@ fn extract_predictions_json(
     }
 }
 
-/// Extract pre-decoded SIFT/PolyPhen predictions from Storable.
+/// Extract SIFT/PolyPhen predictions from Storable `protein_function_predictions`.
+///
+/// Handles both:
+/// 1. Raw VEP cache: blessed ProteinFunctionPredictionMatrix with gzip-compressed
+///    `matrix` binary blob — decoded natively via `decode_compressed_matrix()`.
+/// 2. Pre-decoded format: hash with `predictions` array of structured entries.
 fn extract_predictions_storable(
     pfp: &std::collections::BTreeMap<String, SValue>,
     key: &str,
 ) -> Option<Vec<PredictionEntry>> {
     let predictor = pfp.get(key)?;
-    // Pre-decoded format: the predictor hash may contain a "predictions" array.
-    let arr = predictor.as_array().or_else(|| {
-        predictor
-            .as_hash()
-            .and_then(|obj| obj.get("predictions"))
-            .and_then(SValue::as_array)
-    })?;
+    let obj = predictor.as_hash()?;
+
+    // Check for raw binary matrix (from VEP cache Storable files).
+    if let Some(matrix_data) = obj.get("matrix").and_then(SValue::as_bytes) {
+        let is_compressed = obj
+            .get("matrix_compressed")
+            .and_then(SValue::as_i64)
+            .unwrap_or(0)
+            != 0;
+        let analysis = obj
+            .get("analysis")
+            .and_then(SValue::as_string)
+            .unwrap_or_else(|| key.to_string());
+        return if is_compressed {
+            decode_compressed_matrix(matrix_data, &analysis)
+        } else {
+            decode_prediction_matrix(matrix_data, &analysis)
+        };
+    }
+
+    // Fallback: pre-decoded format with "predictions" array.
+    let arr = obj.get("predictions").and_then(SValue::as_array)?;
     let entries: Vec<PredictionEntry> = arr
         .iter()
         .filter_map(|item| {
-            let obj = item.as_hash()?;
-            let position = sv_i64(obj.get("position")).and_then(|v| i32::try_from(v).ok())?;
-            let amino_acid = sv_str(obj.get("amino_acid"))?;
-            let prediction = sv_str(obj.get("prediction"))?;
-            let score = sv_i64(obj.get("score"))
+            let entry = item.as_hash()?;
+            let position = sv_i64(entry.get("position")).and_then(|v| i32::try_from(v).ok())?;
+            let amino_acid = sv_str(entry.get("amino_acid"))?;
+            let prediction = sv_str(entry.get("prediction"))?;
+            let score = sv_i64(entry.get("score"))
                 .map(|v| v as f32)
-                .or_else(|| sv_str(obj.get("score")).and_then(|s| s.parse::<f32>().ok()))?;
+                .or_else(|| sv_str(entry.get("score")).and_then(|s| s.parse::<f32>().ok()))?;
             Some((position, amino_acid, prediction, score))
         })
         .collect();
@@ -712,4 +836,120 @@ fn sv_str(value: Option<&SValue>) -> Option<String> {
 
 fn sv_i64(value: Option<&SValue>) -> Option<i64> {
     value.and_then(SValue::as_i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a synthetic VEP prediction matrix for 2 positions × 20 amino acids.
+    fn build_test_matrix(analysis: &str) -> Vec<u8> {
+        let mut matrix = Vec::new();
+        matrix.extend_from_slice(MATRIX_HEADER); // "VEP"
+
+        // Position 1: set prediction for amino acid 'A' (index 0) and 'C' (index 1)
+        // All others are NO_PREDICTION (0xFFFF)
+        for aa_idx in 0..NUM_AAS {
+            let val: u16 = match aa_idx {
+                0 => {
+                    // A: prediction code 0, score 0.5 → 500
+                    (0u16 << (16 - NUM_PRED_BITS)) | 500
+                }
+                1 => {
+                    // C: prediction code 1, score 0.02 → 20
+                    (1u16 << (16 - NUM_PRED_BITS)) | 20
+                }
+                _ => NO_PREDICTION,
+            };
+            matrix.extend_from_slice(&val.to_le_bytes());
+        }
+
+        // Position 2: all NO_PREDICTION except 'D' (index 2)
+        for aa_idx in 0..NUM_AAS {
+            let val: u16 = if aa_idx == 2 {
+                // D: prediction code 2, score 0.85 → 850
+                (2u16 << (16 - NUM_PRED_BITS)) | 850
+            } else {
+                NO_PREDICTION
+            };
+            matrix.extend_from_slice(&val.to_le_bytes());
+        }
+
+        // Verify it's the right analysis to pick correct labels
+        assert!(analysis == "sift" || analysis == "polyphen_humvar");
+        matrix
+    }
+
+    #[test]
+    fn decode_sift_matrix() {
+        let matrix = build_test_matrix("sift");
+        let entries = decode_prediction_matrix(&matrix, "sift").unwrap();
+
+        assert_eq!(entries.len(), 3);
+
+        // Position 1, A: tolerated, 0.5
+        assert_eq!(entries[0].0, 1); // position
+        assert_eq!(entries[0].1, "A"); // amino acid
+        assert_eq!(entries[0].2, "tolerated"); // prediction
+        assert!((entries[0].3 - 0.5).abs() < 0.001); // score
+
+        // Position 1, C: deleterious, 0.02
+        assert_eq!(entries[1].0, 1);
+        assert_eq!(entries[1].1, "C");
+        assert_eq!(entries[1].2, "deleterious");
+        assert!((entries[1].3 - 0.02).abs() < 0.001);
+
+        // Position 2, D: tolerated - low confidence, 0.85
+        assert_eq!(entries[2].0, 2);
+        assert_eq!(entries[2].1, "D");
+        assert_eq!(entries[2].2, "tolerated - low confidence");
+        assert!((entries[2].3 - 0.85).abs() < 0.001);
+    }
+
+    #[test]
+    fn decode_polyphen_matrix() {
+        let matrix = build_test_matrix("polyphen_humvar");
+        let entries = decode_prediction_matrix(&matrix, "polyphen_humvar").unwrap();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].2, "probably damaging");
+        assert_eq!(entries[1].2, "possibly damaging");
+        assert_eq!(entries[2].2, "benign");
+    }
+
+    #[test]
+    fn decode_matrix_bad_header() {
+        let matrix = b"BAD".to_vec();
+        assert!(decode_prediction_matrix(&matrix, "sift").is_none());
+    }
+
+    #[test]
+    fn decode_matrix_empty() {
+        assert!(decode_prediction_matrix(b"VEP", "sift").is_none());
+    }
+
+    #[test]
+    fn decode_compressed_matrix_roundtrip() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+
+        let matrix = build_test_matrix("sift");
+
+        // Gzip compress the matrix
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&matrix).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let entries = decode_compressed_matrix(&compressed, "sift").unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].2, "tolerated");
+        assert_eq!(entries[1].2, "deleterious");
+    }
+
+    #[test]
+    fn decode_unknown_analysis_returns_none() {
+        let matrix = build_test_matrix("sift");
+        assert!(decode_prediction_matrix(&matrix, "unknown_tool").is_none());
+    }
 }
