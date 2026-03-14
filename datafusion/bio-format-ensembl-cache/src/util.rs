@@ -1,6 +1,7 @@
 use crate::errors::{Result, exec_err};
 use crate::schema::{
     cdna_mapper_segment_list_data_type, exon_list_data_type, mirna_region_list_data_type,
+    protein_feature_list_data_type,
 };
 use datafusion::arrow::array::{
     ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int8Builder, Int32Builder,
@@ -683,6 +684,73 @@ impl BatchBuilder {
         self.mark_written(col);
     }
 
+    /// Append a list of protein features to a `List<Struct>` column.
+    /// Each feature is `(analysis, hseqname, start, end)`.
+    #[allow(clippy::type_complexity)]
+    pub fn set_protein_feature_list(
+        &mut self,
+        col: usize,
+        features: Option<&[(Option<String>, Option<String>, Option<i64>, Option<i64>)]>,
+    ) {
+        let mut overflow: Option<(usize, usize)> = None;
+        if let AnyBuilder::ProteinFeatureList(list_builder) = &mut self.builders[col] {
+            match features {
+                Some(feat_slice) => {
+                    let current_child_len = list_builder.values().len();
+                    let next_child_len = current_child_len.saturating_add(feat_slice.len());
+                    if next_child_len > i32::MAX as usize {
+                        overflow = Some((current_child_len, feat_slice.len()));
+                        list_builder.append(false);
+                        self.mark_written(col);
+                    } else {
+                        let struct_builder = list_builder.values();
+                        for (analysis, hseqname, start, end) in feat_slice {
+                            let analysis_builder =
+                                struct_builder.field_builder::<StringBuilder>(0).unwrap();
+                            match analysis {
+                                Some(v) => analysis_builder.append_value(v),
+                                None => analysis_builder.append_null(),
+                            }
+                            let hseqname_builder =
+                                struct_builder.field_builder::<StringBuilder>(1).unwrap();
+                            match hseqname {
+                                Some(v) => hseqname_builder.append_value(v),
+                                None => hseqname_builder.append_null(),
+                            }
+                            let start_builder =
+                                struct_builder.field_builder::<Int64Builder>(2).unwrap();
+                            match start {
+                                Some(v) => start_builder.append_value(*v),
+                                None => start_builder.append_null(),
+                            }
+                            let end_builder =
+                                struct_builder.field_builder::<Int64Builder>(3).unwrap();
+                            match end {
+                                Some(v) => end_builder.append_value(*v),
+                                None => end_builder.append_null(),
+                            }
+                            struct_builder.append(true);
+                        }
+                        list_builder.append(true);
+                    }
+                }
+                None => {
+                    list_builder.append(false);
+                }
+            }
+        }
+        if let Some((current_child_len, added)) = overflow {
+            let col_name = self.schema.field(col).name().clone();
+            self.set_pending_error_once(format!(
+                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
+                 Reduce batch_size_hint.",
+                col_name, current_child_len, added
+            ));
+            return;
+        }
+        self.mark_written(col);
+    }
+
     #[inline]
     pub fn set_null(&mut self, col: usize) {
         self.builders[col].append_null();
@@ -759,6 +827,7 @@ enum AnyBuilder {
     ExonList(ListBuilder<StructBuilder>),
     MirnaRegionList(ListBuilder<StructBuilder>),
     CdnaMapperList(ListBuilder<StructBuilder>),
+    ProteinFeatureList(ListBuilder<StructBuilder>),
 }
 
 impl AnyBuilder {
@@ -774,6 +843,7 @@ impl AnyBuilder {
             Self::ExonList(b) => b.append(false),
             Self::MirnaRegionList(b) => b.append(false),
             Self::CdnaMapperList(b) => b.append(false),
+            Self::ProteinFeatureList(b) => b.append(false),
         }
     }
 
@@ -838,6 +908,24 @@ impl AnyBuilder {
                 );
                 Ok(Self::MirnaRegionList(ListBuilder::new(struct_builder)))
             }
+            dt if *dt == protein_feature_list_data_type() => {
+                let fields = vec![
+                    Field::new("analysis", DataType::Utf8, true),
+                    Field::new("hseqname", DataType::Utf8, true),
+                    Field::new("start", DataType::Int64, true),
+                    Field::new("end", DataType::Int64, true),
+                ];
+                let struct_builder = StructBuilder::new(
+                    fields,
+                    vec![
+                        Box::new(StringBuilder::with_capacity(capacity * 2, capacity * 16)),
+                        Box::new(StringBuilder::with_capacity(capacity * 2, capacity * 16)),
+                        Box::new(Int64Builder::with_capacity(capacity * 2)),
+                        Box::new(Int64Builder::with_capacity(capacity * 2)),
+                    ],
+                );
+                Ok(Self::ProteinFeatureList(ListBuilder::new(struct_builder)))
+            }
             _ => Err(exec_err(format!(
                 "Unsupported data type in Ensembl cache schema: {data_type:?}"
             ))),
@@ -855,6 +943,7 @@ impl AnyBuilder {
             Self::ExonList(mut builder) => Arc::new(builder.finish()),
             Self::MirnaRegionList(mut builder) => Arc::new(builder.finish()),
             Self::CdnaMapperList(mut builder) => Arc::new(builder.finish()),
+            Self::ProteinFeatureList(mut builder) => Arc::new(builder.finish()),
         }
     }
 }

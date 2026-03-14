@@ -36,6 +36,8 @@ pub(crate) struct TranslationColumnIndices {
     peptide_seq: Option<usize>,
     cdna_seq: Option<usize>,
     sequences_projected: bool,
+    protein_features: Option<usize>,
+    protein_features_projected: bool,
     raw_object_json: Option<usize>,
     object_hash: Option<usize>,
 }
@@ -47,6 +49,8 @@ impl TranslationColumnIndices {
         let peptide_seq = col_map.get("translation_seq");
         let cdna_seq = col_map.get("cds_sequence");
         let sequences_projected = peptide_seq.is_some() || cdna_seq.is_some();
+        let protein_features = col_map.get("protein_features");
+        let protein_features_projected = protein_features.is_some();
         Self {
             chrom: col_map.get("chrom"),
             start: col_map.get("start"),
@@ -64,6 +68,8 @@ impl TranslationColumnIndices {
             peptide_seq,
             cdna_seq,
             sequences_projected,
+            protein_features,
+            protein_features_projected,
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
@@ -247,8 +253,8 @@ pub(crate) fn parse_translation_line_into(
         batch.set_opt_i64(idx, cds_len);
     }
 
-    // Sequences from _variation_effect_feature_cache — only parse when projected.
-    if col_idx.sequences_projected {
+    // Sequences and protein features from _variation_effect_feature_cache — only parse when projected.
+    if col_idx.sequences_projected || col_idx.protein_features_projected {
         let vef_cache = object
             .get("_variation_effect_feature_cache")
             .and_then(unwrap_blessed_object_optional);
@@ -259,6 +265,10 @@ pub(crate) fn parse_translation_line_into(
         if let Some(idx) = col_idx.cdna_seq {
             let value = vef_cache.and_then(|c| json_str(c.get("translateable_seq")));
             batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.protein_features {
+            let features = vef_cache.and_then(extract_protein_features_json);
+            batch.set_protein_feature_list(idx, features.as_deref());
         }
     }
 
@@ -412,8 +422,8 @@ where
             batch.set_opt_i64(idx, cds_len);
         }
 
-        // Sequences from _variation_effect_feature_cache — only parse when projected.
-        if col_idx.sequences_projected {
+        // Sequences and protein features from _variation_effect_feature_cache — only parse when projected.
+        if col_idx.sequences_projected || col_idx.protein_features_projected {
             if let Some(vef_cache) = obj
                 .get("_variation_effect_feature_cache")
                 .and_then(SValue::as_hash)
@@ -425,6 +435,10 @@ where
                 if let Some(idx) = col_idx.cdna_seq {
                     let value = sv_str(vef_cache.get("translateable_seq"));
                     batch.set_opt_utf8_owned(idx, value.as_ref());
+                }
+                if let Some(idx) = col_idx.protein_features {
+                    let features = extract_protein_features_storable(vef_cache);
+                    batch.set_protein_feature_list(idx, features.as_deref());
                 }
             }
         }
@@ -475,6 +489,66 @@ where
     })?;
 
     Ok(())
+}
+
+/// A single protein feature: (analysis, hseqname, start, end).
+type ProteinFeature = (Option<String>, Option<String>, Option<i64>, Option<i64>);
+
+/// Extract protein features from JSON `_variation_effect_feature_cache` object.
+/// Path: `protein_features` array of ProteinFeature objects.
+fn extract_protein_features_json(
+    vef_cache: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<ProteinFeature>> {
+    let arr = vef_cache.get("protein_features")?.as_array()?;
+    let features: Vec<ProteinFeature> = arr
+        .iter()
+        .filter_map(|item| {
+            let obj = unwrap_blessed_object_optional(item).or_else(|| item.as_object())?;
+            // Extract analysis name: may be in "analysis" sub-object's "logic_name",
+            // or directly as "_analysis" string.
+            let analysis = obj
+                .get("analysis")
+                .and_then(unwrap_blessed_object_optional)
+                .and_then(|a| json_str(a.get("logic_name")))
+                .or_else(|| json_str(obj.get("_analysis")));
+            let hseqname = json_str(obj.get("hseqname"));
+            let start = json_i64(obj.get("start"));
+            let end = json_i64(obj.get("end"));
+            Some((analysis, hseqname, start, end))
+        })
+        .collect();
+    if features.is_empty() {
+        None
+    } else {
+        Some(features)
+    }
+}
+
+/// Extract protein features from Storable `_variation_effect_feature_cache` hash.
+fn extract_protein_features_storable(
+    vef_cache: &std::collections::BTreeMap<String, SValue>,
+) -> Option<Vec<ProteinFeature>> {
+    let arr = vef_cache.get("protein_features")?.as_array()?;
+    let features: Vec<ProteinFeature> = arr
+        .iter()
+        .filter_map(|item| {
+            let obj = item.as_hash()?;
+            let analysis = obj
+                .get("analysis")
+                .and_then(SValue::as_hash)
+                .and_then(|a| sv_str(a.get("logic_name")))
+                .or_else(|| sv_str(obj.get("_analysis")));
+            let hseqname = sv_str(obj.get("hseqname"));
+            let start = sv_i64(obj.get("start"));
+            let end = sv_i64(obj.get("end"));
+            Some((analysis, hseqname, start, end))
+        })
+        .collect();
+    if features.is_empty() {
+        None
+    } else {
+        Some(features)
+    }
 }
 
 fn unwrap_blessed_object(

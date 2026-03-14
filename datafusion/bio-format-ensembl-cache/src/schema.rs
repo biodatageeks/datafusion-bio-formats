@@ -33,6 +33,18 @@ pub(crate) fn cdna_mapper_segment_list_data_type() -> DataType {
     DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
 }
 
+/// Returns the Arrow `DataType` for protein features:
+/// `List<Struct<analysis:Utf8, hseqname:Utf8, start:Int64, end:Int64>>`.
+pub(crate) fn protein_feature_list_data_type() -> DataType {
+    let fields = Fields::from(vec![
+        Field::new("analysis", DataType::Utf8, true),
+        Field::new("hseqname", DataType::Utf8, true),
+        Field::new("start", DataType::Int64, true),
+        Field::new("end", DataType::Int64, true),
+    ]);
+    DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
+}
+
 /// Returns the Arrow `DataType` for mature miRNA genomic regions:
 /// `List<Struct<start:Int64, end:Int64>>`.
 pub(crate) fn mirna_region_list_data_type() -> DataType {
@@ -158,6 +170,7 @@ pub(crate) fn transcript_schema(
         Field::new("peptide_seq", DataType::Utf8, true),
         Field::new("codon_table", DataType::Int32, true),
         Field::new("tsl", DataType::Int32, true),
+        Field::new("appris", DataType::Utf8, true),
         Field::new("mane_select", DataType::Utf8, true),
         Field::new("mane_plus_clinical", DataType::Utf8, true),
         Field::new("gene_phenotype", DataType::Boolean, true),
@@ -274,6 +287,7 @@ pub(crate) fn translation_schema(
         Field::new("cds_len", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
+        Field::new("protein_features", protein_feature_list_data_type(), true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];

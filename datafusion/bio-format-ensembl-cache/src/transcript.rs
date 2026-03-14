@@ -52,6 +52,7 @@ pub(crate) struct TranscriptColumnIndices {
     sequences_projected: bool,
     codon_table: Option<usize>,
     tsl: Option<usize>,
+    appris: Option<usize>,
     mane_select: Option<usize>,
     mane_plus_clinical: Option<usize>,
     gene_phenotype: Option<usize>,
@@ -139,6 +140,7 @@ impl TranscriptColumnIndices {
             sequences_projected,
             codon_table: col_map.get("codon_table"),
             tsl: col_map.get("tsl"),
+            appris: col_map.get("appris"),
             mane_select: col_map.get("mane_select"),
             mane_plus_clinical: col_map.get("mane_plus_clinical"),
             gene_phenotype: col_map.get("gene_phenotype"),
@@ -513,15 +515,16 @@ fn parse_tsl_value(value: &str) -> Option<i32> {
     digits.parse::<i32>().ok().filter(|&v| (1..=5).contains(&v))
 }
 
-/// Extract MANE_Select and MANE_Plus_Clinical from JSON transcript attributes.
-/// VEP stores these as attributes with codes "MANE_Select" / "MANE_Plus_Clinical".
-fn extract_mane_from_json_attributes(
+/// Extract MANE_Select, MANE_Plus_Clinical, and APPRIS from JSON transcript attributes.
+/// VEP stores these as attributes with codes "MANE_Select" / "MANE_Plus_Clinical" / "appris".
+fn extract_mane_appris_from_json_attributes(
     object: &serde_json::Map<String, Value>,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     let mut mane_select = None;
     let mut mane_plus_clinical = None;
+    let mut appris = None;
     let Some(attributes) = object.get("attributes").and_then(Value::as_array) else {
-        return (mane_select, mane_plus_clinical);
+        return (mane_select, mane_plus_clinical, appris);
     };
     for attr in attributes {
         let Some(attr_obj) = unwrap_blessed_object_optional(attr) else {
@@ -541,23 +544,30 @@ fn extract_mane_from_json_attributes(
                     .and_then(Value::as_str)
                     .map(|s| s.to_string());
             }
+            "appris" => {
+                appris = attr_obj
+                    .get("value")
+                    .and_then(Value::as_str)
+                    .map(|s| s.to_string());
+            }
             _ => {}
         }
-        if mane_select.is_some() && mane_plus_clinical.is_some() {
+        if mane_select.is_some() && mane_plus_clinical.is_some() && appris.is_some() {
             break;
         }
     }
-    (mane_select, mane_plus_clinical)
+    (mane_select, mane_plus_clinical, appris)
 }
 
-/// Extract MANE_Select and MANE_Plus_Clinical from Storable transcript attributes.
-fn extract_mane_from_storable_attributes(
+/// Extract MANE_Select, MANE_Plus_Clinical, and APPRIS from Storable transcript attributes.
+fn extract_mane_appris_from_storable_attributes(
     object: &std::collections::BTreeMap<String, SValue>,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<String>) {
     let mut mane_select = None;
     let mut mane_plus_clinical = None;
+    let mut appris = None;
     let Some(attributes) = object.get("attributes").and_then(SValue::as_array) else {
-        return (mane_select, mane_plus_clinical);
+        return (mane_select, mane_plus_clinical, appris);
     };
     for attr in attributes {
         let Some(attr_obj) = attr.as_hash() else {
@@ -574,13 +584,16 @@ fn extract_mane_from_storable_attributes(
             "MANE_Plus_Clinical" => {
                 mane_plus_clinical = attr_obj.get("value").and_then(SValue::as_string);
             }
+            "appris" => {
+                appris = attr_obj.get("value").and_then(SValue::as_string);
+            }
             _ => {}
         }
-        if mane_select.is_some() && mane_plus_clinical.is_some() {
+        if mane_select.is_some() && mane_plus_clinical.is_some() && appris.is_some() {
             break;
         }
     }
-    (mane_select, mane_plus_clinical)
+    (mane_select, mane_plus_clinical, appris)
 }
 
 fn parse_cdna_range(value: &str) -> Option<(i64, i64)> {
@@ -1245,14 +1258,21 @@ pub(crate) fn parse_transcript_line_into(
             });
         batch.set_opt_i32(idx, tsl_from_attrs.or_else(|| json_i32(object.get("tsl"))));
     }
-    // MANE_Select / MANE_Plus_Clinical are stored as attributes, not top-level keys.
-    if col_idx.mane_select.is_some() || col_idx.mane_plus_clinical.is_some() {
-        let (mane_select_val, mane_plus_clinical_val) = extract_mane_from_json_attributes(object);
+    // MANE_Select / MANE_Plus_Clinical / APPRIS are stored as attributes, not top-level keys.
+    if col_idx.mane_select.is_some()
+        || col_idx.mane_plus_clinical.is_some()
+        || col_idx.appris.is_some()
+    {
+        let (mane_select_val, mane_plus_clinical_val, appris_val) =
+            extract_mane_appris_from_json_attributes(object);
         if let Some(idx) = col_idx.mane_select {
             batch.set_opt_utf8_owned(idx, mane_select_val.as_ref());
         }
         if let Some(idx) = col_idx.mane_plus_clinical {
             batch.set_opt_utf8_owned(idx, mane_plus_clinical_val.as_ref());
+        }
+        if let Some(idx) = col_idx.appris {
+            batch.set_opt_utf8_owned(idx, appris_val.as_ref());
         }
     }
 
@@ -1755,15 +1775,21 @@ fn append_transcript_storable_row_into(
                 .or_else(|| sv_i64(object.get("tsl")).and_then(|v| i32::try_from(v).ok())),
         );
     }
-    // MANE_Select / MANE_Plus_Clinical are stored as attributes, not top-level keys.
-    if col_idx.mane_select.is_some() || col_idx.mane_plus_clinical.is_some() {
-        let (mane_select_val, mane_plus_clinical_val) =
-            extract_mane_from_storable_attributes(object);
+    // MANE_Select / MANE_Plus_Clinical / APPRIS are stored as attributes, not top-level keys.
+    if col_idx.mane_select.is_some()
+        || col_idx.mane_plus_clinical.is_some()
+        || col_idx.appris.is_some()
+    {
+        let (mane_select_val, mane_plus_clinical_val, appris_val) =
+            extract_mane_appris_from_storable_attributes(object);
         if let Some(idx) = col_idx.mane_select {
             batch.set_opt_utf8_owned(idx, mane_select_val.as_ref());
         }
         if let Some(idx) = col_idx.mane_plus_clinical {
             batch.set_opt_utf8_owned(idx, mane_plus_clinical_val.as_ref());
+        }
+        if let Some(idx) = col_idx.appris {
+            batch.set_opt_utf8_owned(idx, appris_val.as_ref());
         }
     }
 
@@ -1982,7 +2008,7 @@ mod tests {
             ]
         });
         let object = payload.as_object().unwrap();
-        let (ms, mpc) = extract_mane_from_json_attributes(object);
+        let (ms, mpc, _appris) = extract_mane_appris_from_json_attributes(object);
         assert_eq!(ms.as_deref(), Some("NM_021090.4"));
         assert_eq!(mpc, None);
     }
@@ -2002,7 +2028,7 @@ mod tests {
             ]
         });
         let object = payload.as_object().unwrap();
-        let (ms, mpc) = extract_mane_from_json_attributes(object);
+        let (ms, mpc, _appris) = extract_mane_appris_from_json_attributes(object);
         assert_eq!(ms.as_deref(), Some("NM_001044370.2"));
         assert_eq!(mpc.as_deref(), Some("NM_014346.5"));
     }
@@ -2015,7 +2041,7 @@ mod tests {
             ]
         });
         let object = payload.as_object().unwrap();
-        let (ms, mpc) = extract_mane_from_json_attributes(object);
+        let (ms, mpc, _appris) = extract_mane_appris_from_json_attributes(object);
         assert_eq!(ms, None);
         assert_eq!(mpc, None);
     }
@@ -2035,7 +2061,7 @@ mod tests {
             SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_mane))])),
         );
 
-        let (ms, mpc) = extract_mane_from_storable_attributes(&object);
+        let (ms, mpc, _appris) = extract_mane_appris_from_storable_attributes(&object);
         assert_eq!(ms.as_deref(), Some("NM_021090.4"));
         assert_eq!(mpc, None);
     }
@@ -2068,7 +2094,7 @@ mod tests {
             ])),
         );
 
-        let (ms, mpc) = extract_mane_from_storable_attributes(&object);
+        let (ms, mpc, _appris) = extract_mane_appris_from_storable_attributes(&object);
         assert_eq!(ms.as_deref(), Some("NM_001044370.2"));
         assert_eq!(mpc.as_deref(), Some("NM_014346.5"));
     }
