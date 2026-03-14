@@ -112,7 +112,8 @@ of transcripts that would otherwise have no exon entries.
 | `cdna_seq` | Utf8 | yes | Translatable CDS nucleotide sequence |
 | `peptide_seq` | Utf8 | yes | Protein sequence |
 | `codon_table` | Int32 | yes | NCBI genetic code table ID (1 = standard) |
-| `tsl` | Int32 | yes | Transcript support level |
+| `tsl` | Int32 | yes | Transcript support level (1–5) |
+| `appris` | Utf8 | yes | APPRIS annotation (e.g. `principal1`, `alternative2`) |
 | `mane_select` | Utf8 | yes | MANE Select transcript identifier |
 | `mane_plus_clinical` | Utf8 | yes | MANE Plus Clinical transcript identifier |
 | `gene_phenotype` | Boolean | yes | Gene phenotype flag used by VEP `GENE_PHENO` |
@@ -124,6 +125,12 @@ of transcripts that would otherwise have no exon entries.
 | `cds_start_nf` | Boolean | yes | Transcript has incomplete CDS start (`cds_start_NF`); `false` when absent |
 | `cds_end_nf` | Boolean | yes | Transcript has incomplete CDS end (`cds_end_NF`); `false` when absent |
 | `mature_mirna_regions` | `List<Struct<start:Int64, end:Int64>>` | yes | Mature miRNA genomic regions derived from transcript attributes; null for non-miRNA transcripts |
+| `translateable_seq` | Utf8 | yes | Translatable CDS sequence (top-level promoted field) |
+| `cdna_mapper_segments` | `List<Struct<genomic_start:Int64, genomic_end:Int64, cdna_start:Int64, cdna_end:Int64, ori:Int8>>` | yes | cDNA ↔ genomic coordinate mapping segments |
+| `bam_edit_status` | Utf8 | yes | BAM edit status flag |
+| `has_non_polya_rna_edit` | Boolean | yes | Whether transcript has non-poly-A RNA edits |
+| `spliced_seq` | Utf8 | yes | Spliced transcript sequence |
+| `flags_str` | Utf8 | yes | CDS NF flags in VEP encounter order (e.g. `cds_start_NF&cds_end_NF`) |
 
 ### Exon
 
@@ -166,6 +173,68 @@ Standalone translation table — one row per coding transcript.
 | `cds_len` | Int64 | yes | CDS length (derived: `cdna_coding_end - cdna_coding_start + 1`) |
 | `translation_seq` | Utf8 | yes | Protein/peptide sequence |
 | `cds_sequence` | Utf8 | yes | Translatable CDS nucleotide sequence |
+| `protein_features` | `List<Struct<analysis:Utf8, hseqname:Utf8, start:Int64, end:Int64>>` | yes | Protein domain/feature annotations (see below) |
+| `sift_predictions` | `List<Struct<position:Int32, amino_acid:Utf8, prediction:Utf8, score:Float32>>` | yes | SIFT pathogenicity predictions (see below) |
+| `polyphen_predictions` | `List<Struct<position:Int32, amino_acid:Utf8, prediction:Utf8, score:Float32>>` | yes | PolyPhen-2 pathogenicity predictions (see below) |
+
+#### Protein Features
+
+The `protein_features` column stores domain and feature annotations from
+`_variation_effect_feature_cache.protein_features`. Each entry contains:
+
+- `analysis`: Analysis/database name (e.g. `Pfam`, `PANTHER`, `Gene3D`)
+- `hseqname`: Domain/feature accession (e.g. `PF00069`)
+- `start`: Feature start position in protein coordinates
+- `end`: Feature end position in protein coordinates
+
+At annotation time, VEP checks which protein features overlap the variant's
+protein position and formats them as `analysis:hseqname` joined with `&`.
+
+#### SIFT and PolyPhen Predictions
+
+The `sift_predictions` and `polyphen_predictions` columns contain per-position,
+per-amino-acid pathogenicity scores decoded from VEP's
+`ProteinFunctionPredictionMatrix` binary format. Each entry contains:
+
+- `position`: 1-based protein position
+- `amino_acid`: Single-letter amino acid substitution (one of 20 standard AAs)
+- `prediction`: Qualitative prediction string
+- `score`: Numeric score (0.0–1.0)
+
+**SIFT prediction values** (lower score = more damaging):
+
+| Code | Prediction |
+|------|------------|
+| 0 | `tolerated` |
+| 1 | `deleterious` |
+| 2 | `tolerated - low confidence` |
+| 3 | `deleterious - low confidence` |
+
+**PolyPhen-2 prediction values** (higher score = more damaging):
+
+| Code | Prediction |
+|------|------------|
+| 0 | `probably damaging` |
+| 1 | `possibly damaging` |
+| 2 | `benign` |
+| 3 | `unknown` |
+
+**Binary matrix format** (decoded natively from raw VEP cache):
+
+The VEP cache stores SIFT and PolyPhen scores as gzip-compressed binary
+matrices in `_variation_effect_feature_cache.protein_function_predictions`.
+Each matrix has a 3-byte `VEP` header followed by concatenated 2-byte
+little-endian unsigned shorts — 20 per protein position (one per amino acid
+in the order `A C D E F G H I K L M N P Q R S T V W Y`).
+
+Each 16-bit value encodes:
+- **Top 2 bits** (bits 14–15): Qualitative prediction code (see tables above)
+- **Bottom 10 bits** (bits 0–9): Score × 1000 (divide by 1000 for 3 d.p. float)
+- **0xFFFF**: No prediction (reference amino acid at this position)
+
+The decoder handles both gzip-compressed matrices (raw VEP cache) and
+uncompressed matrices, producing the structured list column directly
+during cache-to-parquet conversion.
 
 ### Regulatory Feature
 
@@ -218,6 +287,10 @@ Standalone translation table — one row per coding transcript.
 | `clinical_impact` | Utf8 | yes | Clinical impact annotation |
 | `pubmed` | Utf8 | yes | PubMed IDs |
 | `var_synonyms` | Utf8 | yes | Variant synonyms |
+| `dbsnp_ids` | Utf8 | yes | Extracted dbSNP IDs (dynamic, from `info.txt` sources) |
+| `cosmic_ids` | Utf8 | yes | Extracted COSMIC IDs (dynamic) |
+| `clinvar_ids` | Utf8 | yes | Extracted ClinVar IDs (dynamic) |
+| _extra columns_ | Utf8 | yes | Additional population frequency columns from `variation_cols` in `info.txt` (e.g. `AFR`, `gnomADe_AFR`, etc.) |
 
 All entity schemas also include **provenance columns**: `species`, `assembly`, `cache_version`, `serializer_type`, `source_cache_path`, `source_file`, plus `raw_object_json` and `object_hash` for full object traceability.
 
@@ -225,8 +298,10 @@ All entity schemas also include **provenance columns**: `species`, `assembly`, `
 
 Transcript, exon, and translation schemas support projection pushdown. When VEP-related
 columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `mature_mirna_regions`,
-`translation_seq`, `cds_sequence`) are not selected in a query, the parser skips
-extracting those fields, significantly reducing parse overhead.
+`cdna_mapper_segments`, `spliced_seq`, `translation_seq`, `cds_sequence`,
+`protein_features`, `sift_predictions`, `polyphen_predictions`) are not
+selected in a query, the parser skips extracting those fields, significantly
+reducing parse overhead.
 
 ## Parallel Scanning
 
