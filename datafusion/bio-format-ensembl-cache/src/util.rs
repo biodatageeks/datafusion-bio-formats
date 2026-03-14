@@ -1,5 +1,7 @@
 use crate::errors::{Result, exec_err};
-use crate::schema::{exon_list_data_type, mirna_region_list_data_type};
+use crate::schema::{
+    cdna_mapper_segment_list_data_type, exon_list_data_type, mirna_region_list_data_type,
+};
 use datafusion::arrow::array::{
     ArrayBuilder, ArrayRef, BooleanBuilder, Float64Builder, Int8Builder, Int32Builder,
     Int64Builder, ListBuilder, StringBuilder, StructBuilder,
@@ -243,6 +245,11 @@ impl ColumnMap {
         for (idx, field) in schema.fields().iter().enumerate() {
             map.insert(field.name().clone(), idx);
         }
+        Self { map }
+    }
+
+    #[cfg(test)]
+    pub fn from_map(map: HashMap<String, usize>) -> Self {
         Self { map }
     }
 
@@ -613,6 +620,69 @@ impl BatchBuilder {
         self.mark_written(col);
     }
 
+    /// Append a list of cDNA mapper segments to a `List<Struct>` column.
+    /// Each segment is `(genomic_start, genomic_end, cdna_start, cdna_end, ori)`.
+    #[allow(clippy::type_complexity)]
+    pub fn set_cdna_mapper_list(
+        &mut self,
+        col: usize,
+        segments: Option<&[(i64, i64, i64, i64, i8)]>,
+    ) {
+        let mut overflow: Option<(usize, usize)> = None;
+        if let AnyBuilder::CdnaMapperList(list_builder) = &mut self.builders[col] {
+            match segments {
+                Some(seg_slice) => {
+                    let current_child_len = list_builder.values().len();
+                    let next_child_len = current_child_len.saturating_add(seg_slice.len());
+                    if next_child_len > i32::MAX as usize {
+                        overflow = Some((current_child_len, seg_slice.len()));
+                        list_builder.append(false);
+                        self.mark_written(col);
+                    } else {
+                        let struct_builder = list_builder.values();
+                        for &(g_start, g_end, c_start, c_end, ori) in seg_slice {
+                            struct_builder
+                                .field_builder::<Int64Builder>(0)
+                                .unwrap()
+                                .append_value(g_start);
+                            struct_builder
+                                .field_builder::<Int64Builder>(1)
+                                .unwrap()
+                                .append_value(g_end);
+                            struct_builder
+                                .field_builder::<Int64Builder>(2)
+                                .unwrap()
+                                .append_value(c_start);
+                            struct_builder
+                                .field_builder::<Int64Builder>(3)
+                                .unwrap()
+                                .append_value(c_end);
+                            struct_builder
+                                .field_builder::<Int8Builder>(4)
+                                .unwrap()
+                                .append_value(ori);
+                            struct_builder.append(true);
+                        }
+                        list_builder.append(true);
+                    }
+                }
+                None => {
+                    list_builder.append(false);
+                }
+            }
+        }
+        if let Some((current_child_len, added)) = overflow {
+            let col_name = self.schema.field(col).name().clone();
+            self.set_pending_error_once(format!(
+                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
+                 Reduce batch_size_hint.",
+                col_name, current_child_len, added
+            ));
+            return;
+        }
+        self.mark_written(col);
+    }
+
     #[inline]
     pub fn set_null(&mut self, col: usize) {
         self.builders[col].append_null();
@@ -688,6 +758,7 @@ enum AnyBuilder {
     Boolean(BooleanBuilder),
     ExonList(ListBuilder<StructBuilder>),
     MirnaRegionList(ListBuilder<StructBuilder>),
+    CdnaMapperList(ListBuilder<StructBuilder>),
 }
 
 impl AnyBuilder {
@@ -702,6 +773,7 @@ impl AnyBuilder {
             Self::Boolean(b) => b.append_null(),
             Self::ExonList(b) => b.append(false),
             Self::MirnaRegionList(b) => b.append(false),
+            Self::CdnaMapperList(b) => b.append(false),
         }
     }
 
@@ -731,6 +803,26 @@ impl AnyBuilder {
                     ],
                 );
                 Ok(Self::ExonList(ListBuilder::new(struct_builder)))
+            }
+            dt if *dt == cdna_mapper_segment_list_data_type() => {
+                let fields = vec![
+                    Field::new("genomic_start", DataType::Int64, false),
+                    Field::new("genomic_end", DataType::Int64, false),
+                    Field::new("cdna_start", DataType::Int64, false),
+                    Field::new("cdna_end", DataType::Int64, false),
+                    Field::new("ori", DataType::Int8, false),
+                ];
+                let struct_builder = StructBuilder::new(
+                    fields,
+                    vec![
+                        Box::new(Int64Builder::with_capacity(capacity * 8)),
+                        Box::new(Int64Builder::with_capacity(capacity * 8)),
+                        Box::new(Int64Builder::with_capacity(capacity * 8)),
+                        Box::new(Int64Builder::with_capacity(capacity * 8)),
+                        Box::new(Int8Builder::with_capacity(capacity * 8)),
+                    ],
+                );
+                Ok(Self::CdnaMapperList(ListBuilder::new(struct_builder)))
             }
             dt if *dt == mirna_region_list_data_type() => {
                 let fields = vec![
@@ -762,6 +854,7 @@ impl AnyBuilder {
             Self::Boolean(mut builder) => Arc::new(builder.finish()),
             Self::ExonList(mut builder) => Arc::new(builder.finish()),
             Self::MirnaRegionList(mut builder) => Arc::new(builder.finish()),
+            Self::CdnaMapperList(mut builder) => Arc::new(builder.finish()),
         }
     }
 }
@@ -769,8 +862,705 @@ impl AnyBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{Array, Int8Array, Int64Array, ListArray, StructArray};
+    use datafusion::arrow::array::{
+        Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray,
+        StringArray, StructArray,
+    };
     use datafusion::arrow::datatypes::{Field, Schema};
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // normalize_nullable / normalize_nullable_ref
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn normalize_nullable_non_empty() {
+        assert_eq!(normalize_nullable("hello"), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn normalize_nullable_empty() {
+        assert_eq!(normalize_nullable(""), None);
+    }
+
+    #[test]
+    fn normalize_nullable_dot() {
+        assert_eq!(normalize_nullable("."), None);
+    }
+
+    #[test]
+    fn normalize_nullable_whitespace() {
+        assert_eq!(normalize_nullable("  "), None);
+    }
+
+    #[test]
+    fn normalize_nullable_trimmed() {
+        assert_eq!(normalize_nullable("  value  "), Some("value".to_string()));
+    }
+
+    #[test]
+    fn normalize_nullable_ref_non_empty() {
+        assert_eq!(normalize_nullable_ref("hello"), Some("hello"));
+    }
+
+    #[test]
+    fn normalize_nullable_ref_dot() {
+        assert_eq!(normalize_nullable_ref("."), None);
+    }
+
+    #[test]
+    fn normalize_nullable_ref_whitespace_dot() {
+        assert_eq!(normalize_nullable_ref(" . "), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_* helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_i64_valid() {
+        assert_eq!(parse_i64(Some("42")), Some(42));
+    }
+
+    #[test]
+    fn parse_i64_negative() {
+        assert_eq!(parse_i64(Some("-10")), Some(-10));
+    }
+
+    #[test]
+    fn parse_i64_dot() {
+        assert_eq!(parse_i64(Some(".")), None);
+    }
+
+    #[test]
+    fn parse_i64_none() {
+        assert_eq!(parse_i64(None), None);
+    }
+
+    #[test]
+    fn parse_i64_invalid() {
+        assert_eq!(parse_i64(Some("abc")), None);
+    }
+
+    #[test]
+    fn parse_i64_ref_valid() {
+        assert_eq!(parse_i64_ref(Some("100")), Some(100));
+    }
+
+    #[test]
+    fn parse_i64_ref_whitespace() {
+        assert_eq!(parse_i64_ref(Some(" 100 ")), Some(100));
+    }
+
+    #[test]
+    fn parse_i8_ref_valid() {
+        assert_eq!(parse_i8_ref(Some("1")), Some(1));
+    }
+
+    #[test]
+    fn parse_i8_ref_negative() {
+        assert_eq!(parse_i8_ref(Some("-1")), Some(-1));
+    }
+
+    #[test]
+    fn parse_i8_ref_overflow() {
+        assert_eq!(parse_i8_ref(Some("200")), None);
+    }
+
+    #[test]
+    fn parse_f64_ref_valid() {
+        assert_eq!(parse_f64_ref(Some("0.5")), Some(0.5));
+    }
+
+    #[test]
+    fn parse_f64_ref_integer() {
+        assert_eq!(parse_f64_ref(Some("42")), Some(42.0));
+    }
+
+    #[test]
+    fn parse_f64_ref_invalid() {
+        assert_eq!(parse_f64_ref(Some("abc")), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_bool
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_bool_true_variants() {
+        assert_eq!(parse_bool(Some("true")), Some(true));
+        assert_eq!(parse_bool(Some("1")), Some(true));
+        assert_eq!(parse_bool(Some("yes")), Some(true));
+        assert_eq!(parse_bool(Some("TRUE")), Some(true));
+    }
+
+    #[test]
+    fn parse_bool_false_variants() {
+        assert_eq!(parse_bool(Some("false")), Some(false));
+        assert_eq!(parse_bool(Some("0")), Some(false));
+        assert_eq!(parse_bool(Some("no")), Some(false));
+    }
+
+    #[test]
+    fn parse_bool_unknown() {
+        assert_eq!(parse_bool(Some("maybe")), None);
+    }
+
+    #[test]
+    fn parse_bool_dot() {
+        assert_eq!(parse_bool(Some(".")), None);
+    }
+
+    #[test]
+    fn parse_bool_none() {
+        assert_eq!(parse_bool(None), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_genomic_start / normalize_genomic_end
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn genomic_start_one_based() {
+        assert_eq!(normalize_genomic_start(100, false), 100);
+    }
+
+    #[test]
+    fn genomic_start_zero_based() {
+        assert_eq!(normalize_genomic_start(100, true), 99);
+    }
+
+    #[test]
+    fn genomic_start_zero_based_at_one() {
+        assert_eq!(normalize_genomic_start(1, true), 0);
+    }
+
+    #[test]
+    fn genomic_start_zero_based_at_zero() {
+        // i64::saturating_sub(1) on 0 yields -1 (no unsigned saturation)
+        assert_eq!(normalize_genomic_start(0, true), -1);
+    }
+
+    #[test]
+    fn genomic_end_unchanged() {
+        assert_eq!(normalize_genomic_end(200, false), 200);
+        assert_eq!(normalize_genomic_end(200, true), 200);
+    }
+
+    // -----------------------------------------------------------------------
+    // stable_hash
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn stable_hash_deterministic() {
+        let h1 = stable_hash("hello");
+        let h2 = stable_hash("hello");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn stable_hash_different_inputs() {
+        assert_ne!(stable_hash("hello"), stable_hash("world"));
+    }
+
+    #[test]
+    fn stable_hash_format() {
+        let h = stable_hash("test");
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn stable_hash_empty_string() {
+        let h = stable_hash("");
+        assert_eq!(h.len(), 16);
+    }
+
+    // -----------------------------------------------------------------------
+    // canonical_json_string / canonicalize_json
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn canonical_json_sorts_keys() {
+        let val = json!({"b": 2, "a": 1});
+        let s = canonical_json_string(&val).unwrap();
+        assert_eq!(s, r#"{"a":1,"b":2}"#);
+    }
+
+    #[test]
+    fn canonical_json_nested() {
+        let val = json!({"z": {"b": 2, "a": 1}, "a": 0});
+        let s = canonical_json_string(&val).unwrap();
+        assert_eq!(s, r#"{"a":0,"z":{"a":1,"b":2}}"#);
+    }
+
+    #[test]
+    fn canonical_json_array_preserves_order() {
+        let val = json!([3, 1, 2]);
+        let s = canonical_json_string(&val).unwrap();
+        assert_eq!(s, "[3,1,2]");
+    }
+
+    #[test]
+    fn canonical_json_scalar() {
+        let val = json!("hello");
+        let s = canonical_json_string(&val).unwrap();
+        assert_eq!(s, r#""hello""#);
+    }
+
+    // -----------------------------------------------------------------------
+    // json_str
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_str_string() {
+        assert_eq!(json_str(Some(&json!("hello"))), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn json_str_number() {
+        assert_eq!(json_str(Some(&json!(42))), Some("42".to_string()));
+    }
+
+    #[test]
+    fn json_str_bool() {
+        assert_eq!(json_str(Some(&json!(true))), Some("true".to_string()));
+    }
+
+    #[test]
+    fn json_str_null() {
+        assert_eq!(json_str(Some(&json!(null))), None);
+    }
+
+    #[test]
+    fn json_str_none() {
+        assert_eq!(json_str(None), None);
+    }
+
+    #[test]
+    fn json_str_array_of_strings() {
+        assert_eq!(
+            json_str(Some(&json!(["a", "b", "c"]))),
+            Some("a,b,c".to_string())
+        );
+    }
+
+    #[test]
+    fn json_str_empty_array() {
+        assert_eq!(json_str(Some(&json!([]))), None);
+    }
+
+    #[test]
+    fn json_str_dot_string() {
+        assert_eq!(json_str(Some(&json!("."))), None);
+    }
+
+    #[test]
+    fn json_str_empty_string() {
+        assert_eq!(json_str(Some(&json!(""))), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // json_i64
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_i64_number() {
+        assert_eq!(json_i64(Some(&json!(42))), Some(42));
+    }
+
+    #[test]
+    fn json_i64_negative() {
+        assert_eq!(json_i64(Some(&json!(-10))), Some(-10));
+    }
+
+    #[test]
+    fn json_i64_string() {
+        assert_eq!(json_i64(Some(&json!("42"))), Some(42));
+    }
+
+    #[test]
+    fn json_i64_invalid_string() {
+        assert_eq!(json_i64(Some(&json!("abc"))), None);
+    }
+
+    #[test]
+    fn json_i64_null() {
+        assert_eq!(json_i64(Some(&json!(null))), None);
+    }
+
+    #[test]
+    fn json_i64_none() {
+        assert_eq!(json_i64(None), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // json_i32
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_i32_valid() {
+        assert_eq!(json_i32(Some(&json!(42))), Some(42));
+    }
+
+    #[test]
+    fn json_i32_overflow() {
+        assert_eq!(json_i32(Some(&json!(3_000_000_000i64))), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // json_f64
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_f64_number() {
+        assert_eq!(json_f64(Some(&json!(3.14))), Some(3.14));
+    }
+
+    #[test]
+    fn json_f64_string() {
+        assert_eq!(json_f64(Some(&json!("3.14"))), Some(3.14));
+    }
+
+    #[test]
+    fn json_f64_integer() {
+        assert_eq!(json_f64(Some(&json!(42))), Some(42.0));
+    }
+
+    // -----------------------------------------------------------------------
+    // json_bool
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_bool_true() {
+        assert_eq!(json_bool(Some(&json!(true))), Some(true));
+    }
+
+    #[test]
+    fn json_bool_false() {
+        assert_eq!(json_bool(Some(&json!(false))), Some(false));
+    }
+
+    #[test]
+    fn json_bool_number_1() {
+        assert_eq!(json_bool(Some(&json!(1))), Some(true));
+    }
+
+    #[test]
+    fn json_bool_number_0() {
+        assert_eq!(json_bool(Some(&json!(0))), Some(false));
+    }
+
+    #[test]
+    fn json_bool_string_true() {
+        assert_eq!(json_bool(Some(&json!("true"))), Some(true));
+    }
+
+    #[test]
+    fn json_bool_string_yes() {
+        assert_eq!(json_bool(Some(&json!("yes"))), Some(true));
+    }
+
+    #[test]
+    fn json_bool_null() {
+        assert_eq!(json_bool(Some(&json!(null))), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // ColumnMap
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn column_map_basic() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+            Field::new("b", DataType::Int64, false),
+            Field::new("c", DataType::Boolean, true),
+        ]));
+        let map = ColumnMap::from_schema(&schema);
+        assert_eq!(map.get("a"), Some(0));
+        assert_eq!(map.get("b"), Some(1));
+        assert_eq!(map.get("c"), Some(2));
+        assert_eq!(map.get("d"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // BatchBuilder basics
+    // -----------------------------------------------------------------------
+
+    fn simple_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("value", DataType::Int64, false),
+            Field::new("flag", DataType::Boolean, true),
+        ]))
+    }
+
+    #[test]
+    fn batch_builder_basic_row() {
+        let schema = simple_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.set_utf8(0, "hello");
+        builder.set_i64(1, 42);
+        builder.set_opt_bool(2, Some(true));
+        builder.finish_row();
+
+        let batch = builder.finish().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 3);
+
+        let names = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "hello");
+
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 42);
+
+        let flags = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert_eq!(flags.value(0), true);
+    }
+
+    #[test]
+    fn batch_builder_unwritten_columns_null_filled() {
+        let schema = simple_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.set_utf8(0, "test");
+        builder.set_i64(1, 1);
+        // Don't set column 2 (flag)
+        builder.finish_row();
+
+        let batch = builder.finish().unwrap();
+        let flags = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(flags.is_null(0));
+    }
+
+    #[test]
+    fn batch_builder_multiple_rows() {
+        let schema = simple_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        for i in 0..5 {
+            builder.set_utf8(0, &format!("row{i}"));
+            builder.set_i64(1, i as i64);
+            builder.set_opt_bool(2, None);
+            builder.finish_row();
+        }
+
+        let batch = builder.finish().unwrap();
+        assert_eq!(batch.num_rows(), 5);
+    }
+
+    #[test]
+    fn batch_builder_empty_batch() {
+        let schema = simple_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+        let batch = builder.finish().unwrap();
+        assert_eq!(batch.num_rows(), 0);
+    }
+
+    #[test]
+    fn batch_builder_all_types() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("i64", DataType::Int64, true),
+            Field::new("i32", DataType::Int32, true),
+            Field::new("i8", DataType::Int8, true),
+            Field::new("f64", DataType::Float64, true),
+            Field::new("b", DataType::Boolean, true),
+        ]));
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.set_opt_utf8(0, Some("test"));
+        builder.set_opt_i64(1, Some(100));
+        builder.set_opt_i32(2, Some(42));
+        builder.set_opt_i8(3, Some(-1));
+        builder.set_opt_f64(4, Some(3.14));
+        builder.set_opt_bool(5, Some(false));
+        builder.finish_row();
+
+        builder.set_null(0);
+        builder.set_null(1);
+        builder.set_null(2);
+        builder.set_null(3);
+        builder.set_null(4);
+        builder.set_null(5);
+        builder.finish_row();
+
+        let batch = builder.finish().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+
+        // Row 0 has values
+        let s = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(s.value(0), "test");
+        assert!(s.is_null(1));
+
+        let i64_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(i64_col.value(0), 100);
+        assert!(i64_col.is_null(1));
+
+        let i32_col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(i32_col.value(0), 42);
+
+        let i8_col = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Int8Array>()
+            .unwrap();
+        assert_eq!(i8_col.value(0), -1);
+
+        let f64_col = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!((f64_col.value(0) - 3.14).abs() < f64::EPSILON);
+
+        let bool_col = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(!bool_col.value(0));
+    }
+
+    #[test]
+    fn batch_builder_len_tracks_rows() {
+        let schema = simple_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+        assert_eq!(builder.len(), 0);
+
+        builder.set_utf8(0, "a");
+        builder.set_i64(1, 1);
+        builder.finish_row();
+        assert_eq!(builder.len(), 1);
+
+        builder.set_utf8(0, "b");
+        builder.set_i64(1, 2);
+        builder.finish_row();
+        assert_eq!(builder.len(), 2);
+
+        let _ = builder.finish().unwrap();
+        assert_eq!(builder.len(), 0);
+    }
+
+    #[test]
+    fn batch_builder_finish_resets() {
+        let schema = simple_schema();
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.set_utf8(0, "a");
+        builder.set_i64(1, 1);
+        builder.finish_row();
+        let batch1 = builder.finish().unwrap();
+
+        builder.set_utf8(0, "b");
+        builder.set_i64(1, 2);
+        builder.finish_row();
+        let batch2 = builder.finish().unwrap();
+
+        assert_eq!(batch1.num_rows(), 1);
+        assert_eq!(batch2.num_rows(), 1);
+
+        let names = batch2
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "b");
+    }
+
+    #[test]
+    fn batch_builder_opt_utf8_owned() {
+        let schema = Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)]));
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        let val = "test".to_string();
+        builder.set_opt_utf8_owned(0, Some(&val));
+        builder.finish_row();
+        builder.set_opt_utf8_owned(0, None);
+        builder.finish_row();
+
+        let batch = builder.finish().unwrap();
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(col.value(0), "test");
+        assert!(col.is_null(1));
+    }
+
+    #[test]
+    fn batch_builder_max_utf8_bytes() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, false),
+            Field::new("b", DataType::Utf8, false),
+        ]));
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.set_utf8(0, "short");
+        builder.set_utf8(1, "much longer string here");
+        builder.finish_row();
+
+        assert!(builder.max_utf8_bytes() >= 23);
+        assert!(builder.total_utf8_bytes() >= 28);
+    }
+
+    #[test]
+    fn batch_builder_zero_column_schema() {
+        let schema = Arc::new(Schema::empty());
+        let mut builder = BatchBuilder::new(schema.clone(), 4).unwrap();
+
+        builder.finish_row();
+        builder.finish_row();
+
+        let batch = builder.finish().unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 0);
+    }
+
+    #[test]
+    fn batch_builder_unsupported_type_errors() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            DataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Second, None),
+            false,
+        )]));
+        assert!(BatchBuilder::new(schema, 4).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Exon and miRNA list builders (existing tests below)
+    // -----------------------------------------------------------------------
 
     fn exon_only_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![Field::new(

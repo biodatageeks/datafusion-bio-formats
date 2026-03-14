@@ -64,6 +64,14 @@ pub(crate) struct TranscriptColumnIndices {
     cds_end_nf: Option<usize>,
     mature_mirna_regions: Option<usize>,
     transcript_attributes_projected: bool,
+    // Promoted VEP fields (issue #125)
+    translateable_seq: Option<usize>,
+    cdna_mapper_segments: Option<usize>,
+    cdna_mapper_projected: bool,
+    bam_edit_status: Option<usize>,
+    has_non_polya_rna_edit: Option<usize>,
+    spliced_seq: Option<usize>,
+    flags_str: Option<usize>,
     raw_object_json: Option<usize>,
     object_hash: Option<usize>,
 }
@@ -82,13 +90,23 @@ impl TranscriptColumnIndices {
 
         let cdna_seq = col_map.get("cdna_seq");
         let peptide_seq = col_map.get("peptide_seq");
-        let sequences_projected = cdna_seq.is_some() || peptide_seq.is_some();
+        let spliced_seq = col_map.get("spliced_seq");
+        let sequences_projected =
+            cdna_seq.is_some() || peptide_seq.is_some() || spliced_seq.is_some();
 
         let cds_start_nf = col_map.get("cds_start_nf");
         let cds_end_nf = col_map.get("cds_end_nf");
         let mature_mirna_regions = col_map.get("mature_mirna_regions");
-        let transcript_attributes_projected =
-            cds_start_nf.is_some() || cds_end_nf.is_some() || mature_mirna_regions.is_some();
+        let has_non_polya_rna_edit = col_map.get("has_non_polya_rna_edit");
+        let flags_str = col_map.get("flags_str");
+        let transcript_attributes_projected = cds_start_nf.is_some()
+            || cds_end_nf.is_some()
+            || mature_mirna_regions.is_some()
+            || has_non_polya_rna_edit.is_some()
+            || flags_str.is_some();
+
+        let cdna_mapper_segments = col_map.get("cdna_mapper_segments");
+        let cdna_mapper_projected = cdna_mapper_segments.is_some();
 
         Self {
             chrom: col_map.get("chrom"),
@@ -133,6 +151,13 @@ impl TranscriptColumnIndices {
             cds_end_nf,
             mature_mirna_regions,
             transcript_attributes_projected,
+            translateable_seq: col_map.get("translateable_seq"),
+            cdna_mapper_segments,
+            cdna_mapper_projected,
+            bam_edit_status: col_map.get("bam_edit_status"),
+            has_non_polya_rna_edit,
+            spliced_seq,
+            flags_str,
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
@@ -145,6 +170,7 @@ struct TranscriptAttributes {
     cds_end_nf: bool,
     tsl: Option<i32>,
     mature_mirna_regions: Vec<(i64, i64)>,
+    has_non_polya_rna_edit: bool,
 }
 
 struct TranscriptRowCore {
@@ -576,12 +602,25 @@ fn mirna_cdna_to_genomic_range(
     }
 }
 
+/// Returns `true` if the `_rna_edit` value represents a non-poly-A RNA edit.
+/// Format: "start end replacement_sequence".
+fn is_non_polya_rna_edit(value: &str) -> bool {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() >= 3 {
+        let seq = parts[2];
+        !seq.is_empty() && !seq.bytes().all(|b| b == b'A' || b == b'a')
+    } else {
+        false
+    }
+}
+
 fn parse_transcript_attributes_json(
     object: &serde_json::Map<String, Value>,
     tx_start: i64,
     tx_end: i64,
     strand: i8,
     parse_mirna_regions: bool,
+    check_rna_edits: bool,
 ) -> TranscriptAttributes {
     let mut out = TranscriptAttributes::default();
     let Some(attributes) = object.get("attributes").and_then(Value::as_array) else {
@@ -608,6 +647,11 @@ fn parse_transcript_attributes_json(
                     ));
                 }
             }
+            "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
+                if is_non_polya_rna_edit(value) {
+                    out.has_non_polya_rna_edit = true;
+                }
+            }
             _ => {}
         }
     }
@@ -621,6 +665,7 @@ fn parse_transcript_attributes_storable(
     tx_end: i64,
     strand: i8,
     parse_mirna_regions: bool,
+    check_rna_edits: bool,
 ) -> TranscriptAttributes {
     let mut out = TranscriptAttributes::default();
     let Some(attributes) = object.get("attributes").and_then(SValue::as_array) else {
@@ -653,11 +698,135 @@ fn parse_transcript_attributes_storable(
                     ));
                 }
             }
+            "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
+                if is_non_polya_rna_edit(&value) {
+                    out.has_non_polya_rna_edit = true;
+                }
+            }
             _ => {}
         }
     }
 
     out
+}
+
+// ---------------------------------------------------------------------------
+// cDNA mapper segment extraction (issue #125)
+// ---------------------------------------------------------------------------
+
+/// A single cDNA mapper segment: (genomic_start, genomic_end, cdna_start, cdna_end, ori).
+type MapperSegment = (i64, i64, i64, i64, i8);
+
+/// Extract cDNA mapper segments from JSON transcript object.
+/// Path: `_variation_effect_feature_cache.mapper.pair_genomic.{region_key}[].{from,to,ori}`
+fn extract_cdna_mapper_segments_json(
+    object: &serde_json::Map<String, Value>,
+) -> Option<Vec<MapperSegment>> {
+    let vef = object
+        .get("_variation_effect_feature_cache")
+        .and_then(unwrap_blessed_object_optional)?;
+    let mapper = vef.get("mapper").and_then(unwrap_blessed_object_optional)?;
+    let pair_genomic = mapper
+        .get("pair_genomic")
+        .and_then(unwrap_blessed_object_optional)?;
+
+    let mut segments = Vec::new();
+    for (_key, value) in pair_genomic {
+        // Skip non-array entries like _pair_count
+        let Some(pairs) = value.as_array() else {
+            continue;
+        };
+        for pair_val in pairs {
+            let pair = unwrap_blessed_object_optional(pair_val).or_else(|| pair_val.as_object());
+            let Some(pair) = pair else {
+                continue;
+            };
+            if let Some(seg) = extract_mapper_pair_json(pair) {
+                segments.push(seg);
+            }
+        }
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
+}
+
+fn extract_mapper_pair_json(pair: &serde_json::Map<String, Value>) -> Option<MapperSegment> {
+    let from = pair.get("from").and_then(unwrap_blessed_object_optional)?;
+    let to = pair.get("to").and_then(unwrap_blessed_object_optional)?;
+    let ori = json_i64(pair.get("ori")).and_then(|v| i8::try_from(v).ok())?;
+    let g_start = json_i64(from.get("start"))?;
+    let g_end = json_i64(from.get("end"))?;
+    let c_start = json_i64(to.get("start"))?;
+    let c_end = json_i64(to.get("end"))?;
+    Some((g_start, g_end, c_start, c_end, ori))
+}
+
+/// Extract cDNA mapper segments from Storable transcript object.
+fn extract_cdna_mapper_segments_storable(
+    object: &std::collections::BTreeMap<String, SValue>,
+) -> Option<Vec<MapperSegment>> {
+    let vef = object
+        .get("_variation_effect_feature_cache")
+        .and_then(SValue::as_hash)?;
+    let mapper = vef.get("mapper").and_then(SValue::as_hash)?;
+    let pair_genomic = mapper.get("pair_genomic").and_then(SValue::as_hash)?;
+
+    let mut segments = Vec::new();
+    for (key, value) in pair_genomic.iter() {
+        // Skip non-array entries like _pair_count
+        if key.starts_with('_') {
+            continue;
+        }
+        let Some(pairs) = value.as_array() else {
+            continue;
+        };
+        for pair_val in pairs.iter() {
+            let Some(pair) = pair_val.as_hash() else {
+                continue;
+            };
+            if let Some(seg) = extract_mapper_pair_storable(pair) {
+                segments.push(seg);
+            }
+        }
+    }
+    if segments.is_empty() {
+        None
+    } else {
+        Some(segments)
+    }
+}
+
+fn extract_mapper_pair_storable(
+    pair: &std::collections::BTreeMap<String, SValue>,
+) -> Option<MapperSegment> {
+    let from = pair.get("from").and_then(SValue::as_hash)?;
+    let to = pair.get("to").and_then(SValue::as_hash)?;
+    let ori = sv_i64(pair.get("ori")).and_then(|v| i8::try_from(v).ok())?;
+    let g_start = sv_i64(from.get("start"))?;
+    let g_end = sv_i64(from.get("end"))?;
+    let c_start = sv_i64(to.get("start"))?;
+    let c_end = sv_i64(to.get("end"))?;
+    Some((g_start, g_end, c_start, c_end, ori))
+}
+
+/// Build the FLAGS string from transcript attributes.
+/// VEP convention: "cds_start_NF", "cds_end_NF", joined with "&".
+fn build_flags_str(attrs: &TranscriptAttributes) -> Option<String> {
+    let mut parts = Vec::new();
+    if attrs.cds_start_nf {
+        parts.push("cds_start_NF");
+    }
+    if attrs.cds_end_nf {
+        parts.push("cds_end_NF");
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("&"))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,7 +1178,7 @@ pub(crate) fn parse_transcript_line_into(
     }
 
     // Sequences from _variation_effect_feature_cache — only parse when projected.
-    if col_idx.sequences_projected {
+    if col_idx.sequences_projected || col_idx.cdna_mapper_projected {
         let vef_cache = object
             .get("_variation_effect_feature_cache")
             .and_then(unwrap_blessed_object_optional);
@@ -1021,6 +1190,28 @@ pub(crate) fn parse_transcript_line_into(
             let value = vef_cache.and_then(|c| json_str(c.get("peptide")));
             batch.set_opt_utf8_owned(idx, value.as_ref());
         }
+        if let Some(idx) = col_idx.spliced_seq {
+            let value = vef_cache.and_then(|c| json_str(c.get("spliced_seq")));
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+    }
+
+    // cDNA mapper segments from _variation_effect_feature_cache.mapper
+    if col_idx.cdna_mapper_projected {
+        if let Some(idx) = col_idx.cdna_mapper_segments {
+            let segments = extract_cdna_mapper_segments_json(object);
+            batch.set_cdna_mapper_list(idx, segments.as_deref());
+        }
+    }
+
+    // Top-level promoted fields (issue #125)
+    if let Some(idx) = col_idx.translateable_seq {
+        let value = json_str(object.get("translateable_seq"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.bam_edit_status {
+        let value = json_str(object.get("_bam_edit_status"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
     }
 
     // Simple scalar VEP fields
@@ -1087,12 +1278,14 @@ pub(crate) fn parse_transcript_line_into(
     if col_idx.transcript_attributes_projected {
         let parse_mirna_regions =
             biotype.as_deref() == Some("miRNA") && col_idx.mature_mirna_regions.is_some();
+        let check_rna_edits = col_idx.has_non_polya_rna_edit.is_some();
         let attributes = parse_transcript_attributes_json(
             object,
             source_start,
             source_end,
             strand,
             parse_mirna_regions,
+            check_rna_edits,
         );
 
         if let Some(idx) = col_idx.cds_start_nf {
@@ -1117,6 +1310,13 @@ pub(crate) fn parse_transcript_line_into(
             } else {
                 batch.set_mirna_region_list(idx, None);
             }
+        }
+        if let Some(idx) = col_idx.has_non_polya_rna_edit {
+            batch.set_opt_bool(idx, Some(attributes.has_non_polya_rna_edit));
+        }
+        if let Some(idx) = col_idx.flags_str {
+            let value = build_flags_str(&attributes);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
         }
     }
 
@@ -1476,7 +1676,7 @@ fn append_transcript_storable_row_into(
     }
 
     // Sequences from _variation_effect_feature_cache — only parse when projected.
-    if col_idx.sequences_projected {
+    if col_idx.sequences_projected || col_idx.cdna_mapper_projected {
         if let Some(vef_cache) = object
             .get("_variation_effect_feature_cache")
             .and_then(SValue::as_hash)
@@ -1489,7 +1689,29 @@ fn append_transcript_storable_row_into(
                 let value = sv_str(vef_cache.get("peptide"));
                 batch.set_opt_utf8_owned(idx, value.as_ref());
             }
+            if let Some(idx) = col_idx.spliced_seq {
+                let value = sv_str(vef_cache.get("spliced_seq"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
         }
+    }
+
+    // cDNA mapper segments from _variation_effect_feature_cache.mapper
+    if col_idx.cdna_mapper_projected {
+        if let Some(idx) = col_idx.cdna_mapper_segments {
+            let segments = extract_cdna_mapper_segments_storable(object);
+            batch.set_cdna_mapper_list(idx, segments.as_deref());
+        }
+    }
+
+    // Top-level promoted fields (issue #125)
+    if let Some(idx) = col_idx.translateable_seq {
+        let value = sv_str(object.get("translateable_seq"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.bam_edit_status {
+        let value = sv_str(object.get("_bam_edit_status"));
+        batch.set_opt_utf8_owned(idx, value.as_ref());
     }
 
     // Simple scalar VEP fields
@@ -1567,12 +1789,14 @@ fn append_transcript_storable_row_into(
     if col_idx.transcript_attributes_projected {
         let parse_mirna_regions =
             biotype.as_deref() == Some("miRNA") && col_idx.mature_mirna_regions.is_some();
+        let check_rna_edits = col_idx.has_non_polya_rna_edit.is_some();
         let attributes = parse_transcript_attributes_storable(
             object,
             source_start,
             source_end,
             strand,
             parse_mirna_regions,
+            check_rna_edits,
         );
 
         if let Some(idx) = col_idx.cds_start_nf {
@@ -1597,6 +1821,13 @@ fn append_transcript_storable_row_into(
             } else {
                 batch.set_mirna_region_list(idx, None);
             }
+        }
+        if let Some(idx) = col_idx.has_non_polya_rna_edit {
+            batch.set_opt_bool(idx, Some(attributes.has_non_polya_rna_edit));
+        }
+        if let Some(idx) = col_idx.flags_str {
+            let value = build_flags_str(&attributes);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
         }
     }
 
@@ -1675,7 +1906,7 @@ mod tests {
         });
         let object = payload.as_object().unwrap();
 
-        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, true);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, true, false);
 
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
@@ -1698,7 +1929,7 @@ mod tests {
         });
         let object = payload.as_object().unwrap();
 
-        let parsed = parse_transcript_attributes_json(object, 100, 200, -1, true);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, -1, true, false);
 
         assert!(!parsed.cds_start_nf);
         assert!(parsed.cds_end_nf);
@@ -1727,7 +1958,7 @@ mod tests {
             ])),
         );
 
-        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, true);
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, true, false);
 
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
@@ -1881,7 +2112,7 @@ mod tests {
             ]
         });
         let object = payload.as_object().unwrap();
-        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false);
         assert_eq!(parsed.tsl, Some(1));
     }
 
@@ -1896,7 +2127,7 @@ mod tests {
             ]
         });
         let object = payload.as_object().unwrap();
-        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false);
         assert_eq!(parsed.tsl, Some(5));
     }
 
@@ -1912,7 +2143,7 @@ mod tests {
             SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_tsl))])),
         );
 
-        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, false);
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, false, false);
         assert_eq!(parsed.tsl, Some(3));
     }
 

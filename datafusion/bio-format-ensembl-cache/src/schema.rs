@@ -20,6 +20,19 @@ pub(crate) fn exon_list_data_type() -> DataType {
     )))
 }
 
+/// Returns the Arrow `DataType` for cDNA mapper segments:
+/// `List<Struct<genomic_start:Int64, genomic_end:Int64, cdna_start:Int64, cdna_end:Int64, ori:Int8>>`.
+pub(crate) fn cdna_mapper_segment_list_data_type() -> DataType {
+    let fields = Fields::from(vec![
+        Field::new("genomic_start", DataType::Int64, false),
+        Field::new("genomic_end", DataType::Int64, false),
+        Field::new("cdna_start", DataType::Int64, false),
+        Field::new("cdna_end", DataType::Int64, false),
+        Field::new("ori", DataType::Int8, false),
+    ]);
+    DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
+}
+
 /// Returns the Arrow `DataType` for mature miRNA genomic regions:
 /// `List<Struct<start:Int64, end:Int64>>`.
 pub(crate) fn mirna_region_list_data_type() -> DataType {
@@ -156,6 +169,17 @@ pub(crate) fn transcript_schema(
         Field::new("cds_start_nf", DataType::Boolean, true),
         Field::new("cds_end_nf", DataType::Boolean, true),
         Field::new("mature_mirna_regions", mirna_region_list_data_type(), true),
+        // Promoted VEP fields (issue #125)
+        Field::new("translateable_seq", DataType::Utf8, true),
+        Field::new(
+            "cdna_mapper_segments",
+            cdna_mapper_segment_list_data_type(),
+            true,
+        ),
+        Field::new("bam_edit_status", DataType::Utf8, true),
+        Field::new("has_non_polya_rna_edit", DataType::Boolean, true),
+        Field::new("spliced_seq", DataType::Utf8, true),
+        Field::new("flags_str", DataType::Utf8, true),
         Field::new("raw_object_json", DataType::Utf8, false),
         Field::new("object_hash", DataType::Utf8, false),
     ];
@@ -281,4 +305,249 @@ fn new_schema(fields: Vec<Field>, coordinate_system_zero_based: bool) -> SchemaR
         coordinate_system_zero_based.to_string(),
     );
     Arc::new(Schema::new_with_metadata(fields, metadata))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::info::{CacheInfo, SourceDescriptor};
+    use std::path::PathBuf;
+
+    fn test_cache_info() -> CacheInfo {
+        CacheInfo {
+            cache_root: PathBuf::from("/tmp/test"),
+            source_cache_path: "/tmp/test".to_string(),
+            species: "homo_sapiens".to_string(),
+            assembly: "GRCh38".to_string(),
+            cache_version: "115".to_string(),
+            serializer_type: Some("storable".to_string()),
+            var_type: Some("region".to_string()),
+            cache_region_size: Some(1_000_000),
+            variation_cols: vec!["chr", "start", "end", "variation_name", "allele_string"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            source_descriptors: vec![],
+        }
+    }
+
+    fn test_cache_info_with_sources() -> CacheInfo {
+        let mut info = test_cache_info();
+        info.source_descriptors = vec![SourceDescriptor {
+            source_key: "dbsnp".to_string(),
+            source_column: "source_dbsnp".to_string(),
+            ids_column: "dbsnp_ids".to_string(),
+            value: "156".to_string(),
+        }];
+        info
+    }
+
+    // -----------------------------------------------------------------------
+    // exon_list_data_type / mirna_region_list_data_type
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exon_list_type_is_list_of_struct() {
+        let dt = exon_list_data_type();
+        match &dt {
+            DataType::List(field) => {
+                assert_eq!(
+                    field.data_type(),
+                    &DataType::Struct(Fields::from(vec![
+                        Field::new("start", DataType::Int64, false),
+                        Field::new("end", DataType::Int64, false),
+                        Field::new("phase", DataType::Int8, false),
+                    ]))
+                );
+            }
+            _ => panic!("expected List type"),
+        }
+    }
+
+    #[test]
+    fn mirna_region_list_type_is_list_of_struct() {
+        let dt = mirna_region_list_data_type();
+        match &dt {
+            DataType::List(field) => {
+                assert_eq!(
+                    field.data_type(),
+                    &DataType::Struct(Fields::from(vec![
+                        Field::new("start", DataType::Int64, false),
+                        Field::new("end", DataType::Int64, false),
+                    ]))
+                );
+            }
+            _ => panic!("expected List type"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // variation_schema
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn variation_schema_required_fields() {
+        let info = test_cache_info();
+        let schema = variation_schema(&info, false).unwrap();
+        assert!(schema.column_with_name("chrom").is_some());
+        assert!(schema.column_with_name("start").is_some());
+        assert!(schema.column_with_name("end").is_some());
+        assert!(schema.column_with_name("variation_name").is_some());
+        assert!(schema.column_with_name("allele_string").is_some());
+        assert!(schema.column_with_name("region_bin").is_some());
+    }
+
+    #[test]
+    fn variation_schema_optional_fields() {
+        let info = test_cache_info();
+        let schema = variation_schema(&info, false).unwrap();
+        assert!(schema.column_with_name("failed").is_some());
+        assert!(schema.column_with_name("clin_sig").is_some());
+        assert!(schema.column_with_name("var_synonyms").is_some());
+    }
+
+    #[test]
+    fn variation_schema_provenance_fields() {
+        let info = test_cache_info();
+        let schema = variation_schema(&info, false).unwrap();
+        assert!(schema.column_with_name("species").is_some());
+        assert!(schema.column_with_name("assembly").is_some());
+        assert!(schema.column_with_name("cache_version").is_some());
+        assert!(schema.column_with_name("source_file").is_some());
+    }
+
+    #[test]
+    fn variation_schema_with_sources() {
+        let info = test_cache_info_with_sources();
+        let schema = variation_schema(&info, false).unwrap();
+        assert!(schema.column_with_name("dbsnp_ids").is_some());
+        assert!(schema.column_with_name("source_dbsnp").is_some());
+    }
+
+    #[test]
+    fn variation_schema_empty_cols_errors() {
+        let mut info = test_cache_info();
+        info.variation_cols.clear();
+        assert!(variation_schema(&info, false).is_err());
+    }
+
+    #[test]
+    fn variation_schema_extra_cols() {
+        let mut info = test_cache_info();
+        info.variation_cols.push("AFR".to_string());
+        info.variation_cols.push("AF".to_string());
+        let schema = variation_schema(&info, false).unwrap();
+        assert!(schema.column_with_name("AFR").is_some());
+        assert!(schema.column_with_name("AF").is_some());
+    }
+
+    #[test]
+    fn variation_schema_coordinate_metadata() {
+        let info = test_cache_info();
+        let schema_1based = variation_schema(&info, false).unwrap();
+        assert_eq!(
+            schema_1based.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+            Some(&"false".to_string())
+        );
+
+        let schema_0based = variation_schema(&info, true).unwrap();
+        assert_eq!(
+            schema_0based.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+            Some(&"true".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // transcript_schema
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transcript_schema_has_expected_fields() {
+        let info = test_cache_info();
+        let schema = transcript_schema(&info, false);
+        assert!(schema.column_with_name("chrom").is_some());
+        assert!(schema.column_with_name("stable_id").is_some());
+        assert!(schema.column_with_name("biotype").is_some());
+        assert!(schema.column_with_name("gene_stable_id").is_some());
+        assert!(schema.column_with_name("exons").is_some());
+        assert!(schema.column_with_name("cdna_seq").is_some());
+        assert!(schema.column_with_name("tsl").is_some());
+        assert!(schema.column_with_name("mane_select").is_some());
+        assert!(schema.column_with_name("raw_object_json").is_some());
+        assert!(schema.column_with_name("object_hash").is_some());
+    }
+
+    #[test]
+    fn transcript_schema_exons_type() {
+        let info = test_cache_info();
+        let schema = transcript_schema(&info, false);
+        let (_, field) = schema.column_with_name("exons").unwrap();
+        assert_eq!(field.data_type(), &exon_list_data_type());
+    }
+
+    // -----------------------------------------------------------------------
+    // regulatory_feature_schema / motif_feature_schema
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn regulatory_schema_fields() {
+        let info = test_cache_info();
+        let schema = regulatory_feature_schema(&info, false);
+        assert!(schema.column_with_name("chrom").is_some());
+        assert!(schema.column_with_name("stable_id").is_some());
+        assert!(schema.column_with_name("feature_type").is_some());
+        assert!(schema.column_with_name("cell_types").is_some());
+    }
+
+    #[test]
+    fn motif_schema_fields() {
+        let info = test_cache_info();
+        let schema = motif_feature_schema(&info, false);
+        assert!(schema.column_with_name("motif_id").is_some());
+        assert!(schema.column_with_name("score").is_some());
+        assert!(schema.column_with_name("binding_matrix").is_some());
+        assert!(schema.column_with_name("transcription_factors").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // exon_schema / translation_schema
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn exon_schema_fields() {
+        let info = test_cache_info();
+        let schema = exon_schema(&info, false);
+        assert!(schema.column_with_name("chrom").is_some());
+        assert!(schema.column_with_name("phase").is_some());
+        assert!(schema.column_with_name("end_phase").is_some());
+        assert!(schema.column_with_name("transcript_id").is_some());
+        assert!(schema.column_with_name("exon_number").is_some());
+    }
+
+    #[test]
+    fn translation_schema_fields() {
+        let info = test_cache_info();
+        let schema = translation_schema(&info, false);
+        assert!(schema.column_with_name("stable_id").is_some());
+        assert!(schema.column_with_name("protein_len").is_some());
+        assert!(schema.column_with_name("transcript_id").is_some());
+        assert!(schema.column_with_name("translation_seq").is_some());
+        assert!(schema.column_with_name("cds_sequence").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // provenance_fields
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provenance_includes_source_columns() {
+        let info = test_cache_info_with_sources();
+        let fields = provenance_fields(&info);
+        let names: Vec<&str> = fields.iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"species"));
+        assert!(names.contains(&"assembly"));
+        assert!(names.contains(&"cache_version"));
+        assert!(names.contains(&"source_file"));
+        assert!(names.contains(&"source_dbsnp"));
+    }
 }
