@@ -310,6 +310,12 @@ fn dispatch_row(
 ) -> Result<RowDispatchState> {
     *emitted_rows += 1;
 
+    if let Some(max_rows) = limit
+        && *emitted_rows > max_rows
+    {
+        return Ok(RowDispatchState::Stop);
+    }
+
     if batch_builder.len() >= batch_size
         || batch_builder.max_utf8_bytes() >= UTF8_FLUSH_THRESHOLD_BYTES
         || batch_builder.total_utf8_bytes() >= UTF8_TOTAL_FLUSH_THRESHOLD_BYTES
@@ -318,12 +324,6 @@ fn dispatch_row(
         if tx.blocking_send(Ok(batch)).is_err() {
             return Ok(RowDispatchState::ConsumerDropped);
         }
-    }
-
-    if let Some(max_rows) = limit
-        && *emitted_rows >= max_rows
-    {
-        return Ok(RowDispatchState::Stop);
     }
 
     Ok(RowDispatchState::Continue)
@@ -385,6 +385,11 @@ fn process_partition(
     } else {
         None
     };
+
+    // LIMIT 0: nothing to emit, skip all I/O.
+    if limit == Some(0) {
+        return Ok(());
+    }
 
     let batch_size = batch_size.max(1);
     let mut batch_builder = BatchBuilder::new(stream_schema.clone(), batch_size)?;
