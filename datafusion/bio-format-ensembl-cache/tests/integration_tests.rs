@@ -1,5 +1,6 @@
 use datafusion::arrow::array::{
-    Array, BooleanArray, Int32Array, Int64Array, ListArray, StringArray, StructArray,
+    Array, BooleanArray, Float64Array, Int8Array, Int32Array, Int64Array, ListArray, StringArray,
+    StructArray,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
@@ -8,9 +9,9 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::test_utils::find_leaf_exec;
 use datafusion_bio_format_ensembl_cache::{
-    EnsemblCacheOptions, ExonTableProvider, MotifFeatureTableProvider,
-    RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,
-    VariationTableProvider,
+    EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, ExonTableProvider,
+    MotifFeatureTableProvider, RegulatoryFeatureTableProvider, TranscriptTableProvider,
+    TranslationTableProvider, VariationTableProvider,
 };
 use std::sync::Arc;
 
@@ -1640,6 +1641,1097 @@ async fn transcript_loc_pseudo_records_excluded() -> datafusion::common::Result<
         loc_rows, 0,
         "LOC-prefixed gene pseudo-records should be filtered out, found {loc_rows}"
     );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// EnsemblCacheTableProvider::for_entity() factory tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn factory_for_entity_variation() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::Variation,
+        EnsemblCacheOptions::new(fixture_path("variation_non_tabix")),
+    )?;
+    assert!(provider.schema().field_with_name("variation_name").is_ok());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("var", provider)?;
+    let batches = ctx.sql("SELECT COUNT(*) FROM var").await?.collect().await?;
+    assert_eq!(first_i64(&batches), 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn factory_for_entity_transcript() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::Transcript,
+        EnsemblCacheOptions::new(fixture_path("transcript_storable")),
+    )?;
+    assert!(provider.schema().field_with_name("stable_id").is_ok());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", provider)?;
+    let batches = ctx.sql("SELECT COUNT(*) FROM tx").await?.collect().await?;
+    assert_eq!(first_i64(&batches), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn factory_for_entity_exon() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::Exon,
+        EnsemblCacheOptions::new(fixture_path("exon_real_115")),
+    )?;
+    assert!(provider.schema().field_with_name("exon_number").is_ok());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("exon", provider)?;
+    let batches = ctx
+        .sql("SELECT COUNT(*) FROM exon")
+        .await?
+        .collect()
+        .await?;
+    assert!(first_i64(&batches) > 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn factory_for_entity_translation() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::Translation,
+        EnsemblCacheOptions::new(fixture_path("exon_real_115")),
+    )?;
+    assert!(provider.schema().field_with_name("protein_len").is_ok());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tl", provider)?;
+    let batches = ctx.sql("SELECT COUNT(*) FROM tl").await?.collect().await?;
+    assert!(first_i64(&batches) > 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn factory_for_entity_regulatory() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::RegulatoryFeature,
+        EnsemblCacheOptions::new(fixture_path("regulatory_storable")),
+    )?;
+    assert!(provider.schema().field_with_name("feature_type").is_ok());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("reg", provider)?;
+    let batches = ctx.sql("SELECT COUNT(*) FROM reg").await?.collect().await?;
+    assert_eq!(first_i64(&batches), 1);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn factory_for_entity_motif() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::MotifFeature,
+        EnsemblCacheOptions::new(fixture_path("regulatory_storable")),
+    )?;
+    assert!(provider.schema().field_with_name("binding_matrix").is_ok());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Variation field value verification
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn variation_core_field_values() -> datafusion::common::Result<()> {
+    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "variation_non_tabix",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("var", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT chrom, start, \"end\", variation_name, allele_string, region_bin \
+             FROM var ORDER BY chrom, start",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let batch = &batches[0];
+    assert!(batch.num_rows() >= 2);
+
+    // Verify chrom values
+    let chroms = batch
+        .column_by_name("chrom")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(chroms.value(0), "1");
+
+    // Verify start values are positive
+    let starts = batch
+        .column_by_name("start")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    for i in 0..batch.num_rows() {
+        assert!(starts.value(i) > 0, "start should be positive");
+    }
+
+    // Verify end >= start
+    let ends = batch
+        .column_by_name("end")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    for i in 0..batch.num_rows() {
+        assert!(
+            ends.value(i) >= starts.value(i),
+            "end ({}) should be >= start ({})",
+            ends.value(i),
+            starts.value(i)
+        );
+    }
+
+    // Verify variation_name is non-empty
+    let var_names = batch
+        .column_by_name("variation_name")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    for i in 0..batch.num_rows() {
+        assert!(
+            !var_names.value(i).is_empty(),
+            "variation_name should be non-empty"
+        );
+    }
+
+    // Verify allele_string contains '/'
+    let alleles = batch
+        .column_by_name("allele_string")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    for i in 0..batch.num_rows() {
+        assert!(
+            alleles.value(i).contains('/'),
+            "allele_string '{}' should contain '/'",
+            alleles.value(i)
+        );
+    }
+
+    // Verify region_bin is non-negative
+    let bins = batch
+        .column_by_name("region_bin")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    for i in 0..batch.num_rows() {
+        assert!(bins.value(i) >= 0, "region_bin should be non-negative");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_optional_fields_nullable() -> datafusion::common::Result<()> {
+    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "variation_non_tabix",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("var", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT failed, somatic, strand, minor_allele, minor_allele_freq, \
+             clin_sig, phenotype_or_disease FROM var",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let batch = &batches[0];
+
+    // failed and somatic should be Int8
+    let failed = batch
+        .column_by_name("failed")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int8Array>()
+        .expect("failed should be Int8Array");
+    for i in 0..batch.num_rows() {
+        if !failed.is_null(i) {
+            assert!(
+                failed.value(i) == 0 || failed.value(i) == 1,
+                "failed should be 0 or 1"
+            );
+        }
+    }
+
+    // minor_allele_freq should be Float64
+    let maf = batch
+        .column_by_name("minor_allele_freq")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("minor_allele_freq should be Float64Array");
+    for i in 0..batch.num_rows() {
+        if !maf.is_null(i) {
+            let freq = maf.value(i);
+            assert!(
+                (0.0..=1.0).contains(&freq),
+                "minor_allele_freq {} should be in [0,1]",
+                freq
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Variation provenance columns
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn variation_provenance_values() -> datafusion::common::Result<()> {
+    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "variation_non_tabix",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("var", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT species, assembly, cache_version, source_file FROM var LIMIT 1")
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(first_string(&batches, 0).as_deref(), Some("homo_sapiens"));
+    assert_eq!(first_string(&batches, 1).as_deref(), Some("GRCh38"));
+    assert_eq!(first_string(&batches, 2).as_deref(), Some("112"));
+    assert!(
+        first_string(&batches, 3).is_some(),
+        "source_file should be populated"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Transcript detailed field tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn transcript_storable_gene_fields() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT stable_id, gene_stable_id, gene_symbol, biotype, strand \
+             FROM tx WHERE stable_id = 'ENST000001'",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches[0].num_rows(), 1);
+
+    let gene_id = batches[0]
+        .column_by_name("gene_stable_id")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(
+        !gene_id.is_null(0),
+        "gene_stable_id should be populated for ENST000001"
+    );
+
+    let biotype = batches[0]
+        .column_by_name("biotype")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(biotype.value(0), "protein_coding");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_real_115_translation_fields() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // Coding transcripts should have translation fields populated
+    let batches = ctx
+        .sql(
+            "SELECT translation_stable_id, translation_start, translation_end \
+             FROM tx WHERE cdna_coding_start IS NOT NULL LIMIT 5",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(total_rows > 0);
+
+    // At least some should have translation_stable_id starting with ENSP
+    let mut has_ensp = false;
+    for batch in &batches {
+        let tl_ids = batch
+            .column_by_name("translation_stable_id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            if !tl_ids.is_null(i) && tl_ids.value(i).starts_with("ENSP") {
+                has_ensp = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        has_ensp,
+        "expected translation_stable_id starting with ENSP"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_cdna_mapper_segments_schema() -> datafusion::common::Result<()> {
+    // Use text-format fixture since the exon_real_115 fixture has truncated
+    // storable binary that errors when deep VEF cache fields are projected.
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // Verify the column exists and is queryable
+    let batches = ctx
+        .sql("SELECT cdna_mapper_segments FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+
+    // Verify column is List type
+    let col = batches[0].column(0);
+    let list_array = col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("cdna_mapper_segments should be ListArray");
+
+    // If any non-null values exist, verify struct fields
+    for row in 0..list_array.len() {
+        if !list_array.is_null(row) {
+            let segments = list_array.value(row);
+            let struct_array = segments
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("segments should be StructArray");
+            if struct_array.len() > 0 {
+                assert!(struct_array.column_by_name("genomic_start").is_some());
+                assert!(struct_array.column_by_name("genomic_end").is_some());
+                assert!(struct_array.column_by_name("cdna_start").is_some());
+                assert!(struct_array.column_by_name("cdna_end").is_some());
+                assert!(struct_array.column_by_name("ori").is_some());
+            }
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_translateable_seq_queryable() -> datafusion::common::Result<()> {
+    // Use text-format fixture since the exon_real_115 fixture has truncated
+    // storable binary that errors when deep VEF cache fields are projected.
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // Verify the column exists and is queryable
+    let batches = ctx
+        .sql("SELECT translateable_seq FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let col = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("translateable_seq should be StringArray");
+
+    // If any non-null values exist, verify they contain valid DNA characters
+    for i in 0..col.len() {
+        if !col.is_null(i) {
+            let seq = col.value(i);
+            assert!(
+                !seq.is_empty(),
+                "translateable_seq should be non-empty when not null"
+            );
+            assert!(
+                seq.chars().all(|c| "ACGTNacgtn".contains(c)),
+                "translateable_seq contains invalid DNA characters: {}",
+                &seq[..seq.len().min(50)]
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_real_115_flags_str() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // flags_str should be queryable (may be null for most transcripts)
+    let batches = ctx.sql("SELECT flags_str FROM tx").await?.collect().await?;
+
+    assert!(!batches.is_empty());
+    let col = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("flags_str should be StringArray");
+
+    // Verify non-null values are plausible (e.g., "gencode_basic", "cds_start_NF")
+    for i in 0..col.len() {
+        if !col.is_null(i) {
+            let flags = col.value(i);
+            assert!(
+                !flags.is_empty(),
+                "flags_str should be non-empty when not null"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Translation detailed field tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn translation_protein_features_populated() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tl", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT protein_features FROM tl WHERE protein_features IS NOT NULL")
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(
+        total_rows > 0,
+        "expected some translations with protein_features from real VEP 115"
+    );
+
+    // Verify protein_features List<Struct> structure
+    let col = batches[0].column(0);
+    let list_array = col
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("protein_features should be ListArray");
+
+    for row in 0..list_array.len() {
+        if !list_array.is_null(row) {
+            let features = list_array.value(row);
+            let struct_array = features
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .expect("protein_features values should be StructArray");
+            assert!(
+                struct_array.len() > 0,
+                "protein feature list should not be empty"
+            );
+            assert!(struct_array.column_by_name("analysis").is_some());
+            assert!(struct_array.column_by_name("hseqname").is_some());
+            assert!(struct_array.column_by_name("start").is_some());
+            assert!(struct_array.column_by_name("end").is_some());
+
+            // Verify start <= end for features
+            let starts = struct_array
+                .column_by_name("start")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let ends = struct_array
+                .column_by_name("end")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for i in 0..struct_array.len() {
+                if !starts.is_null(i) && !ends.is_null(i) {
+                    assert!(
+                        starts.value(i) <= ends.value(i),
+                        "protein feature start ({}) should be <= end ({})",
+                        starts.value(i),
+                        ends.value(i)
+                    );
+                }
+            }
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_sift_predictions_from_storable() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tl", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT sift_predictions FROM tl WHERE sift_predictions IS NOT NULL")
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    // SIFT predictions are decoded from binary matrix in storable format
+    // They may be non-null if the raw VEP cache has matrix data
+    if total_rows > 0 {
+        let col = batches[0].column(0);
+        let list_array = col
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("sift_predictions should be ListArray");
+
+        for row in 0..list_array.len() {
+            if !list_array.is_null(row) {
+                let entries = list_array.value(row);
+                let struct_array = entries
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .expect("sift prediction values should be StructArray");
+                assert!(struct_array.len() > 0);
+
+                // Verify position is 1-based
+                let positions = struct_array
+                    .column_by_name("position")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                for i in 0..positions.len() {
+                    assert!(
+                        positions.value(i) >= 1,
+                        "SIFT position should be 1-based, got {}",
+                        positions.value(i)
+                    );
+                }
+
+                // Verify amino acids are single characters
+                let aas = struct_array
+                    .column_by_name("amino_acid")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                for i in 0..aas.len() {
+                    assert_eq!(
+                        aas.value(i).len(),
+                        1,
+                        "amino_acid should be single char, got '{}'",
+                        aas.value(i)
+                    );
+                }
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn translation_cds_len_derived_correctly() -> datafusion::common::Result<()> {
+    let provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tl", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT cdna_coding_start, cdna_coding_end, cds_len \
+             FROM tl WHERE cdna_coding_start IS NOT NULL AND cdna_coding_end IS NOT NULL",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(total_rows > 0);
+
+    for batch in &batches {
+        let starts = batch
+            .column_by_name("cdna_coding_start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = batch
+            .column_by_name("cdna_coding_end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let cds_lens = batch
+            .column_by_name("cds_len")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+
+        for i in 0..batch.num_rows() {
+            if !starts.is_null(i) && !ends.is_null(i) && !cds_lens.is_null(i) {
+                let expected_len = ends.value(i) - starts.value(i) + 1;
+                assert_eq!(
+                    cds_lens.value(i),
+                    expected_len,
+                    "cds_len should be cdna_coding_end - cdna_coding_start + 1"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Cross-entity consistency tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn cross_entity_translation_transcript_ids_exist() -> datafusion::common::Result<()> {
+    let tx_provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let tl_provider =
+        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(tx_provider))?;
+    ctx.register_table("tl", Arc::new(tl_provider))?;
+
+    // Every translation's transcript_id should exist as a transcript stable_id
+    let batches = ctx
+        .sql(
+            "SELECT tl.transcript_id FROM tl \
+             LEFT JOIN tx ON tl.transcript_id = tx.stable_id \
+             WHERE tx.stable_id IS NULL",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let orphan_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        orphan_count, 0,
+        "all translation transcript_ids should match a transcript stable_id, \
+         found {orphan_count} orphans"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cross_entity_exon_transcript_ids_exist() -> datafusion::common::Result<()> {
+    let tx_provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let exon_provider =
+        ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(tx_provider))?;
+    ctx.register_table("exons", Arc::new(exon_provider))?;
+
+    // Every exon's transcript_id should exist as a transcript stable_id
+    let batches = ctx
+        .sql(
+            "SELECT exons.transcript_id FROM exons \
+             LEFT JOIN tx ON exons.transcript_id = tx.stable_id \
+             WHERE tx.stable_id IS NULL",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let orphan_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        orphan_count, 0,
+        "all exon transcript_ids should match a transcript stable_id, \
+         found {orphan_count} orphans"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cross_entity_exon_count_matches_exon_rows() -> datafusion::common::Result<()> {
+    let tx_provider =
+        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let exon_provider =
+        ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(tx_provider))?;
+    ctx.register_table("exons", Arc::new(exon_provider))?;
+
+    // For each transcript, exon_count should match the number of exon rows
+    let batches = ctx
+        .sql(
+            "SELECT tx.stable_id, tx.exon_count, e.actual_count \
+             FROM tx \
+             JOIN (SELECT transcript_id, COUNT(*) AS actual_count FROM exons GROUP BY transcript_id) e \
+               ON tx.stable_id = e.transcript_id \
+             WHERE tx.exon_count IS NOT NULL AND tx.exon_count != e.actual_count",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let mismatch_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        mismatch_count, 0,
+        "transcript exon_count should match actual exon row count for all transcripts"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Regulatory and motif detailed field tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn regulatory_field_values_storable() -> datafusion::common::Result<()> {
+    let provider = RegulatoryFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "regulatory_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("reg", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT chrom, start, \"end\", strand, stable_id, feature_type FROM reg")
+        .await?
+        .collect()
+        .await?;
+
+    assert_eq!(batches[0].num_rows(), 1);
+
+    // Verify chrom is non-null
+    let chrom = batches[0]
+        .column_by_name("chrom")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(!chrom.is_null(0));
+
+    // Verify start <= end
+    let starts = batches[0]
+        .column_by_name("start")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let ends = batches[0]
+        .column_by_name("end")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert!(starts.value(0) <= ends.value(0));
+
+    // Verify strand is -1 or 1
+    let strand = batches[0]
+        .column_by_name("strand")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int8Array>()
+        .unwrap();
+    assert!(
+        strand.value(0) == 1 || strand.value(0) == -1 || strand.value(0) == 0,
+        "strand should be -1, 0, or 1"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn motif_field_values_storable() -> datafusion::common::Result<()> {
+    let provider = MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "regulatory_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("motif", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT chrom, start, \"end\", motif_id, score, binding_matrix, \
+             transcription_factors FROM motif",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(total_rows > 0);
+
+    let batch = &batches[0];
+
+    // Verify binding_matrix is populated
+    let binding = batch
+        .column_by_name("binding_matrix")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(!binding.is_null(0));
+    assert_eq!(binding.value(0), "MA0001.1");
+
+    // Verify score is Float64
+    let _score = batch
+        .column_by_name("score")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("score should be Float64Array");
+    // Score can be null but column must exist
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Schema metadata tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn all_entities_have_coordinate_system_metadata() -> datafusion::common::Result<()> {
+    let fixtures_and_providers: Vec<(&str, Arc<dyn TableProvider>)> = vec![
+        (
+            "variation",
+            Arc::new(VariationTableProvider::new(EnsemblCacheOptions::new(
+                fixture_path("variation_non_tabix"),
+            ))?) as Arc<dyn TableProvider>,
+        ),
+        (
+            "transcript",
+            Arc::new(TranscriptTableProvider::new(EnsemblCacheOptions::new(
+                fixture_path("transcript_storable"),
+            ))?),
+        ),
+        (
+            "exon",
+            Arc::new(ExonTableProvider::new(EnsemblCacheOptions::new(
+                fixture_path("exon_real_115"),
+            ))?),
+        ),
+        (
+            "translation",
+            Arc::new(TranslationTableProvider::new(EnsemblCacheOptions::new(
+                fixture_path("exon_real_115"),
+            ))?),
+        ),
+        (
+            "regulatory",
+            Arc::new(RegulatoryFeatureTableProvider::new(
+                EnsemblCacheOptions::new(fixture_path("regulatory_storable")),
+            )?),
+        ),
+        (
+            "motif",
+            Arc::new(MotifFeatureTableProvider::new(EnsemblCacheOptions::new(
+                fixture_path("regulatory_storable"),
+            ))?),
+        ),
+    ];
+
+    for (name, provider) in fixtures_and_providers {
+        let schema = provider.schema();
+        assert!(
+            schema
+                .metadata()
+                .contains_key(COORDINATE_SYSTEM_METADATA_KEY),
+            "{name} schema should have coordinate system metadata"
+        );
+        assert_eq!(
+            schema
+                .metadata()
+                .get(COORDINATE_SYSTEM_METADATA_KEY)
+                .unwrap(),
+            "false",
+            "{name} should default to 1-based (false)"
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Object hash and raw JSON tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn transcript_object_hash_stable() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT object_hash, raw_object_json FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    for batch in &batches {
+        let hashes = batch
+            .column_by_name("object_hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let jsons = batch
+            .column_by_name("raw_object_json")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            // object_hash should never be null
+            assert!(!hashes.is_null(i), "object_hash should never be null");
+            // raw_object_json should never be null
+            assert!(!jsons.is_null(i), "raw_object_json should never be null");
+            // raw_object_json should be valid JSON
+            let json_str = jsons.value(i);
+            assert!(
+                serde_json::from_str::<serde_json::Value>(json_str).is_ok(),
+                "raw_object_json should be valid JSON: {}",
+                &json_str[..json_str.len().min(100)]
+            );
+            // object_hash should be a hex string
+            assert!(
+                hashes.value(i).chars().all(|c| c.is_ascii_hexdigit()),
+                "object_hash should be hex, got: {}",
+                hashes.value(i)
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_object_hash_stable_text() -> datafusion::common::Result<()> {
+    // Use the text-format storable fixture to verify object_hash and raw_object_json
+    // (exon_real_115 storable binary has truncation issues with deep VEF cache).
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT object_hash, raw_object_json FROM tx")
+        .await?
+        .collect()
+        .await?;
+
+    for batch in &batches {
+        let hashes = batch
+            .column_by_name("object_hash")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let jsons = batch
+            .column_by_name("raw_object_json")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert!(!hashes.is_null(i), "object_hash should never be null");
+            assert!(!jsons.is_null(i), "raw_object_json should never be null");
+            // raw_object_json should be valid JSON
+            let json_str = jsons.value(i);
+            assert!(
+                serde_json::from_str::<serde_json::Value>(json_str).is_ok(),
+                "raw_object_json should be valid JSON: {}",
+                &json_str[..json_str.len().min(100)]
+            );
+            // object_hash should be a hex string
+            assert!(
+                hashes.value(i).chars().all(|c| c.is_ascii_hexdigit()),
+                "object_hash should be hex, got: {}",
+                hashes.value(i)
+            );
+        }
+    }
 
     Ok(())
 }
