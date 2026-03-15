@@ -83,7 +83,6 @@ impl ProviderInner {
                 let schema = variation_schema(&cache_info, options.coordinate_system_zero_based)?;
                 // var_type is part of VEP cache contract. v1 discovery already prefers all_vars
                 // when present, which matches tabix caches.
-                let _is_tabix_mode = cache_info.var_type.as_deref() == Some("tabix");
                 let files = discover_variation_files(cache_root)?;
                 let region_size = Some(detect_region_size(&cache_info, &files));
                 (schema, files, region_size)
@@ -223,13 +222,7 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Schema
             Vec::<Field>::new(),
             schema.metadata().clone(),
         )),
-        Some(indices) => {
-            let fields = indices
-                .iter()
-                .map(|idx| schema.field(*idx).clone())
-                .collect::<Vec<_>>();
-            Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
-        }
+        Some(indices) => Arc::new(schema.project(indices).expect("valid projection indices")),
         None => schema.clone(),
     }
 }

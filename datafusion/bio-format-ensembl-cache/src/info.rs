@@ -45,6 +45,7 @@ pub(crate) struct CacheInfo {
     pub assembly: String,
     pub cache_version: String,
     pub serializer_type: Option<String>,
+    #[allow(dead_code)] // Parsed from info.txt; will be used for tabix index support.
     pub var_type: Option<String>,
     pub cache_region_size: Option<i64>,
     pub variation_cols: Vec<String>,

@@ -53,42 +53,6 @@ pub(crate) fn open_binary_reader(path: &Path) -> Result<Box<dyn Read + Send>> {
     }
 }
 
-pub(crate) fn read_maybe_gzip_prefix(path: &Path, prefix_len: usize) -> Result<Vec<u8>> {
-    let file = File::open(path)
-        .map_err(|e| exec_err(format!("Failed opening {}: {}", path.display(), e)))?;
-
-    let mut reader: Box<dyn Read + Send> = if path
-        .extension()
-        .and_then(|v| v.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
-    {
-        Box::new(MultiGzDecoder::new(BufReader::with_capacity(
-            IO_BUFFER_SIZE,
-            file,
-        )))
-    } else {
-        Box::new(BufReader::with_capacity(IO_BUFFER_SIZE, file))
-    };
-
-    let mut bytes = vec![0u8; prefix_len];
-    let mut read_total = 0usize;
-    while read_total < prefix_len {
-        let read_now = reader
-            .read(&mut bytes[read_total..])
-            .map_err(|e| exec_err(format!("Failed reading {}: {}", path.display(), e)))?;
-        if read_now == 0 {
-            break;
-        }
-        read_total += read_now;
-    }
-    bytes.truncate(read_total);
-    Ok(bytes)
-}
-
-pub(crate) fn is_storable_binary_payload(path: &Path) -> Result<bool> {
-    Ok(read_maybe_gzip_prefix(path, 4)?.as_slice() == b"pst0")
-}
-
 pub(crate) fn normalize_nullable(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed == "." {
@@ -128,12 +92,15 @@ pub(crate) fn parse_f64_ref(raw: Option<&str>) -> Option<f64> {
 }
 
 pub(crate) fn parse_bool(raw: Option<&str>) -> Option<bool> {
-    raw.and_then(normalize_nullable)
-        .and_then(|v| match v.to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" => Some(true),
-            "false" | "0" | "no" => Some(false),
-            _ => None,
-        })
+    raw.and_then(normalize_nullable).and_then(|v| {
+        if v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("yes") {
+            Some(true)
+        } else if v.eq_ignore_ascii_case("false") || v == "0" || v.eq_ignore_ascii_case("no") {
+            Some(false)
+        } else {
+            None
+        }
+    })
 }
 
 pub(crate) fn normalize_genomic_start(start: i64, coordinate_system_zero_based: bool) -> i64 {
@@ -144,6 +111,8 @@ pub(crate) fn normalize_genomic_start(start: i64, coordinate_system_zero_based: 
     }
 }
 
+/// VEP uses 1-based closed intervals.  When converting to 0-based half-open,
+/// only the start is decremented; the end coordinate is already correct.
 pub(crate) fn normalize_genomic_end(end: i64, _coordinate_system_zero_based: bool) -> i64 {
     end
 }
@@ -349,6 +318,13 @@ pub(crate) struct BatchBuilder {
     written: Vec<bool>,
     written_count: usize,
     pending_error: Option<String>,
+    /// Per-column UTF-8 byte counts, indexed by column index.
+    /// Non-UTF8 columns always stay at 0.
+    utf8_col_bytes: Vec<usize>,
+    /// Cached maximum of `utf8_col_bytes`.
+    max_utf8_bytes_cache: usize,
+    /// Cached sum of all `utf8_col_bytes`.
+    total_utf8_bytes_cache: usize,
 }
 
 impl BatchBuilder {
@@ -366,6 +342,9 @@ impl BatchBuilder {
             written: vec![false; num_cols],
             written_count: 0,
             pending_error: None,
+            utf8_col_bytes: vec![0; num_cols],
+            max_utf8_bytes_cache: 0,
+            total_utf8_bytes_cache: 0,
         })
     }
 
@@ -380,15 +359,9 @@ impl BatchBuilder {
         self.pending_error.take().map(exec_err)
     }
 
+    #[inline]
     pub fn max_utf8_bytes(&self) -> usize {
-        self.builders
-            .iter()
-            .filter_map(|b| match b {
-                AnyBuilder::Utf8(builder) => Some(builder.values_slice().len()),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0)
+        self.max_utf8_bytes_cache
     }
 
     /// Sum of UTF-8 bytes across all string columns.
@@ -396,14 +369,9 @@ impl BatchBuilder {
     /// Used for memory-aware batch flushing when many string columns are
     /// projected. A batch with 10 columns each at 30 MB uses 300 MB even
     /// though no single column exceeds the per-column threshold.
+    #[inline]
     pub fn total_utf8_bytes(&self) -> usize {
-        self.builders
-            .iter()
-            .filter_map(|b| match b {
-                AnyBuilder::Utf8(builder) => Some(builder.values_slice().len()),
-                _ => None,
-            })
-            .sum()
+        self.total_utf8_bytes_cache
     }
 
     #[inline]
@@ -425,6 +393,13 @@ impl BatchBuilder {
                 b.append_null();
             } else {
                 b.append_value(value);
+                // Update cached UTF-8 byte counters
+                let added = value.len();
+                self.utf8_col_bytes[col] += added;
+                self.total_utf8_bytes_cache += added;
+                if self.utf8_col_bytes[col] > self.max_utf8_bytes_cache {
+                    self.max_utf8_bytes_cache = self.utf8_col_bytes[col];
+                }
             }
         }
         if let Some((current, value_len)) = overflow {
@@ -857,6 +832,9 @@ impl BatchBuilder {
         self.row_count = 0;
         self.written.fill(false);
         self.written_count = 0;
+        self.utf8_col_bytes.fill(0);
+        self.max_utf8_bytes_cache = 0;
+        self.total_utf8_bytes_cache = 0;
 
         let arrays: Vec<ArrayRef> = old_builders.into_iter().map(AnyBuilder::finish).collect();
         RecordBatch::try_new(self.schema.clone(), arrays)

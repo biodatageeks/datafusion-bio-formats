@@ -1,3 +1,4 @@
+use crate::decode::storable_binary::try_collect_nstore_alias_counts_and_top_keys;
 use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
 use crate::exon::{ExonColumnIndices, parse_exon_line_into, parse_exon_storable_file_into};
@@ -14,7 +15,7 @@ use crate::translation::{
     TranslationColumnIndices, parse_translation_line_into, parse_translation_storable_file_into,
 };
 use crate::util::{
-    BatchBuilder, ColumnMap, ProvenanceWriter, is_storable_binary_payload, open_text_reader,
+    BatchBuilder, ColumnMap, ProvenanceWriter, open_binary_reader, open_text_reader,
 };
 use crate::variation::{
     SourceIdWriter, VariationColumnIndices, VariationContext, VariationParseResult,
@@ -200,7 +201,12 @@ fn parse_file_chrom_region(name: &str) -> Option<(&str, i64, i64)> {
     let chrom = &name[..marker];
     let suffix = &name[marker + 1..];
     let (start_raw, rest) = suffix.split_once('-')?;
-    let end_raw: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let end_len = rest
+        .as_bytes()
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let end_raw = &rest[..end_len];
     if end_raw.is_empty() {
         return None;
     }
@@ -232,6 +238,23 @@ impl ExecutionPlan for EnsemblCacheExec {
         _children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         Ok(self)
+    }
+
+    fn statistics(&self) -> DFResult<datafusion::physical_plan::Statistics> {
+        // Estimate row count from total compressed file sizes.
+        // Rough heuristic: ~50 bytes per row in compressed VEP cache files.
+        let total_bytes: u64 = self
+            .partition_files
+            .iter()
+            .flatten()
+            .map(|p| estimate_file_size(p))
+            .sum();
+        let estimated_rows = total_bytes / 50;
+        Ok(datafusion::physical_plan::Statistics {
+            num_rows: datafusion::common::stats::Precision::Inexact(estimated_rows as usize),
+            total_byte_size: datafusion::common::stats::Precision::Inexact(total_bytes as usize),
+            column_statistics: vec![],
+        })
     }
 
     fn execute(
@@ -272,7 +295,7 @@ impl ExecutionPlan for EnsemblCacheExec {
             .batch_size_hint
             .unwrap_or_else(|| context.session_config().batch_size());
 
-        let mut builder = RecordBatchReceiverStreamBuilder::new(schema.clone(), 2);
+        let mut builder = RecordBatchReceiverStreamBuilder::new(schema.clone(), 8);
         let tx = builder.tx();
         builder.spawn_blocking(move || {
             process_partition(
@@ -410,15 +433,21 @@ fn process_partition(
             source_file_str
         };
 
-        let use_native_storable = (kind == EnsemblEntityKind::Transcript
+        // Merge the pst0 header check with the alias-count scan to avoid
+        // opening the (potentially gzip-compressed) file twice.
+        let storable_prelude = if (kind == EnsemblEntityKind::Transcript
             || kind == EnsemblEntityKind::RegulatoryFeature
             || kind == EnsemblEntityKind::MotifFeature
             || kind == EnsemblEntityKind::Exon
             || kind == EnsemblEntityKind::Translation)
             && cache_info.serializer_type.as_deref() == Some("storable")
-            && is_storable_binary_payload(source_file)?;
+        {
+            try_collect_nstore_alias_counts_and_top_keys(open_binary_reader(source_file)?)?
+        } else {
+            None
+        };
 
-        if use_native_storable {
+        if let Some((alias_counts, entry_keys)) = storable_prelude {
             let mut reached_limit = false;
             let mut consumer_dropped = false;
 
@@ -432,6 +461,7 @@ fn process_partition(
                         &mut batch_builder,
                         transcript_col_idx.as_ref().unwrap(),
                         &provenance,
+                        Some((alias_counts.clone(), entry_keys.clone())),
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -466,6 +496,7 @@ fn process_partition(
                         &mut batch_builder,
                         regulatory_col_idx.as_ref().unwrap(),
                         &provenance,
+                        Some((alias_counts.clone(), entry_keys.clone())),
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -500,6 +531,7 @@ fn process_partition(
                         &mut batch_builder,
                         regulatory_col_idx.as_ref().unwrap(),
                         &provenance,
+                        Some((alias_counts.clone(), entry_keys.clone())),
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -533,6 +565,7 @@ fn process_partition(
                         &mut batch_builder,
                         exon_col_idx.as_ref().unwrap(),
                         &provenance,
+                        Some((alias_counts.clone(), entry_keys.clone())),
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);
@@ -566,6 +599,7 @@ fn process_partition(
                         &mut batch_builder,
                         translation_col_idx.as_ref().unwrap(),
                         &provenance,
+                        Some((alias_counts.clone(), entry_keys.clone())),
                         |batch_builder| {
                             if let Some(err) = batch_builder.take_error() {
                                 return Err(err);

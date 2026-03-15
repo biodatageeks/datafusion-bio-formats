@@ -2,7 +2,7 @@ use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, canonical_json_string as canonical_storable_json_string,
     collect_nstore_alias_counts_and_top_keys_from_reader,
-    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader,
+    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader, sv_i64, sv_str,
 };
 use crate::errors::{Result, exec_err};
 use crate::exon::is_excluded_biotype;
@@ -13,6 +13,7 @@ use crate::util::{
     BatchBuilder, ColumnMap, canonical_json_string, json_i32, json_i64, json_str,
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
+use std::collections::HashMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -334,6 +335,7 @@ pub(crate) fn parse_translation_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &TranslationColumnIndices,
     provenance: &ProvenanceWriter,
+    alias_prelude: Option<(HashMap<usize, usize>, Vec<String>)>,
     mut on_row_added: F,
 ) -> Result<()>
 where
@@ -509,15 +511,19 @@ where
         on_row_added(batch)
     };
 
-    let (alias_counts, entry_keys) =
-        collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
-            .map_err(|e| {
+    let (alias_counts, entry_keys) = match alias_prelude {
+        Some(prelude) => prelude,
+        None => {
+            collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
+                .map_err(|e| {
                 exec_err(format!(
                     "Failed collecting storable alias references from {}: {}",
                     source_file.display(),
                     e
                 ))
-            })?;
+            })?
+        }
+    };
 
     let reader = open_binary_reader(source_file)?;
     stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader(
@@ -579,7 +585,7 @@ fn extract_protein_features_json(
 
 /// Extract protein features from Storable `_variation_effect_feature_cache` hash.
 fn extract_protein_features_storable(
-    vef_cache: &std::collections::BTreeMap<String, SValue>,
+    vef_cache: &std::collections::HashMap<String, SValue>,
 ) -> Option<Vec<ProteinFeature>> {
     let arr = vef_cache.get("protein_features")?.as_array()?;
     let features: Vec<ProteinFeature> = arr
@@ -763,7 +769,7 @@ fn extract_predictions_json(
 ///    `matrix` binary blob — decoded natively via `decode_compressed_matrix()`.
 /// 2. Pre-decoded format: hash with `predictions` array of structured entries.
 fn extract_predictions_storable(
-    pfp: &std::collections::BTreeMap<String, SValue>,
+    pfp: &std::collections::HashMap<String, SValue>,
     key: &str,
 ) -> Option<Vec<PredictionEntry>> {
     let predictor = pfp.get(key)?;
@@ -830,21 +836,6 @@ fn unwrap_blessed_object_optional(
     value: &serde_json::Value,
 ) -> Option<&serde_json::Map<String, serde_json::Value>> {
     unwrap_blessed_object(value).ok()
-}
-
-fn sv_str(value: Option<&SValue>) -> Option<String> {
-    value.and_then(SValue::as_string).and_then(|v| {
-        let trimmed = v.trim();
-        if trimmed.is_empty() || trimmed == "." {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn sv_i64(value: Option<&SValue>) -> Option<i64> {
-    value.and_then(SValue::as_i64)
 }
 
 #[cfg(test)]
@@ -1025,13 +1016,13 @@ mod tests {
 
     #[test]
     fn protein_features_storable_display_label() {
-        let mut analysis = std::collections::BTreeMap::new();
+        let mut analysis = std::collections::HashMap::new();
         analysis.insert(
             "_display_label".to_string(),
             SValue::String(std::sync::Arc::from("Pfam")),
         );
 
-        let mut feature = std::collections::BTreeMap::new();
+        let mut feature = std::collections::HashMap::new();
         feature.insert(
             "analysis".to_string(),
             SValue::Hash(std::sync::Arc::new(analysis)),
@@ -1043,7 +1034,7 @@ mod tests {
         feature.insert("start".to_string(), SValue::Int(128));
         feature.insert("end".to_string(), SValue::Int(139));
 
-        let mut vef_cache = std::collections::BTreeMap::new();
+        let mut vef_cache = std::collections::HashMap::new();
         vef_cache.insert(
             "protein_features".to_string(),
             SValue::Array(std::sync::Arc::new(vec![SValue::Hash(
@@ -1105,7 +1096,7 @@ mod tests {
 
     #[test]
     fn protein_features_storable_analysis_string_fallback() {
-        let mut feature = std::collections::BTreeMap::new();
+        let mut feature = std::collections::HashMap::new();
         feature.insert(
             "_analysis".to_string(),
             SValue::String(std::sync::Arc::from("CDD")),
@@ -1117,7 +1108,7 @@ mod tests {
         feature.insert("start".to_string(), SValue::Int(5));
         feature.insert("end".to_string(), SValue::Int(55));
 
-        let mut vef_cache = std::collections::BTreeMap::new();
+        let mut vef_cache = std::collections::HashMap::new();
         vef_cache.insert(
             "protein_features".to_string(),
             SValue::Array(std::sync::Arc::new(vec![SValue::Hash(
@@ -1131,7 +1122,7 @@ mod tests {
 
     #[test]
     fn protein_features_storable_display_label_over_logic_name() {
-        let mut analysis = std::collections::BTreeMap::new();
+        let mut analysis = std::collections::HashMap::new();
         analysis.insert(
             "_display_label".to_string(),
             SValue::String(std::sync::Arc::from("Gene3D")),
@@ -1141,7 +1132,7 @@ mod tests {
             SValue::String(std::sync::Arc::from("gene3d")),
         );
 
-        let mut feature = std::collections::BTreeMap::new();
+        let mut feature = std::collections::HashMap::new();
         feature.insert(
             "analysis".to_string(),
             SValue::Hash(std::sync::Arc::new(analysis)),
@@ -1153,7 +1144,7 @@ mod tests {
         feature.insert("start".to_string(), SValue::Int(1));
         feature.insert("end".to_string(), SValue::Int(100));
 
-        let mut vef_cache = std::collections::BTreeMap::new();
+        let mut vef_cache = std::collections::HashMap::new();
         vef_cache.insert(
             "protein_features".to_string(),
             SValue::Array(std::sync::Arc::new(vec![SValue::Hash(
@@ -1167,7 +1158,7 @@ mod tests {
 
     #[test]
     fn protein_features_storable_empty_array_returns_none() {
-        let mut vef_cache = std::collections::BTreeMap::new();
+        let mut vef_cache = std::collections::HashMap::new();
         vef_cache.insert(
             "protein_features".to_string(),
             SValue::Array(std::sync::Arc::new(vec![])),

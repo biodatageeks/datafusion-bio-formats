@@ -2,7 +2,7 @@ use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, canonical_json_string as canonical_storable_json_string,
     collect_nstore_alias_counts_and_top_keys_from_reader,
-    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader,
+    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader, sv_i64, sv_str,
 };
 use crate::errors::{Result, exec_err};
 use crate::exon::{is_excluded_biotype, is_exon_stable_id};
@@ -14,6 +14,7 @@ use crate::util::{
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -232,7 +233,7 @@ fn cdna_to_genomic(exon_coords: &[(i64, i64)], strand: i8, cdna_pos: i64) -> Opt
 /// The primary array is only used when it contains at least one parseable
 /// exon hash (with a `stable_id`).  Otherwise we fall back to `sorted_exons`
 /// which always contains fully materialised exon objects.
-fn storable_exon_array(object: &std::collections::BTreeMap<String, SValue>) -> Option<&[SValue]> {
+fn storable_exon_array(object: &std::collections::HashMap<String, SValue>) -> Option<&[SValue]> {
     let primary = object.get("_trans_exon_array").and_then(SValue::as_array);
     let has_parseable = primary
         .map(|arr| {
@@ -284,7 +285,7 @@ fn json_exon_array(object: &serde_json::Map<String, Value>) -> Option<&Vec<Value
 
 /// Extracts exon (start, end) pairs from a storable transcript object.
 fn extract_exon_coords_storable(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
 ) -> Option<Vec<(i64, i64)>> {
     let arr = storable_exon_array(object)?;
     let coords: Vec<(i64, i64)> = arr
@@ -409,7 +410,7 @@ fn derive_coding_region_from_translation_json(
 }
 
 fn derive_coding_region_from_translation_storable(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
     strand: i8,
     tx_start: i64,
     tx_end: i64,
@@ -492,7 +493,7 @@ fn json_first_string(object: &serde_json::Map<String, Value>, keys: &[&str]) -> 
 }
 
 fn sv_first_string(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
     keys: &[&str],
 ) -> Option<String> {
     keys.iter()
@@ -504,7 +505,7 @@ fn json_first_bool(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Op
 }
 
 fn sv_first_bool(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
     keys: &[&str],
 ) -> Option<bool> {
     keys.iter().find_map(|key| sv_bool(object.get(*key)))
@@ -566,7 +567,7 @@ fn extract_mane_appris_from_json_attributes(
 
 /// Extract MANE_Select, MANE_Plus_Clinical, and APPRIS from Storable transcript attributes.
 fn extract_mane_appris_from_storable_attributes(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
 ) -> (Option<String>, Option<String>, Option<String>) {
     let mut mane_select = None;
     let mut mane_plus_clinical = None;
@@ -707,7 +708,7 @@ fn parse_transcript_attributes_json(
 }
 
 fn parse_transcript_attributes_storable(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
     tx_start: i64,
     tx_end: i64,
     strand: i8,
@@ -825,7 +826,7 @@ fn extract_mapper_pair_json(pair: &serde_json::Map<String, Value>) -> Option<Map
 
 /// Extract cDNA mapper segments from Storable transcript object.
 fn extract_cdna_mapper_segments_storable(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
 ) -> Option<Vec<MapperSegment>> {
     let vef = object
         .get("_variation_effect_feature_cache")
@@ -859,7 +860,7 @@ fn extract_cdna_mapper_segments_storable(
 }
 
 fn extract_mapper_pair_storable(
-    pair: &std::collections::BTreeMap<String, SValue>,
+    pair: &std::collections::HashMap<String, SValue>,
 ) -> Option<MapperSegment> {
     let from = pair.get("from").and_then(SValue::as_hash)?;
     let to = pair.get("to").and_then(SValue::as_hash)?;
@@ -1407,6 +1408,7 @@ pub(crate) fn parse_transcript_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &TranscriptColumnIndices,
     provenance: &ProvenanceWriter,
+    alias_prelude: Option<(HashMap<usize, usize>, Vec<String>)>,
     mut on_row_added: F,
 ) -> Result<()>
 where
@@ -1497,15 +1499,19 @@ where
         on_row_added(batch)
     };
 
-    let (alias_counts, entry_keys) =
-        collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
-            .map_err(|e| {
+    let (alias_counts, entry_keys) = match alias_prelude {
+        Some(prelude) => prelude,
+        None => {
+            collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
+                .map_err(|e| {
                 exec_err(format!(
                     "Failed collecting storable alias references from {}: {}",
                     source_file.display(),
                     e
                 ))
-            })?;
+            })?
+        }
+    };
 
     let reader = open_binary_reader(source_file)?;
     stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader(
@@ -1528,7 +1534,7 @@ where
 #[allow(clippy::too_many_arguments)]
 fn append_transcript_storable_row_into(
     payload: &SValue,
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
     core: TranscriptRowCore,
     coordinate_system_zero_based: bool,
     source_file_str: &str,
@@ -1934,21 +1940,6 @@ fn unwrap_blessed_object_optional(value: &Value) -> Option<&serde_json::Map<Stri
     unwrap_blessed_object(value).ok()
 }
 
-fn sv_str(value: Option<&SValue>) -> Option<String> {
-    value.and_then(SValue::as_string).and_then(|v| {
-        let trimmed = v.trim();
-        if trimmed.is_empty() || trimmed == "." {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn sv_i64(value: Option<&SValue>) -> Option<i64> {
-    value.and_then(SValue::as_i64)
-}
-
 fn sv_bool(value: Option<&SValue>) -> Option<bool> {
     value.and_then(SValue::as_bool)
 }
@@ -1957,7 +1948,7 @@ fn sv_bool(value: Option<&SValue>) -> Option<bool> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -2002,18 +1993,18 @@ mod tests {
 
     #[test]
     fn storable_transcript_attributes_parse_flags_and_mirna_regions() {
-        let mut attr_start = BTreeMap::new();
+        let mut attr_start = HashMap::new();
         attr_start.insert(
             "code".to_string(),
             SValue::String(Arc::from("cds_start_NF")),
         );
         attr_start.insert("value".to_string(), SValue::String(Arc::from("1")));
 
-        let mut attr_region = BTreeMap::new();
+        let mut attr_region = HashMap::new();
         attr_region.insert("code".to_string(), SValue::String(Arc::from("miRNA")));
         attr_region.insert("value".to_string(), SValue::String(Arc::from("42-59")));
 
-        let mut object = BTreeMap::new();
+        let mut object = HashMap::new();
         object.insert(
             "attributes".to_string(),
             SValue::Array(Arc::new(vec![
@@ -2061,14 +2052,14 @@ mod tests {
 
     #[test]
     fn storable_transcript_attributes_parse_ncrna_structure() {
-        let mut attr_ncrna = BTreeMap::new();
+        let mut attr_ncrna = HashMap::new();
         attr_ncrna.insert("code".to_string(), SValue::String(Arc::from("ncRNA")));
         attr_ncrna.insert(
             "value".to_string(),
             SValue::String(Arc::from("1:81 (19.(6.(2.(4.14)12.)10.)9")),
         );
 
-        let mut object = BTreeMap::new();
+        let mut object = HashMap::new();
         object.insert(
             "attributes".to_string(),
             SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_ncrna))])),
@@ -2162,14 +2153,14 @@ mod tests {
 
     #[test]
     fn storable_mane_select_from_attributes() {
-        let mut attr_mane = BTreeMap::new();
+        let mut attr_mane = HashMap::new();
         attr_mane.insert("code".to_string(), SValue::String(Arc::from("MANE_Select")));
         attr_mane.insert(
             "value".to_string(),
             SValue::String(Arc::from("NM_021090.4")),
         );
 
-        let mut object = BTreeMap::new();
+        let mut object = HashMap::new();
         object.insert(
             "attributes".to_string(),
             SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_mane))])),
@@ -2182,14 +2173,14 @@ mod tests {
 
     #[test]
     fn storable_mane_both_from_attributes() {
-        let mut attr_ms = BTreeMap::new();
+        let mut attr_ms = HashMap::new();
         attr_ms.insert("code".to_string(), SValue::String(Arc::from("MANE_Select")));
         attr_ms.insert(
             "value".to_string(),
             SValue::String(Arc::from("NM_001044370.2")),
         );
 
-        let mut attr_mpc = BTreeMap::new();
+        let mut attr_mpc = HashMap::new();
         attr_mpc.insert(
             "code".to_string(),
             SValue::String(Arc::from("MANE_Plus_Clinical")),
@@ -2199,7 +2190,7 @@ mod tests {
             SValue::String(Arc::from("NM_014346.5")),
         );
 
-        let mut object = BTreeMap::new();
+        let mut object = HashMap::new();
         object.insert(
             "attributes".to_string(),
             SValue::Array(Arc::new(vec![
@@ -2281,11 +2272,11 @@ mod tests {
 
     #[test]
     fn storable_transcript_attributes_parse_tsl() {
-        let mut attr_tsl = BTreeMap::new();
+        let mut attr_tsl = HashMap::new();
         attr_tsl.insert("code".to_string(), SValue::String(Arc::from("TSL")));
         attr_tsl.insert("value".to_string(), SValue::String(Arc::from("tsl3")));
 
-        let mut object = BTreeMap::new();
+        let mut object = HashMap::new();
         object.insert(
             "attributes".to_string(),
             SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_tsl))])),

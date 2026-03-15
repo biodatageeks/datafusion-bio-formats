@@ -68,6 +68,9 @@ pub(crate) fn extract_simple_predicate(filters: &[Expr]) -> SimplePredicate {
 pub(crate) fn is_pushdown_supported(expr: &Expr) -> bool {
     match expr {
         Expr::BinaryExpr(binary_expr) => {
+            // If either side of an AND has a pushable predicate, signal Inexact
+            // so DataFusion extracts what we can push. DataFusion always re-applies
+            // the full expression post-scan for Inexact filters.
             if binary_expr.op == Operator::And {
                 return is_pushdown_supported(&binary_expr.left)
                     || is_pushdown_supported(&binary_expr.right);

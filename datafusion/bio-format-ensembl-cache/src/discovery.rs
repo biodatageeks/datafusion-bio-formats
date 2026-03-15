@@ -125,13 +125,16 @@ fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(path) = stack.pop() {
-        if path.is_file() {
+        let meta = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.file_type().is_file() {
             out.push(path);
             continue;
         }
-
-        if !path.exists() {
-            continue;
+        if !meta.file_type().is_dir() {
+            continue; // skip symlinks and other non-regular entries
         }
 
         let entries = fs::read_dir(&path)
@@ -139,9 +142,13 @@ fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         for entry in entries {
             let entry = entry.map_err(|e| exec_err(format!("Failed reading dir entry: {e}")))?;
             let child = entry.path();
-            if child.is_dir() {
+            let child_meta = match fs::symlink_metadata(&child) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if child_meta.file_type().is_dir() {
                 stack.push(child);
-            } else if child.is_file() {
+            } else if child_meta.file_type().is_file() {
                 out.push(child);
             }
         }

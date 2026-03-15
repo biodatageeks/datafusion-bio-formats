@@ -2,7 +2,7 @@ use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, canonical_json_string as canonical_storable_json_string,
     collect_nstore_alias_counts_and_top_keys_from_reader,
-    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader,
+    stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader, sv_i64, sv_str,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -13,6 +13,7 @@ use crate::util::{
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -325,6 +326,7 @@ pub(crate) fn parse_exon_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &ExonColumnIndices,
     provenance: &ProvenanceWriter,
+    alias_prelude: Option<(HashMap<usize, usize>, Vec<String>)>,
     mut on_row_added: F,
 ) -> Result<()>
 where
@@ -518,15 +520,19 @@ where
         Ok(true)
     };
 
-    let (alias_counts, entry_keys) =
-        collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
-            .map_err(|e| {
+    let (alias_counts, entry_keys) = match alias_prelude {
+        Some(prelude) => prelude,
+        None => {
+            collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
+                .map_err(|e| {
                 exec_err(format!(
                     "Failed collecting storable alias references from {}: {}",
                     source_file.display(),
                     e
                 ))
-            })?;
+            })?
+        }
+    };
 
     let reader = open_binary_reader(source_file)?;
     stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader(
@@ -585,21 +591,6 @@ fn unwrap_blessed_object(value: &Value) -> Result<&serde_json::Map<String, Value
 
 fn unwrap_blessed_object_optional(value: &Value) -> Option<&serde_json::Map<String, Value>> {
     unwrap_blessed_object(value).ok()
-}
-
-fn sv_str(value: Option<&SValue>) -> Option<String> {
-    value.and_then(SValue::as_string).and_then(|v| {
-        let trimmed = v.trim();
-        if trimmed.is_empty() || trimmed == "." {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn sv_i64(value: Option<&SValue>) -> Option<i64> {
-    value.and_then(SValue::as_i64)
 }
 
 fn sv_bool(value: Option<&SValue>) -> Option<bool> {

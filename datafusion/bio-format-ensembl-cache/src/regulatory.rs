@@ -1,8 +1,8 @@
 use crate::decode::decode_payload;
 use crate::decode::storable_binary::{
     SValue, canonical_json_string as canonical_storable_json_string,
-    collect_nstore_alias_counts_from_reader,
-    stream_nstore_top_hash_entries_with_alias_counts_from_reader,
+    collect_nstore_alias_counts_and_top_keys_from_reader,
+    stream_nstore_top_hash_entries_with_alias_counts_from_reader, sv_i64, sv_str,
 };
 use crate::errors::{Result, exec_err};
 use crate::filter::SimplePredicate;
@@ -12,6 +12,7 @@ use crate::util::{
     BatchBuilder, ColumnMap, canonical_json_string, json_f64, json_i32, json_i64, json_str,
     normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
 };
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +84,7 @@ fn json_transcription_factors(
 }
 
 fn storable_transcription_factors(
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
 ) -> Option<String> {
     [
         "_transcription_factors",
@@ -324,19 +325,25 @@ pub(crate) fn parse_regulatory_storable_file_into<F>(
     batch: &mut BatchBuilder,
     col_idx: &RegulatoryColumnIndices,
     provenance: &ProvenanceWriter,
+    alias_prelude: Option<(HashMap<usize, usize>, Vec<String>)>,
     mut on_row_added: F,
 ) -> Result<()>
 where
     F: FnMut(&mut BatchBuilder) -> Result<bool>,
 {
-    let alias_counts = collect_nstore_alias_counts_from_reader(open_binary_reader(source_file)?)
-        .map_err(|e| {
-            exec_err(format!(
-                "Failed collecting storable alias references from {}: {}",
-                source_file.display(),
-                e
-            ))
-        })?;
+    let (alias_counts, _entry_keys) = match alias_prelude {
+        Some(prelude) => prelude,
+        None => {
+            collect_nstore_alias_counts_and_top_keys_from_reader(open_binary_reader(source_file)?)
+                .map_err(|e| {
+                exec_err(format!(
+                    "Failed collecting storable alias references from {}: {}",
+                    source_file.display(),
+                    e
+                ))
+            })?
+        }
+    };
 
     let reader = open_binary_reader(source_file)?;
     stream_nstore_top_hash_entries_with_alias_counts_from_reader(
@@ -455,7 +462,7 @@ fn infer_kind(object: &serde_json::Map<String, serde_json::Value>) -> Regulatory
     }
 }
 
-fn infer_kind_storable(object: &std::collections::BTreeMap<String, SValue>) -> RegulatoryTarget {
+fn infer_kind_storable(object: &std::collections::HashMap<String, SValue>) -> RegulatoryTarget {
     if let Some(kind) = sv_str(
         object
             .get("kind")
@@ -489,7 +496,7 @@ fn infer_kind_from_name(name: &str) -> Option<RegulatoryTarget> {
 
 fn append_regulatory_storable_row_into(
     payload: &SValue,
-    object: &std::collections::BTreeMap<String, SValue>,
+    object: &std::collections::HashMap<String, SValue>,
     core: RegulatoryRowCore,
     source_file_str: &str,
     batch: &mut BatchBuilder,
@@ -598,21 +605,6 @@ fn append_regulatory_storable_row_into(
     Ok(())
 }
 
-fn sv_str(value: Option<&SValue>) -> Option<String> {
-    value.and_then(SValue::as_string).and_then(|v| {
-        let trimmed = v.trim();
-        if trimmed.is_empty() || trimmed == "." {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn sv_i64(value: Option<&SValue>) -> Option<i64> {
-    value.and_then(SValue::as_i64)
-}
-
 fn sv_f64(value: Option<&SValue>) -> Option<f64> {
     value
         .and_then(SValue::as_string)
@@ -623,7 +615,7 @@ fn sv_f64(value: Option<&SValue>) -> Option<f64> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[test]
@@ -642,7 +634,7 @@ mod tests {
 
     #[test]
     fn storable_transcription_factors_supports_aliases() {
-        let mut object = BTreeMap::new();
+        let mut object = HashMap::new();
         object.insert(
             "transcription_factor".to_string(),
             SValue::String(Arc::from("CTCF")),

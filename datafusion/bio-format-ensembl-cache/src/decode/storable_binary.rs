@@ -1,5 +1,5 @@
 use crate::errors::{Result, exec_err};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ pub(crate) enum SValue {
     /// Raw binary data that is not valid UTF-8 (e.g., gzip-compressed matrices).
     Bytes(Arc<[u8]>),
     Array(Arc<Vec<SValue>>),
-    Hash(Arc<BTreeMap<String, SValue>>),
+    Hash(Arc<HashMap<String, SValue>>),
     Blessed {
         class: Arc<str>,
         value: Arc<SValue>,
@@ -29,7 +29,7 @@ impl SValue {
         }
     }
 
-    pub(crate) fn as_hash(&self) -> Option<&BTreeMap<String, SValue>> {
+    pub(crate) fn as_hash(&self) -> Option<&HashMap<String, SValue>> {
         match self.unbless() {
             Self::Hash(v) => Some(v),
             _ => None,
@@ -90,6 +90,25 @@ impl SValue {
     }
 }
 
+/// Extracts a trimmed, non-empty string from an optional `SValue`.
+///
+/// Returns `None` if the value is absent, empty, or equals `"."`.
+pub(crate) fn sv_str(value: Option<&SValue>) -> Option<String> {
+    value.and_then(SValue::as_string).and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() || trimmed == "." {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+/// Extracts an `i64` from an optional `SValue`.
+pub(crate) fn sv_i64(value: Option<&SValue>) -> Option<i64> {
+    value.and_then(SValue::as_i64)
+}
+
 /// Converts raw bytes to `SValue::String` if valid UTF-8, otherwise `SValue::Bytes`.
 fn bytes_to_svalue(bytes: Vec<u8>) -> SValue {
     match String::from_utf8(bytes) {
@@ -117,6 +136,7 @@ pub(crate) fn decode_nstore_from_reader<R: Read>(reader: R) -> Result<SValue> {
 
 /// Collect alias reference counts (`REFP` / opcode `0x00` targets) from an
 /// nstore payload.
+#[cfg(test)]
 pub(crate) fn collect_nstore_alias_counts_from_reader<R: Read>(
     reader: R,
 ) -> Result<HashMap<usize, usize>> {
@@ -138,6 +158,24 @@ pub(crate) fn collect_nstore_alias_counts_and_top_keys_from_reader<R: Read>(
     collector.consume_header()?;
     let keys = collector.collect_top_hash_with_keys()?;
     Ok((collector.alias_counts, keys))
+}
+
+/// Pre-collected alias reference counts and top-level hash keys from the
+/// first pass over a storable file.
+pub(crate) type AliasPrelude = (HashMap<usize, usize>, Vec<String>);
+
+/// Like [`collect_nstore_alias_counts_and_top_keys_from_reader`] but returns
+/// `Ok(None)` when the header is not a `pst0` storable payload, avoiding a
+/// separate `is_storable_binary_payload` file open.
+pub(crate) fn try_collect_nstore_alias_counts_and_top_keys<R: Read>(
+    reader: R,
+) -> Result<Option<AliasPrelude>> {
+    let mut collector = AliasCollector::new(reader);
+    if !collector.try_consume_header()? {
+        return Ok(None);
+    }
+    let keys = collector.collect_top_hash_with_keys()?;
+    Ok(Some((collector.alias_counts, keys)))
 }
 
 /// Collect all alias slots (`REFP` / opcode `0x00` targets) referenced in an
@@ -307,15 +345,17 @@ pub(crate) fn canonical_json_string(value: &SValue) -> String {
             }
             SValue::Hash(map) => {
                 out.push('{');
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
                 let mut first = true;
-                for (k, v) in map.iter() {
+                for k in keys {
                     if !first {
                         out.push(',');
                     }
                     first = false;
                     write_escaped_str(out, k);
                     out.push(':');
-                    if !write_value(out, v, limit) {
+                    if !write_value(out, &map[k], limit) {
                         return false;
                     }
                 }
@@ -359,6 +399,7 @@ struct Parser<R> {
     next_slot: usize,
     in_progress_slots: HashSet<usize>,
     alias_ref_counts: Option<HashMap<usize, usize>>,
+    scratch: Vec<u8>,
 }
 
 impl<R: Read> Parser<R> {
@@ -372,6 +413,7 @@ impl<R: Read> Parser<R> {
             next_slot: 0,
             in_progress_slots: HashSet::new(),
             alias_ref_counts: None,
+            scratch: Vec::new(),
         }
     }
 
@@ -384,6 +426,7 @@ impl<R: Read> Parser<R> {
             next_slot: 0,
             in_progress_slots: HashSet::new(),
             alias_ref_counts: Some(alias_ref_counts),
+            scratch: Vec::new(),
         }
     }
 
@@ -825,7 +868,7 @@ impl<R: Read> Parser<R> {
             }
             0x03 => {
                 let len = self.read_u32()? as usize;
-                let mut map = BTreeMap::new();
+                let mut map = HashMap::with_capacity(len);
                 for _ in 0..len {
                     let value = self.parse_value()?;
                     let key = self.parse_hash_key()?;
@@ -900,8 +943,32 @@ impl<R: Read> Parser<R> {
 
     fn parse_hash_key(&mut self) -> Result<String> {
         let len = self.read_u32()? as usize;
-        let bytes = self.read_bytes(len)?;
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        // Use the scratch buffer to avoid a per-key Vec<u8> allocation for
+        // the read.  The owned String still allocates, but we skip the
+        // intermediate heap buffer that `read_bytes()` would create.
+        self.scratch.resize(len, 0);
+        self.reader
+            .read_exact(&mut self.scratch[..len])
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    exec_err(format!(
+                        "Unexpected EOF while decoding storable payload at offset {}",
+                        self.pos
+                    ))
+                } else {
+                    exec_err(format!(
+                        "I/O error while decoding storable payload at offset {}: {e}",
+                        self.pos
+                    ))
+                }
+            })?;
+        self.pos += len;
+        // Fast path: valid UTF-8 — convert from slice without intermediate Vec.
+        // Slow path: invalid UTF-8 — lossy replacement (rare for hash keys).
+        match std::str::from_utf8(&self.scratch[..len]) {
+            Ok(s) => Ok(s.to_owned()),
+            Err(_) => Ok(String::from_utf8_lossy(&self.scratch[..len]).into_owned()),
+        }
     }
 
     fn read_u8(&mut self) -> Result<u8> {
@@ -926,6 +993,32 @@ impl<R: Read> Parser<R> {
         let mut bytes = vec![0u8; len];
         self.read_exact_into(&mut bytes)?;
         Ok(bytes)
+    }
+
+    /// Read `len` bytes into the reusable scratch buffer, returning a slice.
+    ///
+    /// This avoids per-call heap allocation when the caller only needs a
+    /// temporary view of the data (e.g., to immediately convert to `String`).
+    #[allow(dead_code)]
+    fn read_bytes_reusable(&mut self, len: usize) -> Result<&[u8]> {
+        self.scratch.resize(len, 0);
+        self.reader
+            .read_exact(&mut self.scratch[..len])
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    exec_err(format!(
+                        "Unexpected EOF while decoding storable payload at offset {}",
+                        self.pos
+                    ))
+                } else {
+                    exec_err(format!(
+                        "I/O error while decoding storable payload at offset {}: {e}",
+                        self.pos
+                    ))
+                }
+            })?;
+        self.pos += len;
+        Ok(&self.scratch[..len])
     }
 
     fn read_exact_into(&mut self, buf: &mut [u8]) -> Result<()> {
@@ -965,13 +1058,22 @@ impl<R: Read> AliasCollector<R> {
     }
 
     fn consume_header(&mut self) -> Result<()> {
+        if !self.try_consume_header()? {
+            return Err(exec_err(
+                "Unsupported storable payload (missing pst0 header)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns `Ok(true)` if the header is a valid pst0 storable payload,
+    /// `Ok(false)` if the magic bytes don't match.
+    fn try_consume_header(&mut self) -> Result<bool> {
         let mut header = [0u8; 6];
         self.read_exact_into(&mut header)?;
 
         if &header[0..4] != b"pst0" {
-            return Err(exec_err(
-                "Unsupported storable payload (missing pst0 header)",
-            ));
+            return Ok(false);
         }
 
         let version_and_order = header[4];
@@ -995,7 +1097,7 @@ impl<R: Read> AliasCollector<R> {
             )));
         }
 
-        Ok(())
+        Ok(true)
     }
 
     fn collect_value(&mut self) -> Result<()> {
@@ -1183,7 +1285,7 @@ mod tests {
         let hex = "70737430050b03000000020a0178000000016208810000000161";
         let bytes = hex::decode(hex).expect("hex decode");
 
-        let mut seen = BTreeMap::new();
+        let mut seen = HashMap::new();
         stream_nstore_top_hash_entries_from_reader(Cursor::new(bytes), |key, value| {
             seen.insert(key, value.as_string());
             Ok(true)
