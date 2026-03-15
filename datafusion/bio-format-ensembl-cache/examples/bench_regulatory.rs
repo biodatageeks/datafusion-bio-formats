@@ -54,8 +54,7 @@ async fn main() -> datafusion::common::Result<()> {
         }
         other => {
             return Err(datafusion::common::DataFusionError::Execution(format!(
-                "Unknown target '{}', expected 'regulatory' or 'motif'",
-                other
+                "Unknown target '{other}', expected 'regulatory' or 'motif'"
             )));
         }
     }

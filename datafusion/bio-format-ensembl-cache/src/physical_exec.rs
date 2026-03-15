@@ -769,3 +769,187 @@ fn process_partition(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    // -----------------------------------------------------------------------
+    // parse_file_chrom_region
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_chrom_region_typical() {
+        let (chrom, start, end) = parse_file_chrom_region("1_1-1000000_var.gz").unwrap();
+        assert_eq!(chrom, "1");
+        assert_eq!(start, 1);
+        assert_eq!(end, 1000000);
+    }
+
+    #[test]
+    fn parse_chrom_region_chr_prefix() {
+        let (chrom, start, end) = parse_file_chrom_region("22_15000001-16000000_var.gz").unwrap();
+        assert_eq!(chrom, "22");
+        assert_eq!(start, 15000001);
+        assert_eq!(end, 16000000);
+    }
+
+    #[test]
+    fn parse_chrom_region_x() {
+        let (chrom, _, _) = parse_file_chrom_region("X_1-1000000_var.gz").unwrap();
+        assert_eq!(chrom, "X");
+    }
+
+    #[test]
+    fn parse_chrom_region_no_underscore() {
+        assert!(parse_file_chrom_region("all_vars.gz").is_none());
+    }
+
+    #[test]
+    fn parse_chrom_region_no_dash() {
+        assert!(parse_file_chrom_region("1_var.gz").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // file_matches_predicate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn file_matches_no_predicate() {
+        let pred = SimplePredicate::default();
+        assert!(file_matches_predicate(
+            Path::new("1_1-1000000_var.gz"),
+            &pred
+        ));
+    }
+
+    #[test]
+    fn file_matches_chrom_match() {
+        let pred = SimplePredicate {
+            chrom: Some("1".to_string()),
+            ..Default::default()
+        };
+        assert!(file_matches_predicate(
+            Path::new("1_1-1000000_var.gz"),
+            &pred
+        ));
+    }
+
+    #[test]
+    fn file_matches_chrom_mismatch() {
+        let pred = SimplePredicate {
+            chrom: Some("2".to_string()),
+            ..Default::default()
+        };
+        assert!(!file_matches_predicate(
+            Path::new("1_1-1000000_var.gz"),
+            &pred
+        ));
+    }
+
+    #[test]
+    fn file_matches_region_overlap() {
+        let pred = SimplePredicate {
+            start_min: Some(500000),
+            end_max: Some(1500000),
+            ..Default::default()
+        };
+        // File covers 1-1000000, predicate is 500000-1500000 → overlaps
+        assert!(file_matches_predicate(
+            Path::new("1_1-1000000_var.gz"),
+            &pred
+        ));
+    }
+
+    #[test]
+    fn file_matches_region_before() {
+        let pred = SimplePredicate {
+            start_min: Some(2000000),
+            ..Default::default()
+        };
+        // File covers 1-1000000, predicate starts at 2000000 → no overlap
+        assert!(!file_matches_predicate(
+            Path::new("1_1-1000000_var.gz"),
+            &pred
+        ));
+    }
+
+    #[test]
+    fn file_matches_region_after() {
+        let pred = SimplePredicate {
+            end_max: Some(0),
+            ..Default::default()
+        };
+        // File covers 1-1000000, predicate ends at 0 → no overlap
+        assert!(!file_matches_predicate(
+            Path::new("1_1-1000000_var.gz"),
+            &pred
+        ));
+    }
+
+    #[test]
+    fn file_matches_unparseable_always_matches() {
+        let pred = SimplePredicate {
+            chrom: Some("1".to_string()),
+            ..Default::default()
+        };
+        // Unparseable name → don't prune
+        assert!(file_matches_predicate(Path::new("all_vars.gz"), &pred));
+    }
+
+    // -----------------------------------------------------------------------
+    // assign_files_balanced
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn balanced_empty_files() {
+        let result = assign_files_balanced(vec![], 4);
+        assert_eq!(result.len(), 4);
+        assert!(result.iter().all(|p| p.is_empty()));
+    }
+
+    #[test]
+    fn balanced_single_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.gz");
+        fs::write(&f, b"data").unwrap();
+
+        let result = assign_files_balanced(vec![f], 4);
+        let total: usize = result.iter().map(|p| p.len()).sum();
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn balanced_round_robin() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for i in 0..6 {
+            let f = dir.path().join(format!("f{i}.gz"));
+            fs::write(&f, vec![0u8; (i + 1) * 100]).unwrap();
+            files.push(f);
+        }
+
+        let result = assign_files_balanced(files, 3);
+        assert_eq!(result.len(), 3);
+        // Each partition should have exactly 2 files (6 / 3)
+        for partition in &result {
+            assert_eq!(partition.len(), 2);
+        }
+    }
+
+    #[test]
+    fn balanced_more_partitions_than_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("a.gz");
+        let f2 = dir.path().join("b.gz");
+        fs::write(&f1, b"data").unwrap();
+        fs::write(&f2, b"data").unwrap();
+
+        let result = assign_files_balanced(vec![f1, f2], 8);
+        let total: usize = result.iter().map(|p| p.len()).sum();
+        assert_eq!(total, 2);
+        // Should have at most 1 file per partition
+        assert!(result.iter().all(|p| p.len() <= 1));
+    }
+}

@@ -975,18 +975,12 @@ async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::co
                 let tx_end = tx_ends.value(i);
                 assert!(
                     cr_start <= cr_end,
-                    "cds_start ({}) should be <= cds_end ({})",
-                    cr_start,
-                    cr_end
+                    "cds_start ({cr_start}) should be <= cds_end ({cr_end})"
                 );
                 // Coding region must fall within (or equal) the transcript span
                 assert!(
                     cr_start >= tx_start && cr_end <= tx_end,
-                    "coding region [{}, {}] should be within transcript [{}, {}]",
-                    cr_start,
-                    cr_end,
-                    tx_start,
-                    tx_end
+                    "coding region [{cr_start}, {cr_end}] should be within transcript [{tx_start}, {tx_end}]"
                 );
             }
         }
@@ -1932,8 +1926,7 @@ async fn variation_optional_fields_nullable() -> datafusion::common::Result<()> 
             let freq = maf.value(i);
             assert!(
                 (0.0..=1.0).contains(&freq),
-                "minor_allele_freq {} should be in [0,1]",
-                freq
+                "minor_allele_freq {freq} should be in [0,1]"
             );
         }
     }

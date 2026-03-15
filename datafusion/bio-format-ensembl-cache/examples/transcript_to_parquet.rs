@@ -105,7 +105,7 @@ async fn main() -> datafusion::common::Result<()> {
             let rss = rss_mb();
             if rss > peak {
                 peak = rss;
-                println!("  [monitor] RSS: {:.1} MB (new peak)", rss);
+                println!("  [monitor] RSS: {rss:.1} MB (new peak)");
             }
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
@@ -115,7 +115,7 @@ async fn main() -> datafusion::common::Result<()> {
     let start = Instant::now();
 
     // Get physical plan and execute partitioned streams
-    let df = ctx.sql("SELECT * FROM tx").await?;
+    let df = ctx.sql("SELECT * FROM tx ORDER BY chrom, start").await?;
     let plan = df.create_physical_plan().await?;
     let schema = plan.schema();
     let task_ctx = ctx.task_ctx();
@@ -138,8 +138,7 @@ async fn main() -> datafusion::common::Result<()> {
         let file_path = format!("{output_dir}/part-{partition_idx:04}.parquet");
         let file = File::create(&file_path)
             .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
-        let mut writer =
-            ArrowWriter::try_new(file, schema.clone().into(), Some(writer_props.clone()))?;
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_props.clone()))?;
 
         let mut partition_rows = 0usize;
         let mut partition_batches = 0usize;
@@ -189,7 +188,7 @@ async fn main() -> datafusion::common::Result<()> {
     println!("Batches:        {total_batches}");
     println!("Elapsed:        {elapsed:.2?}");
     println!("Final RSS:      {:.1} MB", rss_mb());
-    println!("Peak RSS:       {:.1} MB", peak_rss);
+    println!("Peak RSS:       {peak_rss:.1} MB");
     if elapsed.as_secs_f64() > 0.0 {
         println!(
             "Throughput:     {:.0} rows/sec",

@@ -137,7 +137,7 @@ fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         let entries = fs::read_dir(&path)
             .map_err(|e| exec_err(format!("Failed listing {}: {}", path.display(), e)))?;
         for entry in entries {
-            let entry = entry.map_err(|e| exec_err(format!("Failed reading dir entry: {}", e)))?;
+            let entry = entry.map_err(|e| exec_err(format!("Failed reading dir entry: {e}")))?;
             let child = entry.path();
             if child.is_dir() {
                 stack.push(child);
@@ -165,4 +165,250 @@ fn looks_like_region_file_name(name: &str) -> bool {
         && !end.is_empty()
         && start.chars().all(|c| c.is_ascii_digit())
         && end.chars().all(|c| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    // -----------------------------------------------------------------------
+    // is_index_sidecar_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sidecar_csi() {
+        assert!(is_index_sidecar_name("all_vars.gz.csi"));
+    }
+
+    #[test]
+    fn sidecar_tbi() {
+        assert!(is_index_sidecar_name("all_vars.gz.tbi"));
+    }
+
+    #[test]
+    fn not_sidecar_gz() {
+        assert!(!is_index_sidecar_name("all_vars.gz"));
+    }
+
+    // -----------------------------------------------------------------------
+    // looks_like_region_file_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn region_file_typical() {
+        assert!(looks_like_region_file_name("1-1000000.gz"));
+    }
+
+    #[test]
+    fn region_file_large_numbers() {
+        assert!(looks_like_region_file_name("15000001-16000000.gz"));
+    }
+
+    #[test]
+    fn not_region_file_no_gz() {
+        assert!(!looks_like_region_file_name("1-1000000"));
+    }
+
+    #[test]
+    fn not_region_file_no_dash() {
+        assert!(!looks_like_region_file_name("1000000.gz"));
+    }
+
+    #[test]
+    fn not_region_file_alpha() {
+        assert!(!looks_like_region_file_name("chr1-1000000.gz"));
+    }
+
+    #[test]
+    fn not_region_file_empty_parts() {
+        assert!(!looks_like_region_file_name("-1000000.gz"));
+    }
+
+    // -----------------------------------------------------------------------
+    // discover_variation_files
+    // -----------------------------------------------------------------------
+
+    fn create_file(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, b"test").unwrap();
+    }
+
+    #[test]
+    fn variation_prefers_all_vars() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/all_vars.gz"));
+        create_file(&dir.path().join("1/1_1-1000000_var.gz"));
+
+        let files = discover_variation_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_str().unwrap().contains("all_vars"));
+    }
+
+    #[test]
+    fn variation_falls_back_to_region_files() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/1_1-1000000_var.gz"));
+        create_file(&dir.path().join("2/2_1-1000000_var.gz"));
+
+        let files = discover_variation_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn variation_excludes_index_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("all_vars.gz"));
+        create_file(&dir.path().join("all_vars.gz.csi"));
+        create_file(&dir.path().join("all_vars.gz.tbi"));
+
+        let files = discover_variation_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(!files[0].to_str().unwrap().contains(".csi"));
+    }
+
+    #[test]
+    fn variation_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = discover_variation_files(dir.path()).unwrap();
+        assert!(files.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // discover_transcript_files
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn transcript_finds_explicit_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("transcript/chr1_transcript.storable.gz"));
+        create_file(&dir.path().join("transcript/chr2_transcript.storable.gz"));
+
+        let files = discover_transcript_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn transcript_merged_layout_finds_region_files() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/1-1000000.gz"));
+        create_file(&dir.path().join("2/1-1000000.gz"));
+
+        let files = discover_transcript_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn transcript_merged_excludes_var_files() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/1-1000000.gz"));
+        create_file(&dir.path().join("1/1_1-1000000_var.gz"));
+        create_file(&dir.path().join("info.txt"));
+
+        let files = discover_transcript_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_str().unwrap().contains("1-1000000.gz"));
+    }
+
+    #[test]
+    fn transcript_merged_excludes_regulatory() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/1-1000000.gz"));
+        create_file(&dir.path().join("regulatory/chr1_regulatory.storable.gz"));
+
+        let files = discover_transcript_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn transcript_excludes_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("transcript/chr1_transcript.storable.gz"));
+        create_file(
+            &dir.path()
+                .join("transcript/chr1_transcript.storable.gz.csi"),
+        );
+
+        let files = discover_transcript_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // discover_regulatory_files
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn regulatory_finds_files() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("regulatory/chr1_regulatory.storable.gz"));
+        create_file(&dir.path().join("regulatory/chr2_regulatory.storable.gz"));
+
+        let files = discover_regulatory_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn regulatory_matches_regfeat() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/1_regfeat.gz"));
+
+        let files = discover_regulatory_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn regulatory_matches_reg_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/1_1-1000000_reg.gz"));
+
+        let files = discover_regulatory_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn regulatory_excludes_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("regulatory/chr1_regulatory.storable.gz"));
+        create_file(
+            &dir.path()
+                .join("regulatory/chr1_regulatory.storable.gz.tbi"),
+        );
+
+        let files = discover_regulatory_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // walk_files
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn walk_files_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("a/b/c.txt"));
+        create_file(&dir.path().join("a/d.txt"));
+        create_file(&dir.path().join("e.txt"));
+
+        let mut out = Vec::new();
+        walk_files(dir.path(), &mut out).unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn walk_files_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        walk_files(dir.path(), &mut out).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn walk_files_nonexistent_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        walk_files(&dir.path().join("does_not_exist"), &mut out).unwrap();
+        assert!(out.is_empty());
+    }
 }

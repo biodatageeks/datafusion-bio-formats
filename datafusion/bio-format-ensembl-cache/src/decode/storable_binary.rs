@@ -466,8 +466,7 @@ impl<R: Read> Parser<R> {
 
         if major != 2 {
             return Err(exec_err(format!(
-                "Unsupported storable major version: {}",
-                major
+                "Unsupported storable major version: {major}"
             )));
         }
         if !netorder {
@@ -479,8 +478,7 @@ impl<R: Read> Parser<R> {
         // VEP 115 currently stores 2.10. Keep permissive on minor to tolerate small bumps.
         if minor < 7 {
             return Err(exec_err(format!(
-                "Unsupported storable minor version: {}",
-                minor
+                "Unsupported storable minor version: {minor}"
             )));
         }
 
@@ -789,9 +787,10 @@ impl<R: Read> Parser<R> {
                 class
             } else {
                 let class_idx = self.read_u8()? as usize;
-                self.classes.get(class_idx).cloned().ok_or_else(|| {
-                    exec_err(format!("Invalid storable class index: {}", class_idx))
-                })?
+                self.classes
+                    .get(class_idx)
+                    .cloned()
+                    .ok_or_else(|| exec_err(format!("Invalid storable class index: {class_idx}")))?
             };
             // parse_value() allocates the slot for the inner value.
             let inner = self.parse_value()?;
@@ -982,8 +981,7 @@ impl<R: Read> AliasCollector<R> {
 
         if major != 2 {
             return Err(exec_err(format!(
-                "Unsupported storable major version: {}",
-                major
+                "Unsupported storable major version: {major}"
             )));
         }
         if !netorder {
@@ -993,8 +991,7 @@ impl<R: Read> AliasCollector<R> {
         }
         if minor < 7 {
             return Err(exec_err(format!(
-                "Unsupported storable minor version: {}",
-                minor
+                "Unsupported storable minor version: {minor}"
             )));
         }
 
@@ -1050,8 +1047,7 @@ impl<R: Read> AliasCollector<R> {
                 let class_idx = self.read_u8()? as usize;
                 if class_idx >= self.class_count {
                     return Err(exec_err(format!(
-                        "Invalid storable class index: {}",
-                        class_idx
+                        "Invalid storable class index: {class_idx}"
                     )));
                 }
                 self.collect_value()?;

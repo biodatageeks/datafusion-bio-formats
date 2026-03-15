@@ -128,26 +128,22 @@ pub(crate) fn parse_regulatory_line_into(
     let mut split_iter = trimmed.splitn(4, '\t');
     let part0 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed regulatory row in {}: {}",
-            source_file_str, trimmed
+            "Malformed regulatory row in {source_file_str}: {trimmed}"
         ))
     })?;
     let part1 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed regulatory row in {}: {}",
-            source_file_str, trimmed
+            "Malformed regulatory row in {source_file_str}: {trimmed}"
         ))
     })?;
     let part2 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed regulatory row in {}: {}",
-            source_file_str, trimmed
+            "Malformed regulatory row in {source_file_str}: {trimmed}"
         ))
     })?;
     let part3 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed regulatory row in {}: {}",
-            source_file_str, trimmed
+            "Malformed regulatory row in {source_file_str}: {trimmed}"
         ))
     })?;
 
@@ -183,8 +179,7 @@ pub(crate) fn parse_regulatory_line_into(
     let payload = decode_payload(serializer, part3)?;
     let object = payload.as_object().ok_or_else(|| {
         exec_err(format!(
-            "Regulatory payload must be a JSON object in {}",
-            source_file_str
+            "Regulatory payload must be a JSON object in {source_file_str}"
         ))
     })?;
 
@@ -201,8 +196,7 @@ pub(crate) fn parse_regulatory_line_into(
     } else {
         json_str(object.get("chr").or_else(|| object.get("chrom"))).ok_or_else(|| {
             exec_err(format!(
-                "Regulatory row missing required chrom in {}",
-                source_file_str
+                "Regulatory row missing required chrom in {source_file_str}"
             ))
         })?
     };
@@ -211,8 +205,7 @@ pub(crate) fn parse_regulatory_line_into(
         .or_else(|| json_i64(object.get("start")))
         .ok_or_else(|| {
             exec_err(format!(
-                "Regulatory row missing required start in {}",
-                source_file_str
+                "Regulatory row missing required start in {source_file_str}"
             ))
         })?;
 
@@ -220,8 +213,7 @@ pub(crate) fn parse_regulatory_line_into(
         .or_else(|| json_i64(object.get("end")))
         .ok_or_else(|| {
             exec_err(format!(
-                "Regulatory row missing required end in {}",
-                source_file_str
+                "Regulatory row missing required end in {source_file_str}"
             ))
         })?;
 
@@ -236,8 +228,7 @@ pub(crate) fn parse_regulatory_line_into(
         .and_then(|v| i8::try_from(v).ok())
         .ok_or_else(|| {
             exec_err(format!(
-                "Regulatory row missing required strand in {}",
-                source_file_str
+                "Regulatory row missing required strand in {source_file_str}"
             ))
         })?;
 

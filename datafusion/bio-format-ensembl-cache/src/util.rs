@@ -160,7 +160,7 @@ pub(crate) fn stable_hash(input: &str) -> String {
 pub(crate) fn canonical_json_string(value: &Value) -> Result<String> {
     let canonical = canonicalize_json(value);
     serde_json::to_string(&canonical)
-        .map_err(|e| exec_err(format!("Failed serializing canonical JSON payload: {}", e)))
+        .map_err(|e| exec_err(format!("Failed serializing canonical JSON payload: {e}")))
 }
 
 fn canonicalize_json(value: &Value) -> Value {
@@ -430,9 +430,8 @@ impl BatchBuilder {
         if let Some((current, value_len)) = overflow {
             let col_name = self.schema.field(col).name().clone();
             self.set_pending_error_once(format!(
-                "Arrow UTF-8 offset overflow in column '{}' ({} + {} bytes exceeds i32::MAX). \
-                 Reduce batch_size_hint or avoid projecting very large text columns.",
-                col_name, current, value_len
+                "Arrow UTF-8 offset overflow in column '{col_name}' ({current} + {value_len} bytes exceeds i32::MAX). \
+                 Reduce batch_size_hint or avoid projecting very large text columns."
             ));
         }
         self.mark_written(col);
@@ -567,9 +566,8 @@ impl BatchBuilder {
         if let Some((current_child_len, added)) = overflow {
             let col_name = self.schema.field(col).name().clone();
             self.set_pending_error_once(format!(
-                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
-                 Reduce batch_size_hint.",
-                col_name, current_child_len, added
+                "Arrow List offset overflow in column '{col_name}' ({current_child_len} + {added} values exceeds i32::MAX). \
+                 Reduce batch_size_hint."
             ));
             return;
         }
@@ -612,9 +610,8 @@ impl BatchBuilder {
         if let Some((current_child_len, added)) = overflow {
             let col_name = self.schema.field(col).name().clone();
             self.set_pending_error_once(format!(
-                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
-                 Reduce batch_size_hint.",
-                col_name, current_child_len, added
+                "Arrow List offset overflow in column '{col_name}' ({current_child_len} + {added} values exceeds i32::MAX). \
+                 Reduce batch_size_hint."
             ));
             return;
         }
@@ -675,9 +672,8 @@ impl BatchBuilder {
         if let Some((current_child_len, added)) = overflow {
             let col_name = self.schema.field(col).name().clone();
             self.set_pending_error_once(format!(
-                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
-                 Reduce batch_size_hint.",
-                col_name, current_child_len, added
+                "Arrow List offset overflow in column '{col_name}' ({current_child_len} + {added} values exceeds i32::MAX). \
+                 Reduce batch_size_hint."
             ));
             return;
         }
@@ -742,9 +738,8 @@ impl BatchBuilder {
         if let Some((current_child_len, added)) = overflow {
             let col_name = self.schema.field(col).name().clone();
             self.set_pending_error_once(format!(
-                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
-                 Reduce batch_size_hint.",
-                col_name, current_child_len, added
+                "Arrow List offset overflow in column '{col_name}' ({current_child_len} + {added} values exceeds i32::MAX). \
+                 Reduce batch_size_hint."
             ));
             return;
         }
@@ -800,9 +795,8 @@ impl BatchBuilder {
         if let Some((current_child_len, added)) = overflow {
             let col_name = self.schema.field(col).name().clone();
             self.set_pending_error_once(format!(
-                "Arrow List offset overflow in column '{}' ({} + {} values exceeds i32::MAX). \
-                 Reduce batch_size_hint.",
-                col_name, current_child_len, added
+                "Arrow List offset overflow in column '{col_name}' ({current_child_len} + {added} values exceeds i32::MAX). \
+                 Reduce batch_size_hint."
             ));
             return;
         }
@@ -846,8 +840,7 @@ impl BatchBuilder {
             return RecordBatch::try_new_with_options(self.schema.clone(), Vec::new(), &options)
                 .map_err(|e| {
                     exec_err(format!(
-                        "Failed building zero-column Ensembl cache RecordBatch: {}",
-                        e
+                        "Failed building zero-column Ensembl cache RecordBatch: {e}"
                     ))
                 });
         }
@@ -867,7 +860,7 @@ impl BatchBuilder {
 
         let arrays: Vec<ArrayRef> = old_builders.into_iter().map(AnyBuilder::finish).collect();
         RecordBatch::try_new(self.schema.clone(), arrays)
-            .map_err(|e| exec_err(format!("Failed building Ensembl cache RecordBatch: {}", e)))
+            .map_err(|e| exec_err(format!("Failed building Ensembl cache RecordBatch: {e}")))
     }
 }
 
@@ -1382,12 +1375,12 @@ mod tests {
 
     #[test]
     fn json_f64_number() {
-        assert_eq!(json_f64(Some(&json!(3.14))), Some(3.14));
+        assert_eq!(json_f64(Some(&json!(3.15))), Some(3.15));
     }
 
     #[test]
     fn json_f64_string() {
-        assert_eq!(json_f64(Some(&json!("3.14"))), Some(3.14));
+        assert_eq!(json_f64(Some(&json!("3.15"))), Some(3.15));
     }
 
     #[test]
@@ -1497,7 +1490,7 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert_eq!(flags.value(0), true);
+        assert!(flags.value(0));
     }
 
     #[test]
@@ -1559,7 +1552,7 @@ mod tests {
         builder.set_opt_i64(1, Some(100));
         builder.set_opt_i32(2, Some(42));
         builder.set_opt_i8(3, Some(-1));
-        builder.set_opt_f64(4, Some(3.14));
+        builder.set_opt_f64(4, Some(3.15));
         builder.set_opt_bool(5, Some(false));
         builder.finish_row();
 
@@ -1610,7 +1603,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!((f64_col.value(0) - 3.14).abs() < f64::EPSILON);
+        assert!((f64_col.value(0) - 3.15).abs() < f64::EPSILON);
 
         let bool_col = batch
             .column(5)

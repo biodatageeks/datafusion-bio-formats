@@ -1,8 +1,6 @@
 //! Parquet round-trip tests: write VEP cache → Parquet → read back, verify.
 
-use datafusion::arrow::array::{
-    Array, Float32Array, Int32Array, Int64Array, ListArray, StringArray, StructArray,
-};
+use datafusion::arrow::array::{Array, Int64Array, ListArray, StringArray, StructArray};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
 use datafusion::parquet::arrow::ArrowWriter;

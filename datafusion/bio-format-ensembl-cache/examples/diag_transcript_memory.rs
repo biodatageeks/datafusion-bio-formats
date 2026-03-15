@@ -115,8 +115,7 @@ async fn main() -> datafusion::common::Result<()> {
             peak_rss = peak_rss.max(rss);
             let elapsed = start.elapsed();
             println!(
-                "  rows={:<8} batches={:<5} RSS={:.1} MB  peak={:.1} MB  elapsed={:.2?}",
-                total_rows, total_batches, rss, peak_rss, elapsed
+                "  rows={total_rows:<8} batches={total_batches:<5} RSS={rss:.1} MB  peak={peak_rss:.1} MB  elapsed={elapsed:.2?}"
             );
         }
     }
@@ -129,8 +128,8 @@ async fn main() -> datafusion::common::Result<()> {
     println!("Total rows:    {total_rows}");
     println!("Total batches: {total_batches}");
     println!("Elapsed:       {elapsed:.2?}");
-    println!("Final RSS:     {:.1} MB", rss);
-    println!("Peak RSS:      {:.1} MB", peak_rss);
+    println!("Final RSS:     {rss:.1} MB");
+    println!("Peak RSS:      {peak_rss:.1} MB");
     if elapsed.as_secs_f64() > 0.0 {
         let rows_per_sec = total_rows as f64 / elapsed.as_secs_f64();
         println!("Throughput:    {rows_per_sec:.0} rows/sec");

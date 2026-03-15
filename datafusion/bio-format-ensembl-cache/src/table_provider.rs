@@ -211,8 +211,7 @@ fn validate_serializer(cache_info: &CacheInfo) -> Result<()> {
 
     if serializer != "storable" && serializer != "sereal" {
         return Err(exec_err(format!(
-            "Unknown serializer type in info.txt: {}",
-            serializer
+            "Unknown serializer type in info.txt: {serializer}"
         )));
     }
     Ok(())

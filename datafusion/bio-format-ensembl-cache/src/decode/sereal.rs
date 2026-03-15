@@ -13,8 +13,45 @@ pub(crate) fn decode(payload: &str) -> Result<Value> {
 
     serde_json::from_str(json_payload).map_err(|e| {
         exec_err(format!(
-            "Failed decoding sereal JSON payload in v1 subset decoder: {}",
-            e
+            "Failed decoding sereal JSON payload in v1 subset decoder: {e}"
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_valid_json_object() {
+        let val = decode("SRL1{\"key\":\"value\"}").unwrap();
+        assert_eq!(val["key"], "value");
+    }
+
+    #[test]
+    fn decode_valid_json_array() {
+        let val = decode("SRL1[1,2,3]").unwrap();
+        assert_eq!(val.as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn decode_missing_prefix() {
+        assert!(decode("{\"key\":\"value\"}").is_err());
+    }
+
+    #[test]
+    fn decode_wrong_prefix() {
+        assert!(decode("JSON:{\"key\":\"value\"}").is_err());
+    }
+
+    #[test]
+    fn decode_invalid_json() {
+        assert!(decode("SRL1{invalid}").is_err());
+    }
+
+    #[test]
+    fn decode_nested() {
+        let val = decode("SRL1{\"a\":{\"b\":42}}").unwrap();
+        assert_eq!(val["a"]["b"], 42);
+    }
 }

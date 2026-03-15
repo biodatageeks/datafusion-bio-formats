@@ -387,6 +387,18 @@ impl SourceIdWriter {
             }
         }
     }
+
+    #[cfg(test)]
+    fn slot_buffer(&self, source_key: &str) -> Option<&str> {
+        self.key_to_slot.get(source_key).and_then(|idx| {
+            let slot = &self.slots[*idx];
+            if slot.offsets.is_empty() {
+                None
+            } else {
+                Some(slot.buffer.as_str())
+            }
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -604,4 +616,435 @@ pub(crate) fn parse_variation_line_into(
 
     batch.finish_row();
     Ok(VariationParseResult::Added)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::info::{CacheInfo, SourceDescriptor};
+    use crate::schema::variation_schema;
+    use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter};
+    use std::path::PathBuf;
+
+    fn make_cache_info(variation_cols: Vec<String>, sources: Vec<SourceDescriptor>) -> CacheInfo {
+        CacheInfo {
+            cache_root: PathBuf::from("/tmp/test"),
+            source_cache_path: "/tmp/test".to_string(),
+            species: "homo_sapiens".to_string(),
+            assembly: "GRCh38".to_string(),
+            cache_version: "115".to_string(),
+            serializer_type: Some("storable".to_string()),
+            var_type: Some("region".to_string()),
+            cache_region_size: Some(1_000_000),
+            variation_cols,
+            source_descriptors: sources,
+        }
+    }
+
+    fn standard_cols() -> Vec<String> {
+        vec![
+            "chr",
+            "start",
+            "end",
+            "variation_name",
+            "allele_string",
+            "failed",
+            "somatic",
+            "strand",
+            "minor_allele",
+            "minor_allele_freq",
+            "clin_sig",
+            "phenotype_or_disease",
+            "clinical_impact",
+            "pubmed",
+            "var_synonyms",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    fn standard_sources() -> Vec<SourceDescriptor> {
+        vec![
+            SourceDescriptor {
+                source_key: "dbsnp".to_string(),
+                source_column: "source_dbsnp".to_string(),
+                ids_column: "dbsnp_ids".to_string(),
+                value: "156".to_string(),
+            },
+            SourceDescriptor {
+                source_key: "cosmic".to_string(),
+                source_column: "source_cosmic".to_string(),
+                ids_column: "cosmic_ids".to_string(),
+                value: "101".to_string(),
+            },
+            SourceDescriptor {
+                source_key: "clinvar".to_string(),
+                source_column: "source_clinvar".to_string(),
+                ids_column: "clinvar_ids".to_string(),
+                value: "202502".to_string(),
+            },
+            SourceDescriptor {
+                source_key: "hgmd_public".to_string(),
+                source_column: "source_hgmd_public".to_string(),
+                ids_column: "hgmd_public_ids".to_string(),
+                value: "20204".to_string(),
+            },
+        ]
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_region_from_filename
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_region_typical() {
+        assert_eq!(
+            parse_region_from_filename("1_1-1000000_var.gz"),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn parse_region_large() {
+        assert_eq!(
+            parse_region_from_filename("22_15000001-16000000_var.gz"),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn parse_region_no_underscore() {
+        assert_eq!(parse_region_from_filename("all_vars.gz"), None);
+    }
+
+    #[test]
+    fn parse_region_no_dash() {
+        assert_eq!(parse_region_from_filename("1_var.gz"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_region_size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detect_from_cache_info() {
+        let info = make_cache_info(standard_cols(), vec![]);
+        assert_eq!(detect_region_size(&info, &[]), 1_000_000);
+    }
+
+    #[test]
+    fn detect_from_filename() {
+        let mut info = make_cache_info(standard_cols(), vec![]);
+        info.cache_region_size = None;
+        let files = vec![PathBuf::from("1_1-500000_var.gz")];
+        assert_eq!(detect_region_size(&info, &files), 500_000);
+    }
+
+    #[test]
+    fn detect_defaults_to_1m() {
+        let mut info = make_cache_info(standard_cols(), vec![]);
+        info.cache_region_size = None;
+        assert_eq!(detect_region_size(&info, &[]), 1_000_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // VariationContext
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn variation_context_maps_standard_cols() {
+        let info = make_cache_info(standard_cols(), vec![]);
+        let ctx = VariationContext::new(&info);
+        assert_eq!(ctx.chrom_tab, Some(0));
+        assert_eq!(ctx.start_tab, Some(1));
+        assert_eq!(ctx.end_tab, Some(2));
+        assert_eq!(ctx.var_name_tab, Some(3));
+        assert_eq!(ctx.allele_tab, Some(4));
+        assert_eq!(ctx.failed_tab, Some(5));
+        assert_eq!(ctx.var_synonyms_tab, Some(14));
+    }
+
+    #[test]
+    fn variation_context_extra_columns() {
+        let mut cols = standard_cols();
+        cols.push("AFR".to_string());
+        cols.push("AF".to_string());
+        let info = make_cache_info(cols, vec![]);
+        let ctx = VariationContext::new(&info);
+        assert_eq!(ctx.extra_columns.len(), 2);
+        assert_eq!(ctx.extra_columns[0].1, "AFR");
+        assert_eq!(ctx.extra_columns[1].1, "AF");
+    }
+
+    #[test]
+    fn variation_context_alternate_names() {
+        let cols: Vec<String> = vec!["seq_region_name", "pos", "end", "id", "alleles"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let info = make_cache_info(cols, vec![]);
+        let ctx = VariationContext::new(&info);
+        assert_eq!(ctx.chrom_tab, Some(0));
+        assert_eq!(ctx.start_tab, Some(1));
+        assert_eq!(ctx.var_name_tab, Some(3));
+        assert_eq!(ctx.allele_tab, Some(4));
+    }
+
+    // -----------------------------------------------------------------------
+    // SourceIdWriter
+    // -----------------------------------------------------------------------
+
+    fn make_source_id_writer() -> SourceIdWriter {
+        let sources = standard_sources();
+        let source_to_id: HashMap<String, String> = sources
+            .iter()
+            .map(|s| (s.source_key.clone(), s.ids_column.clone()))
+            .collect();
+        // Create a dummy column map that has dbsnp_ids=0, cosmic_ids=1, clinvar_ids=2, hgmd_public_ids=3
+        let mut map_entries = HashMap::new();
+        map_entries.insert("dbsnp_ids".to_string(), 0usize);
+        map_entries.insert("cosmic_ids".to_string(), 1usize);
+        map_entries.insert("clinvar_ids".to_string(), 2usize);
+        map_entries.insert("hgmd_public_ids".to_string(), 3usize);
+        let col_map = crate::util::ColumnMap::from_map(map_entries);
+        SourceIdWriter::new(&col_map, &source_to_id)
+    }
+
+    #[test]
+    fn source_id_writer_rs_pattern() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("rs12345"), None);
+        assert_eq!(writer.slot_buffer("dbsnp"), Some("rs12345"));
+    }
+
+    #[test]
+    fn source_id_writer_cosm_pattern() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("COSM12345"), None);
+        assert_eq!(writer.slot_buffer("cosmic"), Some("COSM12345"));
+    }
+
+    #[test]
+    fn source_id_writer_cosv_pattern() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("COSV12345"), None);
+        assert_eq!(writer.slot_buffer("cosmic"), Some("COSV12345"));
+    }
+
+    #[test]
+    fn source_id_writer_cm_pattern() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("CM001234"), None);
+        assert_eq!(writer.slot_buffer("hgmd_public"), Some("CM001234"));
+    }
+
+    #[test]
+    fn source_id_writer_rcv_pattern() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("RCV000012345"), None);
+        assert_eq!(writer.slot_buffer("clinvar"), Some("RCV000012345"));
+    }
+
+    #[test]
+    fn source_id_writer_var_synonyms_double_colon() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(None, Some("dbSNP::rs111,dbSNP::rs222"));
+        assert_eq!(writer.slot_buffer("dbsnp"), Some("rs111,rs222"));
+    }
+
+    #[test]
+    fn source_id_writer_var_synonyms_single_colon() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(None, Some("COSMIC:COSM100,COSM200"));
+        assert_eq!(writer.slot_buffer("cosmic"), Some("COSM100,COSM200"));
+    }
+
+    #[test]
+    fn source_id_writer_dedup() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("rs123"), Some("dbSNP::rs123"));
+        assert_eq!(writer.slot_buffer("dbsnp"), Some("rs123"));
+    }
+
+    #[test]
+    fn source_id_writer_mixed_sources() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("rs123"), Some("COSMIC::COSM456,ClinVar::RCV789"));
+        assert_eq!(writer.slot_buffer("dbsnp"), Some("rs123"));
+        assert_eq!(writer.slot_buffer("cosmic"), Some("COSM456"));
+        assert_eq!(writer.slot_buffer("clinvar"), Some("RCV789"));
+    }
+
+    #[test]
+    fn source_id_writer_empty_values_skipped() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(None, Some("dbSNP::.,dbSNP::"));
+        assert_eq!(writer.slot_buffer("dbsnp"), None);
+    }
+
+    #[test]
+    fn source_id_writer_clear_resets() {
+        let mut writer = make_source_id_writer();
+        writer.clear();
+        writer.populate(Some("rs123"), None);
+        assert_eq!(writer.slot_buffer("dbsnp"), Some("rs123"));
+        writer.clear();
+        assert_eq!(writer.slot_buffer("dbsnp"), None);
+    }
+
+    #[test]
+    fn source_id_writer_is_active() {
+        let writer = make_source_id_writer();
+        assert!(writer.is_active());
+    }
+
+    #[test]
+    fn source_id_writer_inactive_when_no_columns() {
+        let source_to_id: HashMap<String, String> = HashMap::new();
+        let col_map = crate::util::ColumnMap::from_map(HashMap::new());
+        let writer = SourceIdWriter::new(&col_map, &source_to_id);
+        assert!(!writer.is_active());
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_variation_line_into
+    // -----------------------------------------------------------------------
+
+    fn setup_variation_parser() -> (
+        BatchBuilder,
+        VariationColumnIndices,
+        VariationContext,
+        ProvenanceWriter,
+        SourceIdWriter,
+    ) {
+        let info = make_cache_info(standard_cols(), standard_sources());
+        let schema = variation_schema(&info, false).unwrap();
+        let col_map = ColumnMap::from_schema(&schema);
+        let ctx = VariationContext::new(&info);
+        let col_idx = VariationColumnIndices::new(&col_map, &ctx);
+        let provenance = ProvenanceWriter::new(&col_map, &info);
+        let source_id_writer = SourceIdWriter::new(&col_map, ctx.source_to_id_column());
+        let builder = BatchBuilder::new(schema, 64).unwrap();
+        (builder, col_idx, ctx, provenance, source_id_writer)
+    }
+
+    #[test]
+    fn parse_valid_line() {
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        let predicate = SimplePredicate::default();
+        let line = "1\t100\t100\trs12345\tA/G\t0\t0\t1\tG\t0.45\t.\t0\t.\t.\t.";
+        let result = parse_variation_line_into(
+            line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
+            &mut sid,
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Added);
+        assert_eq!(batch.len(), 1);
+    }
+
+    #[test]
+    fn parse_blank_line_skipped() {
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        let predicate = SimplePredicate::default();
+        let result = parse_variation_line_into(
+            "", "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
+            &mut sid,
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Skipped);
+        assert_eq!(batch.len(), 0);
+    }
+
+    #[test]
+    fn parse_comment_line_skipped() {
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        let predicate = SimplePredicate::default();
+        let result = parse_variation_line_into(
+            "# header comment",
+            "test.gz",
+            &predicate,
+            1_000_000,
+            false,
+            &mut batch,
+            &col_idx,
+            &ctx,
+            &prov,
+            &mut sid,
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Skipped);
+    }
+
+    #[test]
+    fn parse_missing_chrom_malformed() {
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        let predicate = SimplePredicate::default();
+        let line = ".\t100\t100\trs12345\tA/G";
+        let result = parse_variation_line_into(
+            line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
+            &mut sid,
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Malformed);
+    }
+
+    #[test]
+    fn parse_missing_start_malformed() {
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        let predicate = SimplePredicate::default();
+        let line = "1\t.\t100\trs12345\tA/G";
+        let result = parse_variation_line_into(
+            line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
+            &mut sid,
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Malformed);
+    }
+
+    #[test]
+    fn parse_predicate_filters_chrom() {
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        let predicate = SimplePredicate {
+            chrom: Some("2".to_string()),
+            ..Default::default()
+        };
+        let line = "1\t100\t100\trs12345\tA/G\t0\t0\t1\tG\t0.45\t.\t0\t.\t.\t.";
+        let result = parse_variation_line_into(
+            line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
+            &mut sid,
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Skipped);
+    }
+
+    #[test]
+    fn parse_zero_based_coordinate() {
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        let predicate = SimplePredicate::default();
+        let line = "1\t100\t100\trs12345\tA/G\t0\t0\t1\tG\t0.45\t.\t0\t.\t.\t.";
+        parse_variation_line_into(
+            line, "test.gz", &predicate, 1_000_000, true, // zero-based
+            &mut batch, &col_idx, &ctx, &prov, &mut sid,
+        )
+        .unwrap();
+        // Start should be 99 (100 - 1) in zero-based
+        let rb = batch.finish().unwrap();
+        let starts = rb
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap();
+        assert_eq!(starts.value(0), 99);
+    }
 }

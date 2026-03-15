@@ -232,9 +232,7 @@ fn cdna_to_genomic(exon_coords: &[(i64, i64)], strand: i8, cdna_pos: i64) -> Opt
 /// The primary array is only used when it contains at least one parseable
 /// exon hash (with a `stable_id`).  Otherwise we fall back to `sorted_exons`
 /// which always contains fully materialised exon objects.
-fn storable_exon_array<'a>(
-    object: &'a std::collections::BTreeMap<String, SValue>,
-) -> Option<&'a [SValue]> {
+fn storable_exon_array(object: &std::collections::BTreeMap<String, SValue>) -> Option<&[SValue]> {
     let primary = object.get("_trans_exon_array").and_then(SValue::as_array);
     let has_parseable = primary
         .map(|arr| {
@@ -263,7 +261,7 @@ fn storable_exon_array<'a>(
 ///
 /// The primary array is only used when it contains at least one parseable
 /// blessed object.  Otherwise we fall back to `sorted_exons`.
-fn json_exon_array<'a>(object: &'a serde_json::Map<String, Value>) -> Option<&'a Vec<Value>> {
+fn json_exon_array(object: &serde_json::Map<String, Value>) -> Option<&Vec<Value>> {
     let primary = object.get("_trans_exon_array").and_then(Value::as_array);
     let has_parseable = primary
         .map(|arr| {
@@ -437,6 +435,7 @@ fn derive_coding_region_from_translation_storable(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_cds_from_translation_exons<T>(
     tl_start: Option<i64>,
     tl_end: Option<i64>,
@@ -907,26 +906,22 @@ pub(crate) fn parse_transcript_line_into(
     let mut split_iter = trimmed.splitn(4, '\t');
     let part0 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed transcript row in {}: {}",
-            source_file_str, trimmed
+            "Malformed transcript row in {source_file_str}: {trimmed}"
         ))
     })?;
     let part1 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed transcript row in {}: {}",
-            source_file_str, trimmed
+            "Malformed transcript row in {source_file_str}: {trimmed}"
         ))
     })?;
     let part2 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed transcript row in {}: {}",
-            source_file_str, trimmed
+            "Malformed transcript row in {source_file_str}: {trimmed}"
         ))
     })?;
     let part3 = split_iter.next().ok_or_else(|| {
         exec_err(format!(
-            "Malformed transcript row in {}: {}",
-            source_file_str, trimmed
+            "Malformed transcript row in {source_file_str}: {trimmed}"
         ))
     })?;
 
@@ -964,8 +959,7 @@ pub(crate) fn parse_transcript_line_into(
     let payload = decode_payload(serializer, part3)?;
     let object = payload.as_object().ok_or_else(|| {
         exec_err(format!(
-            "Transcript payload must be a JSON object in {}",
-            source_file_str
+            "Transcript payload must be a JSON object in {source_file_str}"
         ))
     })?;
 
@@ -974,8 +968,7 @@ pub(crate) fn parse_transcript_line_into(
     } else {
         json_str(object.get("chr").or_else(|| object.get("chrom"))).ok_or_else(|| {
             exec_err(format!(
-                "Transcript row missing required chrom in {}: {}",
-                source_file_str, trimmed
+                "Transcript row missing required chrom in {source_file_str}: {trimmed}"
             ))
         })?
     };
@@ -984,8 +977,7 @@ pub(crate) fn parse_transcript_line_into(
         .or_else(|| json_i64(object.get("start")))
         .ok_or_else(|| {
             exec_err(format!(
-                "Transcript row missing required start in {}: {}",
-                source_file_str, trimmed
+                "Transcript row missing required start in {source_file_str}: {trimmed}"
             ))
         })?;
 
@@ -993,8 +985,7 @@ pub(crate) fn parse_transcript_line_into(
         .or_else(|| json_i64(object.get("end")))
         .ok_or_else(|| {
             exec_err(format!(
-                "Transcript row missing required end in {}: {}",
-                source_file_str, trimmed
+                "Transcript row missing required end in {source_file_str}: {trimmed}"
             ))
         })?;
 
@@ -1010,15 +1001,13 @@ pub(crate) fn parse_transcript_line_into(
         .and_then(|v| i8::try_from(v).ok())
         .ok_or_else(|| {
             exec_err(format!(
-                "Transcript row missing required strand in {}",
-                source_file_str
+                "Transcript row missing required strand in {source_file_str}"
             ))
         })?;
 
     let stable_id = json_str(object.get("stable_id")).ok_or_else(|| {
         exec_err(format!(
-            "Transcript row missing required stable_id in {}",
-            source_file_str
+            "Transcript row missing required stable_id in {source_file_str}"
         ))
     })?;
 
