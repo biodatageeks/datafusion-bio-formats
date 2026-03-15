@@ -420,13 +420,13 @@ impl<R: Read> Parser<R> {
     }
 
     fn consume_alias_ref(&mut self, slot: usize) {
-        if let Some(counts) = self.alias_ref_counts.as_mut() {
-            if let Some(remaining) = counts.get_mut(&slot) {
-                *remaining = remaining.saturating_sub(1);
-                if *remaining == 0 {
-                    counts.remove(&slot);
-                    self.refs.remove(&slot);
-                }
+        if let Some(counts) = self.alias_ref_counts.as_mut()
+            && let Some(remaining) = counts.get_mut(&slot)
+        {
+            *remaining = remaining.saturating_sub(1);
+            if *remaining == 0 {
+                counts.remove(&slot);
+                self.refs.remove(&slot);
             }
         }
     }

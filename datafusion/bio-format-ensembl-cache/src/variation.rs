@@ -409,10 +409,10 @@ pub(crate) fn detect_region_size(
     cache_info: &CacheInfo,
     variation_files: &[std::path::PathBuf],
 ) -> i64 {
-    if let Some(size) = cache_info.cache_region_size {
-        if size > 0 {
-            return size;
-        }
+    if let Some(size) = cache_info.cache_region_size
+        && size > 0
+    {
+        return size;
     }
 
     for path in variation_files {

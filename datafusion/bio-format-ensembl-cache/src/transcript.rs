@@ -1167,23 +1167,22 @@ pub(crate) fn parse_transcript_line_into(
     }
 
     // Translation sub-object
-    if col_idx.translation_projected {
-        if let Some(translation_obj) = object
+    if col_idx.translation_projected
+        && let Some(translation_obj) = object
             .get("translation")
             .and_then(unwrap_blessed_object_optional)
-        {
-            if let Some(idx) = col_idx.translation_stable_id {
-                batch.set_opt_utf8_owned(idx, json_str(translation_obj.get("stable_id")).as_ref());
-            }
-            if let Some(idx) = col_idx.translation_start {
-                batch.set_opt_i64(idx, json_i64(translation_obj.get("start")));
-            }
-            if let Some(idx) = col_idx.translation_end {
-                batch.set_opt_i64(idx, json_i64(translation_obj.get("end")));
-            }
+    {
+        if let Some(idx) = col_idx.translation_stable_id {
+            batch.set_opt_utf8_owned(idx, json_str(translation_obj.get("stable_id")).as_ref());
         }
-        // If translation is null, finish_row() will append nulls for these columns
+        if let Some(idx) = col_idx.translation_start {
+            batch.set_opt_i64(idx, json_i64(translation_obj.get("start")));
+        }
+        if let Some(idx) = col_idx.translation_end {
+            batch.set_opt_i64(idx, json_i64(translation_obj.get("end")));
+        }
     }
+    // If translation is null, finish_row() will append nulls for these columns
 
     if let Some(idx) = col_idx.exon_count {
         let exon_count = object
@@ -1194,30 +1193,30 @@ pub(crate) fn parse_transcript_line_into(
     }
 
     // Exon structured array — only parse when projected
-    if col_idx.exons_projected {
-        if let Some(idx) = col_idx.exons {
-            let exon_tuples = json_exon_array(object).map(|arr| {
-                arr.iter()
-                    .filter_map(|exon_val| {
-                        let exon_obj = unwrap_blessed_object_optional(exon_val)?;
-                        // Skip non-exon objects (slices, transcripts, genes).
-                        let id = json_str(exon_obj.get("stable_id"))?;
-                        if !is_exon_stable_id(&id) {
-                            return None;
-                        }
-                        let start = json_i64(exon_obj.get("start"))
-                            .map(|v| normalize_genomic_start(v, coordinate_system_zero_based))?;
-                        let end = json_i64(exon_obj.get("end"))
-                            .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
-                        let phase = json_i64(exon_obj.get("phase"))
-                            .and_then(|v| i8::try_from(v).ok())
-                            .unwrap_or(-1);
-                        Some((start, end, phase))
-                    })
-                    .collect::<Vec<(i64, i64, i8)>>()
-            });
-            batch.set_exon_list(idx, exon_tuples.as_deref());
-        }
+    if col_idx.exons_projected
+        && let Some(idx) = col_idx.exons
+    {
+        let exon_tuples = json_exon_array(object).map(|arr| {
+            arr.iter()
+                .filter_map(|exon_val| {
+                    let exon_obj = unwrap_blessed_object_optional(exon_val)?;
+                    // Skip non-exon objects (slices, transcripts, genes).
+                    let id = json_str(exon_obj.get("stable_id"))?;
+                    if !is_exon_stable_id(&id) {
+                        return None;
+                    }
+                    let start = json_i64(exon_obj.get("start"))
+                        .map(|v| normalize_genomic_start(v, coordinate_system_zero_based))?;
+                    let end = json_i64(exon_obj.get("end"))
+                        .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
+                    let phase = json_i64(exon_obj.get("phase"))
+                        .and_then(|v| i8::try_from(v).ok())
+                        .unwrap_or(-1);
+                    Some((start, end, phase))
+                })
+                .collect::<Vec<(i64, i64, i8)>>()
+        });
+        batch.set_exon_list(idx, exon_tuples.as_deref());
     }
 
     // Sequences from _variation_effect_feature_cache — only parse when projected.
@@ -1240,11 +1239,11 @@ pub(crate) fn parse_transcript_line_into(
     }
 
     // cDNA mapper segments from _variation_effect_feature_cache.mapper
-    if col_idx.cdna_mapper_projected {
-        if let Some(idx) = col_idx.cdna_mapper_segments {
-            let segments = extract_cdna_mapper_segments_json(object);
-            batch.set_cdna_mapper_list(idx, segments.as_deref());
-        }
+    if col_idx.cdna_mapper_projected
+        && let Some(idx) = col_idx.cdna_mapper_segments
+    {
+        let segments = extract_cdna_mapper_segments_json(object);
+        batch.set_cdna_mapper_list(idx, segments.as_deref());
     }
 
     // Top-level promoted fields (issue #125)
@@ -1680,18 +1679,18 @@ fn append_transcript_storable_row_into(
     }
 
     // Translation sub-object
-    if col_idx.translation_projected {
-        if let Some(translation_obj) = object.get("translation").and_then(SValue::as_hash) {
-            if let Some(idx) = col_idx.translation_stable_id {
-                let value = sv_str(translation_obj.get("stable_id"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
-            }
-            if let Some(idx) = col_idx.translation_start {
-                batch.set_opt_i64(idx, sv_i64(translation_obj.get("start")));
-            }
-            if let Some(idx) = col_idx.translation_end {
-                batch.set_opt_i64(idx, sv_i64(translation_obj.get("end")));
-            }
+    if col_idx.translation_projected
+        && let Some(translation_obj) = object.get("translation").and_then(SValue::as_hash)
+    {
+        if let Some(idx) = col_idx.translation_stable_id {
+            let value = sv_str(translation_obj.get("stable_id"));
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.translation_start {
+            batch.set_opt_i64(idx, sv_i64(translation_obj.get("start")));
+        }
+        if let Some(idx) = col_idx.translation_end {
+            batch.set_opt_i64(idx, sv_i64(translation_obj.get("end")));
         }
     }
 
@@ -1703,60 +1702,59 @@ fn append_transcript_storable_row_into(
     }
 
     // Exon structured array — only parse when projected
-    if col_idx.exons_projected {
-        if let Some(idx) = col_idx.exons {
-            let exon_tuples = storable_exon_array(object).map(|exon_arr| {
-                exon_arr
-                    .iter()
-                    .filter_map(|exon_val| {
-                        let exon_obj = exon_val.as_hash()?;
-                        // Skip non-exon objects (slices, transcripts, genes).
-                        let sid = sv_str(exon_obj.get("stable_id"))?;
-                        if !is_exon_stable_id(&sid) {
-                            return None;
-                        }
-                        let start = sv_i64(exon_obj.get("start"))
-                            .map(|v| normalize_genomic_start(v, coordinate_system_zero_based))?;
-                        let end = sv_i64(exon_obj.get("end"))
-                            .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
-                        let phase = sv_i64(exon_obj.get("phase"))
-                            .and_then(|v| i8::try_from(v).ok())
-                            .unwrap_or(-1);
-                        Some((start, end, phase))
-                    })
-                    .collect::<Vec<(i64, i64, i8)>>()
-            });
-            batch.set_exon_list(idx, exon_tuples.as_deref());
-        }
+    if col_idx.exons_projected
+        && let Some(idx) = col_idx.exons
+    {
+        let exon_tuples = storable_exon_array(object).map(|exon_arr| {
+            exon_arr
+                .iter()
+                .filter_map(|exon_val| {
+                    let exon_obj = exon_val.as_hash()?;
+                    // Skip non-exon objects (slices, transcripts, genes).
+                    let sid = sv_str(exon_obj.get("stable_id"))?;
+                    if !is_exon_stable_id(&sid) {
+                        return None;
+                    }
+                    let start = sv_i64(exon_obj.get("start"))
+                        .map(|v| normalize_genomic_start(v, coordinate_system_zero_based))?;
+                    let end = sv_i64(exon_obj.get("end"))
+                        .map(|v| normalize_genomic_end(v, coordinate_system_zero_based))?;
+                    let phase = sv_i64(exon_obj.get("phase"))
+                        .and_then(|v| i8::try_from(v).ok())
+                        .unwrap_or(-1);
+                    Some((start, end, phase))
+                })
+                .collect::<Vec<(i64, i64, i8)>>()
+        });
+        batch.set_exon_list(idx, exon_tuples.as_deref());
     }
 
     // Sequences from _variation_effect_feature_cache — only parse when projected.
-    if col_idx.sequences_projected || col_idx.cdna_mapper_projected {
-        if let Some(vef_cache) = object
+    if (col_idx.sequences_projected || col_idx.cdna_mapper_projected)
+        && let Some(vef_cache) = object
             .get("_variation_effect_feature_cache")
             .and_then(SValue::as_hash)
-        {
-            if let Some(idx) = col_idx.cdna_seq {
-                let value = sv_str(vef_cache.get("translateable_seq"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
-            }
-            if let Some(idx) = col_idx.peptide_seq {
-                let value = sv_str(vef_cache.get("peptide"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
-            }
-            if let Some(idx) = col_idx.spliced_seq {
-                let value = sv_str(vef_cache.get("spliced_seq"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
-            }
+    {
+        if let Some(idx) = col_idx.cdna_seq {
+            let value = sv_str(vef_cache.get("translateable_seq"));
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.peptide_seq {
+            let value = sv_str(vef_cache.get("peptide"));
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.spliced_seq {
+            let value = sv_str(vef_cache.get("spliced_seq"));
+            batch.set_opt_utf8_owned(idx, value.as_ref());
         }
     }
 
     // cDNA mapper segments from _variation_effect_feature_cache.mapper
-    if col_idx.cdna_mapper_projected {
-        if let Some(idx) = col_idx.cdna_mapper_segments {
-            let segments = extract_cdna_mapper_segments_storable(object);
-            batch.set_cdna_mapper_list(idx, segments.as_deref());
-        }
+    if col_idx.cdna_mapper_projected
+        && let Some(idx) = col_idx.cdna_mapper_segments
+    {
+        let segments = extract_cdna_mapper_segments_storable(object);
+        batch.set_cdna_mapper_list(idx, segments.as_deref());
     }
 
     // Top-level promoted fields (issue #125)

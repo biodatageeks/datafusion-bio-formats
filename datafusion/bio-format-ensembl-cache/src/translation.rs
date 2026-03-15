@@ -210,10 +210,10 @@ pub(crate) fn parse_translation_line_into(
     if transcript_stable_id.starts_with("LOC") {
         return Ok(false);
     }
-    if let Some(bt) = json_str(object.get("biotype")) {
-        if is_excluded_biotype(&bt) {
-            return Ok(false);
-        }
+    if let Some(bt) = json_str(object.get("biotype"))
+        && is_excluded_biotype(&bt)
+    {
+        return Ok(false);
     }
 
     if let Some(idx) = col_idx.chrom {
@@ -396,10 +396,10 @@ where
         if transcript_stable_id.starts_with("LOC") {
             return Ok(true);
         }
-        if let Some(bt) = sv_str(obj.get("biotype")) {
-            if is_excluded_biotype(&bt) {
-                return Ok(true);
-            }
+        if let Some(bt) = sv_str(obj.get("biotype"))
+            && is_excluded_biotype(&bt)
+        {
+            return Ok(true);
         }
 
         if let Some(idx) = col_idx.chrom {
@@ -453,40 +453,38 @@ where
         }
 
         // Sequences, protein features, and predictions from _variation_effect_feature_cache.
-        if col_idx.sequences_projected
+        if (col_idx.sequences_projected
             || col_idx.protein_features_projected
-            || col_idx.predictions_projected
-        {
-            if let Some(vef_cache) = obj
+            || col_idx.predictions_projected)
+            && let Some(vef_cache) = obj
                 .get("_variation_effect_feature_cache")
                 .and_then(SValue::as_hash)
-            {
-                if let Some(idx) = col_idx.peptide_seq {
-                    let value = sv_str(vef_cache.get("peptide"));
-                    batch.set_opt_utf8_owned(idx, value.as_ref());
+        {
+            if let Some(idx) = col_idx.peptide_seq {
+                let value = sv_str(vef_cache.get("peptide"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
+            if let Some(idx) = col_idx.cdna_seq {
+                let value = sv_str(vef_cache.get("translateable_seq"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
+            if let Some(idx) = col_idx.protein_features {
+                let features = extract_protein_features_storable(vef_cache);
+                batch.set_protein_feature_list(idx, features.as_deref());
+            }
+            // SIFT/PolyPhen predictions — populated from pre-decoded data.
+            if col_idx.predictions_projected {
+                let pfp = vef_cache
+                    .get("protein_function_predictions")
+                    .and_then(SValue::as_hash);
+                if let Some(idx) = col_idx.sift_predictions {
+                    let preds = pfp.and_then(|p| extract_predictions_storable(p, "sift"));
+                    batch.set_prediction_list(idx, preds.as_deref());
                 }
-                if let Some(idx) = col_idx.cdna_seq {
-                    let value = sv_str(vef_cache.get("translateable_seq"));
-                    batch.set_opt_utf8_owned(idx, value.as_ref());
-                }
-                if let Some(idx) = col_idx.protein_features {
-                    let features = extract_protein_features_storable(vef_cache);
-                    batch.set_protein_feature_list(idx, features.as_deref());
-                }
-                // SIFT/PolyPhen predictions — populated from pre-decoded data.
-                if col_idx.predictions_projected {
-                    let pfp = vef_cache
-                        .get("protein_function_predictions")
-                        .and_then(SValue::as_hash);
-                    if let Some(idx) = col_idx.sift_predictions {
-                        let preds = pfp.and_then(|p| extract_predictions_storable(p, "sift"));
-                        batch.set_prediction_list(idx, preds.as_deref());
-                    }
-                    if let Some(idx) = col_idx.polyphen_predictions {
-                        let preds =
-                            pfp.and_then(|p| extract_predictions_storable(p, "polyphen_humvar"));
-                        batch.set_prediction_list(idx, preds.as_deref());
-                    }
+                if let Some(idx) = col_idx.polyphen_predictions {
+                    let preds =
+                        pfp.and_then(|p| extract_predictions_storable(p, "polyphen_humvar"));
+                    batch.set_prediction_list(idx, preds.as_deref());
                 }
             }
         }
@@ -660,7 +658,7 @@ fn decode_prediction_matrix(matrix: &[u8], analysis: &str) -> Option<Vec<Predict
 
     let data = &matrix[MATRIX_HEADER.len()..];
     let total_predictions = data.len() / BYTES_PER_PRED;
-    if total_predictions == 0 || data.len() % BYTES_PER_PRED != 0 {
+    if total_predictions == 0 || !data.len().is_multiple_of(BYTES_PER_PRED) {
         return None;
     }
     let protein_length = total_predictions / NUM_AAS;

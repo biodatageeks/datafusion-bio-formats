@@ -71,68 +71,62 @@ fn evaluate_binary_filter(
     record: &dyn RecordFieldAccessor,
     binary_expr: &datafusion::logical_expr::BinaryExpr,
 ) -> bool {
-    if let Expr::Column(column) = &*binary_expr.left {
-        if let Expr::Literal(literal, _) = &*binary_expr.right {
-            let field_name = &column.name;
+    if let Expr::Column(column) = &*binary_expr.left
+        && let Expr::Literal(literal, _) = &*binary_expr.right
+    {
+        let field_name = &column.name;
 
-            // Try string comparison first
-            if let Some(record_value) = record.get_string_field(field_name) {
-                return evaluate_string_comparison(&record_value, literal, &binary_expr.op);
-            }
-
-            // Try numeric comparisons
-            if let Some(record_value) = record.get_f64_field(field_name) {
-                return evaluate_numeric_comparison(record_value, literal, &binary_expr.op);
-            }
-            if let Some(record_value) = record.get_f32_field(field_name) {
-                return evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op);
-            }
-            if let Some(record_value) = record.get_u32_field(field_name) {
-                return evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op);
-            }
-
-            // Field not found on record — pass through
-            return true;
+        // Try string comparison first
+        if let Some(record_value) = record.get_string_field(field_name) {
+            return evaluate_string_comparison(&record_value, literal, &binary_expr.op);
         }
+
+        // Try numeric comparisons
+        if let Some(record_value) = record.get_f64_field(field_name) {
+            return evaluate_numeric_comparison(record_value, literal, &binary_expr.op);
+        }
+        if let Some(record_value) = record.get_f32_field(field_name) {
+            return evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op);
+        }
+        if let Some(record_value) = record.get_u32_field(field_name) {
+            return evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op);
+        }
+
+        // Field not found on record — pass through
+        return true;
     }
     true
 }
 
 fn evaluate_between_filter(record: &dyn RecordFieldAccessor, between_expr: &Between) -> bool {
-    if let Expr::Column(column) = &*between_expr.expr {
-        if let (Expr::Literal(low_literal, _), Expr::Literal(high_literal, _)) =
+    if let Expr::Column(column) = &*between_expr.expr
+        && let (Expr::Literal(low_literal, _), Expr::Literal(high_literal, _)) =
             (&*between_expr.low, &*between_expr.high)
-        {
-            let field_name = &column.name;
-            let negated = between_expr.negated;
+    {
+        let field_name = &column.name;
+        let negated = between_expr.negated;
 
-            // Try u32
-            if let Some(record_value) = record.get_u32_field(field_name) {
-                return evaluate_between_comparison(
-                    record_value as f64,
-                    low_literal,
-                    high_literal,
-                    negated,
-                );
-            }
-            // Try f32
-            if let Some(record_value) = record.get_f32_field(field_name) {
-                return evaluate_between_comparison(
-                    record_value as f64,
-                    low_literal,
-                    high_literal,
-                    negated,
-                );
-            }
-            // Try f64
-            if let Some(record_value) = record.get_f64_field(field_name) {
-                return evaluate_between_comparison(
-                    record_value,
-                    low_literal,
-                    high_literal,
-                    negated,
-                );
-            }
+        // Try u32
+        if let Some(record_value) = record.get_u32_field(field_name) {
+            return evaluate_between_comparison(
+                record_value as f64,
+                low_literal,
+                high_literal,
+                negated,
+            );
+        }
+        // Try f32
+        if let Some(record_value) = record.get_f32_field(field_name) {
+            return evaluate_between_comparison(
+                record_value as f64,
+                low_literal,
+                high_literal,
+                negated,
+            );
+        }
+        // Try f64
+        if let Some(record_value) = record.get_f64_field(field_name) {
+            return evaluate_between_comparison(record_value, low_literal, high_literal, negated);
         }
     }
     true
@@ -248,26 +242,26 @@ fn can_push_down_binary_expr(
     if let Expr::Column(column) = &*binary_expr.left {
         let field_name = &column.name;
 
-        if let Ok(field) = schema.field_with_name(field_name) {
-            if matches!(&*binary_expr.right, Expr::Literal(_, _)) {
-                return match field.data_type() {
-                    DataType::Utf8 => {
-                        matches!(binary_expr.op, Operator::Eq | Operator::NotEq)
-                    }
-                    DataType::UInt32 | DataType::Int32 | DataType::Float32 | DataType::Float64 => {
-                        matches!(
-                            binary_expr.op,
-                            Operator::Eq
-                                | Operator::NotEq
-                                | Operator::Lt
-                                | Operator::LtEq
-                                | Operator::Gt
-                                | Operator::GtEq
-                        )
-                    }
-                    _ => false,
-                };
-            }
+        if let Ok(field) = schema.field_with_name(field_name)
+            && matches!(&*binary_expr.right, Expr::Literal(_, _))
+        {
+            return match field.data_type() {
+                DataType::Utf8 => {
+                    matches!(binary_expr.op, Operator::Eq | Operator::NotEq)
+                }
+                DataType::UInt32 | DataType::Int32 | DataType::Float32 | DataType::Float64 => {
+                    matches!(
+                        binary_expr.op,
+                        Operator::Eq
+                            | Operator::NotEq
+                            | Operator::Lt
+                            | Operator::LtEq
+                            | Operator::Gt
+                            | Operator::GtEq
+                    )
+                }
+                _ => false,
+            };
         }
     }
     false
@@ -277,14 +271,14 @@ fn can_push_down_between_expr(between_expr: &Between, schema: &Arc<Schema>) -> b
     if let Expr::Column(column) = &*between_expr.expr {
         let field_name = &column.name;
 
-        if let Ok(field) = schema.field_with_name(field_name) {
-            if matches!(
+        if let Ok(field) = schema.field_with_name(field_name)
+            && matches!(
                 field.data_type(),
                 DataType::UInt32 | DataType::Int32 | DataType::Float32 | DataType::Float64
-            ) {
-                return matches!(&*between_expr.low, Expr::Literal(_, _))
-                    && matches!(&*between_expr.high, Expr::Literal(_, _));
-            }
+            )
+        {
+            return matches!(&*between_expr.low, Expr::Literal(_, _))
+                && matches!(&*between_expr.high, Expr::Literal(_, _));
         }
     }
     false
@@ -294,20 +288,20 @@ fn can_push_down_in_list_expr(in_list_expr: &InList, schema: &Arc<Schema>) -> bo
     if let Expr::Column(column) = &*in_list_expr.expr {
         let field_name = &column.name;
 
-        if let Ok(field) = schema.field_with_name(field_name) {
-            if matches!(
+        if let Ok(field) = schema.field_with_name(field_name)
+            && matches!(
                 field.data_type(),
                 DataType::Utf8
                     | DataType::UInt32
                     | DataType::Int32
                     | DataType::Float32
                     | DataType::Float64
-            ) {
-                return in_list_expr
-                    .list
-                    .iter()
-                    .all(|expr| matches!(expr, Expr::Literal(_, _)));
-            }
+            )
+        {
+            return in_list_expr
+                .list
+                .iter()
+                .all(|expr| matches!(expr, Expr::Literal(_, _)));
         }
     }
     false

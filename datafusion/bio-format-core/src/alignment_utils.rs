@@ -700,7 +700,7 @@ pub fn encode_cigar_ops_to_binary_unwrap(
 
 /// Decode binary CIGAR bytes (LE u32 per op) back to `Vec<Op>`.
 pub fn decode_binary_cigar_to_ops(bytes: &[u8]) -> io::Result<Vec<Op>> {
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("binary CIGAR length {} is not a multiple of 4", bytes.len()),

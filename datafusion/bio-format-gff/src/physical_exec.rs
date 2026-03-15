@@ -123,30 +123,29 @@ impl ExecutionPlan for GffExec {
         // Use indexed reading when partition assignments and index are available
         if let (Some(assignments), Some(index_path)) =
             (&self.partition_assignments, &self.index_path)
+            && partition < assignments.len()
         {
-            if partition < assignments.len() {
-                let regions = assignments[partition].regions.clone();
-                let file_path = self.file_path.clone();
-                let index_path = index_path.clone();
-                let projection = self.projection.clone();
-                let coord_zero_based = self.coordinate_system_zero_based;
-                let attr_fields = self.attr_fields.clone();
-                let residual_filters = self.residual_filters.clone();
+            let regions = assignments[partition].regions.clone();
+            let file_path = self.file_path.clone();
+            let index_path = index_path.clone();
+            let projection = self.projection.clone();
+            let coord_zero_based = self.coordinate_system_zero_based;
+            let attr_fields = self.attr_fields.clone();
+            let residual_filters = self.residual_filters.clone();
 
-                let fut = get_indexed_gff_stream(
-                    file_path,
-                    index_path,
-                    regions,
-                    schema.clone(),
-                    batch_size,
-                    projection,
-                    coord_zero_based,
-                    attr_fields,
-                    residual_filters,
-                );
-                let stream = futures::stream::once(fut).try_flatten();
-                return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
-            }
+            let fut = get_indexed_gff_stream(
+                file_path,
+                index_path,
+                regions,
+                schema.clone(),
+                batch_size,
+                projection,
+                coord_zero_based,
+                attr_fields,
+                residual_filters,
+            );
+            let stream = futures::stream::once(fut).try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
         // Fallback: full scan (original path)
@@ -271,11 +270,11 @@ fn load_attributes_unnest_from_string(
         projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
 
     for i in 0..attribute_builders.2.len() {
-        if let Some(indices) = &projected_attribute_indices {
-            if !indices.contains(&i) {
-                attribute_builders.2[i].append_null()?;
-                continue;
-            }
+        if let Some(indices) = &projected_attribute_indices
+            && !indices.contains(&i)
+        {
+            attribute_builders.2[i].append_null()?;
+            continue;
         }
 
         let name = &attribute_builders.0[i];
@@ -312,11 +311,11 @@ fn load_attributes_unnest(
     let attributes = record.attributes();
 
     for i in 0..attribute_builders.2.len() {
-        if let Some(indices) = &projected_attribute_indices {
-            if !indices.contains(&i) {
-                attribute_builders.2[i].append_null()?;
-                continue;
-            }
+        if let Some(indices) = &projected_attribute_indices
+            && !indices.contains(&i)
+        {
+            attribute_builders.2[i].append_null()?;
+            continue;
         }
 
         let name = &attribute_builders.0[i];
@@ -1312,15 +1311,15 @@ async fn get_indexed_gff_stream(
 
                     // Skip records outside the sub-region bounds (TBI/CSI bins may return
                     // overlapping records at sub-region boundaries)
-                    if let Some(rs) = region_start_1based {
-                        if start_1based < rs {
-                            continue;
-                        }
+                    if let Some(rs) = region_start_1based
+                        && start_1based < rs
+                    {
+                        continue;
                     }
-                    if let Some(re) = region_end_1based {
-                        if start_1based > re {
-                            continue;
-                        }
+                    if let Some(re) = region_end_1based
+                        && start_1based > re
+                    {
+                        continue;
                     }
                     let score_val: Option<f32> = if fields[5] == "." {
                         None
@@ -1405,7 +1404,7 @@ async fn get_indexed_gff_stream(
 
                     total_records += 1;
 
-                    if total_records % batch_size == 0 {
+                    if total_records.is_multiple_of(batch_size) {
                         let batch = build_record_batch_optimized(
                             Arc::clone(&schema),
                             &chroms,
@@ -1455,7 +1454,9 @@ async fn get_indexed_gff_stream(
             }
 
             // Remaining records
-            if !chroms.is_empty() || (total_records % batch_size != 0 && total_records > 0) {
+            if !chroms.is_empty()
+                || (!total_records.is_multiple_of(batch_size) && total_records > 0)
+            {
                 let remaining = total_records % batch_size;
                 if remaining > 0 {
                     let batch = build_record_batch_optimized(

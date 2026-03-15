@@ -131,32 +131,31 @@ impl ExecutionPlan for CramExec {
         // Use indexed reading when partition assignments and index are available
         if let (Some(assignments), Some(index_path)) =
             (&self.partition_assignments, &self.index_path)
+            && partition < assignments.len()
         {
-            if partition < assignments.len() {
-                let regions = assignments[partition].regions.clone();
-                let file_path = self.file_path.clone();
-                let index_path = index_path.clone();
-                let reference_path = self.reference_path.clone();
-                let projection = self.projection.clone();
-                let coord_zero_based = self.coordinate_system_zero_based;
-                let tag_fields = self.tag_fields.clone();
-                let residual_filters = self.residual_filters.clone();
+            let regions = assignments[partition].regions.clone();
+            let file_path = self.file_path.clone();
+            let index_path = index_path.clone();
+            let reference_path = self.reference_path.clone();
+            let projection = self.projection.clone();
+            let coord_zero_based = self.coordinate_system_zero_based;
+            let tag_fields = self.tag_fields.clone();
+            let residual_filters = self.residual_filters.clone();
 
-                let fut = get_indexed_stream(
-                    file_path,
-                    index_path,
-                    reference_path,
-                    regions,
-                    schema.clone(),
-                    batch_size,
-                    projection,
-                    coord_zero_based,
-                    tag_fields,
-                    residual_filters,
-                );
-                let stream = futures::stream::once(fut).try_flatten();
-                return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
-            }
+            let fut = get_indexed_stream(
+                file_path,
+                index_path,
+                reference_path,
+                regions,
+                schema.clone(),
+                batch_size,
+                projection,
+                coord_zero_based,
+                tag_fields,
+                residual_filters,
+            );
+            let stream = futures::stream::once(fut).try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
         // Fallback: full scan (original path)
@@ -373,16 +372,16 @@ fn load_tags<R: Record>(
     // Backfill: attempt MD/NM calculation for unpopulated tags, then null for the rest
     for (idx, &populated) in tag_populated.iter().enumerate().take(num_tags) {
         if !populated {
-            if Some(idx) == md_index && reference_seq.is_some() {
-                if let Some(md_value) = calculate_md_tag(record, reference_seq.unwrap()) {
+            if Some(idx) == md_index {
+                if let Some(md_value) = reference_seq.and_then(|rs| calculate_md_tag(record, rs)) {
                     tag_builders.2[idx].append_string(&md_value)?;
                     continue;
                 }
-            } else if Some(idx) == nm_index {
-                if let Some(nm_value) = calculate_nm_tag(record, reference_seq) {
-                    tag_builders.2[idx].append_int(nm_value)?;
-                    continue;
-                }
+            } else if Some(idx) == nm_index
+                && let Some(nm_value) = calculate_nm_tag(record, reference_seq)
+            {
+                tag_builders.2[idx].append_int(nm_value)?;
+                continue;
             }
             tag_builders.2[idx].append_null()?;
         }
@@ -1153,15 +1152,15 @@ async fn get_indexed_stream(
                             s
                         }
                     }) {
-                        if let Some(rs) = region_start_1based {
-                            if pos_1based < rs {
-                                continue;
-                            }
+                        if let Some(rs) = region_start_1based
+                            && pos_1based < rs
+                        {
+                            continue;
                         }
-                        if let Some(re) = region_end_1based {
-                            if pos_1based > re {
-                                continue;
-                            }
+                        if let Some(re) = region_end_1based
+                            && pos_1based > re
+                        {
+                            continue;
                         }
                     }
 
@@ -1263,7 +1262,7 @@ async fn get_indexed_stream(
 
                     total_records += 1;
 
-                    if total_records % batch_size == 0 {
+                    if total_records.is_multiple_of(batch_size) {
                         let tag_arrays = if num_tag_fields > 0 {
                             Some(
                                 builders_to_arrays(&mut tag_builders.2)

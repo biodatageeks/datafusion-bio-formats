@@ -152,29 +152,29 @@ fn main() {
 
     // Read variation_cols from info.txt
     let info_path = cache_path.join("info.txt");
-    if info_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&info_path) {
-            for line in content.lines() {
-                let lower = line.trim().to_ascii_lowercase();
-                if lower.starts_with("variation_cols") {
-                    println!("variation_cols: {}", line.trim());
-                    let col_count = line
-                        .split_once('=')
-                        .or_else(|| line.split_once(' '))
-                        .map(|(_, v)| {
-                            v.replace(['[', ']', '"', '\''], "")
-                                .split([',', ' ', '\t'])
-                                .filter(|s| !s.trim().is_empty())
-                                .count()
-                        })
-                        .unwrap_or(0);
-                    println!("Declared column count: {col_count}");
-                    if col_count != max_fields {
-                        println!(
-                            "  NOTE: declared columns ({col_count}) vs actual max fields ({max_fields}). \
+    if info_path.exists()
+        && let Ok(content) = std::fs::read_to_string(&info_path)
+    {
+        for line in content.lines() {
+            let lower = line.trim().to_ascii_lowercase();
+            if lower.starts_with("variation_cols") {
+                println!("variation_cols: {}", line.trim());
+                let col_count = line
+                    .split_once('=')
+                    .or_else(|| line.split_once(' '))
+                    .map(|(_, v)| {
+                        v.replace(['[', ']', '"', '\''], "")
+                            .split([',', ' ', '\t'])
+                            .filter(|s| !s.trim().is_empty())
+                            .count()
+                    })
+                    .unwrap_or(0);
+                println!("Declared column count: {col_count}");
+                if col_count != max_fields {
+                    println!(
+                        "  NOTE: declared columns ({col_count}) vs actual max fields ({max_fields}). \
                              Mismatch may indicate extra/missing tab fields."
-                        );
-                    }
+                    );
                 }
             }
         }
@@ -266,10 +266,10 @@ fn walk_variation_files(
                 // 1_1-1000000_var.gz -> "1"
                 name.split('_').next()
             };
-            if let Some(fc) = file_chrom {
-                if fc != chrom.as_str() {
-                    continue;
-                }
+            if let Some(fc) = file_chrom
+                && fc != chrom.as_str()
+            {
+                continue;
             }
         }
         out.push(path);

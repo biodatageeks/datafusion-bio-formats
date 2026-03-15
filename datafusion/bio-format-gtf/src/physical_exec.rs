@@ -104,30 +104,29 @@ impl ExecutionPlan for GtfExec {
         // Use indexed reading when partition assignments and index are available
         if let (Some(assignments), Some(index_path)) =
             (&self.partition_assignments, &self.index_path)
+            && partition < assignments.len()
         {
-            if partition < assignments.len() {
-                let regions = assignments[partition].regions.clone();
-                let file_path = self.file_path.clone();
-                let index_path = index_path.clone();
-                let projection = self.projection.clone();
-                let coord_zero_based = self.coordinate_system_zero_based;
-                let attr_fields = self.attr_fields.clone();
-                let residual_filters = self.residual_filters.clone();
+            let regions = assignments[partition].regions.clone();
+            let file_path = self.file_path.clone();
+            let index_path = index_path.clone();
+            let projection = self.projection.clone();
+            let coord_zero_based = self.coordinate_system_zero_based;
+            let attr_fields = self.attr_fields.clone();
+            let residual_filters = self.residual_filters.clone();
 
-                let fut = get_indexed_gtf_stream(
-                    file_path,
-                    index_path,
-                    regions,
-                    schema.clone(),
-                    batch_size,
-                    projection,
-                    coord_zero_based,
-                    attr_fields,
-                    residual_filters,
-                );
-                let stream = futures::stream::once(fut).try_flatten();
-                return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
-            }
+            let fut = get_indexed_gtf_stream(
+                file_path,
+                index_path,
+                regions,
+                schema.clone(),
+                batch_size,
+                projection,
+                coord_zero_based,
+                attr_fields,
+                residual_filters,
+            );
+            let stream = futures::stream::once(fut).try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
         // Fallback: full scan (local or remote)
@@ -314,12 +313,12 @@ impl GtfBatchCollector {
 
     /// Returns true when a full batch has been accumulated.
     fn is_full(&self) -> bool {
-        self.record_num > 0 && self.record_num % self.batch_size == 0
+        self.record_num > 0 && self.record_num.is_multiple_of(self.batch_size)
     }
 
     /// Returns true when there are pending records that haven't been flushed.
     fn has_pending(&self) -> bool {
-        self.record_num % self.batch_size != 0
+        !self.record_num.is_multiple_of(self.batch_size)
     }
 
     /// Build a RecordBatch from accumulated data and clear the column vectors.
@@ -413,13 +412,13 @@ fn load_attributes_unnest_from_string(
         let wanted: std::collections::HashSet<&str> =
             attribute_builders.0.iter().map(|s| s.as_str()).collect();
         for pair in attributes_str.split(';') {
-            if let Some((key, value)) = parse_gtf_pair(pair) {
-                if wanted.contains(key) {
-                    // For duplicate keys, keep the first value (consistent with attribute extraction)
-                    attributes_map
-                        .entry(key.to_string())
-                        .or_insert_with(|| value.to_string());
-                }
+            if let Some((key, value)) = parse_gtf_pair(pair)
+                && wanted.contains(key)
+            {
+                // For duplicate keys, keep the first value (consistent with attribute extraction)
+                attributes_map
+                    .entry(key.to_string())
+                    .or_insert_with(|| value.to_string());
             }
         }
     }
@@ -428,11 +427,11 @@ fn load_attributes_unnest_from_string(
         projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
 
     for i in 0..attribute_builders.1.len() {
-        if let Some(indices) = &projected_attribute_indices {
-            if !indices.contains(&i) {
-                attribute_builders.1[i].append_null()?;
-                continue;
-            }
+        if let Some(indices) = &projected_attribute_indices
+            && !indices.contains(&i)
+        {
+            attribute_builders.1[i].append_null()?;
+            continue;
         }
 
         let name = &attribute_builders.0[i];
@@ -704,15 +703,15 @@ async fn get_indexed_gtf_stream(
                         .map_err(|e| DataFusionError::Execution(format!("GTF parse error: {e}")))?;
 
                     // Skip records outside the sub-region bounds
-                    if let Some(rs) = region_start_1based {
-                        if record.start < rs {
-                            continue;
-                        }
+                    if let Some(rs) = region_start_1based
+                        && record.start < rs
+                    {
+                        continue;
                     }
-                    if let Some(re) = region_end_1based {
-                        if record.start > re {
-                            continue;
-                        }
+                    if let Some(re) = region_end_1based
+                        && record.start > re
+                    {
+                        continue;
                     }
 
                     // Apply residual filters

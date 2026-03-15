@@ -79,111 +79,109 @@ pub fn build_bam_header(schema: &SchemaRef, _tag_fields: &[String]) -> Result<sa
     builder = builder.set_header(header_map);
 
     // Add reference sequences (@SQ) with all optional fields (AS, UR, M5, SP, etc.)
-    if let Some(ref_seqs_json) = schema_metadata.get(BAM_REFERENCE_SEQUENCES_KEY) {
-        if let Some(ref_seqs) = from_json_string::<Vec<ReferenceSequenceMetadata>>(ref_seqs_json) {
-            for ref_seq in ref_seqs {
-                let length = NonZeroUsize::new(ref_seq.length).ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "Reference sequence length cannot be zero".to_string(),
-                    )
-                })?;
-                let mut reference_sequence = Map::<ReferenceSequence>::new(length);
-                // Restore optional @SQ fields (AS, UR, M5, SP, etc.)
-                for (key, value) in &ref_seq.other_fields {
-                    if let Some(tag) = str_to_sq_tag(key) {
-                        reference_sequence
-                            .other_fields_mut()
-                            .insert(tag, value.to_string().into());
-                    }
+    if let Some(ref_seqs_json) = schema_metadata.get(BAM_REFERENCE_SEQUENCES_KEY)
+        && let Some(ref_seqs) = from_json_string::<Vec<ReferenceSequenceMetadata>>(ref_seqs_json)
+    {
+        for ref_seq in ref_seqs {
+            let length = NonZeroUsize::new(ref_seq.length).ok_or_else(|| {
+                DataFusionError::Execution("Reference sequence length cannot be zero".to_string())
+            })?;
+            let mut reference_sequence = Map::<ReferenceSequence>::new(length);
+            // Restore optional @SQ fields (AS, UR, M5, SP, etc.)
+            for (key, value) in &ref_seq.other_fields {
+                if let Some(tag) = str_to_sq_tag(key) {
+                    reference_sequence
+                        .other_fields_mut()
+                        .insert(tag, value.to_string().into());
                 }
-                builder = builder.add_reference_sequence(ref_seq.name, reference_sequence);
             }
+            builder = builder.add_reference_sequence(ref_seq.name, reference_sequence);
         }
     }
 
     // Add read groups (@RG)
-    if let Some(read_groups_json) = schema_metadata.get(BAM_READ_GROUPS_KEY) {
-        if let Some(read_groups) = from_json_string::<Vec<ReadGroupMetadata>>(read_groups_json) {
-            for rg in read_groups {
-                // Create read group map with available fields
-                let mut rg_map = Map::<ReadGroup>::default();
+    if let Some(read_groups_json) = schema_metadata.get(BAM_READ_GROUPS_KEY)
+        && let Some(read_groups) = from_json_string::<Vec<ReadGroupMetadata>>(read_groups_json)
+    {
+        for rg in read_groups {
+            // Create read group map with available fields
+            let mut rg_map = Map::<ReadGroup>::default();
 
-                // Set optional fields using other_fields
-                use noodles_sam::header::record::value::map::read_group::tag;
-                if let Some(sample) = rg.sample {
-                    rg_map.other_fields_mut().insert(tag::SAMPLE, sample.into());
-                }
-                if let Some(platform) = rg.platform {
-                    rg_map
-                        .other_fields_mut()
-                        .insert(tag::PLATFORM, platform.into());
-                }
-                if let Some(library) = rg.library {
-                    rg_map
-                        .other_fields_mut()
-                        .insert(tag::LIBRARY, library.into());
-                }
-                if let Some(description) = rg.description {
-                    rg_map
-                        .other_fields_mut()
-                        .insert(tag::DESCRIPTION, description.into());
-                }
-                // Restore additional @RG fields
-                for (key, value) in &rg.other_fields {
-                    if let Some(t) = str_to_rg_tag(key) {
-                        rg_map
-                            .other_fields_mut()
-                            .insert(t, value.to_string().into());
-                    }
-                }
-
-                builder = builder.add_read_group(rg.id, rg_map);
+            // Set optional fields using other_fields
+            use noodles_sam::header::record::value::map::read_group::tag;
+            if let Some(sample) = rg.sample {
+                rg_map.other_fields_mut().insert(tag::SAMPLE, sample.into());
             }
+            if let Some(platform) = rg.platform {
+                rg_map
+                    .other_fields_mut()
+                    .insert(tag::PLATFORM, platform.into());
+            }
+            if let Some(library) = rg.library {
+                rg_map
+                    .other_fields_mut()
+                    .insert(tag::LIBRARY, library.into());
+            }
+            if let Some(description) = rg.description {
+                rg_map
+                    .other_fields_mut()
+                    .insert(tag::DESCRIPTION, description.into());
+            }
+            // Restore additional @RG fields
+            for (key, value) in &rg.other_fields {
+                if let Some(t) = str_to_rg_tag(key) {
+                    rg_map
+                        .other_fields_mut()
+                        .insert(t, value.to_string().into());
+                }
+            }
+
+            builder = builder.add_read_group(rg.id, rg_map);
         }
     }
 
     // Add program info (@PG)
-    if let Some(programs_json) = schema_metadata.get(BAM_PROGRAM_INFO_KEY) {
-        if let Some(programs) = from_json_string::<Vec<ProgramMetadata>>(programs_json) {
-            for pg in programs {
-                // Create program map with available fields
-                let mut pg_map = Map::<Program>::default();
+    if let Some(programs_json) = schema_metadata.get(BAM_PROGRAM_INFO_KEY)
+        && let Some(programs) = from_json_string::<Vec<ProgramMetadata>>(programs_json)
+    {
+        for pg in programs {
+            // Create program map with available fields
+            let mut pg_map = Map::<Program>::default();
 
-                // Set optional fields using other_fields
-                use noodles_sam::header::record::value::map::program::tag;
-                if let Some(name) = pg.name {
-                    pg_map.other_fields_mut().insert(tag::NAME, name.into());
-                }
-                if let Some(version) = pg.version {
-                    pg_map
-                        .other_fields_mut()
-                        .insert(tag::VERSION, version.into());
-                }
-                if let Some(command_line) = pg.command_line {
-                    pg_map
-                        .other_fields_mut()
-                        .insert(tag::COMMAND_LINE, command_line.into());
-                }
-                // Restore additional @PG fields
-                for (key, value) in &pg.other_fields {
-                    if let Some(t) = str_to_pg_tag(key) {
-                        pg_map
-                            .other_fields_mut()
-                            .insert(t, value.to_string().into());
-                    }
-                }
-
-                builder = builder.add_program(pg.id, pg_map);
+            // Set optional fields using other_fields
+            use noodles_sam::header::record::value::map::program::tag;
+            if let Some(name) = pg.name {
+                pg_map.other_fields_mut().insert(tag::NAME, name.into());
             }
+            if let Some(version) = pg.version {
+                pg_map
+                    .other_fields_mut()
+                    .insert(tag::VERSION, version.into());
+            }
+            if let Some(command_line) = pg.command_line {
+                pg_map
+                    .other_fields_mut()
+                    .insert(tag::COMMAND_LINE, command_line.into());
+            }
+            // Restore additional @PG fields
+            for (key, value) in &pg.other_fields {
+                if let Some(t) = str_to_pg_tag(key) {
+                    pg_map
+                        .other_fields_mut()
+                        .insert(t, value.to_string().into());
+                }
+            }
+
+            builder = builder.add_program(pg.id, pg_map);
         }
     }
 
     // Add comments (@CO)
-    if let Some(comments_json) = schema_metadata.get(BAM_COMMENTS_KEY) {
-        if let Some(comments) = from_json_string::<Vec<String>>(comments_json) {
-            for comment in comments {
-                builder = builder.add_comment(comment);
-            }
+    if let Some(comments_json) = schema_metadata.get(BAM_COMMENTS_KEY)
+        && let Some(comments) = from_json_string::<Vec<String>>(comments_json)
+    {
+        for comment in comments {
+            builder = builder.add_comment(comment);
         }
     }
 

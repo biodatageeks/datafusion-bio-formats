@@ -16,30 +16,30 @@ impl SimplePredicate {
         if self.always_false {
             return false;
         }
-        if let Some(expected_chrom) = &self.chrom {
-            if expected_chrom != chrom {
-                return false;
-            }
+        if let Some(expected_chrom) = &self.chrom
+            && expected_chrom != chrom
+        {
+            return false;
         }
-        if let Some(min_start) = self.start_min {
-            if start < min_start {
-                return false;
-            }
+        if let Some(min_start) = self.start_min
+            && start < min_start
+        {
+            return false;
         }
-        if let Some(max_start) = self.start_max {
-            if start > max_start {
-                return false;
-            }
+        if let Some(max_start) = self.start_max
+            && start > max_start
+        {
+            return false;
         }
-        if let Some(min_end) = self.end_min {
-            if end < min_end {
-                return false;
-            }
+        if let Some(min_end) = self.end_min
+            && end < min_end
+        {
+            return false;
         }
-        if let Some(max_end) = self.end_max {
-            if end > max_end {
-                return false;
-            }
+        if let Some(max_end) = self.end_max
+            && end > max_end
+        {
+            return false;
         }
         true
     }
@@ -51,15 +51,15 @@ pub(crate) fn extract_simple_predicate(filters: &[Expr]) -> SimplePredicate {
         apply_expr(expr, &mut predicate);
     }
 
-    if let (Some(min), Some(max)) = (predicate.start_min, predicate.start_max) {
-        if min > max {
-            predicate.always_false = true;
-        }
+    if let (Some(min), Some(max)) = (predicate.start_min, predicate.start_max)
+        && min > max
+    {
+        predicate.always_false = true;
     }
-    if let (Some(min), Some(max)) = (predicate.end_min, predicate.end_max) {
-        if min > max {
-            predicate.always_false = true;
-        }
+    if let (Some(min), Some(max)) = (predicate.end_min, predicate.end_max)
+        && min > max
+    {
+        predicate.always_false = true;
     }
 
     predicate
@@ -109,15 +109,15 @@ fn apply_expr(expr: &Expr, predicate: &mut SimplePredicate) {
 
             match column.name.as_str() {
                 "chrom" | "chr" => {
-                    if binary_expr.op == Operator::Eq {
-                        if let Some(chrom) = scalar_to_string(literal) {
-                            if let Some(existing) = &predicate.chrom {
-                                if existing != &chrom {
-                                    predicate.always_false = true;
-                                }
-                            }
-                            predicate.chrom = Some(chrom);
+                    if binary_expr.op == Operator::Eq
+                        && let Some(chrom) = scalar_to_string(literal)
+                    {
+                        if let Some(existing) = &predicate.chrom
+                            && existing != &chrom
+                        {
+                            predicate.always_false = true;
                         }
+                        predicate.chrom = Some(chrom);
                     }
                 }
                 "start" => {

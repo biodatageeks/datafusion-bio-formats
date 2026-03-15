@@ -73,43 +73,43 @@ pub fn build_vcf_header_lines(
     lines.push(format!("##fileformat={file_format}"));
 
     // Add FILTER definitions from metadata using shared utilities
-    if let Some(filters_json) = schema_metadata.get(VCF_FILTERS_KEY) {
-        if let Some(filters) = from_json_string::<Vec<FilterMetadata>>(filters_json) {
-            for filter in filters {
-                if filter.id != "PASS" {
-                    // PASS is implicit
-                    lines.push(format!(
-                        "##FILTER=<ID={},Description=\"{}\">",
-                        filter.id, filter.description
-                    ));
-                }
+    if let Some(filters_json) = schema_metadata.get(VCF_FILTERS_KEY)
+        && let Some(filters) = from_json_string::<Vec<FilterMetadata>>(filters_json)
+    {
+        for filter in filters {
+            if filter.id != "PASS" {
+                // PASS is implicit
+                lines.push(format!(
+                    "##FILTER=<ID={},Description=\"{}\">",
+                    filter.id, filter.description
+                ));
             }
         }
     }
 
     // Add CONTIG definitions from metadata using shared utilities
-    if let Some(contigs_json) = schema_metadata.get(VCF_CONTIGS_KEY) {
-        if let Some(contigs) = from_json_string::<Vec<ContigMetadata>>(contigs_json) {
-            for contig in contigs {
-                let mut line = format!("##contig=<ID={}", contig.id);
-                if let Some(length) = contig.length {
-                    line.push_str(&format!(",length={length}"));
-                }
-                line.push('>');
-                lines.push(line);
+    if let Some(contigs_json) = schema_metadata.get(VCF_CONTIGS_KEY)
+        && let Some(contigs) = from_json_string::<Vec<ContigMetadata>>(contigs_json)
+    {
+        for contig in contigs {
+            let mut line = format!("##contig=<ID={}", contig.id);
+            if let Some(length) = contig.length {
+                line.push_str(&format!(",length={length}"));
             }
+            line.push('>');
+            lines.push(line);
         }
     }
 
     // Add ALT definitions from metadata using shared utilities
-    if let Some(alts_json) = schema_metadata.get(VCF_ALTERNATIVE_ALLELES_KEY) {
-        if let Some(alts) = from_json_string::<Vec<AltAlleleMetadata>>(alts_json) {
-            for alt in alts {
-                lines.push(format!(
-                    "##ALT=<ID={},Description=\"{}\">",
-                    alt.id, alt.description
-                ));
-            }
+    if let Some(alts_json) = schema_metadata.get(VCF_ALTERNATIVE_ALLELES_KEY)
+        && let Some(alts) = from_json_string::<Vec<AltAlleleMetadata>>(alts_json)
+    {
+        for alt in alts {
+            lines.push(format!(
+                "##ALT=<ID={},Description=\"{}\">",
+                alt.id, alt.description
+            ));
         }
     }
 
@@ -224,12 +224,12 @@ fn find_format_field<'a>(
     // Columnar multisample schema: genotypes: Struct<GT: List<T>, GQ: List<T>, ...>
     if let Ok(idx) = schema.index_of("genotypes") {
         let genotypes_field = schema.field(idx);
-        if let DataType::Struct(struct_fields) = genotypes_field.data_type() {
-            if let Some(field) = struct_fields.iter().find(|f| f.name() == format_name) {
-                // field is List<T>; return a reference so callers can extract metadata.
-                // The caller needs to unwrap List to get scalar type for VCF header.
-                return Some(field.as_ref());
-            }
+        if let DataType::Struct(struct_fields) = genotypes_field.data_type()
+            && let Some(field) = struct_fields.iter().find(|f| f.name() == format_name)
+        {
+            // field is List<T>; return a reference so callers can extract metadata.
+            // The caller needs to unwrap List to get scalar type for VCF header.
+            return Some(field.as_ref());
         }
     }
 

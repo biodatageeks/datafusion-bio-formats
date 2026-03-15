@@ -284,7 +284,7 @@ async fn main() -> datafusion::common::Result<()> {
         total_batches += 1;
         writer.write(&batch)?;
 
-        if total_batches % 50 == 0 {
+        if total_batches.is_multiple_of(50) {
             println!(
                 "  Progress: {total_rows} rows, {total_batches} batches | RSS: {:.1} MB",
                 rss_mb()

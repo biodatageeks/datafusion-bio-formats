@@ -203,15 +203,13 @@ fn synchronize_bgzf_reader<R: BufRead>(
         }
 
         if let Some(at_pos) = buf.iter().position(|&b| b == b'@') {
-            if let Some(l1_end) = find_line_end(buf, at_pos) {
-                if let Some(l2_end) = find_line_end(buf, l1_end + 1) {
-                    if let Some(l3_start) = l2_end.checked_add(1) {
-                        if buf.get(l3_start) == Some(&b'+') {
-                            reader.consume(at_pos);
-                            return Ok(());
-                        }
-                    }
-                }
+            if let Some(l1_end) = find_line_end(buf, at_pos)
+                && let Some(l2_end) = find_line_end(buf, l1_end + 1)
+                && let Some(l3_start) = l2_end.checked_add(1)
+                && buf.get(l3_start) == Some(&b'+')
+            {
+                reader.consume(at_pos);
+                return Ok(());
             }
             if let Some(end_of_at_line) = find_line_end(buf, at_pos) {
                 reader.consume(end_of_at_line + 1);
@@ -235,15 +233,13 @@ fn synchronize_plain_reader<R: BufRead>(reader: &mut R) -> io::Result<()> {
         }
 
         if let Some(at_pos) = buf.iter().position(|&b| b == b'@') {
-            if let Some(l1_end) = find_line_end(buf, at_pos) {
-                if let Some(l2_end) = find_line_end(buf, l1_end + 1) {
-                    if let Some(l3_start) = l2_end.checked_add(1) {
-                        if buf.get(l3_start) == Some(&b'+') {
-                            reader.consume(at_pos);
-                            return Ok(());
-                        }
-                    }
-                }
+            if let Some(l1_end) = find_line_end(buf, at_pos)
+                && let Some(l2_end) = find_line_end(buf, l1_end + 1)
+                && let Some(l3_start) = l2_end.checked_add(1)
+                && buf.get(l3_start) == Some(&b'+')
+            {
+                reader.consume(at_pos);
+                return Ok(());
             }
             if let Some(end_of_at_line) = find_line_end(buf, at_pos) {
                 reader.consume(end_of_at_line + 1);
@@ -414,28 +410,28 @@ fn read_and_send_batches<R: BufRead>(
     let mut total_records = 0;
 
     // Fast path for empty projection (COUNT(*) queries)
-    if let Some(proj) = projection {
-        if proj.is_empty() {
-            let mut num_rows = 0;
-            loop {
-                if limit.is_some_and(|l| num_rows >= l) {
-                    break;
-                }
-                if is_past_end(fastq_reader) {
-                    break;
-                }
-                match fastq_reader.read_record(&mut record) {
-                    Ok(0) => break,
-                    Ok(_) => num_rows += 1,
-                    Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
-                }
+    if let Some(proj) = projection
+        && proj.is_empty()
+    {
+        let mut num_rows = 0;
+        loop {
+            if limit.is_some_and(|l| num_rows >= l) {
+                break;
             }
-            let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
-                .with_row_count(Some(num_rows));
-            let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)?;
-            tx.try_send((Ok(batch), num_rows)).ok();
-            return Ok(());
+            if is_past_end(fastq_reader) {
+                break;
+            }
+            match fastq_reader.read_record(&mut record) {
+                Ok(0) => break,
+                Ok(_) => num_rows += 1,
+                Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
+            }
         }
+        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(Some(num_rows));
+        let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)?;
+        tx.try_send((Ok(batch), num_rows)).ok();
+        return Ok(());
     }
 
     loop {

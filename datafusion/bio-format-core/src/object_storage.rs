@@ -170,10 +170,10 @@ pub async fn get_compression_type(
     debug!(
         "get_compression_type called with file_path: {file_path}, compression_type: {compression_type:?}"
     );
-    if let Some(ct) = compression_type {
-        if ct != CompressionType::AUTO {
-            return Ok(ct);
-        }
+    if let Some(ct) = compression_type
+        && ct != CompressionType::AUTO
+    {
+        return Ok(ct);
     }
 
     let storage_type = get_storage_type(file_path.clone());
@@ -411,25 +411,25 @@ fn extract_account_and_container(url_str: &str) -> BlobInfo {
 }
 
 fn is_azure_blob_url(url_str: &str) -> bool {
-    if let Ok(url) = Url::parse(url_str) {
-        if let Some(host) = url.host_str() {
-            // Check if the host ends with the Azure Blob Storage domain
-            if host.ends_with(".blob.core.windows.net") {
-                // Ensure the path has at least two segments: container and blob
-                if let Some(segments) = url.path_segments() {
-                    let segments: Vec<_> = segments.collect();
-                    return segments.len() >= 2;
-                }
-            } else if !&env::var("AZURE_ENDPOINT_URL")
-                .unwrap_or("".parse().unwrap())
-                .is_empty()
-                && url
-                    .to_string()
-                    .starts_with(&env::var("AZURE_ENDPOINT_URL").unwrap())
-            //FIXME: this is a workaround for Azure Blob Storage emulator
-            {
-                return true;
+    if let Ok(url) = Url::parse(url_str)
+        && let Some(host) = url.host_str()
+    {
+        // Check if the host ends with the Azure Blob Storage domain
+        if host.ends_with(".blob.core.windows.net") {
+            // Ensure the path has at least two segments: container and blob
+            if let Some(segments) = url.path_segments() {
+                let segments: Vec<_> = segments.collect();
+                return segments.len() >= 2;
             }
+        } else if !&env::var("AZURE_ENDPOINT_URL")
+            .unwrap_or("".parse().unwrap())
+            .is_empty()
+            && url
+                .to_string()
+                .starts_with(&env::var("AZURE_ENDPOINT_URL").unwrap())
+        //FIXME: this is a workaround for Azure Blob Storage emulator
+        {
+            return true;
         }
     }
     false

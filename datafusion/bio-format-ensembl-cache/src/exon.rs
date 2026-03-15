@@ -186,10 +186,10 @@ where
     if transcript_stable_id.starts_with("LOC") {
         return Ok(true);
     }
-    if let Some(bt) = json_str(object.get("biotype")) {
-        if is_excluded_biotype(&bt) {
-            return Ok(true);
-        }
+    if let Some(bt) = json_str(object.get("biotype"))
+        && is_excluded_biotype(&bt)
+    {
+        return Ok(true);
     }
 
     // Try _trans_exon_array first. If it's missing or contains only
@@ -389,10 +389,10 @@ where
         if transcript_stable_id.starts_with("LOC") {
             return Ok(true);
         }
-        if let Some(bt) = sv_str(obj.get("biotype")) {
-            if is_excluded_biotype(&bt) {
-                return Ok(true);
-            }
+        if let Some(bt) = sv_str(obj.get("biotype"))
+            && is_excluded_biotype(&bt)
+        {
+            return Ok(true);
         }
 
         // Try _trans_exon_array first. If it's missing or contains only

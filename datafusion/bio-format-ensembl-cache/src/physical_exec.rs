@@ -173,22 +173,22 @@ fn file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
     };
 
     // Check chromosome
-    if let Some(pred_chrom) = &predicate.chrom {
-        if pred_chrom != file_chrom {
-            return false;
-        }
+    if let Some(pred_chrom) = &predicate.chrom
+        && pred_chrom != file_chrom
+    {
+        return false;
     }
 
     // Check region range overlap
-    if let Some(start_min) = predicate.start_min {
-        if file_end < start_min {
-            return false;
-        }
+    if let Some(start_min) = predicate.start_min
+        && file_end < start_min
+    {
+        return false;
     }
-    if let Some(end_max) = predicate.end_max {
-        if file_start > end_max {
-            return false;
-        }
+    if let Some(end_max) = predicate.end_max
+        && file_start > end_max
+    {
+        return false;
     }
 
     true
@@ -320,10 +320,10 @@ fn dispatch_row(
         }
     }
 
-    if let Some(max_rows) = limit {
-        if *emitted_rows >= max_rows {
-            return Ok(RowDispatchState::Stop);
-        }
+    if let Some(max_rows) = limit
+        && *emitted_rows >= max_rows
+    {
+        return Ok(RowDispatchState::Stop);
     }
 
     Ok(RowDispatchState::Continue)
