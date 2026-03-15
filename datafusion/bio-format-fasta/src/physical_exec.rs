@@ -330,7 +330,7 @@ async fn get_local_fasta_sync(
 
                         record_num += 1;
 
-                        if record_num % batch_size == 0 {
+                        if record_num.is_multiple_of(batch_size) {
                             debug!("Record number: {record_num}");
                             let batch = build_record_batch(
                                 Arc::clone(&schema),

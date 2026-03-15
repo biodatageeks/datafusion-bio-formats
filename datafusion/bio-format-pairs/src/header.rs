@@ -109,13 +109,13 @@ pub fn parse_pairs_header(reader: &mut impl BufRead) -> std::io::Result<PairsHea
             header.columns = cols.split_whitespace().map(|s| s.to_string()).collect();
         } else if let Some(cs) = directive.strip_prefix("chromsize:") {
             let parts: Vec<&str> = cs.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(length) = parts[1].parse::<u64>() {
-                    header.chromsizes.push(ChromSize {
-                        name: parts[0].to_string(),
-                        length,
-                    });
-                }
+            if parts.len() >= 2
+                && let Ok(length) = parts[1].parse::<u64>()
+            {
+                header.chromsizes.push(ChromSize {
+                    name: parts[0].to_string(),
+                    length,
+                });
             }
         } else if let Some(sorted) = directive.strip_prefix("sorted:") {
             header.sorted = Some(sorted.trim().to_string());

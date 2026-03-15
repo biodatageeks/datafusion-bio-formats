@@ -1,0 +1,5 @@
+species homo_sapiens
+assembly GRCh38
+cache_version 115
+var_type tabix
+variation_cols chr,start,end,variation_name,allele_string

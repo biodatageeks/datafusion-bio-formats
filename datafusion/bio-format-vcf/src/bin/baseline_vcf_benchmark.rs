@@ -85,28 +85,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("   🚀 Throughput: {records_per_sec:.0} records/sec");
 
         // Show sample data
-        if let Some(batch) = proj_result.first() {
-            if batch.num_rows() > 0 {
-                let chrom_array = batch
-                    .column(0)
-                    .as_any()
-                    .downcast_ref::<datafusion::arrow::array::StringArray>()
-                    .unwrap();
-                let start_array = batch
-                    .column(1)
-                    .as_any()
-                    .downcast_ref::<datafusion::arrow::array::UInt32Array>()
-                    .unwrap();
+        if let Some(batch) = proj_result.first()
+            && batch.num_rows() > 0
+        {
+            let chrom_array = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::StringArray>()
+                .unwrap();
+            let start_array = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+                .unwrap();
 
-                println!("   📋 Sample data:");
-                for i in 0..std::cmp::min(3, batch.num_rows()) {
-                    println!(
-                        "      {}: {} {}",
-                        i + 1,
-                        chrom_array.value(i),
-                        start_array.value(i)
-                    );
-                }
+            println!("   📋 Sample data:");
+            for i in 0..std::cmp::min(3, batch.num_rows()) {
+                println!(
+                    "      {}: {} {}",
+                    i + 1,
+                    chrom_array.value(i),
+                    start_array.value(i)
+                );
             }
         }
         println!();

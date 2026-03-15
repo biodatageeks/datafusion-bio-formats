@@ -171,11 +171,11 @@ fn collect_genomic_constraints(
                 if let Expr::Literal(scalar, _) = &*binary_expr.right {
                     match col.name.as_str() {
                         "chrom" => {
-                            if binary_expr.op == Operator::Eq {
-                                if let Some(s) = scalar_to_string(scalar) {
-                                    chroms.push(s);
-                                    return;
-                                }
+                            if binary_expr.op == Operator::Eq
+                                && let Some(s) = scalar_to_string(scalar)
+                            {
+                                chroms.push(s);
+                                return;
                             }
                             // chrom with non-eq operators goes to residual
                             residual_filters.push(expr.clone());
@@ -255,53 +255,48 @@ fn collect_genomic_constraints(
             }
         }
         Expr::Between(between) => {
-            if let Expr::Column(col) = &*between.expr {
-                if col.name == "start" && !between.negated {
-                    if let (Expr::Literal(low, _), Expr::Literal(high, _)) =
-                        (&*between.low, &*between.high)
-                    {
-                        if let (Some(low_val), Some(high_val)) =
-                            (scalar_to_u64(low), scalar_to_u64(high))
-                        {
-                            let low_1based = if coordinate_system_zero_based {
-                                low_val + 1
-                            } else {
-                                low_val
-                            };
-                            let high_1based = if coordinate_system_zero_based {
-                                high_val + 1
-                            } else {
-                                high_val
-                            };
-                            *start_lower =
-                                Some(start_lower.map_or(low_1based, |v| v.max(low_1based)));
-                            *end_upper =
-                                Some(end_upper.map_or(high_1based, |v| v.min(high_1based)));
-                            return;
-                        }
-                    }
-                }
+            if let Expr::Column(col) = &*between.expr
+                && col.name == "start"
+                && !between.negated
+                && let (Expr::Literal(low, _), Expr::Literal(high, _)) =
+                    (&*between.low, &*between.high)
+                && let (Some(low_val), Some(high_val)) = (scalar_to_u64(low), scalar_to_u64(high))
+            {
+                let low_1based = if coordinate_system_zero_based {
+                    low_val + 1
+                } else {
+                    low_val
+                };
+                let high_1based = if coordinate_system_zero_based {
+                    high_val + 1
+                } else {
+                    high_val
+                };
+                *start_lower = Some(start_lower.map_or(low_1based, |v| v.max(low_1based)));
+                *end_upper = Some(end_upper.map_or(high_1based, |v| v.min(high_1based)));
+                return;
             }
             residual_filters.push(expr.clone());
         }
         Expr::InList(in_list) => {
-            if let Expr::Column(col) = &*in_list.expr {
-                if col.name == "chrom" && !in_list.negated {
-                    let mut extracted_chroms: Vec<String> = in_list
-                        .list
-                        .iter()
-                        .filter_map(|e| {
-                            if let Expr::Literal(scalar, _) = e {
-                                scalar_to_string(scalar)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-                    if !extracted_chroms.is_empty() {
-                        chroms.append(&mut extracted_chroms);
-                        return;
-                    }
+            if let Expr::Column(col) = &*in_list.expr
+                && col.name == "chrom"
+                && !in_list.negated
+            {
+                let mut extracted_chroms: Vec<String> = in_list
+                    .list
+                    .iter()
+                    .filter_map(|e| {
+                        if let Expr::Literal(scalar, _) = e {
+                            scalar_to_string(scalar)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                if !extracted_chroms.is_empty() {
+                    chroms.append(&mut extracted_chroms);
+                    return;
                 }
             }
             residual_filters.push(expr.clone());

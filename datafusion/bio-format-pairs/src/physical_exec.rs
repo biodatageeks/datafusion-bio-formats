@@ -122,30 +122,29 @@ impl ExecutionPlan for PairsExec {
         // Indexed path
         if let (Some(assignments), Some(index_path)) =
             (&self.partition_assignments, &self.index_path)
+            && partition < assignments.len()
         {
-            if partition < assignments.len() {
-                let regions = assignments[partition].regions.clone();
-                let file_path = self.file_path.clone();
-                let index_path = index_path.clone();
-                let projection = self.projection.clone();
-                let columns = self.columns.clone();
-                let coord_zero_based = self.coordinate_system_zero_based;
-                let residual_filters = self.residual_filters.clone();
+            let regions = assignments[partition].regions.clone();
+            let file_path = self.file_path.clone();
+            let index_path = index_path.clone();
+            let projection = self.projection.clone();
+            let columns = self.columns.clone();
+            let coord_zero_based = self.coordinate_system_zero_based;
+            let residual_filters = self.residual_filters.clone();
 
-                let fut = get_indexed_pairs_stream(
-                    file_path,
-                    index_path,
-                    regions,
-                    schema.clone(),
-                    batch_size,
-                    projection,
-                    columns,
-                    coord_zero_based,
-                    residual_filters,
-                );
-                let stream = futures::stream::once(fut).try_flatten();
-                return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
-            }
+            let fut = get_indexed_pairs_stream(
+                file_path,
+                index_path,
+                regions,
+                schema.clone(),
+                batch_size,
+                projection,
+                columns,
+                coord_zero_based,
+                residual_filters,
+            );
+            let stream = futures::stream::once(fut).try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
         // Sequential full scan
@@ -247,18 +246,18 @@ fn build_record_batch(
     }
 
     // Handle empty projection (COUNT(*))
-    if let Some(proj) = projection {
-        if proj.is_empty() {
-            let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> =
-                vec![Arc::new(NullArray::new(record_count))];
-            let null_field = Field::new("__null", DataType::Null, true);
-            let null_schema = Arc::new(Schema::new_with_metadata(
-                vec![null_field],
-                schema.metadata().clone(),
-            ));
-            return RecordBatch::try_new(null_schema, arrays)
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
-        }
+    if let Some(proj) = projection
+        && proj.is_empty()
+    {
+        let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> =
+            vec![Arc::new(NullArray::new(record_count))];
+        let null_field = Field::new("__null", DataType::Null, true);
+        let null_schema = Arc::new(Schema::new_with_metadata(
+            vec![null_field],
+            schema.metadata().clone(),
+        ));
+        return RecordBatch::try_new(null_schema, arrays)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
     }
 
     let projected_indices: Vec<usize> = match projection {
@@ -383,7 +382,7 @@ async fn get_local_pairs_stream(
 
             total_records += 1;
 
-            if total_records % batch_size == 0 {
+            if total_records.is_multiple_of(batch_size) {
                 let batch = build_record_batch(
                     schema.clone(),
                     &column_data,
@@ -398,11 +397,10 @@ async fn get_local_pairs_stream(
                 }
             }
 
-            if let Some(lim) = limit {
-                if total_records >= lim {
+            if let Some(lim) = limit
+                && total_records >= lim {
                     break;
                 }
-            }
         }
 
         // Remaining records
@@ -495,20 +493,19 @@ async fn get_indexed_pairs_stream(
 
                     // Get pos1 for sub-region dedup (pos1 is typically column index 2)
                     let pos1_idx = columns.iter().position(|c| c == "pos1");
-                    if let Some(idx) = pos1_idx {
-                        if idx < fields.len() {
-                            if let Ok(pos1_val) = fields[idx].parse::<u32>() {
-                                if let Some(rs) = region_start_1based {
-                                    if pos1_val < rs {
-                                        continue;
-                                    }
-                                }
-                                if let Some(re) = region_end_1based {
-                                    if pos1_val > re {
-                                        continue;
-                                    }
-                                }
-                            }
+                    if let Some(idx) = pos1_idx
+                        && idx < fields.len()
+                        && let Ok(pos1_val) = fields[idx].parse::<u32>()
+                    {
+                        if let Some(rs) = region_start_1based
+                            && pos1_val < rs
+                        {
+                            continue;
+                        }
+                        if let Some(re) = region_end_1based
+                            && pos1_val > re
+                        {
+                            continue;
                         }
                     }
 
@@ -548,7 +545,7 @@ async fn get_indexed_pairs_stream(
 
                     total_records += 1;
 
-                    if total_records % batch_size == 0 {
+                    if total_records.is_multiple_of(batch_size) {
                         let batch = build_indexed_batch(
                             &schema,
                             &string_cols,
@@ -628,18 +625,18 @@ fn build_indexed_batch(
     }
 
     // Handle empty projection (COUNT(*))
-    if let Some(proj) = projection {
-        if proj.is_empty() {
-            let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> =
-                vec![Arc::new(NullArray::new(record_count))];
-            let null_field = Field::new("__null", DataType::Null, true);
-            let null_schema = Arc::new(Schema::new_with_metadata(
-                vec![null_field],
-                schema.metadata().clone(),
-            ));
-            return RecordBatch::try_new(null_schema, arrays)
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
-        }
+    if let Some(proj) = projection
+        && proj.is_empty()
+    {
+        let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> =
+            vec![Arc::new(NullArray::new(record_count))];
+        let null_field = Field::new("__null", DataType::Null, true);
+        let null_schema = Arc::new(Schema::new_with_metadata(
+            vec![null_field],
+            schema.metadata().clone(),
+        ));
+        return RecordBatch::try_new(null_schema, arrays)
+            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
     }
 
     let projected_indices: Vec<usize> = match projection {

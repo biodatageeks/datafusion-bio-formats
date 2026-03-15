@@ -118,51 +118,49 @@ fn evaluate_binary_filter<T: GtfRecordTrait>(
     attributes_str: &str,
     coordinate_system_zero_based: bool,
 ) -> bool {
-    if let Expr::Column(column) = &*binary_expr.left {
-        if let Expr::Literal(literal, _) = &*binary_expr.right {
-            let field_name = &column.name;
+    if let Expr::Column(column) = &*binary_expr.left
+        && let Expr::Literal(literal, _) = &*binary_expr.right
+    {
+        let field_name = &column.name;
 
-            return match field_name.as_str() {
-                "chrom" => evaluate_string_comparison(
-                    record.reference_sequence_name(),
-                    literal,
-                    &binary_expr.op,
-                ),
-                "start" => {
-                    let start_1based = record.start();
-                    let start_output = if coordinate_system_zero_based {
-                        start_1based.saturating_sub(1)
-                    } else {
-                        start_1based
-                    };
-                    evaluate_numeric_comparison(start_output as f64, literal, &binary_expr.op)
+        return match field_name.as_str() {
+            "chrom" => evaluate_string_comparison(
+                record.reference_sequence_name(),
+                literal,
+                &binary_expr.op,
+            ),
+            "start" => {
+                let start_1based = record.start();
+                let start_output = if coordinate_system_zero_based {
+                    start_1based.saturating_sub(1)
+                } else {
+                    start_1based
+                };
+                evaluate_numeric_comparison(start_output as f64, literal, &binary_expr.op)
+            }
+            "end" => {
+                let record_value = record.end();
+                evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op)
+            }
+            "type" => evaluate_string_comparison(record.ty(), literal, &binary_expr.op),
+            "source" => evaluate_string_comparison(record.source(), literal, &binary_expr.op),
+            "score" => {
+                if let Some(score) = record.score() {
+                    evaluate_numeric_comparison(score as f64, literal, &binary_expr.op)
+                } else {
+                    false
                 }
-                "end" => {
-                    let record_value = record.end();
-                    evaluate_numeric_comparison(record_value as f64, literal, &binary_expr.op)
+            }
+            "strand" => evaluate_string_comparison(record.strand(), literal, &binary_expr.op),
+            "phase" => {
+                if let Some(phase) = record.phase() {
+                    evaluate_numeric_comparison(phase as f64, literal, &binary_expr.op)
+                } else {
+                    false
                 }
-                "type" => evaluate_string_comparison(record.ty(), literal, &binary_expr.op),
-                "source" => evaluate_string_comparison(record.source(), literal, &binary_expr.op),
-                "score" => {
-                    if let Some(score) = record.score() {
-                        evaluate_numeric_comparison(score as f64, literal, &binary_expr.op)
-                    } else {
-                        false
-                    }
-                }
-                "strand" => evaluate_string_comparison(record.strand(), literal, &binary_expr.op),
-                "phase" => {
-                    if let Some(phase) = record.phase() {
-                        evaluate_numeric_comparison(phase as f64, literal, &binary_expr.op)
-                    } else {
-                        false
-                    }
-                }
-                _ => {
-                    evaluate_attribute_filter(field_name, attributes_str, literal, &binary_expr.op)
-                }
-            };
-        }
+            }
+            _ => evaluate_attribute_filter(field_name, attributes_str, literal, &binary_expr.op),
+        };
     }
     true
 }
@@ -172,37 +170,28 @@ fn evaluate_between_filter<T: GtfRecordTrait>(
     between_expr: &Between,
     coordinate_system_zero_based: bool,
 ) -> bool {
-    if let Expr::Column(column) = &*between_expr.expr {
-        if let (Expr::Literal(low_literal, _), Expr::Literal(high_literal, _)) =
+    if let Expr::Column(column) = &*between_expr.expr
+        && let (Expr::Literal(low_literal, _), Expr::Literal(high_literal, _)) =
             (&*between_expr.low, &*between_expr.high)
-        {
-            let field_name = &column.name;
-            let negated = between_expr.negated;
+    {
+        let field_name = &column.name;
+        let negated = between_expr.negated;
 
-            return match field_name.as_str() {
-                "start" => {
-                    let start_1based = record.start();
-                    let start_output = if coordinate_system_zero_based {
-                        start_1based.saturating_sub(1)
-                    } else {
-                        start_1based
-                    };
-                    evaluate_between_comparison(
-                        start_output as f64,
-                        low_literal,
-                        high_literal,
-                        negated,
-                    )
-                }
-                "end" => evaluate_between_comparison(
-                    record.end() as f64,
-                    low_literal,
-                    high_literal,
-                    negated,
-                ),
-                _ => true,
-            };
-        }
+        return match field_name.as_str() {
+            "start" => {
+                let start_1based = record.start();
+                let start_output = if coordinate_system_zero_based {
+                    start_1based.saturating_sub(1)
+                } else {
+                    start_1based
+                };
+                evaluate_between_comparison(start_output as f64, low_literal, high_literal, negated)
+            }
+            "end" => {
+                evaluate_between_comparison(record.end() as f64, low_literal, high_literal, negated)
+            }
+            _ => true,
+        };
     }
     true
 }
@@ -355,10 +344,10 @@ pub fn extract_gtf_attribute_value(field_name: &str, attributes_str: &str) -> Op
     }
 
     for pair in attributes_str.split(';') {
-        if let Some((key, value)) = parse_gtf_pair(pair) {
-            if key == field_name {
-                return Some(value.to_string());
-            }
+        if let Some((key, value)) = parse_gtf_pair(pair)
+            && key == field_name
+        {
+            return Some(value.to_string());
         }
     }
     None

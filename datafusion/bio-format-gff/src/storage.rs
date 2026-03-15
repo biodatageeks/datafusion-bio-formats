@@ -202,20 +202,15 @@ use tokio_util::io::StreamReader;
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GffParserType {
     /// Standard noodles-gff parser (compatible but slower)
     Standard,
     /// Fast parser with ~3x performance improvement
+    #[default]
     Fast,
     /// SIMD parser with ~3.3x performance improvement
     Simd,
-}
-
-impl Default for GffParserType {
-    fn default() -> Self {
-        Self::Fast // Default to fast parser for best balance of performance and compatibility
-    }
 }
 
 impl GffParserType {

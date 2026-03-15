@@ -407,22 +407,20 @@ impl VcfTableProvider {
         // 1. Check genotypes field metadata (direct round-trip from multi-sample read)
         if let Ok(idx) = schema.index_of("genotypes") {
             let field = schema.field(idx);
-            if let Some(json) = field.metadata().get(VCF_GENOTYPES_SAMPLE_NAMES_KEY) {
-                if let Some(names) = from_json_string::<Vec<String>>(json) {
-                    if !names.is_empty() {
-                        return names;
-                    }
-                }
+            if let Some(json) = field.metadata().get(VCF_GENOTYPES_SAMPLE_NAMES_KEY)
+                && let Some(names) = from_json_string::<Vec<String>>(json)
+                && !names.is_empty()
+            {
+                return names;
             }
         }
 
         // 2. Check schema-level metadata (passthrough query)
-        if let Some(json) = schema.metadata().get(VCF_SAMPLE_NAMES_KEY) {
-            if let Some(names) = from_json_string::<Vec<String>>(json) {
-                if !names.is_empty() {
-                    return names;
-                }
-            }
+        if let Some(json) = schema.metadata().get(VCF_SAMPLE_NAMES_KEY)
+            && let Some(names) = from_json_string::<Vec<String>>(json)
+            && !names.is_empty()
+        {
+            return names;
         }
 
         // 3. Neither found — triggers runtime inference in write_exec

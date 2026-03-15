@@ -45,27 +45,27 @@ fn parse_gff_attributes_optimized(attributes_str: &str) -> HashMap<String, Strin
     // Try to optimize by avoiding multiple string operations
     attributes_str.split(';').for_each(|pair| {
         let pair = pair.trim();
-        if !pair.is_empty() {
-            if let Some(eq_pos) = pair.find('=') {
-                let key = &pair[..eq_pos];
-                let value = &pair[eq_pos + 1..];
+        if !pair.is_empty()
+            && let Some(eq_pos) = pair.find('=')
+        {
+            let key = &pair[..eq_pos];
+            let value = &pair[eq_pos + 1..];
 
-                // Only do expensive operations if needed
-                let decoded_value = if value.starts_with('"') && value.ends_with('"') {
-                    value[1..value.len() - 1].to_string()
-                } else if value.contains('%') {
-                    value
-                        .replace("%3B", ";")
-                        .replace("%3D", "=")
-                        .replace("%26", "&")
-                        .replace("%2C", ",")
-                        .replace("%09", "\t")
-                } else {
-                    value.to_string()
-                };
+            // Only do expensive operations if needed
+            let decoded_value = if value.starts_with('"') && value.ends_with('"') {
+                value[1..value.len() - 1].to_string()
+            } else if value.contains('%') {
+                value
+                    .replace("%3B", ";")
+                    .replace("%3D", "=")
+                    .replace("%26", "&")
+                    .replace("%2C", ",")
+                    .replace("%09", "\t")
+            } else {
+                value.to_string()
+            };
 
-                attributes.insert(key.to_string(), decoded_value);
-            }
+            attributes.insert(key.to_string(), decoded_value);
         }
     });
 

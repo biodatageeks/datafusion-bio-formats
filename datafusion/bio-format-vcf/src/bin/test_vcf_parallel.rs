@@ -76,14 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let results = df.collect().await?;
     let duration = start_time.elapsed();
 
-    if let Some(batch) = results.first() {
-        if let Some(column) = batch
+    if let Some(batch) = results.first()
+        && let Some(column) = batch
             .column(0)
             .as_any()
             .downcast_ref::<datafusion::arrow::array::Int64Array>()
-        {
-            println!("Records processed: {}", column.value(0));
-        }
+    {
+        println!("Records processed: {}", column.value(0));
     }
     println!("Time with auto threads: {duration:?}");
 

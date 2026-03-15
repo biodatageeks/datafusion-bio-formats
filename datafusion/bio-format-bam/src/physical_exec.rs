@@ -136,30 +136,29 @@ impl ExecutionPlan for BamExec {
         // Use indexed reading when partition assignments and index are available
         if let (Some(assignments), Some(index_path)) =
             (&self.partition_assignments, &self.index_path)
+            && partition < assignments.len()
         {
-            if partition < assignments.len() {
-                let regions = assignments[partition].regions.clone();
-                let file_path = self.file_path.clone();
-                let index_path = index_path.clone();
-                let projection = self.projection.clone();
-                let coord_zero_based = self.coordinate_system_zero_based;
-                let tag_fields = self.tag_fields.clone();
-                let residual_filters = self.residual_filters.clone();
+            let regions = assignments[partition].regions.clone();
+            let file_path = self.file_path.clone();
+            let index_path = index_path.clone();
+            let projection = self.projection.clone();
+            let coord_zero_based = self.coordinate_system_zero_based;
+            let tag_fields = self.tag_fields.clone();
+            let residual_filters = self.residual_filters.clone();
 
-                let fut = get_indexed_stream(
-                    file_path,
-                    index_path,
-                    regions,
-                    schema.clone(),
-                    batch_size,
-                    projection,
-                    coord_zero_based,
-                    tag_fields,
-                    residual_filters,
-                );
-                let stream = futures::stream::once(fut).try_flatten();
-                return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
-            }
+            let fut = get_indexed_stream(
+                file_path,
+                index_path,
+                regions,
+                schema.clone(),
+                batch_size,
+                projection,
+                coord_zero_based,
+                tag_fields,
+                residual_filters,
+            );
+            let stream = futures::stream::once(fut).try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
         // Fallback: full scan (original path)
@@ -1517,15 +1516,15 @@ async fn get_indexed_stream(
                             s
                         }
                     }) {
-                        if let Some(rs) = region_start_1based {
-                            if pos_1based < rs {
-                                continue;
-                            }
+                        if let Some(rs) = region_start_1based
+                            && pos_1based < rs
+                        {
+                            continue;
                         }
-                        if let Some(re) = region_end_1based {
-                            if pos_1based > re {
-                                continue;
-                            }
+                        if let Some(re) = region_end_1based
+                            && pos_1based > re
+                        {
+                            continue;
                         }
                     }
 
