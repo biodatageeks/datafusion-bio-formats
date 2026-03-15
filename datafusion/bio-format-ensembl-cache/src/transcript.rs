@@ -64,6 +64,7 @@ pub(crate) struct TranscriptColumnIndices {
     cds_start_nf: Option<usize>,
     cds_end_nf: Option<usize>,
     mature_mirna_regions: Option<usize>,
+    ncrna_structure: Option<usize>,
     transcript_attributes_projected: bool,
     // Promoted VEP fields (issue #125)
     translateable_seq: Option<usize>,
@@ -98,11 +99,13 @@ impl TranscriptColumnIndices {
         let cds_start_nf = col_map.get("cds_start_nf");
         let cds_end_nf = col_map.get("cds_end_nf");
         let mature_mirna_regions = col_map.get("mature_mirna_regions");
+        let ncrna_structure = col_map.get("ncrna_structure");
         let has_non_polya_rna_edit = col_map.get("has_non_polya_rna_edit");
         let flags_str = col_map.get("flags_str");
         let transcript_attributes_projected = cds_start_nf.is_some()
             || cds_end_nf.is_some()
             || mature_mirna_regions.is_some()
+            || ncrna_structure.is_some()
             || has_non_polya_rna_edit.is_some()
             || flags_str.is_some();
 
@@ -152,6 +155,7 @@ impl TranscriptColumnIndices {
             cds_start_nf,
             cds_end_nf,
             mature_mirna_regions,
+            ncrna_structure,
             transcript_attributes_projected,
             translateable_seq: col_map.get("translateable_seq"),
             cdna_mapper_segments,
@@ -174,6 +178,8 @@ struct TranscriptAttributes {
     cds_nf_order: Vec<&'static str>,
     tsl: Option<i32>,
     mature_mirna_regions: Vec<(i64, i64)>,
+    /// Raw ncRNA structure string from the "ncRNA" attribute (e.g. "(19.(6.(2.(4.14)12.)10.)9").
+    ncrna_structure: Option<String>,
     has_non_polya_rna_edit: bool,
 }
 
@@ -596,6 +602,21 @@ fn extract_mane_appris_from_storable_attributes(
     (mane_select, mane_plus_clinical, appris)
 }
 
+/// Parse an ncRNA attribute value into (cdna_start, cdna_end, structure_string).
+/// Format: "start:end structure" e.g. "1:81 (19.(6.(2.(4.14)12.)10.)9"
+fn parse_ncrna_attribute(value: &str) -> Option<(i64, i64, &str)> {
+    let (coords, structure) = value.split_once(|c: char| c.is_whitespace())?;
+    let (start_str, end_str) = coords.split_once(':')?;
+    let start = start_str.trim().parse::<i64>().ok()?;
+    let end = end_str.trim().parse::<i64>().ok()?;
+    let structure = structure.trim();
+    if structure.is_empty() {
+        None
+    } else {
+        Some((start, end, structure))
+    }
+}
+
 fn parse_cdna_range(value: &str) -> Option<(i64, i64)> {
     let mut parts = value.splitn(2, '-');
     let start = parts.next()?.trim().parse::<i64>().ok()?;
@@ -635,6 +656,7 @@ fn parse_transcript_attributes_json(
     tx_end: i64,
     strand: i8,
     parse_mirna_regions: bool,
+    parse_ncrna_structure: bool,
     check_rna_edits: bool,
 ) -> TranscriptAttributes {
     let mut out = TranscriptAttributes::default();
@@ -668,6 +690,11 @@ fn parse_transcript_attributes_json(
                     ));
                 }
             }
+            "ncRNA" if parse_ncrna_structure && out.ncrna_structure.is_none() => {
+                if let Some((_start, _end, structure)) = parse_ncrna_attribute(value) {
+                    out.ncrna_structure = Some(structure.to_string());
+                }
+            }
             "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
                 if is_non_polya_rna_edit(value) {
                     out.has_non_polya_rna_edit = true;
@@ -686,6 +713,7 @@ fn parse_transcript_attributes_storable(
     tx_end: i64,
     strand: i8,
     parse_mirna_regions: bool,
+    parse_ncrna_structure: bool,
     check_rna_edits: bool,
 ) -> TranscriptAttributes {
     let mut out = TranscriptAttributes::default();
@@ -723,6 +751,11 @@ fn parse_transcript_attributes_storable(
                     out.mature_mirna_regions.push(mirna_cdna_to_genomic_range(
                         tx_start, tx_end, strand, cdna_start, cdna_end,
                     ));
+                }
+            }
+            "ncRNA" if parse_ncrna_structure && out.ncrna_structure.is_none() => {
+                if let Some((_start, _end, structure)) = parse_ncrna_attribute(&value) {
+                    out.ncrna_structure = Some(structure.to_string());
                 }
             }
             "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
@@ -1306,6 +1339,7 @@ pub(crate) fn parse_transcript_line_into(
     if col_idx.transcript_attributes_projected {
         let parse_mirna_regions =
             biotype.as_deref() == Some("miRNA") && col_idx.mature_mirna_regions.is_some();
+        let parse_ncrna_structure = col_idx.ncrna_structure.is_some();
         let check_rna_edits = col_idx.has_non_polya_rna_edit.is_some();
         let attributes = parse_transcript_attributes_json(
             object,
@@ -1313,6 +1347,7 @@ pub(crate) fn parse_transcript_line_into(
             source_end,
             strand,
             parse_mirna_regions,
+            parse_ncrna_structure,
             check_rna_edits,
         );
 
@@ -1338,6 +1373,9 @@ pub(crate) fn parse_transcript_line_into(
             } else {
                 batch.set_mirna_region_list(idx, None);
             }
+        }
+        if let Some(idx) = col_idx.ncrna_structure {
+            batch.set_opt_utf8_owned(idx, attributes.ncrna_structure.as_ref());
         }
         if let Some(idx) = col_idx.has_non_polya_rna_edit {
             batch.set_opt_bool(idx, Some(attributes.has_non_polya_rna_edit));
@@ -1823,6 +1861,7 @@ fn append_transcript_storable_row_into(
     if col_idx.transcript_attributes_projected {
         let parse_mirna_regions =
             biotype.as_deref() == Some("miRNA") && col_idx.mature_mirna_regions.is_some();
+        let parse_ncrna_structure = col_idx.ncrna_structure.is_some();
         let check_rna_edits = col_idx.has_non_polya_rna_edit.is_some();
         let attributes = parse_transcript_attributes_storable(
             object,
@@ -1830,6 +1869,7 @@ fn append_transcript_storable_row_into(
             source_end,
             strand,
             parse_mirna_regions,
+            parse_ncrna_structure,
             check_rna_edits,
         );
 
@@ -1855,6 +1895,9 @@ fn append_transcript_storable_row_into(
             } else {
                 batch.set_mirna_region_list(idx, None);
             }
+        }
+        if let Some(idx) = col_idx.ncrna_structure {
+            batch.set_opt_utf8_owned(idx, attributes.ncrna_structure.as_ref());
         }
         if let Some(idx) = col_idx.has_non_polya_rna_edit {
             batch.set_opt_bool(idx, Some(attributes.has_non_polya_rna_edit));
@@ -1940,7 +1983,7 @@ mod tests {
         });
         let object = payload.as_object().unwrap();
 
-        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, true, false);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, true, false, false);
 
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
@@ -1963,7 +2006,7 @@ mod tests {
         });
         let object = payload.as_object().unwrap();
 
-        let parsed = parse_transcript_attributes_json(object, 100, 200, -1, true, false);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, -1, true, false, false);
 
         assert!(!parsed.cds_start_nf);
         assert!(parsed.cds_end_nf);
@@ -1992,11 +2035,95 @@ mod tests {
             ])),
         );
 
-        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, true, false);
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, true, false, false);
 
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
         assert_eq!(parsed.mature_mirna_regions, vec![(141, 158)]);
+    }
+
+    #[test]
+    fn parse_ncrna_attribute_extracts_structure() {
+        let (start, end, structure) =
+            parse_ncrna_attribute("1:81 (19.(6.(2.(4.14)12.)10.)9").unwrap();
+        assert_eq!(start, 1);
+        assert_eq!(end, 81);
+        assert_eq!(structure, "(19.(6.(2.(4.14)12.)10.)9");
+    }
+
+    #[test]
+    fn parse_ncrna_attribute_returns_none_for_coords_only() {
+        assert!(parse_ncrna_attribute("1:81").is_none());
+    }
+
+    #[test]
+    fn json_transcript_attributes_parse_ncrna_structure() {
+        let payload = json!({
+            "attributes": [
+                { "code": "ncRNA", "value": "1:81 (19.(6.(2.(4.14)12.)10.)9" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, true, false);
+        assert_eq!(
+            parsed.ncrna_structure.as_deref(),
+            Some("(19.(6.(2.(4.14)12.)10.)9")
+        );
+    }
+
+    #[test]
+    fn storable_transcript_attributes_parse_ncrna_structure() {
+        let mut attr_ncrna = BTreeMap::new();
+        attr_ncrna.insert("code".to_string(), SValue::String(Arc::from("ncRNA")));
+        attr_ncrna.insert(
+            "value".to_string(),
+            SValue::String(Arc::from("1:81 (19.(6.(2.(4.14)12.)10.)9")),
+        );
+
+        let mut object = BTreeMap::new();
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_ncrna))])),
+        );
+
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, false, true, false);
+        assert_eq!(
+            parsed.ncrna_structure.as_deref(),
+            Some("(19.(6.(2.(4.14)12.)10.)9")
+        );
+    }
+
+    #[test]
+    fn json_ncrna_structure_ignored_when_disabled() {
+        let payload = json!({
+            "attributes": [
+                { "code": "ncRNA", "value": "1:81 (19.(6.(2.(4.14)12.)10.)9" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+        // parse_ncrna_structure = false
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false, false);
+        assert!(parsed.ncrna_structure.is_none());
+    }
+
+    #[test]
+    fn parse_ncrna_attribute_with_tab_separator() {
+        let (start, end, structure) =
+            parse_ncrna_attribute("1:81\t(19.(6.(2.(4.14)12.)10.)9").unwrap();
+        assert_eq!(start, 1);
+        assert_eq!(end, 81);
+        assert_eq!(structure, "(19.(6.(2.(4.14)12.)10.)9");
+    }
+
+    #[test]
+    fn parse_ncrna_attribute_empty_structure_returns_none() {
+        assert!(parse_ncrna_attribute("1:81 ").is_none());
+    }
+
+    #[test]
+    fn parse_ncrna_attribute_no_colon_returns_none() {
+        assert!(parse_ncrna_attribute("1-81 structure").is_none());
     }
 
     #[test]
@@ -2146,7 +2273,7 @@ mod tests {
             ]
         });
         let object = payload.as_object().unwrap();
-        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false, false);
         assert_eq!(parsed.tsl, Some(1));
     }
 
@@ -2161,7 +2288,7 @@ mod tests {
             ]
         });
         let object = payload.as_object().unwrap();
-        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false);
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false, false);
         assert_eq!(parsed.tsl, Some(5));
     }
 
@@ -2177,7 +2304,8 @@ mod tests {
             SValue::Array(Arc::new(vec![SValue::Hash(Arc::new(attr_tsl))])),
         );
 
-        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, false, false);
+        let parsed =
+            parse_transcript_attributes_storable(&object, 100, 200, 1, false, false, false);
         assert_eq!(parsed.tsl, Some(3));
     }
 

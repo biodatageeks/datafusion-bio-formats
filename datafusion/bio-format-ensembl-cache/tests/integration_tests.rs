@@ -554,6 +554,10 @@ async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<
         "mature_mirna_regions should be List type, got {:?}",
         mirna_regions.data_type()
     );
+    let ncrna_structure = schema
+        .field_with_name("ncrna_structure")
+        .expect("ncrna_structure column missing");
+    assert_eq!(ncrna_structure.data_type(), &DataType::Utf8);
 
     Ok(())
 }
@@ -762,6 +766,36 @@ async fn transcript_mature_mirna_regions_queryable() -> datafusion::common::Resu
             assert!(regions.column_by_name("end").is_some());
         }
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_ncrna_structure_queryable() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    // ncrna_structure should be queryable as a string column
+    let batches = ctx
+        .sql("SELECT stable_id, ncrna_structure FROM tx LIMIT 10")
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    let ncrna_col = batches[0]
+        .column_by_name("ncrna_structure")
+        .expect("ncrna_structure column missing");
+    let string_array = ncrna_col
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("ncrna_structure should be StringArray");
+    // Non-miRNA transcripts should have NULL ncrna_structure
+    assert_eq!(string_array.len(), batches[0].num_rows());
 
     Ok(())
 }
@@ -2199,6 +2233,29 @@ async fn translation_protein_features_populated() -> datafusion::common::Result<
             assert!(struct_array.column_by_name("hseqname").is_some());
             assert!(struct_array.column_by_name("start").is_some());
             assert!(struct_array.column_by_name("end").is_some());
+
+            // Verify analysis values are populated (issue #128 fix)
+            let analyses = struct_array
+                .column_by_name("analysis")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let mut any_analysis_populated = false;
+            for i in 0..analyses.len() {
+                if !analyses.is_null(i) {
+                    any_analysis_populated = true;
+                    let label = analyses.value(i);
+                    assert!(
+                        !label.is_empty(),
+                        "protein feature analysis should not be empty"
+                    );
+                }
+            }
+            assert!(
+                any_analysis_populated,
+                "expected at least one non-NULL analysis in protein_features (issue #128)"
+            );
 
             // Verify start <= end for features
             let starts = struct_array

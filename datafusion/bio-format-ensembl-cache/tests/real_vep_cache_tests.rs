@@ -9,7 +9,7 @@
 //! - Cross-entity consistency with real IDs (ENST/ENSP/ENSE)
 
 use datafusion::arrow::array::{
-    Array, Float32Array, Int32Array, Int64Array, ListArray, StructArray,
+    Array, Float32Array, Int32Array, Int64Array, ListArray, StringArray, StructArray,
 };
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
@@ -465,13 +465,53 @@ async fn real_translation_protein_features() -> datafusion::common::Result<()> {
     ctx.register_table("tl", Arc::new(provider))?;
 
     let batches = ctx
-        .sql("SELECT COUNT(*) FROM tl WHERE protein_features IS NOT NULL")
+        .sql("SELECT protein_features FROM tl WHERE protein_features IS NOT NULL")
         .await?
         .collect()
         .await?;
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert!(
-        first_i64(&batches) > 0,
+        total_rows > 0,
         "expected some translations with protein_features in real data"
+    );
+
+    // Verify analysis values are populated (issue #128 fix)
+    let mut total_features = 0usize;
+    let mut non_null_analyses = 0usize;
+    for batch in &batches {
+        let list_array = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        for row in 0..list_array.len() {
+            if !list_array.is_null(row) {
+                let struct_array = list_array
+                    .value(row)
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .unwrap()
+                    .clone();
+                let analyses = struct_array
+                    .column_by_name("analysis")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .clone();
+                for i in 0..analyses.len() {
+                    total_features += 1;
+                    if !analyses.is_null(i) {
+                        non_null_analyses += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(total_features > 0, "expected protein features in real data");
+    assert!(
+        non_null_analyses > 0,
+        "expected non-NULL analysis labels in protein_features (issue #128)"
     );
 
     Ok(())

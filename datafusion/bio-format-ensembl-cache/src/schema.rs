@@ -194,6 +194,7 @@ pub(crate) fn transcript_schema(
         Field::new("cds_start_nf", DataType::Boolean, true),
         Field::new("cds_end_nf", DataType::Boolean, true),
         Field::new("mature_mirna_regions", mirna_region_list_data_type(), true),
+        Field::new("ncrna_structure", DataType::Utf8, true),
         // Promoted VEP fields (issue #125)
         Field::new("translateable_seq", DataType::Utf8, true),
         Field::new(

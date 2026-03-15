@@ -326,6 +326,45 @@ async fn transcript_parquet_roundtrip_exons_list() -> datafusion::common::Result
     Ok(())
 }
 
+#[tokio::test]
+async fn transcript_parquet_roundtrip_ncrna_structure() -> datafusion::common::Result<()> {
+    let temp_dir = TempDir::new().unwrap();
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let parquet_path = write_provider_to_parquet(Arc::new(provider), "tx_ncrna", &temp_dir).await;
+
+    let ctx = SessionContext::new();
+    ctx.register_parquet("tx", &parquet_path, ParquetReadOptions::default())
+        .await?;
+
+    // ncrna_structure column should be queryable after round-trip
+    let batches = ctx
+        .sql("SELECT ncrna_structure FROM tx LIMIT 5")
+        .await?
+        .collect()
+        .await?;
+    assert!(!batches.is_empty());
+
+    // Column should exist and be a string-like type (Utf8 or Utf8View after Parquet roundtrip)
+    let schema = batches[0].schema();
+    let field = schema
+        .field_with_name("ncrna_structure")
+        .expect("ncrna_structure column missing after round-trip");
+    assert!(
+        matches!(
+            field.data_type(),
+            datafusion::arrow::datatypes::DataType::Utf8
+                | datafusion::arrow::datatypes::DataType::Utf8View
+        ),
+        "ncrna_structure should be string type, got {:?}",
+        field.data_type()
+    );
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Translation parquet round-trip
 // ---------------------------------------------------------------------------
@@ -400,14 +439,51 @@ async fn translation_parquet_roundtrip_protein_features() -> datafusion::common:
         "expected some translations with protein_features in real VEP 115 data"
     );
 
-    // Verify the column is queryable as list
+    // Verify protein_features with analysis values survive roundtrip (issue #128)
     let batches = ctx
-        .sql("SELECT protein_features FROM tl WHERE protein_features IS NOT NULL LIMIT 1")
+        .sql("SELECT protein_features FROM tl WHERE protein_features IS NOT NULL LIMIT 5")
         .await?
         .collect()
         .await?;
     assert!(!batches.is_empty());
     assert!(batches[0].num_rows() > 0);
+
+    let list_array = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let mut found_analysis = false;
+    for row in 0..list_array.len() {
+        if !list_array.is_null(row) {
+            let struct_array = list_array
+                .value(row)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap()
+                .clone();
+            let analyses = struct_array
+                .column_by_name("analysis")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .clone();
+            for i in 0..analyses.len() {
+                if !analyses.is_null(i) {
+                    found_analysis = true;
+                    break;
+                }
+            }
+            if found_analysis {
+                break;
+            }
+        }
+    }
+    assert!(
+        found_analysis,
+        "analysis labels should survive parquet round-trip"
+    );
 
     Ok(())
 }

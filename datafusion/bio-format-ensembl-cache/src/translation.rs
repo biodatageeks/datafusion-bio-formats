@@ -552,12 +552,19 @@ fn extract_protein_features_json(
         .iter()
         .filter_map(|item| {
             let obj = unwrap_blessed_object_optional(item).or_else(|| item.as_object())?;
-            // Extract analysis name: may be in "analysis" sub-object's "logic_name",
-            // or directly as "_analysis" string.
+            // Extract analysis display label from nested Analysis object.
+            // Format 1: analysis.__value._display_label (blessed object)
+            // Format 2: analysis._display_label (plain object)
+            // Fallback: analysis.__value.logic_name or _analysis string.
             let analysis = obj
                 .get("analysis")
-                .and_then(unwrap_blessed_object_optional)
-                .and_then(|a| json_str(a.get("logic_name")))
+                .and_then(|a| {
+                    // Try unwrapping blessed object first, fall back to plain object
+                    let analysis_obj =
+                        unwrap_blessed_object_optional(a).or_else(|| a.as_object())?;
+                    json_str(analysis_obj.get("_display_label"))
+                        .or_else(|| json_str(analysis_obj.get("logic_name")))
+                })
                 .or_else(|| json_str(obj.get("_analysis")));
             let hseqname = json_str(obj.get("hseqname"));
             let start = json_i64(obj.get("start"));
@@ -583,8 +590,12 @@ fn extract_protein_features_storable(
             let obj = item.as_hash()?;
             let analysis = obj
                 .get("analysis")
-                .and_then(SValue::as_hash)
-                .and_then(|a| sv_str(a.get("logic_name")))
+                .and_then(|a| {
+                    // Storable blessed objects are auto-unwrapped, so just get the hash
+                    let analysis_hash = a.as_hash()?;
+                    sv_str(analysis_hash.get("_display_label"))
+                        .or_else(|| sv_str(analysis_hash.get("logic_name")))
+                })
                 .or_else(|| sv_str(obj.get("_analysis")));
             let hseqname = sv_str(obj.get("hseqname"));
             let start = sv_i64(obj.get("start"));
@@ -951,5 +962,218 @@ mod tests {
     fn decode_unknown_analysis_returns_none() {
         let matrix = build_test_matrix("sift");
         assert!(decode_prediction_matrix(&matrix, "unknown_tool").is_none());
+    }
+
+    #[test]
+    fn protein_features_json_display_label_blessed() {
+        let vef_cache = serde_json::json!({
+            "protein_features": [
+                {
+                    "__class": "Bio::EnsEMBL::ProteinFeature",
+                    "__value": {
+                        "analysis": {
+                            "__class": "Bio::EnsEMBL::Analysis",
+                            "__value": { "_display_label": "Pfam" }
+                        },
+                        "hseqname": "PF02083",
+                        "start": "128",
+                        "end": "139"
+                    }
+                }
+            ]
+        });
+        let map = vef_cache.as_object().unwrap();
+        let features = extract_protein_features_json(map).unwrap();
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].0.as_deref(), Some("Pfam"));
+        assert_eq!(features[0].1.as_deref(), Some("PF02083"));
+        assert_eq!(features[0].2, Some(128));
+        assert_eq!(features[0].3, Some(139));
+    }
+
+    #[test]
+    fn protein_features_json_display_label_plain() {
+        let vef_cache = serde_json::json!({
+            "protein_features": [
+                {
+                    "analysis": { "_display_label": "SMART" },
+                    "hseqname": "SM00220",
+                    "start": "10",
+                    "end": "50"
+                }
+            ]
+        });
+        let map = vef_cache.as_object().unwrap();
+        let features = extract_protein_features_json(map).unwrap();
+        assert_eq!(features[0].0.as_deref(), Some("SMART"));
+    }
+
+    #[test]
+    fn protein_features_json_logic_name_fallback() {
+        let vef_cache = serde_json::json!({
+            "protein_features": [
+                {
+                    "analysis": { "logic_name": "gene3d" },
+                    "hseqname": "1.10.150.50",
+                    "start": "1",
+                    "end": "100"
+                }
+            ]
+        });
+        let map = vef_cache.as_object().unwrap();
+        let features = extract_protein_features_json(map).unwrap();
+        assert_eq!(features[0].0.as_deref(), Some("gene3d"));
+    }
+
+    #[test]
+    fn protein_features_storable_display_label() {
+        let mut analysis = std::collections::BTreeMap::new();
+        analysis.insert(
+            "_display_label".to_string(),
+            SValue::String(std::sync::Arc::from("Pfam")),
+        );
+
+        let mut feature = std::collections::BTreeMap::new();
+        feature.insert(
+            "analysis".to_string(),
+            SValue::Hash(std::sync::Arc::new(analysis)),
+        );
+        feature.insert(
+            "hseqname".to_string(),
+            SValue::String(std::sync::Arc::from("PF02083")),
+        );
+        feature.insert("start".to_string(), SValue::Int(128));
+        feature.insert("end".to_string(), SValue::Int(139));
+
+        let mut vef_cache = std::collections::BTreeMap::new();
+        vef_cache.insert(
+            "protein_features".to_string(),
+            SValue::Array(std::sync::Arc::new(vec![SValue::Hash(
+                std::sync::Arc::new(feature),
+            )])),
+        );
+
+        let features = extract_protein_features_storable(&vef_cache).unwrap();
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].0.as_deref(), Some("Pfam"));
+    }
+
+    #[test]
+    fn protein_features_json_analysis_string_fallback() {
+        let vef_cache = serde_json::json!({
+            "protein_features": [
+                {
+                    "_analysis": "CDD",
+                    "hseqname": "cd00001",
+                    "start": "5",
+                    "end": "55"
+                }
+            ]
+        });
+        let map = vef_cache.as_object().unwrap();
+        let features = extract_protein_features_json(map).unwrap();
+        assert_eq!(features[0].0.as_deref(), Some("CDD"));
+    }
+
+    #[test]
+    fn protein_features_json_display_label_over_logic_name() {
+        // When both _display_label and logic_name exist, _display_label wins
+        let vef_cache = serde_json::json!({
+            "protein_features": [
+                {
+                    "analysis": {
+                        "_display_label": "Gene3D",
+                        "logic_name": "gene3d"
+                    },
+                    "hseqname": "1.10.150.50",
+                    "start": "1",
+                    "end": "100"
+                }
+            ]
+        });
+        let map = vef_cache.as_object().unwrap();
+        let features = extract_protein_features_json(map).unwrap();
+        assert_eq!(features[0].0.as_deref(), Some("Gene3D"));
+    }
+
+    #[test]
+    fn protein_features_json_empty_array_returns_none() {
+        let vef_cache = serde_json::json!({
+            "protein_features": []
+        });
+        let map = vef_cache.as_object().unwrap();
+        assert!(extract_protein_features_json(map).is_none());
+    }
+
+    #[test]
+    fn protein_features_storable_analysis_string_fallback() {
+        let mut feature = std::collections::BTreeMap::new();
+        feature.insert(
+            "_analysis".to_string(),
+            SValue::String(std::sync::Arc::from("CDD")),
+        );
+        feature.insert(
+            "hseqname".to_string(),
+            SValue::String(std::sync::Arc::from("cd00001")),
+        );
+        feature.insert("start".to_string(), SValue::Int(5));
+        feature.insert("end".to_string(), SValue::Int(55));
+
+        let mut vef_cache = std::collections::BTreeMap::new();
+        vef_cache.insert(
+            "protein_features".to_string(),
+            SValue::Array(std::sync::Arc::new(vec![SValue::Hash(
+                std::sync::Arc::new(feature),
+            )])),
+        );
+
+        let features = extract_protein_features_storable(&vef_cache).unwrap();
+        assert_eq!(features[0].0.as_deref(), Some("CDD"));
+    }
+
+    #[test]
+    fn protein_features_storable_display_label_over_logic_name() {
+        let mut analysis = std::collections::BTreeMap::new();
+        analysis.insert(
+            "_display_label".to_string(),
+            SValue::String(std::sync::Arc::from("Gene3D")),
+        );
+        analysis.insert(
+            "logic_name".to_string(),
+            SValue::String(std::sync::Arc::from("gene3d")),
+        );
+
+        let mut feature = std::collections::BTreeMap::new();
+        feature.insert(
+            "analysis".to_string(),
+            SValue::Hash(std::sync::Arc::new(analysis)),
+        );
+        feature.insert(
+            "hseqname".to_string(),
+            SValue::String(std::sync::Arc::from("1.10.150.50")),
+        );
+        feature.insert("start".to_string(), SValue::Int(1));
+        feature.insert("end".to_string(), SValue::Int(100));
+
+        let mut vef_cache = std::collections::BTreeMap::new();
+        vef_cache.insert(
+            "protein_features".to_string(),
+            SValue::Array(std::sync::Arc::new(vec![SValue::Hash(
+                std::sync::Arc::new(feature),
+            )])),
+        );
+
+        let features = extract_protein_features_storable(&vef_cache).unwrap();
+        assert_eq!(features[0].0.as_deref(), Some("Gene3D"));
+    }
+
+    #[test]
+    fn protein_features_storable_empty_array_returns_none() {
+        let mut vef_cache = std::collections::BTreeMap::new();
+        vef_cache.insert(
+            "protein_features".to_string(),
+            SValue::Array(std::sync::Arc::new(vec![])),
+        );
+        assert!(extract_protein_features_storable(&vef_cache).is_none());
     }
 }
