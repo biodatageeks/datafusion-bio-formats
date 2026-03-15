@@ -9,6 +9,7 @@
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
+use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
@@ -73,6 +74,8 @@ fn build_dedup_query(
         String::new()
     };
 
+    // All queries end with ORDER BY chrom, start so parquet row groups have
+    // tight min/max statistics for efficient predicate pushdown.
     match kind {
         // Transcript: dedup by stable_id, prefer entries with non-null cds_start
         EnsemblEntityKind::Transcript => {
@@ -83,7 +86,8 @@ fn build_dedup_query(
                         ORDER BY cds_start NULLS LAST\
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
-                ) WHERE _rn = 1"
+                ) WHERE _rn = 1 \
+                ORDER BY chrom, start"
             )
         }
         // Translation: dedup by transcript_id, prefer entries with non-null cdna_coding_start
@@ -95,7 +99,8 @@ fn build_dedup_query(
                         ORDER BY cdna_coding_start NULLS LAST\
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
-                ) WHERE _rn = 1"
+                ) WHERE _rn = 1 \
+                ORDER BY chrom, start, \"end\""
             )
         }
         // Exon: dedup by (transcript_id, exon_number), prefer entries with non-null stable_id
@@ -107,16 +112,16 @@ fn build_dedup_query(
                         ORDER BY stable_id NULLS LAST\
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
-                ) WHERE _rn = 1"
+                ) WHERE _rn = 1 \
+                ORDER BY chrom, start"
             )
         }
         // Other entities: no dedup needed
         _ => {
-            if let Some(chrom) = chrom_filter {
-                format!("SELECT * FROM {table_name} WHERE chrom = '{chrom}'")
-            } else {
-                format!("SELECT * FROM {table_name}")
-            }
+            format!(
+                "SELECT * FROM {table_name}{where_clause} \
+                ORDER BY chrom, start"
+            )
         }
     }
 }
@@ -245,10 +250,22 @@ async fn main() -> datafusion::common::Result<()> {
     let mut stream = df.execute_stream().await?;
     let schema = stream.schema();
 
-    let writer_props = WriterProperties::builder()
+    // Translation uses small row groups (1024) so that point queries on
+    // transcript_id can leverage row-group min/max statistics for pruning.
+    let row_group_size = match kind {
+        EnsemblEntityKind::Translation => 256,
+        _ => 100_000,
+    };
+    let mut builder = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
-        .set_max_row_group_size(100_000)
-        .build();
+        .set_max_row_group_size(row_group_size);
+    if matches!(kind, EnsemblEntityKind::Translation) {
+        // Page-level column index for finer-grained pruning within row groups
+        builder = builder.set_column_index_truncate_length(Some(64));
+        // Bloom filter on transcript_id for definite-negative row group skipping
+        builder = builder.set_column_bloom_filter_enabled(ColumnPath::from("transcript_id"), true);
+    }
+    let writer_props = builder.build();
 
     // Single output file
     let file = File::create(&output_file)
