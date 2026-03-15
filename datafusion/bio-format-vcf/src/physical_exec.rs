@@ -2523,38 +2523,37 @@ impl ExecutionPlan for VcfExec {
         // Use indexed reading when partition assignments and index are available
         if let (Some(assignments), Some(index_path)) =
             (&self.partition_assignments, &self.index_path)
+            && partition < assignments.len()
         {
-            if partition < assignments.len() {
-                let regions = assignments[partition].regions.clone();
-                let file_path = self.file_path.clone();
-                let index_path = index_path.clone();
-                let projection = self.projection.clone();
-                let coord_zero_based = self.coordinate_system_zero_based;
-                let info_fields = self.info_fields.clone();
-                let format_fields = self.format_fields.clone();
-                let sample_names = self.sample_names.clone();
-                let source_sample_names = self.source_sample_names.clone();
-                let residual_filters = self.residual_filters.clone();
+            let regions = assignments[partition].regions.clone();
+            let file_path = self.file_path.clone();
+            let index_path = index_path.clone();
+            let projection = self.projection.clone();
+            let coord_zero_based = self.coordinate_system_zero_based;
+            let info_fields = self.info_fields.clone();
+            let format_fields = self.format_fields.clone();
+            let sample_names = self.sample_names.clone();
+            let source_sample_names = self.source_sample_names.clone();
+            let residual_filters = self.residual_filters.clone();
 
-                let limit = self.limit;
-                let fut = get_indexed_vcf_stream(
-                    file_path,
-                    index_path,
-                    regions,
-                    schema.clone(),
-                    batch_size,
-                    projection,
-                    coord_zero_based,
-                    info_fields,
-                    format_fields,
-                    sample_names,
-                    source_sample_names,
-                    residual_filters,
-                    limit,
-                );
-                let stream = futures::stream::once(fut).try_flatten();
-                return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
-            }
+            let limit = self.limit;
+            let fut = get_indexed_vcf_stream(
+                file_path,
+                index_path,
+                regions,
+                schema.clone(),
+                batch_size,
+                projection,
+                coord_zero_based,
+                info_fields,
+                format_fields,
+                sample_names,
+                source_sample_names,
+                residual_filters,
+                limit,
+            );
+            let stream = futures::stream::once(fut).try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)));
         }
 
         // Fallback: full scan (original path)
@@ -2770,15 +2769,15 @@ async fn get_indexed_vcf_stream(
                         (None, None)
                     };
 
-                    if let Some(rs) = region_start_1based {
-                        if start_pos.unwrap() < rs {
-                            continue;
-                        }
+                    if let Some(rs) = region_start_1based
+                        && start_pos.unwrap() < rs
+                    {
+                        continue;
                     }
-                    if let Some(re) = region_end_1based {
-                        if start_pos.unwrap() > re {
-                            continue;
-                        }
+                    if let Some(re) = region_end_1based
+                        && start_pos.unwrap() > re
+                    {
+                        continue;
                     }
 
                     let chrom_for_filters = if has_residual_filters {

@@ -453,12 +453,11 @@ impl IndexedCramReader {
         let mut builder = cram::io::indexed_reader::Builder::default().set_index(index);
 
         // Set reference sequence repository if provided
-        if let Some(ref_path) = reference_path {
-            if let ReferenceSequenceRepository::External(repo) =
+        if let Some(ref_path) = reference_path
+            && let ReferenceSequenceRepository::External(repo) =
                 ReferenceSequenceRepository::from_fasta_path(ref_path)?
-            {
-                builder = builder.set_reference_sequence_repository(repo);
-            }
+        {
+            builder = builder.set_reference_sequence_repository(repo);
         }
 
         let mut reader = builder
