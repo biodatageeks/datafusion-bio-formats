@@ -145,8 +145,8 @@ fn row_group_size(kind: EnsemblEntityKind) -> usize {
         EnsemblEntityKind::Variation => 100_000,
         // Transcript: 6-12K rows/RG for interval predicate pruning
         EnsemblEntityKind::Transcript => 8_000,
-        // Exon: 20-45K rows/RG for transcript_id predicate pruning
-        EnsemblEntityKind::Exon => 30_000,
+        // Exon: ~45K rows/RG — fewer RGs reduces inter-RG alignment padding
+        EnsemblEntityKind::Exon => 45_000,
         // Translation splits: 6K rows/RG for effective pruning on ~22K rows
         EnsemblEntityKind::Translation => 6_000,
         // Regulatory: ~9K rows/RG for interval predicate pruning
