@@ -310,6 +310,36 @@ pub(crate) fn translation_schema(
     new_schema(fields, coordinate_system_zero_based)
 }
 
+/// Schema for the `translation_core` split file: identity, sequence, and protein features.
+/// Sorted by `(transcript_id)` to enable RG pruning for `WHERE transcript_id IN (...)`.
+pub fn translation_core_schema(coordinate_system_zero_based: bool) -> SchemaRef {
+    let fields = vec![
+        Field::new("transcript_id", DataType::Utf8, false),
+        Field::new("stable_id", DataType::Utf8, true),
+        Field::new("version", DataType::Int32, true),
+        Field::new("cds_len", DataType::Int64, true),
+        Field::new("protein_len", DataType::Int64, true),
+        Field::new("translation_seq", DataType::Utf8, true),
+        Field::new("cds_sequence", DataType::Utf8, true),
+        Field::new("protein_features", protein_feature_list_data_type(), true),
+    ];
+    new_schema(fields, coordinate_system_zero_based)
+}
+
+/// Schema for the `translation_sift` split file: position-range sift/polyphen data.
+/// Sorted by `(chrom, start)` to enable RG pruning for windowed sift/polyphen loading.
+pub fn translation_sift_schema(coordinate_system_zero_based: bool) -> SchemaRef {
+    let fields = vec![
+        Field::new("transcript_id", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+        Field::new("sift_predictions", prediction_list_data_type(), true),
+        Field::new("polyphen_predictions", prediction_list_data_type(), true),
+    ];
+    new_schema(fields, coordinate_system_zero_based)
+}
+
 fn provenance_fields(cache_info: &CacheInfo) -> Vec<Field> {
     let mut fields = vec![
         Field::new("species", DataType::Utf8, false),
@@ -562,6 +592,55 @@ mod tests {
         assert!(schema.column_with_name("transcript_id").is_some());
         assert!(schema.column_with_name("translation_seq").is_some());
         assert!(schema.column_with_name("cds_sequence").is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // translation_core_schema / translation_sift_schema
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn translation_core_schema_fields() {
+        let schema = translation_core_schema(false);
+        assert!(schema.column_with_name("transcript_id").is_some());
+        assert!(schema.column_with_name("stable_id").is_some());
+        assert!(schema.column_with_name("cds_len").is_some());
+        assert!(schema.column_with_name("protein_len").is_some());
+        assert!(schema.column_with_name("translation_seq").is_some());
+        assert!(schema.column_with_name("cds_sequence").is_some());
+        assert!(schema.column_with_name("protein_features").is_some());
+        // Should NOT contain position or sift/polyphen columns
+        assert!(schema.column_with_name("chrom").is_none());
+        assert!(schema.column_with_name("start").is_none());
+        assert!(schema.column_with_name("sift_predictions").is_none());
+        assert!(schema.column_with_name("polyphen_predictions").is_none());
+    }
+
+    #[test]
+    fn translation_sift_schema_fields() {
+        let schema = translation_sift_schema(false);
+        assert!(schema.column_with_name("transcript_id").is_some());
+        assert!(schema.column_with_name("chrom").is_some());
+        assert!(schema.column_with_name("start").is_some());
+        assert!(schema.column_with_name("end").is_some());
+        assert!(schema.column_with_name("sift_predictions").is_some());
+        assert!(schema.column_with_name("polyphen_predictions").is_some());
+        // Should NOT contain core translation columns
+        assert!(schema.column_with_name("translation_seq").is_none());
+        assert!(schema.column_with_name("protein_features").is_none());
+    }
+
+    #[test]
+    fn translation_split_schemas_coordinate_metadata() {
+        let core_0 = translation_core_schema(true);
+        assert_eq!(
+            core_0.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+            Some(&"true".to_string())
+        );
+        let sift_1 = translation_sift_schema(false);
+        assert_eq!(
+            sift_1.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+            Some(&"false".to_string())
+        );
     }
 
     // -----------------------------------------------------------------------
