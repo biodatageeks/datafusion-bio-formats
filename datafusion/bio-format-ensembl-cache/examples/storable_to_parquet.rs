@@ -100,19 +100,8 @@ fn build_dedup_query(
                 ORDER BY chrom, start"
             )
         }
-        // Translation: dedup by transcript_id — sort happens per-split in write_translation_split()
-        EnsemblEntityKind::Translation => {
-            format!(
-                "SELECT * FROM (\
-                    SELECT *, ROW_NUMBER() OVER (\
-                        PARTITION BY transcript_id \
-                        ORDER BY cdna_coding_start NULLS LAST\
-                    ) AS _rn \
-                    FROM {table_name}{where_clause}\
-                ) WHERE _rn = 1 \
-                ORDER BY chrom, start, \"end\""
-            )
-        }
+        // Translation is handled separately by write_translation_split() — not via this path.
+        EnsemblEntityKind::Translation => unreachable!("use write_translation_split() instead"),
         // Exon: dedup by (transcript_id, exon_number), sort by (transcript_id, start)
         // to enable RG pruning for WHERE transcript_id IN (...) queries
         EnsemblEntityKind::Exon => {
@@ -233,6 +222,7 @@ fn project_batch(
 }
 
 /// Write translation entity as two split files: translation_core and translation_sift.
+/// Coordinates are 1-based (coordinate_system_zero_based=false) to match VEP conventions.
 async fn write_translation_split(
     ctx: &SessionContext,
     table_name: &str,
@@ -275,6 +265,11 @@ async fn write_translation_split(
         .collect();
     let df = df.select_columns(&cols.iter().map(|c| c.name()).collect::<Vec<_>>())?;
     let deduped = df.collect().await?;
+
+    // Empty result (e.g. --chrom Y on a cache without Y data)
+    if deduped.is_empty() || deduped.iter().all(|b| b.num_rows() == 0) {
+        return Ok(vec![]);
+    }
 
     // Register as temp table
     let mem_table = datafusion::datasource::MemTable::try_new(deduped[0].schema(), vec![deduped])?;

@@ -595,6 +595,55 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // translation_core_schema / translation_sift_schema
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn translation_core_schema_fields() {
+        let schema = translation_core_schema(false);
+        assert!(schema.column_with_name("transcript_id").is_some());
+        assert!(schema.column_with_name("stable_id").is_some());
+        assert!(schema.column_with_name("cds_len").is_some());
+        assert!(schema.column_with_name("protein_len").is_some());
+        assert!(schema.column_with_name("translation_seq").is_some());
+        assert!(schema.column_with_name("cds_sequence").is_some());
+        assert!(schema.column_with_name("protein_features").is_some());
+        // Should NOT contain position or sift/polyphen columns
+        assert!(schema.column_with_name("chrom").is_none());
+        assert!(schema.column_with_name("start").is_none());
+        assert!(schema.column_with_name("sift_predictions").is_none());
+        assert!(schema.column_with_name("polyphen_predictions").is_none());
+    }
+
+    #[test]
+    fn translation_sift_schema_fields() {
+        let schema = translation_sift_schema(false);
+        assert!(schema.column_with_name("transcript_id").is_some());
+        assert!(schema.column_with_name("chrom").is_some());
+        assert!(schema.column_with_name("start").is_some());
+        assert!(schema.column_with_name("end").is_some());
+        assert!(schema.column_with_name("sift_predictions").is_some());
+        assert!(schema.column_with_name("polyphen_predictions").is_some());
+        // Should NOT contain core translation columns
+        assert!(schema.column_with_name("translation_seq").is_none());
+        assert!(schema.column_with_name("protein_features").is_none());
+    }
+
+    #[test]
+    fn translation_split_schemas_coordinate_metadata() {
+        let core_0 = translation_core_schema(true);
+        assert_eq!(
+            core_0.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+            Some(&"true".to_string())
+        );
+        let sift_1 = translation_sift_schema(false);
+        assert_eq!(
+            sift_1.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
+            Some(&"false".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // provenance_fields
     // -----------------------------------------------------------------------
 
