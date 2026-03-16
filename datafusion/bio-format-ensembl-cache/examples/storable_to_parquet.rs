@@ -182,12 +182,14 @@ fn sort_key(kind: EnsemblEntityKind) -> &'static [&'static str] {
 }
 
 /// Build WriterProperties with compression, row group size, sorting metadata, and bloom filters.
+/// If `rg_size_override` is provided, it takes precedence over the entity-level default.
 fn writer_properties(
     kind: EnsemblEntityKind,
     schema: &SchemaRef,
     sort_columns: &[&str],
+    rg_size_override: Option<usize>,
 ) -> WriterProperties {
-    let rg_size = row_group_size(kind);
+    let rg_size = rg_size_override.unwrap_or_else(|| row_group_size(kind));
     let sorting = sorting_columns_for(schema, sort_columns);
 
     let mut builder = WriterProperties::builder()
@@ -293,7 +295,12 @@ async fn write_translation_split(
 
     let core_file = format!("{output_dir}/{cache_dir_name}_translation_core{chrom_suffix}.parquet");
     let core_sort = &["transcript_id"];
-    let core_props = writer_properties(EnsemblEntityKind::Translation, &core_schema, core_sort);
+    let core_props = writer_properties(
+        EnsemblEntityKind::Translation,
+        &core_schema,
+        core_sort,
+        None,
+    );
 
     let core_df = ctx.sql(&core_query).await?;
     let mut core_stream = core_df.execute_stream().await?;
@@ -329,7 +336,14 @@ async fn write_translation_split(
 
     let sift_file = format!("{output_dir}/{cache_dir_name}_translation_sift{chrom_suffix}.parquet");
     let sift_sort = &["chrom", "start"];
-    let sift_props = writer_properties(EnsemblEntityKind::Translation, &sift_schema, sift_sort);
+    // Small RGs (~256 rows) for sift: windowed 5 Mb queries need narrow RGs
+    // so position predicates prune effectively on the nested list<struct> data.
+    let sift_props = writer_properties(
+        EnsemblEntityKind::Translation,
+        &sift_schema,
+        sift_sort,
+        Some(256),
+    );
 
     let sift_df = ctx.sql(&sift_query).await?;
     let mut sift_stream = sift_df.execute_stream().await?;
@@ -510,7 +524,7 @@ async fn main() -> datafusion::common::Result<()> {
     let schema = stream.schema();
 
     let sk = sort_key(kind);
-    let props = writer_properties(kind, &schema, sk);
+    let props = writer_properties(kind, &schema, sk, None);
 
     let file = File::create(&output_file)
         .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
