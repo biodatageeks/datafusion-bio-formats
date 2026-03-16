@@ -14,7 +14,7 @@ mod filter;
 mod info;
 mod physical_exec;
 mod regulatory;
-mod schema;
+pub(crate) mod schema;
 mod table_provider;
 mod transcript;
 mod translation;
@@ -22,6 +22,7 @@ mod util;
 mod variation;
 
 pub use entity::EnsemblEntityKind;
+pub use schema::{translation_core_schema, translation_sift_schema};
 pub use table_provider::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, ExonTableProvider, MotifFeatureTableProvider,
     RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,

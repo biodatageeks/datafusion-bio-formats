@@ -1,14 +1,28 @@
-/// Convert Ensembl VEP cache storable entities to a single Parquet file.
+/// Convert Ensembl VEP cache storable entities to optimized Parquet files.
 ///
 /// Usage: cargo run --release --example storable_to_parquet -- <cache_root> <output_dir> <entity> [partitions] [--chrom CHROM]
 ///
 /// entity: transcript | exon | translation | regulatory | motif | variation
 ///
-/// Output file: <output_dir>/<version>_<assembly>_<entity>[_<chrom>].parquet
-/// e.g. 115_GRCh38_transcript_22.parquet
+/// Output files:
+///   <output_dir>/<version_assembly>_<entity>[_<chrom>].parquet
+///   e.g. 115_GRCh38_transcript_22.parquet
+///
+/// Translation is split into two files for optimal access patterns:
+///   <output_dir>/<version_assembly>_translation_core[_<chrom>].parquet  (sorted by transcript_id)
+///   <output_dir>/<version_assembly>_translation_sift[_<chrom>].parquet  (sorted by chrom, start)
+///
+/// Layout optimizations (see https://github.com/biodatageeks/datafusion-bio-formats/issues/131):
+///   - Provenance/metadata columns dropped (species, assembly, cache_version, source_*, etc.)
+///   - Entity-specific row group sizing for effective RG pruning
+///   - Sort order matched to downstream query access patterns
+///   - sorting_columns declared in parquet footer for DataFusion sort-aware optimizations
+use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
+use datafusion::parquet::format::SortingColumn;
 use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
@@ -61,8 +75,33 @@ fn rss_mb() -> f64 {
     0.0
 }
 
-/// Build the dedup query for entities that can appear in multiple region bins.
-/// Uses ROW_NUMBER() to prefer entries with non-null CDS boundaries.
+/// Columns to drop from all parquet output files.
+/// These are constant provenance/metadata columns that bloat per-RG dictionaries.
+/// They can be stored in a separate `_metadata.json` sidecar if needed.
+const PROVENANCE_COLUMN_PREFIXES: &[&str] = &[
+    "species",
+    "assembly",
+    "cache_version",
+    "serializer_type",
+    "source_cache_path",
+    "source_file",
+    "source_",     // catches all source_* columns (source_assembly, source_dbsnp, etc.)
+    "object_hash", // stable hash - derivable, not needed for queries
+];
+
+/// Additional columns dropped only from non-variation entities.
+/// raw_object_json is the canonical JSON blob — large and unused in the annotation path.
+const RAW_JSON_COLUMN: &str = "raw_object_json";
+
+fn is_provenance_column(name: &str) -> bool {
+    PROVENANCE_COLUMN_PREFIXES
+        .iter()
+        .any(|prefix| name == *prefix || name.starts_with(prefix))
+        || name == RAW_JSON_COLUMN
+}
+
+/// Build the dedup + sort query for each entity type.
+/// Sort order is chosen to match downstream access patterns (see issue #131).
 fn build_dedup_query(
     kind: EnsemblEntityKind,
     table_name: &str,
@@ -74,10 +113,8 @@ fn build_dedup_query(
         String::new()
     };
 
-    // All queries end with ORDER BY chrom, start so parquet row groups have
-    // tight min/max statistics for efficient predicate pushdown.
     match kind {
-        // Transcript: dedup by stable_id, prefer entries with non-null cds_start
+        // Transcript: dedup by stable_id, sort by (chrom, start) for interval queries
         EnsemblEntityKind::Transcript => {
             format!(
                 "SELECT * FROM (\
@@ -90,7 +127,7 @@ fn build_dedup_query(
                 ORDER BY chrom, start"
             )
         }
-        // Translation: dedup by transcript_id, prefer entries with non-null cdna_coding_start
+        // Translation: dedup by transcript_id — sort happens per-split in write_translation_split()
         EnsemblEntityKind::Translation => {
             format!(
                 "SELECT * FROM (\
@@ -103,7 +140,8 @@ fn build_dedup_query(
                 ORDER BY chrom, start, \"end\""
             )
         }
-        // Exon: dedup by (transcript_id, exon_number), prefer entries with non-null stable_id
+        // Exon: dedup by (transcript_id, exon_number), sort by (transcript_id, start)
+        // to enable RG pruning for WHERE transcript_id IN (...) queries
         EnsemblEntityKind::Exon => {
             format!(
                 "SELECT * FROM (\
@@ -113,10 +151,10 @@ fn build_dedup_query(
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
                 ) WHERE _rn = 1 \
-                ORDER BY chrom, start"
+                ORDER BY transcript_id, start"
             )
         }
-        // Other entities: no dedup needed
+        // Other entities (variation, regulatory, motif): sort by (chrom, start)
         _ => {
             format!(
                 "SELECT * FROM {table_name}{where_clause} \
@@ -124,6 +162,252 @@ fn build_dedup_query(
             )
         }
     }
+}
+
+/// Row group sizing per entity type.
+/// Chosen to balance RG pruning effectiveness vs per-RG overhead.
+fn row_group_size(kind: EnsemblEntityKind) -> usize {
+    match kind {
+        // Variation: 100K rows/RG — already optimal, large table
+        EnsemblEntityKind::Variation => 100_000,
+        // Transcript: 6-12K rows/RG for interval predicate pruning
+        EnsemblEntityKind::Transcript => 8_000,
+        // Exon: 20-45K rows/RG for transcript_id predicate pruning
+        EnsemblEntityKind::Exon => 30_000,
+        // Translation splits: 6K rows/RG for effective pruning on ~22K rows
+        EnsemblEntityKind::Translation => 6_000,
+        // Regulatory: ~9K rows/RG for interval predicate pruning
+        EnsemblEntityKind::RegulatoryFeature => 9_000,
+        // Motif: typically empty or very small, use moderate size
+        EnsemblEntityKind::MotifFeature => 10_000,
+    }
+}
+
+/// Build sorting_columns metadata for the parquet footer based on sort key.
+fn sorting_columns_for(schema: &SchemaRef, sort_columns: &[&str]) -> Option<Vec<SortingColumn>> {
+    let cols: Vec<SortingColumn> = sort_columns
+        .iter()
+        .filter_map(|name| {
+            schema
+                .column_with_name(name)
+                .map(|(idx, _)| SortingColumn::new(idx as i32, false, false))
+        })
+        .collect();
+    if cols.len() == sort_columns.len() {
+        Some(cols)
+    } else {
+        None
+    }
+}
+
+/// Sort key for each entity type (must match the ORDER BY in build_dedup_query).
+fn sort_key(kind: EnsemblEntityKind) -> &'static [&'static str] {
+    match kind {
+        EnsemblEntityKind::Exon => &["transcript_id", "start"],
+        _ => &["chrom", "start"],
+    }
+}
+
+/// Build WriterProperties with compression, row group size, sorting metadata, and bloom filters.
+fn writer_properties(
+    kind: EnsemblEntityKind,
+    schema: &SchemaRef,
+    sort_columns: &[&str],
+) -> WriterProperties {
+    let rg_size = row_group_size(kind);
+    let sorting = sorting_columns_for(schema, sort_columns);
+
+    let mut builder = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .set_max_row_group_size(rg_size)
+        .set_sorting_columns(sorting);
+
+    // Bloom filter on transcript_id for translation and exon tables
+    if matches!(
+        kind,
+        EnsemblEntityKind::Translation | EnsemblEntityKind::Exon
+    ) {
+        builder = builder.set_column_bloom_filter_enabled(ColumnPath::from("transcript_id"), true);
+    }
+
+    builder.build()
+}
+
+/// Filter provenance columns from a RecordBatch, keeping only data columns.
+fn drop_provenance_columns(batch: &RecordBatch) -> datafusion::common::Result<RecordBatch> {
+    let schema = batch.schema();
+    let keep_indices: Vec<usize> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !is_provenance_column(f.name()))
+        .map(|(i, _)| i)
+        .collect();
+
+    let new_fields: Vec<_> = keep_indices
+        .iter()
+        .map(|&i| schema.field(i).clone())
+        .collect();
+    let new_columns: Vec<_> = keep_indices
+        .iter()
+        .map(|&i| batch.column(i).clone())
+        .collect();
+
+    let new_schema = Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
+        new_fields,
+        schema.metadata().clone(),
+    ));
+
+    Ok(RecordBatch::try_new(new_schema, new_columns)?)
+}
+
+/// Project a RecordBatch to a target schema (select columns by name).
+fn project_batch(
+    batch: &RecordBatch,
+    target_schema: &SchemaRef,
+) -> datafusion::common::Result<RecordBatch> {
+    let source_schema = batch.schema();
+    let mut columns = Vec::with_capacity(target_schema.fields().len());
+    for field in target_schema.fields() {
+        let (idx, _) = source_schema
+            .column_with_name(field.name())
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Column '{}' not found in source batch",
+                    field.name()
+                ))
+            })?;
+        columns.push(batch.column(idx).clone());
+    }
+    Ok(RecordBatch::try_new(target_schema.clone(), columns)?)
+}
+
+/// Write translation entity as two split files: translation_core and translation_sift.
+async fn write_translation_split(
+    ctx: &SessionContext,
+    table_name: &str,
+    chrom_filter: &Option<String>,
+    output_dir: &str,
+    cache_dir_name: &str,
+    coordinate_system_zero_based: bool,
+) -> datafusion::common::Result<Vec<(String, usize)>> {
+    let where_clause = if let Some(chrom) = chrom_filter {
+        format!(" WHERE chrom = '{chrom}'")
+    } else {
+        String::new()
+    };
+
+    let chrom_suffix = if let Some(chrom) = &chrom_filter {
+        format!("_{chrom}")
+    } else {
+        String::new()
+    };
+
+    // Dedup query — we'll re-sort per split
+    let dedup_query = format!(
+        "SELECT * FROM (\
+            SELECT *, ROW_NUMBER() OVER (\
+                PARTITION BY transcript_id \
+                ORDER BY cdna_coding_start NULLS LAST\
+            ) AS _rn \
+            FROM {table_name}{where_clause}\
+        ) WHERE _rn = 1"
+    );
+
+    // Register deduped data as a temp table so we can query it twice with different sorts
+    let df = ctx.sql(&dedup_query).await?;
+    // Drop _rn column
+    let schema = df.schema().clone();
+    let cols: Vec<_> = schema
+        .columns()
+        .into_iter()
+        .filter(|c| c.name() != "_rn")
+        .collect();
+    let df = df.select_columns(&cols.iter().map(|c| c.name()).collect::<Vec<_>>())?;
+    let deduped = df.collect().await?;
+
+    // Register as temp table
+    let mem_table = datafusion::datasource::MemTable::try_new(deduped[0].schema(), vec![deduped])?;
+    ctx.register_table("_tl_deduped", Arc::new(mem_table))?;
+
+    let mut results = Vec::new();
+
+    // --- translation_core: sorted by transcript_id ---
+    let core_schema =
+        datafusion_bio_format_ensembl_cache::translation_core_schema(coordinate_system_zero_based);
+    let core_cols: Vec<&str> = core_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    let core_select = core_cols.join(", ");
+    let core_query = format!("SELECT {core_select} FROM _tl_deduped ORDER BY transcript_id");
+
+    let core_file = format!("{output_dir}/{cache_dir_name}_translation_core{chrom_suffix}.parquet");
+    let core_sort = &["transcript_id"];
+    let core_props = writer_properties(EnsemblEntityKind::Translation, &core_schema, core_sort);
+
+    let core_df = ctx.sql(&core_query).await?;
+    let mut core_stream = core_df.execute_stream().await?;
+
+    let file = File::create(&core_file)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
+    let mut writer = ArrowWriter::try_new(file, core_schema.clone(), Some(core_props))?;
+    let mut core_rows = 0usize;
+
+    while let Some(batch_result) = core_stream.next().await {
+        let batch = batch_result?;
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let batch = project_batch(&batch, &core_schema)?;
+        core_rows += batch.num_rows();
+        writer.write(&batch)?;
+    }
+    writer.close()?;
+    println!("  translation_core: {core_rows} rows -> {core_file}");
+    results.push((core_file, core_rows));
+
+    // --- translation_sift: sorted by (chrom, start) ---
+    let sift_schema =
+        datafusion_bio_format_ensembl_cache::translation_sift_schema(coordinate_system_zero_based);
+    let sift_cols: Vec<&str> = sift_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+    let sift_select = sift_cols.join(", ");
+    let sift_query = format!("SELECT {sift_select} FROM _tl_deduped ORDER BY chrom, start");
+
+    let sift_file = format!("{output_dir}/{cache_dir_name}_translation_sift{chrom_suffix}.parquet");
+    let sift_sort = &["chrom", "start"];
+    let sift_props = writer_properties(EnsemblEntityKind::Translation, &sift_schema, sift_sort);
+
+    let sift_df = ctx.sql(&sift_query).await?;
+    let mut sift_stream = sift_df.execute_stream().await?;
+
+    let file = File::create(&sift_file)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
+    let mut writer = ArrowWriter::try_new(file, sift_schema.clone(), Some(sift_props))?;
+    let mut sift_rows = 0usize;
+
+    while let Some(batch_result) = sift_stream.next().await {
+        let batch = batch_result?;
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let batch = project_batch(&batch, &sift_schema)?;
+        sift_rows += batch.num_rows();
+        writer.write(&batch)?;
+    }
+    writer.close()?;
+    println!("  translation_sift: {sift_rows} rows -> {sift_file}");
+    results.push((sift_file, sift_rows));
+
+    // Deregister temp table
+    ctx.deregister_table("_tl_deduped")?;
+
+    Ok(results)
 }
 
 #[tokio::main]
@@ -172,16 +456,8 @@ async fn main() -> datafusion::common::Result<()> {
         .and_then(|f| f.to_str())
         .unwrap_or("unknown");
 
-    // Build output filename: <version_assembly>_<entity>[_<chrom>].parquet
-    let output_file = if let Some(ref chrom) = chrom_filter {
-        format!("{output_dir}/{cache_dir_name}_{entity_label}_{chrom}.parquet")
-    } else {
-        format!("{output_dir}/{cache_dir_name}_{entity_label}.parquet")
-    };
-
     println!("Cache root:  {cache_root}");
     println!("Entity:      {entity_str} ({kind:?})");
-    println!("Output file: {output_file}");
     println!("Partitions:  {partitions}");
     if let Some(ref chrom) = chrom_filter {
         println!("Chrom filter: {chrom}");
@@ -199,11 +475,8 @@ async fn main() -> datafusion::common::Result<()> {
     println!("After provider init RSS: {:.1} MB", rss_mb());
 
     // Ensure output directory exists
-    let output_path = std::path::Path::new(&output_file);
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
-    }
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
 
     // Memory monitor
     let monitor_flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -223,8 +496,46 @@ async fn main() -> datafusion::common::Result<()> {
 
     let start = Instant::now();
 
-    // Build query with SQL-level dedup for transcript/exon/translation.
-    // ROW_NUMBER() prefers entries with non-null CDS boundaries over nulls.
+    // --- Translation: split into two files ---
+    if kind == EnsemblEntityKind::Translation {
+        let results = write_translation_split(
+            &ctx,
+            table_name,
+            &chrom_filter,
+            &output_dir,
+            cache_dir_name,
+            false, // coordinate_system_zero_based
+        )
+        .await?;
+
+        let elapsed = start.elapsed();
+        monitor_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        let peak_rss = monitor_handle.join().unwrap_or(0.0);
+
+        println!();
+        println!("=== Summary (translation split) ===");
+        for (file, rows) in &results {
+            let size = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+            println!(
+                "  {file}: {rows} rows ({:.1} MB)",
+                size as f64 / 1024.0 / 1024.0
+            );
+        }
+        println!("Elapsed:   {elapsed:.2?}");
+        println!("Final RSS: {:.1} MB", rss_mb());
+        println!("Peak RSS:  {peak_rss:.1} MB");
+        return Ok(());
+    }
+
+    // --- All other entities: single file ---
+    let chrom_suffix = if let Some(chrom) = &chrom_filter {
+        format!("_{chrom}")
+    } else {
+        String::new()
+    };
+    let output_file = format!("{output_dir}/{cache_dir_name}_{entity_label}{chrom_suffix}.parquet");
+    println!("Output file: {output_file}");
+
     let query = build_dedup_query(kind, table_name, &chrom_filter);
     println!("Query: {query}");
 
@@ -233,7 +544,7 @@ async fn main() -> datafusion::common::Result<()> {
     // Drop the _rn column added by ROW_NUMBER() before writing to parquet
     let needs_rn_drop = matches!(
         kind,
-        EnsemblEntityKind::Transcript | EnsemblEntityKind::Translation | EnsemblEntityKind::Exon
+        EnsemblEntityKind::Transcript | EnsemblEntityKind::Exon
     );
     let df = if needs_rn_drop {
         let schema = df.schema().clone();
@@ -248,38 +559,62 @@ async fn main() -> datafusion::common::Result<()> {
     };
 
     let mut stream = df.execute_stream().await?;
-    let schema = stream.schema();
 
-    // Translation uses small row groups (1024) so that point queries on
-    // transcript_id can leverage row-group min/max statistics for pruning.
-    let row_group_size = match kind {
-        EnsemblEntityKind::Translation => 256,
-        _ => 100_000,
-    };
-    let mut builder = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(Default::default()))
-        .set_max_row_group_size(row_group_size);
-    if matches!(kind, EnsemblEntityKind::Translation) {
-        // Page-level column index for finer-grained pruning within row groups
-        builder = builder.set_column_index_truncate_length(Some(64));
-        // Bloom filter on transcript_id for definite-negative row group skipping
-        builder = builder.set_column_bloom_filter_enabled(ColumnPath::from("transcript_id"), true);
+    // Get first batch to determine schema after provenance column removal
+    let pending_batch: Option<RecordBatch>;
+    let output_schema: SchemaRef;
+    loop {
+        match stream.next().await {
+            Some(Ok(batch)) if batch.num_rows() > 0 => {
+                let cleaned = drop_provenance_columns(&batch)?;
+                output_schema = cleaned.schema();
+                pending_batch = Some(cleaned);
+                break;
+            }
+            Some(Ok(_)) => continue, // empty batch
+            Some(Err(e)) => return Err(e),
+            None => {
+                // No data — use stream schema with provenance dropped
+                let s = stream.schema();
+                let fields: Vec<_> = s
+                    .fields()
+                    .iter()
+                    .filter(|f| !is_provenance_column(f.name()))
+                    .cloned()
+                    .collect();
+                output_schema = Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
+                    fields,
+                    s.metadata().clone(),
+                ));
+                pending_batch = None;
+                break;
+            }
+        }
     }
-    let writer_props = builder.build();
 
-    // Single output file
+    let sk = sort_key(kind);
+    let props = writer_properties(kind, &output_schema, sk);
+
     let file = File::create(&output_file)
         .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
-    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_props))?;
+    let mut writer = ArrowWriter::try_new(file, output_schema.clone(), Some(props))?;
 
     let mut total_rows: usize = 0;
     let mut total_batches: usize = 0;
+
+    // Write pending batch from schema discovery
+    if let Some(batch) = pending_batch {
+        total_rows += batch.num_rows();
+        total_batches += 1;
+        writer.write(&batch)?;
+    }
 
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
         if batch.num_rows() == 0 {
             continue;
         }
+        let batch = drop_provenance_columns(&batch)?;
         total_rows += batch.num_rows();
         total_batches += 1;
         writer.write(&batch)?;
@@ -303,6 +638,18 @@ async fn main() -> datafusion::common::Result<()> {
         .map(|m| m.len())
         .unwrap_or(0);
 
+    // Report which columns were dropped
+    let source_schema = stream.schema();
+    let dropped: Vec<&str> = source_schema
+        .fields()
+        .iter()
+        .filter(|f| is_provenance_column(f.name()))
+        .map(|f| f.name().as_str())
+        .collect();
+    if !dropped.is_empty() {
+        println!("Dropped provenance columns: {}", dropped.join(", "));
+    }
+
     println!();
     println!("=== Summary ({entity_label}) ===");
     println!("Rows written:   {total_rows}");
@@ -310,6 +657,8 @@ async fn main() -> datafusion::common::Result<()> {
         "Output:         {output_file} ({:.1} MB)",
         file_size as f64 / 1024.0 / 1024.0
     );
+    println!("Row group size: {}", row_group_size(kind));
+    println!("Sort key:       {}", sk.join(", "));
     println!("Batches:        {total_batches}");
     println!("Elapsed:        {elapsed:.2?}");
     println!("Final RSS:      {:.1} MB", rss_mb());

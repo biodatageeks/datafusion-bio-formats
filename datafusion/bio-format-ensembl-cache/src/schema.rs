@@ -310,6 +310,36 @@ pub(crate) fn translation_schema(
     new_schema(fields, coordinate_system_zero_based)
 }
 
+/// Schema for the `translation_core` split file: identity, sequence, and protein features.
+/// Sorted by `(transcript_id)` to enable RG pruning for `WHERE transcript_id IN (...)`.
+pub fn translation_core_schema(coordinate_system_zero_based: bool) -> SchemaRef {
+    let fields = vec![
+        Field::new("transcript_id", DataType::Utf8, false),
+        Field::new("stable_id", DataType::Utf8, true),
+        Field::new("version", DataType::Int32, true),
+        Field::new("cds_len", DataType::Int64, true),
+        Field::new("protein_len", DataType::Int64, true),
+        Field::new("translation_seq", DataType::Utf8, true),
+        Field::new("cds_sequence", DataType::Utf8, true),
+        Field::new("protein_features", protein_feature_list_data_type(), true),
+    ];
+    new_schema(fields, coordinate_system_zero_based)
+}
+
+/// Schema for the `translation_sift` split file: position-range sift/polyphen data.
+/// Sorted by `(chrom, start)` to enable RG pruning for windowed sift/polyphen loading.
+pub fn translation_sift_schema(coordinate_system_zero_based: bool) -> SchemaRef {
+    let fields = vec![
+        Field::new("transcript_id", DataType::Utf8, false),
+        Field::new("chrom", DataType::Utf8, false),
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+        Field::new("sift_predictions", prediction_list_data_type(), true),
+        Field::new("polyphen_predictions", prediction_list_data_type(), true),
+    ];
+    new_schema(fields, coordinate_system_zero_based)
+}
+
 fn provenance_fields(cache_info: &CacheInfo) -> Vec<Field> {
     let mut fields = vec![
         Field::new("species", DataType::Utf8, false),
