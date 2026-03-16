@@ -283,12 +283,12 @@ async fn write_translation_split(
     // --- translation_core: sorted by transcript_id ---
     let core_schema =
         datafusion_bio_format_ensembl_cache::translation_core_schema(coordinate_system_zero_based);
-    let core_cols: Vec<&str> = core_schema
+    let core_select = core_schema
         .fields()
         .iter()
-        .map(|f| f.name().as_str())
-        .collect();
-    let core_select = core_cols.join(", ");
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let core_query = format!("SELECT {core_select} FROM _tl_deduped ORDER BY transcript_id");
 
     let core_file = format!("{output_dir}/{cache_dir_name}_translation_core{chrom_suffix}.parquet");
@@ -319,12 +319,12 @@ async fn write_translation_split(
     // --- translation_sift: sorted by (chrom, start) ---
     let sift_schema =
         datafusion_bio_format_ensembl_cache::translation_sift_schema(coordinate_system_zero_based);
-    let sift_cols: Vec<&str> = sift_schema
+    let sift_select = sift_schema
         .fields()
         .iter()
-        .map(|f| f.name().as_str())
-        .collect();
-    let sift_select = sift_cols.join(", ");
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sift_query = format!("SELECT {sift_select} FROM _tl_deduped ORDER BY chrom, start");
 
     let sift_file = format!("{output_dir}/{cache_dir_name}_translation_sift{chrom_suffix}.parquet");
