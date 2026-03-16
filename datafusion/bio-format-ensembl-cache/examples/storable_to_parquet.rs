@@ -13,11 +13,9 @@
 ///   <output_dir>/<version_assembly>_translation_sift[_<chrom>].parquet  (sorted by chrom, start)
 ///
 /// Layout optimizations (see https://github.com/biodatageeks/datafusion-bio-formats/issues/131):
-///   - Provenance/metadata columns dropped (species, assembly, cache_version, source_*, etc.)
 ///   - Entity-specific row group sizing for effective RG pruning
 ///   - Sort order matched to downstream query access patterns
 ///   - sorting_columns declared in parquet footer for DataFusion sort-aware optimizations
-use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
@@ -73,31 +71,6 @@ fn rss_mb() -> f64 {
         }
     }
     0.0
-}
-
-/// Columns to drop from all parquet output files.
-/// These are constant provenance/metadata columns that bloat per-RG dictionaries.
-/// They can be stored in a separate `_metadata.json` sidecar if needed.
-const PROVENANCE_COLUMN_PREFIXES: &[&str] = &[
-    "species",
-    "assembly",
-    "cache_version",
-    "serializer_type",
-    "source_cache_path",
-    "source_file",
-    "source_",     // catches all source_* columns (source_assembly, source_dbsnp, etc.)
-    "object_hash", // stable hash - derivable, not needed for queries
-];
-
-/// Additional columns dropped only from non-variation entities.
-/// raw_object_json is the canonical JSON blob — large and unused in the annotation path.
-const RAW_JSON_COLUMN: &str = "raw_object_json";
-
-fn is_provenance_column(name: &str) -> bool {
-    PROVENANCE_COLUMN_PREFIXES
-        .iter()
-        .any(|prefix| name == *prefix || name.starts_with(prefix))
-        || name == RAW_JSON_COLUMN
 }
 
 /// Build the dedup + sort query for each entity type.
@@ -165,7 +138,7 @@ fn build_dedup_query(
 }
 
 /// Row group sizing per entity type.
-/// Chosen to balance RG pruning effectiveness vs per-RG overhead.
+/// Chosen to balance RG pruning effectiveness vs per-RG alignment padding overhead.
 fn row_group_size(kind: EnsemblEntityKind) -> usize {
     match kind {
         // Variation: 100K rows/RG — already optimal, large table
@@ -233,39 +206,11 @@ fn writer_properties(
     builder.build()
 }
 
-/// Filter provenance columns from a RecordBatch, keeping only data columns.
-fn drop_provenance_columns(batch: &RecordBatch) -> datafusion::common::Result<RecordBatch> {
-    let schema = batch.schema();
-    let keep_indices: Vec<usize> = schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| !is_provenance_column(f.name()))
-        .map(|(i, _)| i)
-        .collect();
-
-    let new_fields: Vec<_> = keep_indices
-        .iter()
-        .map(|&i| schema.field(i).clone())
-        .collect();
-    let new_columns: Vec<_> = keep_indices
-        .iter()
-        .map(|&i| batch.column(i).clone())
-        .collect();
-
-    let new_schema = Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
-        new_fields,
-        schema.metadata().clone(),
-    ));
-
-    Ok(RecordBatch::try_new(new_schema, new_columns)?)
-}
-
 /// Project a RecordBatch to a target schema (select columns by name).
 fn project_batch(
-    batch: &RecordBatch,
+    batch: &datafusion::arrow::array::RecordBatch,
     target_schema: &SchemaRef,
-) -> datafusion::common::Result<RecordBatch> {
+) -> datafusion::common::Result<datafusion::arrow::array::RecordBatch> {
     let source_schema = batch.schema();
     let mut columns = Vec::with_capacity(target_schema.fields().len());
     for field in target_schema.fields() {
@@ -279,7 +224,10 @@ fn project_batch(
             })?;
         columns.push(batch.column(idx).clone());
     }
-    Ok(RecordBatch::try_new(target_schema.clone(), columns)?)
+    Ok(datafusion::arrow::array::RecordBatch::try_new(
+        target_schema.clone(),
+        columns,
+    )?)
 }
 
 /// Write translation entity as two split files: translation_core and translation_sift.
@@ -559,62 +507,23 @@ async fn main() -> datafusion::common::Result<()> {
     };
 
     let mut stream = df.execute_stream().await?;
-
-    // Get first batch to determine schema after provenance column removal
-    let pending_batch: Option<RecordBatch>;
-    let output_schema: SchemaRef;
-    loop {
-        match stream.next().await {
-            Some(Ok(batch)) if batch.num_rows() > 0 => {
-                let cleaned = drop_provenance_columns(&batch)?;
-                output_schema = cleaned.schema();
-                pending_batch = Some(cleaned);
-                break;
-            }
-            Some(Ok(_)) => continue, // empty batch
-            Some(Err(e)) => return Err(e),
-            None => {
-                // No data — use stream schema with provenance dropped
-                let s = stream.schema();
-                let fields: Vec<_> = s
-                    .fields()
-                    .iter()
-                    .filter(|f| !is_provenance_column(f.name()))
-                    .cloned()
-                    .collect();
-                output_schema = Arc::new(datafusion::arrow::datatypes::Schema::new_with_metadata(
-                    fields,
-                    s.metadata().clone(),
-                ));
-                pending_batch = None;
-                break;
-            }
-        }
-    }
+    let schema = stream.schema();
 
     let sk = sort_key(kind);
-    let props = writer_properties(kind, &output_schema, sk);
+    let props = writer_properties(kind, &schema, sk);
 
     let file = File::create(&output_file)
         .map_err(|e| datafusion::error::DataFusionError::Execution(format!("{e}")))?;
-    let mut writer = ArrowWriter::try_new(file, output_schema.clone(), Some(props))?;
+    let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
 
     let mut total_rows: usize = 0;
     let mut total_batches: usize = 0;
-
-    // Write pending batch from schema discovery
-    if let Some(batch) = pending_batch {
-        total_rows += batch.num_rows();
-        total_batches += 1;
-        writer.write(&batch)?;
-    }
 
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result?;
         if batch.num_rows() == 0 {
             continue;
         }
-        let batch = drop_provenance_columns(&batch)?;
         total_rows += batch.num_rows();
         total_batches += 1;
         writer.write(&batch)?;
@@ -637,18 +546,6 @@ async fn main() -> datafusion::common::Result<()> {
     let file_size = std::fs::metadata(&output_file)
         .map(|m| m.len())
         .unwrap_or(0);
-
-    // Report which columns were dropped
-    let source_schema = stream.schema();
-    let dropped: Vec<&str> = source_schema
-        .fields()
-        .iter()
-        .filter(|f| is_provenance_column(f.name()))
-        .map(|f| f.name().as_str())
-        .collect();
-    if !dropped.is_empty() {
-        println!("Dropped provenance columns: {}", dropped.join(", "));
-    }
 
     println!();
     println!("=== Summary ({entity_label}) ===");
