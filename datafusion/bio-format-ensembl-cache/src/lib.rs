@@ -26,5 +26,5 @@ pub use schema::{translation_core_schema, translation_sift_schema};
 pub use table_provider::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, ExonTableProvider, MotifFeatureTableProvider,
     RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,
-    VariationTableProvider,
+    VEP_CHROMOSOMES_METADATA_KEY, VariationTableProvider,
 };

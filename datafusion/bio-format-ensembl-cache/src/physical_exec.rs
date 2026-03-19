@@ -196,7 +196,7 @@ fn file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
 }
 
 /// Parses `{chrom}_{start}-{end}_var.gz` → (chrom, start, end)
-fn parse_file_chrom_region(name: &str) -> Option<(&str, i64, i64)> {
+pub(crate) fn parse_file_chrom_region(name: &str) -> Option<(&str, i64, i64)> {
     let marker = name.find('_')?;
     let chrom = &name[..marker];
     let suffix = &name[marker + 1..];

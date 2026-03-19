@@ -11,7 +11,7 @@ use datafusion_bio_format_core::test_utils::find_leaf_exec;
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, ExonTableProvider,
     MotifFeatureTableProvider, RegulatoryFeatureTableProvider, TranscriptTableProvider,
-    TranslationTableProvider, VariationTableProvider,
+    TranslationTableProvider, VEP_CHROMOSOMES_METADATA_KEY, VariationTableProvider,
 };
 use std::sync::Arc;
 
@@ -147,6 +147,96 @@ async fn variation_tabix_mode_prefers_all_vars() -> datafusion::common::Result<(
         .collect()
         .await?;
     assert_eq!(first_i64(&batches), 2);
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Chromosome metadata from file paths (zero I/O)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn variation_chromosomes_from_file_paths() -> datafusion::common::Result<()> {
+    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "variation_non_tabix",
+    )))?;
+
+    // Chromosomes are available directly from the provider API
+    let chroms = provider
+        .chromosomes()
+        .expect("chroms should be extractable");
+    assert_eq!(chroms, &["1", "2"]);
+
+    // They are also stored in schema metadata
+    let meta = provider
+        .schema()
+        .metadata()
+        .get(VEP_CHROMOSOMES_METADATA_KEY)
+        .cloned();
+    assert!(meta.is_some());
+    let parsed: Vec<String> = serde_json::from_str(&meta.unwrap()).unwrap();
+    assert_eq!(parsed, vec!["1", "2"]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_tabix_chroms_unavailable_from_paths() -> datafusion::common::Result<()> {
+    // variation_tabix has `variation/all_vars.gz` — parent dir is "variation",
+    // so chroms can't be extracted from paths.
+    let provider =
+        VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path("variation_tabix")))?;
+
+    assert!(provider.chromosomes().is_none());
+    assert!(
+        provider
+            .schema()
+            .metadata()
+            .get(VEP_CHROMOSOMES_METADATA_KEY)
+            .is_none()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_storable_chroms_from_file_paths() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let chroms = provider
+        .chromosomes()
+        .expect("chroms should be extractable");
+    assert_eq!(chroms, &["1"]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_merged_chroms_from_file_paths() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_merged_layout",
+    )))?;
+
+    let chroms = provider
+        .chromosomes()
+        .expect("chroms should be extractable");
+    assert_eq!(chroms, &["1"]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn regulatory_chroms_from_file_paths() -> datafusion::common::Result<()> {
+    let provider = RegulatoryFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "regulatory_storable",
+    )))?;
+
+    let chroms = provider
+        .chromosomes()
+        .expect("chroms should be extractable");
+    assert_eq!(chroms, &["1"]);
 
     Ok(())
 }

@@ -1,4 +1,7 @@
+use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
+use crate::physical_exec::parse_file_chrom_region;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -159,6 +162,69 @@ fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 
 fn is_index_sidecar_name(name: &str) -> bool {
     name.ends_with(".csi") || name.ends_with(".tbi")
+}
+
+/// Well-known entity directory names that are NOT chromosome names.
+const ENTITY_DIR_NAMES: &[&str] = &["variation", "transcript", "regulatory"];
+
+/// Extracts the chromosome name from a discovered file path.
+///
+/// Uses entity-kind-aware heuristics based on VEP cache naming conventions:
+/// - Variation region files: `{chrom}_{start}-{end}_var.gz` → chrom from filename
+/// - `all_vars.gz` / merged region files: chrom from parent directory name
+/// - Explicit layout: `chr{N}_transcript.storable.gz` → strip `chr` prefix
+///
+/// Returns `None` if the chromosome cannot be reliably determined.
+pub(crate) fn extract_chrom_from_path(path: &Path, kind: EnsemblEntityKind) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+
+    // For variation files, try parsing `{chrom}_{start}-{end}_var.gz` first
+    if kind == EnsemblEntityKind::Variation
+        && let Some((chrom, _, _)) = parse_file_chrom_region(name)
+    {
+        return Some(chrom.to_string());
+    }
+
+    // Try parent directory name (works for merged/tabix layout: `1/all_vars.gz`,
+    // `22/1-1000000.gz`, etc.)
+    let parent_name = path.parent()?.file_name()?.to_str()?;
+    if !ENTITY_DIR_NAMES.contains(&parent_name.to_ascii_lowercase().as_str()) {
+        return Some(parent_name.to_string());
+    }
+
+    // Explicit layout: `chr{N}_transcript.storable.gz`, `chr{N}_regulatory.storable.gz`
+    let stem = extract_chrom_prefix_from_explicit_name(&lower)?;
+    Some(stem.to_string())
+}
+
+/// Extracts chrom from explicit-layout filenames like `chr1_transcript.storable.gz`.
+/// Returns the chromosome portion (e.g. `"1"` from `"chr1_transcript.storable.gz"`).
+fn extract_chrom_prefix_from_explicit_name(lower_name: &str) -> Option<&str> {
+    // Must start with "chr"
+    let rest = lower_name.strip_prefix("chr")?;
+    // Find the next underscore — everything between "chr" and "_" is the chrom
+    let underscore_pos = rest.find('_')?;
+    let chrom = &rest[..underscore_pos];
+    if chrom.is_empty() {
+        return None;
+    }
+    Some(chrom)
+}
+
+/// Extracts distinct chromosome values from a set of discovered file paths.
+///
+/// Returns `None` if any file's chromosome cannot be determined, signaling
+/// that a full scan is required for correctness.
+pub(crate) fn extract_distinct_chroms(
+    files: &[PathBuf],
+    kind: EnsemblEntityKind,
+) -> Option<Vec<String>> {
+    let mut chroms = BTreeSet::new();
+    for path in files {
+        chroms.insert(extract_chrom_from_path(path, kind)?);
+    }
+    Some(chroms.into_iter().collect())
 }
 
 fn looks_like_region_file_name(name: &str) -> bool {
@@ -417,5 +483,133 @@ mod tests {
         let mut out = Vec::new();
         walk_files(&dir.path().join("does_not_exist"), &mut out).unwrap();
         assert!(out.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_chrom_from_path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn chrom_variation_region_file() {
+        let path = PathBuf::from("/cache/variation/1_1-1000000_var.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Variation),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_variation_region_file_x() {
+        let path = PathBuf::from("/cache/variation/X_1-1000000_var.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Variation),
+            Some("X".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_all_vars_in_chrom_dir() {
+        let path = PathBuf::from("/cache/1/all_vars.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Variation),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_all_vars_in_entity_dir() {
+        // Parent dir is "variation" — not a chromosome name
+        let path = PathBuf::from("/cache/variation/all_vars.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Variation),
+            None
+        );
+    }
+
+    #[test]
+    fn chrom_transcript_merged_layout() {
+        let path = PathBuf::from("/cache/22/15000001-16000000.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Transcript),
+            Some("22".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_transcript_explicit_layout() {
+        let path = PathBuf::from("/cache/transcript/chr1_transcript.storable.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Transcript),
+            Some("1".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_regulatory_explicit_layout() {
+        let path = PathBuf::from("/cache/regulatory/chr2_regulatory.storable.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::RegulatoryFeature),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_regulatory_merged_layout() {
+        let path = PathBuf::from("/cache/22/15000001-16000000_reg.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::RegulatoryFeature),
+            Some("22".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_exon_merged_layout() {
+        let path = PathBuf::from("/cache/X/1-1000000.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Exon),
+            Some("X".to_string())
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // extract_distinct_chroms
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn distinct_chroms_variation_region_files() {
+        let files = vec![
+            PathBuf::from("/cache/variation/1_1-1000000_var.gz"),
+            PathBuf::from("/cache/variation/1_1000001-2000000_var.gz"),
+            PathBuf::from("/cache/variation/2_1-1000000_var.gz"),
+            PathBuf::from("/cache/variation/X_1-1000000_var.gz"),
+        ];
+        let chroms = extract_distinct_chroms(&files, EnsemblEntityKind::Variation).unwrap();
+        assert_eq!(chroms, vec!["1", "2", "X"]);
+    }
+
+    #[test]
+    fn distinct_chroms_returns_none_when_undetermined() {
+        let files = vec![
+            PathBuf::from("/cache/variation/1_1-1000000_var.gz"),
+            PathBuf::from("/cache/variation/all_vars.gz"), // parent is "variation"
+        ];
+        assert!(extract_distinct_chroms(&files, EnsemblEntityKind::Variation).is_none());
+    }
+
+    #[test]
+    fn distinct_chroms_transcript_mixed() {
+        let files = vec![
+            PathBuf::from("/cache/1/1-1000000.gz"),
+            PathBuf::from("/cache/1/1000001-2000000.gz"),
+            PathBuf::from("/cache/22/1-1000000.gz"),
+        ];
+        let chroms = extract_distinct_chroms(&files, EnsemblEntityKind::Transcript).unwrap();
+        assert_eq!(chroms, vec!["1", "22"]);
+    }
+
+    #[test]
+    fn distinct_chroms_empty_files() {
+        let chroms = extract_distinct_chroms(&[], EnsemblEntityKind::Variation).unwrap();
+        assert!(chroms.is_empty());
     }
 }
