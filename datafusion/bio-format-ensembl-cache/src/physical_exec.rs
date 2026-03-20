@@ -1,4 +1,5 @@
 use crate::decode::storable_binary::try_collect_nstore_alias_counts_and_top_keys;
+use crate::discovery::extract_chrom_from_path;
 use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
 use crate::exon::{ExonColumnIndices, parse_exon_line_into, parse_exon_storable_file_into};
@@ -159,18 +160,19 @@ impl EnsemblCacheExec {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 8: File-level predicate pruning for variation files
+// File-level predicate pruning
 // ---------------------------------------------------------------------------
 
-fn file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
-    // Variation files are named {chrom}_{start}-{end}_var.gz (e.g. 1_1-1000000_var.gz).
-    // We can prune files whose chrom/region can't match the predicate.
+/// Prunes variation files by chrom AND genomic region using the
+/// `{chrom}_{start}-{end}_var.gz` naming convention.
+fn variation_file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return true; // can't parse, don't prune
     };
 
     let Some((file_chrom, file_start, file_end)) = parse_file_chrom_region(file_name) else {
-        return true; // can't parse, don't prune
+        // Fall back to chrom-only pruning (e.g. all_vars.gz in a chrom dir)
+        return file_matches_chrom_predicate(path, predicate, EnsemblEntityKind::Variation);
     };
 
     // Check chromosome
@@ -193,6 +195,25 @@ fn file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
     }
 
     true
+}
+
+/// Prunes files by chromosome using directory structure or filename
+/// conventions. Works for all entity kinds. Returns `true` (don't prune)
+/// if the chromosome cannot be determined from the path.
+fn file_matches_chrom_predicate(
+    path: &Path,
+    predicate: &SimplePredicate,
+    kind: EnsemblEntityKind,
+) -> bool {
+    let Some(pred_chrom) = &predicate.chrom else {
+        return true; // no chrom filter → keep all files
+    };
+
+    let Some(file_chrom) = extract_chrom_from_path(path, kind) else {
+        return true; // can't determine chrom → don't prune
+    };
+
+    file_chrom == *pred_chrom
 }
 
 /// Parses `{chrom}_{start}-{end}_var.gz` → (chrom, start, end)
@@ -275,14 +296,16 @@ impl ExecutionPlan for EnsemblCacheExec {
         let cache_info = self.cache_info.clone();
         let predicate = self.predicate.clone();
 
-        // Files for this partition (pre-balanced by size), with predicate pruning
+        // Files for this partition (pre-balanced by size), with predicate pruning.
+        // Variation files support chrom + region pruning via filename parsing;
+        // all other entities support chrom-only pruning via directory/filename.
         let files: Vec<PathBuf> = self.partition_files[partition]
             .iter()
             .filter(|path| {
                 if kind == EnsemblEntityKind::Variation {
-                    file_matches_predicate(path, &predicate)
+                    variation_file_matches_predicate(path, &predicate)
                 } else {
-                    true
+                    file_matches_chrom_predicate(path, &predicate, kind)
                 }
             })
             .cloned()
@@ -851,13 +874,13 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // file_matches_predicate
+    // variation_file_matches_predicate
     // -----------------------------------------------------------------------
 
     #[test]
     fn file_matches_no_predicate() {
         let pred = SimplePredicate::default();
-        assert!(file_matches_predicate(
+        assert!(variation_file_matches_predicate(
             Path::new("1_1-1000000_var.gz"),
             &pred
         ));
@@ -869,7 +892,7 @@ mod tests {
             chrom: Some("1".to_string()),
             ..Default::default()
         };
-        assert!(file_matches_predicate(
+        assert!(variation_file_matches_predicate(
             Path::new("1_1-1000000_var.gz"),
             &pred
         ));
@@ -881,7 +904,7 @@ mod tests {
             chrom: Some("2".to_string()),
             ..Default::default()
         };
-        assert!(!file_matches_predicate(
+        assert!(!variation_file_matches_predicate(
             Path::new("1_1-1000000_var.gz"),
             &pred
         ));
@@ -895,7 +918,7 @@ mod tests {
             ..Default::default()
         };
         // File covers 1-1000000, predicate is 500000-1500000 → overlaps
-        assert!(file_matches_predicate(
+        assert!(variation_file_matches_predicate(
             Path::new("1_1-1000000_var.gz"),
             &pred
         ));
@@ -908,7 +931,7 @@ mod tests {
             ..Default::default()
         };
         // File covers 1-1000000, predicate starts at 2000000 → no overlap
-        assert!(!file_matches_predicate(
+        assert!(!variation_file_matches_predicate(
             Path::new("1_1-1000000_var.gz"),
             &pred
         ));
@@ -921,7 +944,7 @@ mod tests {
             ..Default::default()
         };
         // File covers 1-1000000, predicate ends at 0 → no overlap
-        assert!(!file_matches_predicate(
+        assert!(!variation_file_matches_predicate(
             Path::new("1_1-1000000_var.gz"),
             &pred
         ));
@@ -934,7 +957,115 @@ mod tests {
             ..Default::default()
         };
         // Unparseable name → don't prune
-        assert!(file_matches_predicate(Path::new("all_vars.gz"), &pred));
+        assert!(variation_file_matches_predicate(
+            Path::new("all_vars.gz"),
+            &pred
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // file_matches_chrom_predicate (all entity kinds)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn chrom_predicate_no_filter_matches_all() {
+        let pred = SimplePredicate::default();
+        assert!(file_matches_chrom_predicate(
+            Path::new("/cache/1/1-1000000.gz"),
+            &pred,
+            EnsemblEntityKind::Transcript
+        ));
+    }
+
+    #[test]
+    fn chrom_predicate_transcript_merged_match() {
+        let pred = SimplePredicate {
+            chrom: Some("1".to_string()),
+            ..Default::default()
+        };
+        assert!(file_matches_chrom_predicate(
+            Path::new("/cache/1/1-1000000.gz"),
+            &pred,
+            EnsemblEntityKind::Transcript
+        ));
+    }
+
+    #[test]
+    fn chrom_predicate_transcript_merged_mismatch() {
+        let pred = SimplePredicate {
+            chrom: Some("2".to_string()),
+            ..Default::default()
+        };
+        assert!(!file_matches_chrom_predicate(
+            Path::new("/cache/1/1-1000000.gz"),
+            &pred,
+            EnsemblEntityKind::Transcript
+        ));
+    }
+
+    #[test]
+    fn chrom_predicate_transcript_explicit_match() {
+        let pred = SimplePredicate {
+            chrom: Some("1".to_string()),
+            ..Default::default()
+        };
+        assert!(file_matches_chrom_predicate(
+            Path::new("/cache/transcript/chr1_transcript.storable.gz"),
+            &pred,
+            EnsemblEntityKind::Transcript
+        ));
+    }
+
+    #[test]
+    fn chrom_predicate_transcript_explicit_mismatch() {
+        let pred = SimplePredicate {
+            chrom: Some("2".to_string()),
+            ..Default::default()
+        };
+        assert!(!file_matches_chrom_predicate(
+            Path::new("/cache/transcript/chr1_transcript.storable.gz"),
+            &pred,
+            EnsemblEntityKind::Transcript
+        ));
+    }
+
+    #[test]
+    fn chrom_predicate_regulatory_match() {
+        let pred = SimplePredicate {
+            chrom: Some("2".to_string()),
+            ..Default::default()
+        };
+        assert!(file_matches_chrom_predicate(
+            Path::new("/cache/regulatory/chr2_regulatory.storable.gz"),
+            &pred,
+            EnsemblEntityKind::RegulatoryFeature
+        ));
+    }
+
+    #[test]
+    fn chrom_predicate_exon_merged_match() {
+        let pred = SimplePredicate {
+            chrom: Some("X".to_string()),
+            ..Default::default()
+        };
+        assert!(file_matches_chrom_predicate(
+            Path::new("/cache/X/1-1000000.gz"),
+            &pred,
+            EnsemblEntityKind::Exon
+        ));
+    }
+
+    #[test]
+    fn chrom_predicate_exon_merged_mismatch() {
+        let pred = SimplePredicate {
+            chrom: Some("1".to_string()),
+            ..Default::default()
+        };
+        assert!(!file_matches_chrom_predicate(
+            Path::new("/cache/X/1-1000000.gz"),
+            &pred,
+            EnsemblEntityKind::Exon
+        ));
     }
 
     // -----------------------------------------------------------------------
