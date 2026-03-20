@@ -268,7 +268,46 @@ async fn test_vcf_contigs_indexed_absent_without_index() -> datafusion::error::R
 
     assert!(
         !metadata.contains_key(VCF_CONTIGS_INDEXED_KEY),
-        "bio.vcf.contigs.indexed should NOT be present without a TBI index"
+        "bio.vcf.contigs.indexed should NOT be present without an index"
+    );
+
+    Ok(())
+}
+
+/// Test: bio.vcf.contigs.indexed is populated from a CSI index.
+#[tokio::test]
+async fn test_vcf_contigs_indexed_metadata_csi() -> datafusion::error::Result<()> {
+    // multi_chrom_csi.vcf.gz has only a .csi index (no .tbi)
+    let provider = VcfTableProvider::new(
+        "tests/multi_chrom_csi.vcf.gz".to_string(),
+        None,
+        None,
+        None,
+        true,
+    )?;
+
+    let schema = provider.schema();
+    let metadata = schema.metadata();
+
+    let indexed_json = metadata
+        .get(VCF_CONTIGS_INDEXED_KEY)
+        .expect("bio.vcf.contigs.indexed should be present when CSI index exists");
+
+    let indexed_contigs: Vec<String> =
+        serde_json::from_str(indexed_json).expect("should be a valid JSON array of strings");
+
+    assert_eq!(
+        indexed_contigs.len(),
+        2,
+        "Expected 2 indexed contigs from CSI, got: {indexed_contigs:?}"
+    );
+    assert!(
+        indexed_contigs.contains(&"21".to_string()),
+        "Expected '21' in CSI-indexed contigs: {indexed_contigs:?}"
+    );
+    assert!(
+        indexed_contigs.contains(&"22".to_string()),
+        "Expected '22' in CSI-indexed contigs: {indexed_contigs:?}"
     );
 
     Ok(())
