@@ -9,7 +9,9 @@
 //! Uses multi_chrom.vcf.gz: 1000 variants across 21(500), 22(500).
 
 use datafusion::arrow::array::Array;
+use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
+use datafusion_bio_format_core::metadata::VCF_CONTIGS_INDEXED_KEY;
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -204,6 +206,69 @@ async fn test_vcf_indexed_correctness() -> datafusion::error::Result<()> {
     assert_eq!(
         indexed_count, manual_count,
         "Indexed chr21 count ({indexed_count}) should equal manual count from full scan ({manual_count})"
+    );
+
+    Ok(())
+}
+
+/// Test: schema metadata contains bio.vcf.contigs.indexed with TBI-derived contigs.
+#[tokio::test]
+async fn test_vcf_contigs_indexed_metadata() -> datafusion::error::Result<()> {
+    let provider = VcfTableProvider::new(
+        "tests/multi_chrom.vcf.gz".to_string(),
+        None,
+        None,
+        None,
+        true,
+    )?;
+
+    let schema = provider.schema();
+    let metadata = schema.metadata();
+
+    // The indexed contigs key must be present when a TBI index exists
+    let indexed_json = metadata
+        .get(VCF_CONTIGS_INDEXED_KEY)
+        .expect("bio.vcf.contigs.indexed should be present when TBI index exists");
+
+    let indexed_contigs: Vec<String> =
+        serde_json::from_str(indexed_json).expect("should be a valid JSON array of strings");
+
+    // multi_chrom.vcf.gz has data on chromosomes 21 and 22
+    assert_eq!(
+        indexed_contigs.len(),
+        2,
+        "Expected 2 indexed contigs, got: {indexed_contigs:?}"
+    );
+    assert!(
+        indexed_contigs.contains(&"21".to_string()),
+        "Expected '21' in indexed contigs: {indexed_contigs:?}"
+    );
+    assert!(
+        indexed_contigs.contains(&"22".to_string()),
+        "Expected '22' in indexed contigs: {indexed_contigs:?}"
+    );
+
+    Ok(())
+}
+
+/// Test: bio.vcf.contigs.indexed is absent when no TBI index is available.
+#[tokio::test]
+async fn test_vcf_contigs_indexed_absent_without_index() -> datafusion::error::Result<()> {
+    // Use a plain (uncompressed) VCF that has no TBI index
+    let provider = VcfTableProvider::new(
+        "tests/head_106667_tail_6.vcf".to_string(),
+        None,
+        None,
+        None,
+        true,
+    )?;
+
+    let schema = provider.schema();
+    let metadata = schema.metadata();
+
+    assert!(
+        !metadata.contains_key(VCF_CONTIGS_INDEXED_KEY),
+        "bio.vcf.contigs.indexed should NOT be present without a TBI index"
     );
 
     Ok(())
