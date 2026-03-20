@@ -177,7 +177,6 @@ const ENTITY_DIR_NAMES: &[&str] = &["variation", "transcript", "regulatory"];
 /// Returns `None` if the chromosome cannot be reliably determined.
 pub(crate) fn extract_chrom_from_path(path: &Path, kind: EnsemblEntityKind) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    let lower = name.to_ascii_lowercase();
 
     // For variation files, try parsing `{chrom}_{start}-{end}_var.gz` first
     if kind == EnsemblEntityKind::Variation
@@ -194,15 +193,21 @@ pub(crate) fn extract_chrom_from_path(path: &Path, kind: EnsemblEntityKind) -> O
     }
 
     // Explicit layout: `chr{N}_transcript.storable.gz`, `chr{N}_regulatory.storable.gz`
-    let stem = extract_chrom_prefix_from_explicit_name(&lower)?;
+    // Use original name to preserve chromosome case (e.g. `X`, `MT`)
+    let stem = extract_chrom_prefix_from_explicit_name(name)?;
     Some(stem.to_string())
 }
 
 /// Extracts chrom from explicit-layout filenames like `chr1_transcript.storable.gz`.
 /// Returns the chromosome portion (e.g. `"1"` from `"chr1_transcript.storable.gz"`).
-fn extract_chrom_prefix_from_explicit_name(lower_name: &str) -> Option<&str> {
-    // Must start with "chr"
-    let rest = lower_name.strip_prefix("chr")?;
+/// The `chr` prefix is matched case-insensitively to preserve the original case of
+/// the chromosome token (e.g. `chrX_...` → `"X"`, not `"x"`).
+fn extract_chrom_prefix_from_explicit_name(name: &str) -> Option<&str> {
+    // Must start with "chr" (case-insensitive)
+    if name.len() < 3 || !name[..3].eq_ignore_ascii_case("chr") {
+        return None;
+    }
+    let rest = &name[3..];
     // Find the next underscore — everything between "chr" and "_" is the chrom
     let underscore_pos = rest.find('_')?;
     let chrom = &rest[..underscore_pos];
@@ -550,6 +555,24 @@ mod tests {
         assert_eq!(
             extract_chrom_from_path(&path, EnsemblEntityKind::RegulatoryFeature),
             Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_transcript_explicit_layout_preserves_case() {
+        let path = PathBuf::from("/cache/transcript/chrX_transcript.storable.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::Transcript),
+            Some("X".to_string())
+        );
+    }
+
+    #[test]
+    fn chrom_regulatory_explicit_layout_preserves_case() {
+        let path = PathBuf::from("/cache/regulatory/chrMT_regulatory.storable.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::RegulatoryFeature),
+            Some("MT".to_string())
         );
     }
 
