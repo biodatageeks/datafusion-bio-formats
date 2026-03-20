@@ -165,7 +165,7 @@ fn is_index_sidecar_name(name: &str) -> bool {
 }
 
 /// Well-known entity directory names that are NOT chromosome names.
-const ENTITY_DIR_NAMES: &[&str] = &["variation", "transcript", "regulatory"];
+const ENTITY_DIR_NAMES: &[&str] = &["variation", "transcript", "regulatory", "motif", "regfeat"];
 
 /// Extracts the chromosome name from a discovered file path.
 ///
@@ -528,6 +528,25 @@ mod tests {
         assert_eq!(
             extract_chrom_from_path(&path, EnsemblEntityKind::Variation),
             None
+        );
+    }
+
+    #[test]
+    fn chrom_motif_entity_dir_not_chromosome() {
+        // Parent dir is "motif" — not a chromosome name
+        let path = PathBuf::from("/cache/motif/all_vars.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::MotifFeature),
+            None
+        );
+    }
+
+    #[test]
+    fn chrom_regfeat_entity_dir_not_chromosome() {
+        let path = PathBuf::from("/cache/regfeat/chr1_regulatory.storable.gz");
+        assert_eq!(
+            extract_chrom_from_path(&path, EnsemblEntityKind::RegulatoryFeature),
+            Some("1".to_string())
         );
     }
 

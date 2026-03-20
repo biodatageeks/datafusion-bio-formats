@@ -864,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_chrom_region_no_underscore() {
+    fn parse_chrom_region_all_vars_returns_none() {
         assert!(parse_file_chrom_region("all_vars.gz").is_none());
     }
 

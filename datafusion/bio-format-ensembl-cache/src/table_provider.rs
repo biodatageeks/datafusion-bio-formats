@@ -148,10 +148,9 @@ impl ProviderInner {
         // can access them without a full scan.
         let schema = if let Some(ref chroms) = chroms {
             let mut metadata = schema.metadata().clone();
-            metadata.insert(
-                VEP_CHROMOSOMES_METADATA_KEY.to_string(),
-                serde_json::to_string(chroms).unwrap_or_default(),
-            );
+            if let Ok(json) = serde_json::to_string(chroms) {
+                metadata.insert(VEP_CHROMOSOMES_METADATA_KEY.to_string(), json);
+            }
             Arc::new(Schema::new_with_metadata(
                 schema.fields().to_vec(),
                 metadata,
