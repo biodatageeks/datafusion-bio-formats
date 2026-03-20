@@ -1,5 +1,6 @@
 use crate::discovery::{
     discover_regulatory_files, discover_transcript_files, discover_variation_files,
+    extract_distinct_chroms,
 };
 use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
@@ -63,6 +64,14 @@ impl EnsemblCacheOptions {
     }
 }
 
+/// Schema metadata key for the JSON-encoded list of chromosomes discovered
+/// from VEP cache file paths (e.g. `["1","2","22","X"]`).
+///
+/// The value is `None`/absent when chromosome names could not be reliably
+/// determined from file paths alone (e.g. tabix caches with a single
+/// `all_vars.gz` in a non-chromosome directory).
+pub const VEP_CHROMOSOMES_METADATA_KEY: &str = "bio.vep.chromosomes";
+
 #[derive(Debug, Clone)]
 struct ProviderInner {
     kind: EnsemblEntityKind,
@@ -71,6 +80,8 @@ struct ProviderInner {
     schema: SchemaRef,
     files: Vec<std::path::PathBuf>,
     variation_region_size: Option<i64>,
+    /// Distinct chromosomes extracted from file paths, if available.
+    chroms: Option<Vec<String>>,
 }
 
 impl ProviderInner {
@@ -129,6 +140,25 @@ impl ProviderInner {
             )));
         }
 
+        // Extract distinct chromosomes from file paths (best-effort).
+        let chroms = extract_distinct_chroms(&files, kind);
+
+        // If chromosomes were resolved, store them in schema metadata so that
+        // downstream consumers (parquet writers, SQL information_schema, etc.)
+        // can access them without a full scan.
+        let schema = if let Some(ref chroms) = chroms {
+            let mut metadata = schema.metadata().clone();
+            if let Ok(json) = serde_json::to_string(chroms) {
+                metadata.insert(VEP_CHROMOSOMES_METADATA_KEY.to_string(), json);
+            }
+            Arc::new(Schema::new_with_metadata(
+                schema.fields().to_vec(),
+                metadata,
+            ))
+        } else {
+            schema
+        };
+
         Ok(Self {
             kind,
             options,
@@ -136,6 +166,7 @@ impl ProviderInner {
             schema,
             files,
             variation_region_size,
+            chroms,
         })
     }
 
@@ -157,6 +188,16 @@ impl ProviderInner {
                 }
             })
             .collect())
+    }
+
+    /// Returns the distinct chromosomes derived from file paths, if available.
+    ///
+    /// Returns `None` when chromosome names could not be reliably extracted
+    /// from the directory structure (e.g. tabix caches with a single
+    /// `all_vars.gz` in a non-chromosome directory). In that case a full
+    /// scan is needed to discover chromosomes.
+    fn chromosomes(&self) -> Option<&[String]> {
+        self.chroms.as_deref()
     }
 
     async fn scan(
@@ -265,6 +306,12 @@ impl VariationTableProvider {
             inner: ProviderInner::new(EnsemblEntityKind::Variation, options)?,
         })
     }
+
+    /// Returns the distinct chromosomes derived from cache file paths, or
+    /// `None` if they could not be determined without a full scan.
+    pub fn chromosomes(&self) -> Option<&[String]> {
+        self.inner.chromosomes()
+    }
 }
 
 /// DataFusion table provider for VEP transcript cache entity.
@@ -279,6 +326,12 @@ impl TranscriptTableProvider {
         Ok(Self {
             inner: ProviderInner::new(EnsemblEntityKind::Transcript, options)?,
         })
+    }
+
+    /// Returns the distinct chromosomes derived from cache file paths, or
+    /// `None` if they could not be determined without a full scan.
+    pub fn chromosomes(&self) -> Option<&[String]> {
+        self.inner.chromosomes()
     }
 }
 
@@ -295,6 +348,12 @@ impl RegulatoryFeatureTableProvider {
             inner: ProviderInner::new(EnsemblEntityKind::RegulatoryFeature, options)?,
         })
     }
+
+    /// Returns the distinct chromosomes derived from cache file paths, or
+    /// `None` if they could not be determined without a full scan.
+    pub fn chromosomes(&self) -> Option<&[String]> {
+        self.inner.chromosomes()
+    }
 }
 
 /// DataFusion table provider for VEP motif feature cache entity.
@@ -309,6 +368,12 @@ impl MotifFeatureTableProvider {
         Ok(Self {
             inner: ProviderInner::new(EnsemblEntityKind::MotifFeature, options)?,
         })
+    }
+
+    /// Returns the distinct chromosomes derived from cache file paths, or
+    /// `None` if they could not be determined without a full scan.
+    pub fn chromosomes(&self) -> Option<&[String]> {
+        self.inner.chromosomes()
     }
 }
 
@@ -325,6 +390,12 @@ impl ExonTableProvider {
             inner: ProviderInner::new(EnsemblEntityKind::Exon, options)?,
         })
     }
+
+    /// Returns the distinct chromosomes derived from cache file paths, or
+    /// `None` if they could not be determined without a full scan.
+    pub fn chromosomes(&self) -> Option<&[String]> {
+        self.inner.chromosomes()
+    }
 }
 
 /// DataFusion table provider for translation objects from VEP transcript cache.
@@ -339,6 +410,12 @@ impl TranslationTableProvider {
         Ok(Self {
             inner: ProviderInner::new(EnsemblEntityKind::Translation, options)?,
         })
+    }
+
+    /// Returns the distinct chromosomes derived from cache file paths, or
+    /// `None` if they could not be determined without a full scan.
+    pub fn chromosomes(&self) -> Option<&[String]> {
+        self.inner.chromosomes()
     }
 }
 
