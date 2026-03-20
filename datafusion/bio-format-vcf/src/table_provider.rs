@@ -10,10 +10,10 @@ use datafusion_bio_format_core::genomic_filter::{
 use datafusion_bio_format_core::index_utils::discover_vcf_index;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
-    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
-    VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY,
-    VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
-    from_json_string, to_json_string,
+    VCF_CONTIGS_INDEXED_KEY, VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY,
+    VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
+    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY,
+    VcfFieldMetadata, from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -522,14 +522,15 @@ impl VcfTableProvider {
     ) -> datafusion::common::Result<Self> {
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
 
-        let (schema, sample_names, source_sample_names) = block_on(determine_schema_from_header(
-            &file_path,
-            &info_fields,
-            &format_fields,
-            &samples_to_include,
-            &object_storage_options,
-            coordinate_system_zero_based,
-        ))?;
+        let (mut schema, sample_names, source_sample_names) =
+            block_on(determine_schema_from_header(
+                &file_path,
+                &info_fields,
+                &format_fields,
+                &samples_to_include,
+                &object_storage_options,
+                coordinate_system_zero_based,
+            ))?;
 
         // Extract contig names and lengths from schema metadata
         let contig_metadata: Vec<ContigMetadata> = schema
@@ -549,62 +550,97 @@ impl VcfTableProvider {
 
         // Auto-discover index file for local BGZF-compressed files
         let storage_type = get_storage_type(file_path.clone());
-        let index_path = if matches!(storage_type, StorageType::LOCAL) {
-            discover_vcf_index(&file_path).map(|(path, fmt)| {
-                debug!("Discovered VCF index: {path} (format: {fmt:?})");
-                path
-            })
+        let (index_path, index_format) = if matches!(storage_type, StorageType::LOCAL) {
+            match discover_vcf_index(&file_path) {
+                Some((path, fmt)) => {
+                    debug!("Discovered VCF index: {path} (format: {fmt:?})");
+                    (Some(path), Some(fmt))
+                }
+                None => (None, None),
+            }
         } else {
-            None
+            (None, None)
         };
 
-        // Prefer TBI header reference names for indexed full scans and size
+        // Prefer index header reference names for indexed full scans and size
         // estimation. This keeps reference-name->index-id mapping aligned even
         // when VCF header contigs include many entries absent from the index.
+        // Supports both TBI and CSI index formats.
         if let Some(ref idx_path) = index_path {
-            match noodles_tabix::fs::read(idx_path) {
-                Ok(index) => {
-                    use noodles_csi::binning_index::BinningIndex;
-                    let index_names: Vec<String> = index
-                        .header()
-                        .map(|h| {
-                            h.reference_sequence_names()
-                                .iter()
-                                .map(|n| n.to_string())
-                                .collect()
-                        })
-                        .unwrap_or_default();
+            use datafusion_bio_format_core::index_utils::IndexFormat;
+            use noodles_csi::binning_index::BinningIndex;
 
-                    if !index_names.is_empty() {
-                        if contig_names.is_empty() {
-                            debug!(
-                                "VCF header lacks ##contig lines; inferred {} contigs from TBI index",
-                                index_names.len()
-                            );
-                        } else if contig_names != index_names {
-                            debug!(
-                                "Using {} contigs from TBI header for indexed partitioning (schema has {})",
-                                index_names.len(),
-                                contig_names.len()
-                            );
-                        }
+            // Read reference sequence names from the index header.
+            // Both TBI and CSI implement BinningIndex, so we extract names
+            // via a shared closure to avoid duplicating logic.
+            let extract_names =
+                |header: &noodles_csi::binning_index::index::Header| -> Vec<String> {
+                    header
+                        .reference_sequence_names()
+                        .iter()
+                        .map(|n| n.to_string())
+                        .collect()
+                };
 
-                        let index_lengths: Vec<u64> = index_names
-                            .iter()
-                            .map(|name| {
-                                contig_length_by_name
-                                    .get(name.as_str())
-                                    .copied()
-                                    .unwrap_or(0)
-                            })
-                            .collect();
-                        contig_names = index_names;
-                        contig_lengths = index_lengths;
+            let index_names: Vec<String> = match index_format.unwrap_or(IndexFormat::TBI) {
+                IndexFormat::TBI => match noodles_tabix::fs::read(idx_path) {
+                    Ok(index) => index.header().map(extract_names).unwrap_or_default(),
+                    Err(e) => {
+                        debug!("Failed to read TBI index header: {e}");
+                        Vec::new()
                     }
+                },
+                IndexFormat::CSI => match noodles_csi::fs::read(idx_path) {
+                    Ok(index) => index.header().map(extract_names).unwrap_or_default(),
+                    Err(e) => {
+                        debug!("Failed to read CSI index header: {e}");
+                        Vec::new()
+                    }
+                },
+                other => {
+                    debug!("Unsupported index format for VCF contig extraction: {other:?}");
+                    Vec::new()
                 }
-                Err(e) => {
-                    debug!("Failed to read TBI index header for partitioning contigs: {e}");
+            };
+
+            if !index_names.is_empty() {
+                let fmt_label = index_format
+                    .map(|f| format!("{f:?}"))
+                    .unwrap_or_else(|| "index".to_string());
+                if contig_names.is_empty() {
+                    debug!(
+                        "VCF header lacks ##contig lines; inferred {} contigs from {fmt_label}",
+                        index_names.len()
+                    );
+                } else if contig_names != index_names {
+                    debug!(
+                        "Using {} contigs from {fmt_label} header for indexed partitioning (schema has {})",
+                        index_names.len(),
+                        contig_names.len()
+                    );
                 }
+
+                let index_lengths: Vec<u64> = index_names
+                    .iter()
+                    .map(|name| {
+                        contig_length_by_name
+                            .get(name.as_str())
+                            .copied()
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                // Store index-derived contig names in schema metadata so
+                // downstream consumers can discover data-bearing contigs
+                // without accessing the index file directly.
+                let mut updated_metadata = schema.metadata().clone();
+                updated_metadata.insert(
+                    VCF_CONTIGS_INDEXED_KEY.to_string(),
+                    to_json_string(&index_names),
+                );
+                schema = Arc::new(schema.as_ref().clone().with_metadata(updated_metadata));
+
+                contig_names = index_names;
+                contig_lengths = index_lengths;
             }
         }
 

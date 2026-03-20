@@ -37,6 +37,11 @@ pub const VCF_FILTERS_KEY: &str = "bio.vcf.filters";
 /// VCF CONTIG definitions stored as JSON array of ContigMetadata
 pub const VCF_CONTIGS_KEY: &str = "bio.vcf.contigs";
 
+/// TBI-index-derived contig names stored as a JSON array of strings.
+/// Only present when a TBI/CSI index is available; contains only contigs
+/// that have actual variant records in the file.
+pub const VCF_CONTIGS_INDEXED_KEY: &str = "bio.vcf.contigs.indexed";
+
 /// VCF ALT allele definitions stored as JSON array of AltAlleleMetadata
 pub const VCF_ALTERNATIVE_ALLELES_KEY: &str = "bio.vcf.alternative_alleles";
 
