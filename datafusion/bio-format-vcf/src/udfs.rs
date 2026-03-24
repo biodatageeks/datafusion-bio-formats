@@ -124,6 +124,9 @@ impl ScalarUDFImpl for ListAvgUdf {
 
 /// Compute sum and non-null count over a contiguous i32 slice [start..end)
 /// using the flat values buffer and optional null bitmap.
+///
+/// Accumulates as i64 to avoid per-element i32→f64 cast, which prevents
+/// auto-vectorization. The final i64→f64 cast happens once at the end.
 #[inline]
 fn sum_count_i32_slice(
     values: &[i32],
@@ -131,25 +134,23 @@ fn sum_count_i32_slice(
     start: usize,
     end: usize,
 ) -> (f64, usize) {
+    let slice = &values[start..end];
     match nulls {
         None => {
-            // No nulls: tight loop over contiguous memory
-            let mut sum = 0.0_f64;
-            for &v in &values[start..end] {
-                sum += v as f64;
-            }
-            (sum, end - start)
+            // No nulls: accumulate as i64 for auto-vectorization
+            let sum: i64 = slice.iter().map(|&v| v as i64).sum();
+            (sum as f64, slice.len())
         }
         Some(null_buf) => {
-            let mut sum = 0.0_f64;
+            let mut sum = 0_i64;
             let mut count = 0_usize;
-            for i in start..end {
-                if null_buf.is_valid(i) {
-                    sum += values[i] as f64;
+            for (i, &v) in slice.iter().enumerate() {
+                if null_buf.is_valid(start + i) {
+                    sum += v as i64;
                     count += 1;
                 }
             }
-            (sum, count)
+            (sum as f64, count)
         }
     }
 }
@@ -162,20 +163,18 @@ fn sum_count_f32_slice(
     start: usize,
     end: usize,
 ) -> (f64, usize) {
+    let slice = &values[start..end];
     match nulls {
         None => {
-            let mut sum = 0.0_f64;
-            for &v in &values[start..end] {
-                sum += v as f64;
-            }
-            (sum, end - start)
+            let sum: f64 = slice.iter().map(|&v| v as f64).sum();
+            (sum, slice.len())
         }
         Some(null_buf) => {
             let mut sum = 0.0_f64;
             let mut count = 0_usize;
-            for i in start..end {
-                if null_buf.is_valid(i) {
-                    sum += values[i] as f64;
+            for (i, &v) in slice.iter().enumerate() {
+                if null_buf.is_valid(start + i) {
+                    sum += v as f64;
                     count += 1;
                 }
             }
