@@ -70,43 +70,118 @@ impl ScalarUDFImpl for ListAvgUdf {
             .as_any()
             .downcast_ref::<ListArray>()
             .ok_or_else(|| DataFusionError::Execution("list_avg expects List input".to_string()))?;
-        let mut builder = Float64Builder::with_capacity(list.len());
-        for i in 0..list.len() {
-            if list.is_null(i) {
-                builder.append_null();
-                continue;
+
+        // Optimized path: operate on the flat values array with offsets directly,
+        // avoiding per-row ListArray::value() slice creation.
+        let offsets = list.offsets();
+        let values = list.values();
+        let num_rows = list.len();
+        let mut builder = Float64Builder::with_capacity(num_rows);
+
+        if let Some(int_values) = values.as_any().downcast_ref::<Int32Array>() {
+            let raw_values = int_values.values();
+            let null_buffer = int_values.nulls();
+            for i in 0..num_rows {
+                if list.is_null(i) {
+                    builder.append_null();
+                    continue;
+                }
+                let start = offsets[i] as usize;
+                let end = offsets[i + 1] as usize;
+                let (sum, count) = sum_count_i32_slice(raw_values, null_buffer, start, end);
+                if count == 0 {
+                    builder.append_null();
+                } else {
+                    builder.append_value(sum / count as f64);
+                }
             }
-            let inner = list.value(i);
-            let (sum, count) = compute_sum_count(&inner);
-            if count == 0 {
-                builder.append_null();
-            } else {
-                builder.append_value(sum / count as f64);
+        } else if let Some(float_values) = values.as_any().downcast_ref::<Float32Array>() {
+            let raw_values = float_values.values();
+            let null_buffer = float_values.nulls();
+            for i in 0..num_rows {
+                if list.is_null(i) {
+                    builder.append_null();
+                    continue;
+                }
+                let start = offsets[i] as usize;
+                let end = offsets[i + 1] as usize;
+                let (sum, count) = sum_count_f32_slice(raw_values, null_buffer, start, end);
+                if count == 0 {
+                    builder.append_null();
+                } else {
+                    builder.append_value(sum / count as f64);
+                }
             }
+        } else {
+            return Err(DataFusionError::Execution(
+                "list_avg: unsupported element type (expected Int32 or Float32)".to_string(),
+            ));
         }
+
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))
     }
 }
 
-fn compute_sum_count(array: &dyn Array) -> (f64, usize) {
-    let mut sum = 0.0_f64;
-    let mut count = 0_usize;
-    if let Some(int_arr) = array.as_any().downcast_ref::<Int32Array>() {
-        for i in 0..int_arr.len() {
-            if !int_arr.is_null(i) {
-                sum += int_arr.value(i) as f64;
-                count += 1;
+/// Compute sum and non-null count over a contiguous i32 slice [start..end)
+/// using the flat values buffer and optional null bitmap.
+#[inline]
+fn sum_count_i32_slice(
+    values: &[i32],
+    nulls: Option<&datafusion::arrow::buffer::NullBuffer>,
+    start: usize,
+    end: usize,
+) -> (f64, usize) {
+    match nulls {
+        None => {
+            // No nulls: tight loop over contiguous memory
+            let mut sum = 0.0_f64;
+            for &v in &values[start..end] {
+                sum += v as f64;
             }
+            (sum, end - start)
         }
-    } else if let Some(float_arr) = array.as_any().downcast_ref::<Float32Array>() {
-        for i in 0..float_arr.len() {
-            if !float_arr.is_null(i) {
-                sum += float_arr.value(i) as f64;
-                count += 1;
+        Some(null_buf) => {
+            let mut sum = 0.0_f64;
+            let mut count = 0_usize;
+            for i in start..end {
+                if null_buf.is_valid(i) {
+                    sum += values[i] as f64;
+                    count += 1;
+                }
             }
+            (sum, count)
         }
     }
-    (sum, count)
+}
+
+/// Compute sum and non-null count over a contiguous f32 slice [start..end).
+#[inline]
+fn sum_count_f32_slice(
+    values: &[f32],
+    nulls: Option<&datafusion::arrow::buffer::NullBuffer>,
+    start: usize,
+    end: usize,
+) -> (f64, usize) {
+    match nulls {
+        None => {
+            let mut sum = 0.0_f64;
+            for &v in &values[start..end] {
+                sum += v as f64;
+            }
+            (sum, end - start)
+        }
+        Some(null_buf) => {
+            let mut sum = 0.0_f64;
+            let mut count = 0_usize;
+            for i in start..end {
+                if null_buf.is_valid(i) {
+                    sum += values[i] as f64;
+                    count += 1;
+                }
+            }
+            (sum, count)
+        }
+    }
 }
 
 /// Creates the `list_avg` scalar UDF.
@@ -1077,6 +1152,164 @@ mod tests {
         assert!((result.value(0) - 20.0).abs() < 0.001);
         // Row 1: avg(5, 15) = 10.0 (null skipped)
         assert!((result.value(1) - 10.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_list_avg_null_list_and_empty() {
+        // Test: null list row → null output, empty list → null output
+        use datafusion::arrow::array::Int32Builder;
+        use datafusion::arrow::datatypes::Schema;
+
+        let ctx = SessionContext::new();
+        register_vcf_udfs(&ctx);
+
+        let mut builder = ListBuilder::new(Int32Builder::new());
+        // Row 0: [10, 20, 30] → avg = 20.0
+        builder.values().append_value(10);
+        builder.values().append_value(20);
+        builder.values().append_value(30);
+        builder.append(true);
+        // Row 1: NULL list → null
+        builder.append(false);
+        // Row 2: empty list [] → null (count=0)
+        builder.append(true);
+        // Row 3: [5] → avg = 5.0
+        builder.values().append_value(5);
+        builder.append(true);
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "vals",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            true,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap();
+        ctx.register_batch("t", batch).unwrap();
+
+        let df = ctx.sql("SELECT list_avg(vals) as a FROM t").await.unwrap();
+        let batches = df.collect().await.unwrap();
+        let result = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert_eq!(result.len(), 4);
+        assert!((result.value(0) - 20.0).abs() < 0.001);
+        assert!(result.is_null(1)); // null list
+        assert!(result.is_null(2)); // empty list
+        assert!((result.value(3) - 5.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_list_avg_all_null_elements() {
+        // Test: list where all elements are null → null output
+        use datafusion::arrow::array::Int32Builder;
+        use datafusion::arrow::datatypes::Schema;
+
+        let ctx = SessionContext::new();
+        register_vcf_udfs(&ctx);
+
+        let mut builder = ListBuilder::new(Int32Builder::new());
+        // Row 0: [null, null]
+        builder.values().append_null();
+        builder.values().append_null();
+        builder.append(true);
+        // Row 1: [null, 42, null]
+        builder.values().append_null();
+        builder.values().append_value(42);
+        builder.values().append_null();
+        builder.append(true);
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "vals",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            true,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap();
+        ctx.register_batch("t", batch).unwrap();
+
+        let df = ctx.sql("SELECT list_avg(vals) as a FROM t").await.unwrap();
+        let batches = df.collect().await.unwrap();
+        let result = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert!(result.is_null(0)); // all-null elements
+        assert!((result.value(1) - 42.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_list_avg_float32() {
+        // Test Float32 element type
+        use datafusion::arrow::array::Float32Builder;
+        use datafusion::arrow::datatypes::Schema;
+
+        let ctx = SessionContext::new();
+        register_vcf_udfs(&ctx);
+
+        let mut builder = ListBuilder::new(Float32Builder::new());
+        builder.values().append_value(1.5);
+        builder.values().append_value(2.5);
+        builder.append(true);
+        builder.values().append_value(10.0);
+        builder.append(true);
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "vals",
+            DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+            true,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap();
+        ctx.register_batch("t", batch).unwrap();
+
+        let df = ctx.sql("SELECT list_avg(vals) as a FROM t").await.unwrap();
+        let batches = df.collect().await.unwrap();
+        let result = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert!((result.value(0) - 2.0).abs() < 0.001);
+        assert!((result.value(1) - 10.0).abs() < 0.001);
+    }
+
+    #[tokio::test]
+    async fn test_list_avg_large_list() {
+        // Test with a large list (2000 elements) to exercise the hot path
+        use datafusion::arrow::array::Int32Builder;
+        use datafusion::arrow::datatypes::Schema;
+
+        let ctx = SessionContext::new();
+        register_vcf_udfs(&ctx);
+
+        let mut builder = ListBuilder::new(Int32Builder::new());
+        let n = 2000;
+        for i in 0..n {
+            builder.values().append_value(i as i32);
+        }
+        builder.append(true);
+        // expected avg: (0 + 1 + ... + 1999) / 2000 = 999.5
+
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "vals",
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            true,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(builder.finish())]).unwrap();
+        ctx.register_batch("t", batch).unwrap();
+
+        let df = ctx.sql("SELECT list_avg(vals) as a FROM t").await.unwrap();
+        let batches = df.collect().await.unwrap();
+        let result = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Float64Array>()
+            .unwrap();
+        assert!((result.value(0) - 999.5).abs() < 0.001);
     }
 
     #[tokio::test]
