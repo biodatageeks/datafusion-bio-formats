@@ -16,11 +16,15 @@ use crate::schema::{
 };
 use crate::variation::detect_region_size;
 use async_trait::async_trait;
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::expressions::Column;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use std::any::Any;
 use std::path::Path;
 use std::sync::Arc;
@@ -263,11 +267,13 @@ impl ProviderInner {
             .preserve_sort_order
             .unwrap_or(self.kind == EnsemblEntityKind::Variation);
 
-        Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
+        let single_chrom_filter = predicate.chrom.clone();
+
+        let exec = Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
             kind: self.kind,
             cache_info: self.cache_info.clone(),
             files,
-            schema: projected_schema,
+            schema: projected_schema.clone(),
             predicate,
             limit,
             variation_region_size: self.variation_region_size,
@@ -275,7 +281,32 @@ impl ProviderInner {
             coordinate_system_zero_based: self.options.coordinate_system_zero_based,
             num_partitions,
             preserve_sort_order,
-        })))
+            single_chrom_filter: single_chrom_filter.clone(),
+        }));
+
+        // When sort order is preserved, a single chrom is filtered, and
+        // there are multiple partitions, wrap with SortPreservingMergeExec
+        // to merge the pre-sorted partition streams by (start ASC).
+        // This guarantees parallel execution instead of relying on the
+        // optimizer to choose merge over a full single-threaded SortExec.
+        if preserve_sort_order
+            && single_chrom_filter.is_some()
+            && num_partitions > 1
+            && let Ok(si) = projected_schema.index_of("start")
+        {
+            let sort_exprs = LexOrdering::new(vec![PhysicalSortExpr::new(
+                Arc::new(Column::new("start", si)),
+                SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+            )])
+            .expect("sort expressions should not be empty");
+
+            return Ok(Arc::new(SortPreservingMergeExec::new(sort_exprs, exec)));
+        }
+
+        Ok(exec)
     }
 }
 

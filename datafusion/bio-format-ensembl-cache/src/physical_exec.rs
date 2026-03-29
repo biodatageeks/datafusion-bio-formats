@@ -75,10 +75,17 @@ pub(crate) struct EnsemblCacheExecConfig {
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) num_partitions: usize,
     /// When true, files are assigned to partitions in discovery order
-    /// (consecutive chunks) and output ordering `(chrom, start)` is declared
-    /// per partition.  This allows DataFusion to use SortPreservingMergeExec
-    /// instead of a full SortExec when the caller adds `ORDER BY chrom, start`.
+    /// (consecutive chunks) and per-partition output ordering is declared.
+    ///
+    /// When combined with a single-chromosome predicate, the declared
+    /// ordering is `(start ASC)` which is always correct.  Without a
+    /// chromosome filter, no ordering is declared because karyotypic
+    /// file order differs from lexicographic string comparison.
     pub(crate) preserve_sort_order: bool,
+    /// When set, indicates the query filters to a single chromosome
+    /// (e.g. `WHERE chrom = '1'`).  Used to declare `(start ASC)`
+    /// per-partition ordering, enabling `SortPreservingMergeExec`.
+    pub(crate) single_chrom_filter: Option<String>,
 }
 
 impl Debug for EnsemblCacheExec {
@@ -170,17 +177,20 @@ impl EnsemblCacheExec {
             assign_files_balanced(config.files, num_partitions)
         };
 
-        // When preserve_sort_order is set AND chrom/start columns are present
-        // in the projected schema, declare per-partition output ordering so
-        // DataFusion can replace a full SortExec with SortPreservingMergeExec.
-        let eq_props = if config.preserve_sort_order {
-            let chrom_idx = config.schema.index_of("chrom").ok();
-            let start_idx = config.schema.index_of("start").ok();
-            if let (Some(ci), Some(si)) = (chrom_idx, start_idx) {
-                let sort_exprs = vec![
-                    PhysicalSortExpr::new_default(Arc::new(Column::new("chrom", ci))).asc(),
-                    PhysicalSortExpr::new_default(Arc::new(Column::new("start", si))).asc(),
-                ];
+        // Declare per-partition output ordering when preserve_sort_order is set.
+        //
+        // Single-chrom filter (WHERE chrom = '1'): declare (start ASC).
+        //   Correct because within each partition, files are consecutive
+        //   genomic chunks with monotonically increasing start positions.
+        //
+        // No chrom filter: do NOT declare ordering. Karyotypic file order
+        //   (1, 2, ..., 10, ..., 22, X, Y, MT) differs from lexicographic
+        //   string order ("1" < "10" < "2"), so declaring (chrom ASC, start ASC)
+        //   would be incorrect and could produce wrong merge results.
+        let eq_props = if config.preserve_sort_order && config.single_chrom_filter.is_some() {
+            if let Ok(si) = config.schema.index_of("start") {
+                let sort_exprs =
+                    vec![PhysicalSortExpr::new_default(Arc::new(Column::new("start", si))).asc()];
                 EquivalenceProperties::new_with_orderings(config.schema.clone(), [sort_exprs])
             } else {
                 EquivalenceProperties::new(config.schema.clone())

@@ -4,7 +4,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
-use datafusion::physical_plan::ExecutionPlanProperties;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::test_utils::find_leaf_exec;
@@ -2871,6 +2871,167 @@ async fn transcript_object_hash_stable_text() -> datafusion::common::Result<()> 
                 hashes.value(i)
             );
         }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sort-preserving merge and parallel execution tests
+// ---------------------------------------------------------------------------
+
+/// Recursively search for an execution plan node by name.
+fn find_exec_by_name(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<Arc<dyn ExecutionPlan>> {
+    if plan.name() == name {
+        return Some(Arc::clone(plan));
+    }
+    for child in plan.children() {
+        if let Some(found) = find_exec_by_name(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Check that a plan tree does NOT contain a node with the given name.
+fn assert_no_exec_named(plan: &Arc<dyn ExecutionPlan>, name: &str) {
+    assert!(
+        find_exec_by_name(plan, name).is_none(),
+        "unexpected {name} found in plan"
+    );
+}
+
+#[tokio::test]
+async fn variation_single_chrom_uses_sort_preserving_merge() -> datafusion::common::Result<()> {
+    // With 2 partitions and WHERE chrom = '1', scan() should return
+    // SortPreservingMergeExec wrapping EnsemblCacheExec.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    options.target_partitions = Some(2);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(2);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+
+    // SortPreservingMergeExec should be present
+    let merge = find_exec_by_name(&plan, "SortPreservingMergeExec");
+    assert!(merge.is_some(), "expected SortPreservingMergeExec in plan");
+
+    // No CoalescePartitionsExec (which would serialize to 1 thread)
+    assert_no_exec_named(&plan, "CoalescePartitionsExec");
+
+    // The EnsemblCacheExec should be present as leaf
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "EnsemblCacheExec");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_single_partition_no_merge() -> datafusion::common::Result<()> {
+    // With 1 partition, no SortPreservingMergeExec needed.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    options.target_partitions = Some(1);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(1);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+
+    // No SortPreservingMergeExec for single partition
+    assert_no_exec_named(&plan, "SortPreservingMergeExec");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_no_chrom_filter_no_merge_from_scan() -> datafusion::common::Result<()> {
+    // Without WHERE chrom = '...', scan() should NOT wrap with
+    // SortPreservingMergeExec (karyotypic != lexicographic).
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    options.target_partitions = Some(2);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(2);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx.sql("SELECT chrom, start FROM variation").await?;
+    let plan = df.create_physical_plan().await?;
+
+    // No SortPreservingMergeExec should be added by scan() for unfiltered queries
+    assert_no_exec_named(&plan, "SortPreservingMergeExec");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_single_chrom_no_coalesce_for_various_partitions()
+-> datafusion::common::Result<()> {
+    // Verify that for partition counts 2..8, the plan never coalesces
+    // to a single thread when filtering to a single chromosome.
+    for target_partitions in 2..=8 {
+        let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+        options.target_partitions = Some(target_partitions);
+        let provider = VariationTableProvider::new(options)?;
+        let ctx = session_ctx_with_target_partitions(target_partitions);
+        let table_name = format!("var_{target_partitions}");
+        ctx.register_table(&table_name, Arc::new(provider))?;
+
+        let df = ctx
+            .sql(&format!(
+                "SELECT start FROM {table_name} WHERE chrom = '1' ORDER BY start"
+            ))
+            .await?;
+        let plan = df.create_physical_plan().await?;
+
+        assert_no_exec_named(&plan, "CoalescePartitionsExec");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_single_chrom_results_ordered() -> datafusion::common::Result<()> {
+    // End-to-end: verify that results from a single-chrom query with
+    // ORDER BY start actually come back correctly ordered.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    options.target_partitions = Some(2);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(2);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+
+    let starts: Vec<i64> = batches
+        .iter()
+        .flat_map(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+
+    // Verify monotonically non-decreasing
+    for window in starts.windows(2) {
+        assert!(
+            window[0] <= window[1],
+            "results not ordered: {} > {}",
+            window[0],
+            window[1]
+        );
     }
 
     Ok(())
