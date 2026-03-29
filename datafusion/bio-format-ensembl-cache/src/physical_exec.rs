@@ -218,7 +218,7 @@ impl EnsemblCacheExec {
 
 /// Prunes variation files by chrom AND genomic region using the
 /// `{chrom}_{start}-{end}_var.gz` naming convention.
-fn variation_file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
+pub(crate) fn variation_file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return true; // can't parse, don't prune
     };
@@ -253,7 +253,7 @@ fn variation_file_matches_predicate(path: &Path, predicate: &SimplePredicate) ->
 /// Prunes files by chromosome using directory structure or filename
 /// conventions. Works for all entity kinds. Returns `true` (don't prune)
 /// if the chromosome cannot be determined from the path.
-fn file_matches_chrom_predicate(
+pub(crate) fn file_matches_chrom_predicate(
     path: &Path,
     predicate: &SimplePredicate,
     kind: EnsemblEntityKind,
@@ -1246,5 +1246,209 @@ mod tests {
         let result = assign_files_ordered(files, 8);
         let total: usize = result.iter().map(|p| p.len()).sum();
         assert_eq!(total, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Ordering preserved with partitions > 1
+    // -----------------------------------------------------------------------
+
+    /// Helper: collect all files from partitions in partition order,
+    /// simulating how DataFusion's SortPreservingMergeExec would see them.
+    fn flatten_partitions(partitions: &[Vec<PathBuf>]) -> Vec<String> {
+        partitions
+            .iter()
+            .flat_map(|p| p.iter().map(|f| f.to_str().unwrap().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn ordered_genomic_sort_preserved_across_partitions() {
+        // Simulate variation files in karyotypic genomic order (as produced
+        // by sort_variation_files_genomic). Verify that assign_files_ordered
+        // distributes them so that flattening partitions in order recovers
+        // the original genomic order.
+        use crate::discovery::sort_variation_files_genomic;
+
+        let mut files: Vec<PathBuf> = vec![
+            "10_1-1000000_var.gz",
+            "2_1-1000000_var.gz",
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "2_1000001-2000000_var.gz",
+            "X_1-1000000_var.gz",
+            "22_1-1000000_var.gz",
+            "22_1000001-2000000_var.gz",
+            "Y_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+        let expected_order: Vec<String> = files
+            .iter()
+            .map(|f| f.to_str().unwrap().to_string())
+            .collect();
+
+        // Distribute across 4 partitions
+        let partitions = assign_files_ordered(files, 4);
+        assert_eq!(partitions.len(), 4);
+
+        // Each partition's files must be a contiguous sub-slice of the
+        // genomic order.
+        let flattened = flatten_partitions(&partitions);
+        assert_eq!(flattened, expected_order);
+    }
+
+    #[test]
+    fn ordered_within_partition_monotonic_chrom_start() {
+        // Verify that within each partition, (chrom_sort_key, start) is
+        // monotonically non-decreasing using karyotypic order.
+        use crate::discovery::{chrom_sort_key, sort_variation_files_genomic};
+
+        let mut files: Vec<PathBuf> = vec![
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "1_2000001-3000000_var.gz",
+            "2_1-1000000_var.gz",
+            "2_1000001-2000000_var.gz",
+            "10_1-1000000_var.gz",
+            "22_1-1000000_var.gz",
+            "X_1-1000000_var.gz",
+            "X_1000001-2000000_var.gz",
+            "Y_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        for num_partitions in [2, 3, 4, 5, 8] {
+            let partitions = assign_files_ordered(files.clone(), num_partitions);
+
+            for (p_idx, partition) in partitions.iter().enumerate() {
+                let regions: Vec<_> = partition
+                    .iter()
+                    .filter_map(|f| {
+                        let name = f.to_str()?;
+                        parse_file_chrom_region(name)
+                    })
+                    .collect();
+
+                for window in regions.windows(2) {
+                    let (chrom_a, start_a, _) = window[0];
+                    let (chrom_b, start_b, _) = window[1];
+                    let key_a = (chrom_sort_key(chrom_a), start_a);
+                    let key_b = (chrom_sort_key(chrom_b), start_b);
+                    assert!(
+                        key_a <= key_b,
+                        "partition {p_idx} with {num_partitions} partitions: \
+                         ({chrom_a}, {start_a}) > ({chrom_b}, {start_b})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_pruned_subset_preserves_order() {
+        // Simulate the scan() flow: genomic sort → predicate prune → ordered assign.
+        // Verify ordering is preserved when only one chromosome's files remain.
+        use crate::discovery::sort_variation_files_genomic;
+        use crate::filter::SimplePredicate;
+
+        let mut files: Vec<PathBuf> = vec![
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "2_1-1000000_var.gz",
+            "2_1000001-2000000_var.gz",
+            "2_2000001-3000000_var.gz",
+            "10_1-1000000_var.gz",
+            "X_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        // Prune to chrom 2 only (simulating WHERE chrom = '2')
+        let predicate = SimplePredicate {
+            chrom: Some("2".to_string()),
+            ..Default::default()
+        };
+        let pruned: Vec<PathBuf> = files
+            .into_iter()
+            .filter(|f| variation_file_matches_predicate(f, &predicate))
+            .collect();
+
+        assert_eq!(pruned.len(), 3);
+
+        // Distribute across 3 partitions — each should get 1 file
+        let partitions = assign_files_ordered(pruned.clone(), 3);
+        let flattened = flatten_partitions(&partitions);
+        let expected: Vec<String> = pruned
+            .iter()
+            .map(|f| f.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(flattened, expected);
+
+        // All files should be chr2 in ascending start order
+        let starts: Vec<i64> = flattened
+            .iter()
+            .filter_map(|name| parse_file_chrom_region(name).map(|(_, s, _)| s))
+            .collect();
+        assert_eq!(starts, vec![1, 1000001, 2000001]);
+    }
+
+    #[test]
+    fn ordered_pruned_region_within_chrom_preserves_order() {
+        // Prune to a specific region within a chromosome and verify
+        // ordering is preserved across partitions.
+        use crate::discovery::sort_variation_files_genomic;
+        use crate::filter::SimplePredicate;
+
+        let mut files: Vec<PathBuf> = vec![
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "1_2000001-3000000_var.gz",
+            "1_3000001-4000000_var.gz",
+            "1_4000001-5000000_var.gz",
+            "1_5000001-6000000_var.gz",
+            "2_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        // Prune to chr1:2000001-4000000.
+        // File overlap logic: file_end < start_min prunes, file_start > end_max prunes.
+        // 1_2000001-3000000 → overlaps (start=2000001, end=3000000)
+        // 1_3000001-4000000 → overlaps (start=3000001, end=4000000)
+        // 1_1000001-2000000 → pruned (file_end=2000000 < start_min=2000001)
+        // 1_4000001-5000000 → pruned (file_start=4000001 > end_max=4000000)
+        let predicate = SimplePredicate {
+            chrom: Some("1".to_string()),
+            start_min: Some(2000001),
+            end_max: Some(4000000),
+            ..Default::default()
+        };
+        let pruned: Vec<PathBuf> = files
+            .into_iter()
+            .filter(|f| variation_file_matches_predicate(f, &predicate))
+            .collect();
+
+        assert_eq!(pruned.len(), 2);
+
+        let partitions = assign_files_ordered(pruned.clone(), 2);
+        let flattened = flatten_partitions(&partitions);
+        let expected: Vec<String> = pruned
+            .iter()
+            .map(|f| f.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(flattened, expected);
     }
 }

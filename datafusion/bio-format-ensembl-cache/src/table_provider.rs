@@ -6,7 +6,10 @@ use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
 use crate::filter::{extract_simple_predicate, is_pushdown_supported};
 use crate::info::CacheInfo;
-use crate::physical_exec::{EnsemblCacheExec, EnsemblCacheExecConfig};
+use crate::physical_exec::{
+    EnsemblCacheExec, EnsemblCacheExecConfig, file_matches_chrom_predicate,
+    variation_file_matches_predicate,
+};
 use crate::schema::{
     exon_schema, motif_feature_schema, regulatory_feature_schema, transcript_schema,
     translation_schema, variation_schema,
@@ -218,6 +221,41 @@ impl ProviderInner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let projected_schema = project_schema(&self.schema, projection);
         let predicate = extract_simple_predicate(filters);
+
+        // Prune files by predicate BEFORE partition assignment so that
+        // per-chromosome queries distribute matching files across all
+        // partitions instead of concentrating them in one.
+        let files: Vec<std::path::PathBuf> = self
+            .files
+            .iter()
+            .filter(|path| {
+                if self.kind == EnsemblEntityKind::Variation {
+                    variation_file_matches_predicate(path, &predicate)
+                } else {
+                    file_matches_chrom_predicate(path, &predicate, self.kind)
+                }
+            })
+            .cloned()
+            .collect();
+
+        if files.is_empty() {
+            // All files pruned — still need a valid plan with at least 1 partition.
+            // Pass empty file list; execute() will produce zero batches.
+            return Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
+                kind: self.kind,
+                cache_info: self.cache_info.clone(),
+                files,
+                schema: projected_schema,
+                predicate,
+                limit,
+                variation_region_size: self.variation_region_size,
+                batch_size_hint: self.options.batch_size_hint,
+                coordinate_system_zero_based: self.options.coordinate_system_zero_based,
+                num_partitions: 1,
+                preserve_sort_order: false,
+            })));
+        }
+
         let base_partitions = match self.options.target_partitions {
             Some(target) => target,
             None => state.config().target_partitions(),
@@ -234,7 +272,7 @@ impl ProviderInner {
             base_partitions
         }
         .max(1);
-        let num_partitions = requested_partitions.min(self.files.len().max(1));
+        let num_partitions = requested_partitions.min(files.len().max(1));
 
         // Default: preserve sort order for variation (already sorted in
         // genomic order by discovery), disable for other entities.
@@ -246,7 +284,7 @@ impl ProviderInner {
         Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
             kind: self.kind,
             cache_info: self.cache_info.clone(),
-            files: self.files.clone(),
+            files,
             schema: projected_schema,
             predicate,
             limit,

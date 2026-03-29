@@ -210,7 +210,7 @@ fn parse_chrom_and_start(name: &str) -> Option<(&str, i64)> {
 ///
 /// Canonical: 1-22 → 1-22, X → 23, Y → 24, MT → 25.
 /// Non-canonical: 100 + lexicographic position (sorts after canonical).
-fn chrom_sort_key(chrom: &str) -> (u32, String) {
+pub(crate) fn chrom_sort_key(chrom: &str) -> (u32, String) {
     match chrom {
         "X" | "x" => (23, String::new()),
         "Y" | "y" => (24, String::new()),
