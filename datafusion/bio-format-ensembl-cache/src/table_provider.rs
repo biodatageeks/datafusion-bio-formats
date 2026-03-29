@@ -269,6 +269,31 @@ impl ProviderInner {
 
         let single_chrom_filter = predicate.chrom.clone();
 
+        // For tabix variation caches with few files (typically 1 per chrom),
+        // split the bgzf file into byte-range partitions for intra-file
+        // parallelism.  This is the key optimization for VEP 110+ caches.
+        let is_tabix = self.kind == EnsemblEntityKind::Variation
+            && self.cache_info.var_type.as_deref() == Some("tabix");
+        let bgzf_partitions = if is_tabix && files.len() == 1 && requested_partitions > 1 {
+            match crate::tabix_reader::compute_bgzf_partitions(&files[0], requested_partitions) {
+                Ok(parts) if parts.len() > 1 => Some(
+                    parts
+                        .into_iter()
+                        .map(|p| (files[0].clone(), p))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let effective_partitions = if let Some(ref bp) = bgzf_partitions {
+            bp.len()
+        } else {
+            num_partitions
+        };
+
         let exec = Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
             kind: self.kind,
             cache_info: self.cache_info.clone(),
@@ -279,9 +304,10 @@ impl ProviderInner {
             variation_region_size: self.variation_region_size,
             batch_size_hint: self.options.batch_size_hint,
             coordinate_system_zero_based: self.options.coordinate_system_zero_based,
-            num_partitions,
+            num_partitions: effective_partitions,
             preserve_sort_order,
             single_chrom_filter: single_chrom_filter.clone(),
+            bgzf_partitions,
         }));
 
         // When sort order is preserved, a single chrom is filtered, and
@@ -291,7 +317,7 @@ impl ProviderInner {
         // optimizer to choose merge over a full single-threaded SortExec.
         if preserve_sort_order
             && single_chrom_filter.is_some()
-            && num_partitions > 1
+            && effective_partitions > 1
             && let Ok(si) = projected_schema.index_of("start")
         {
             let sort_exprs = LexOrdering::new(vec![PhysicalSortExpr::new(

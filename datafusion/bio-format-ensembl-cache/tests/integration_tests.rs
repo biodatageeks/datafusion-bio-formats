@@ -3102,3 +3102,149 @@ async fn variation_multi_region_results_ordered_with_parallel_exec()
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tabix bgzf intra-file parallelism tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tabix_bgzf_parallel_partitions() -> datafusion::common::Result<()> {
+    // With a single bgzf all_vars.gz and target_partitions=4,
+    // the EnsemblCacheExec should split into multiple bgzf byte-range
+    // partitions for true intra-file parallelism.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_tabix_bgzf"));
+    options.target_partitions = Some(4);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(4);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+
+    // EnsemblCacheExec should have multiple partitions (bgzf byte-range split)
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "EnsemblCacheExec");
+    let num_partitions = leaf.output_partitioning().partition_count();
+    assert!(
+        num_partitions > 1,
+        "expected >1 partitions for tabix bgzf split, got {num_partitions}"
+    );
+
+    // SortPreservingMergeExec should be present
+    assert!(
+        find_exec_by_name(&plan, "SortPreservingMergeExec").is_some(),
+        "expected SortPreservingMergeExec in plan"
+    );
+
+    // No CoalescePartitionsExec
+    assert_no_exec_named(&plan, "CoalescePartitionsExec");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn tabix_bgzf_results_correct_and_ordered() -> datafusion::common::Result<()> {
+    // End-to-end: verify that parallel bgzf reading produces correct
+    // ordered results that match single-partition reading.
+    let fixture = fixture_path("variation_tabix_bgzf");
+
+    // Single partition (baseline)
+    let mut options_1 = EnsemblCacheOptions::new(&fixture);
+    options_1.target_partitions = Some(1);
+    let provider_1 = VariationTableProvider::new(options_1)?;
+    let ctx_1 = session_ctx_with_target_partitions(1);
+    ctx_1.register_table("var", Arc::new(provider_1))?;
+    let batches_1 = ctx_1
+        .sql("SELECT start FROM var WHERE chrom = '1' ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+
+    // Multiple partitions (parallel bgzf)
+    let mut options_4 = EnsemblCacheOptions::new(&fixture);
+    options_4.target_partitions = Some(4);
+    let provider_4 = VariationTableProvider::new(options_4)?;
+    let ctx_4 = session_ctx_with_target_partitions(4);
+    ctx_4.register_table("var", Arc::new(provider_4))?;
+    let batches_4 = ctx_4
+        .sql("SELECT start FROM var WHERE chrom = '1' ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+
+    let starts_1: Vec<i64> = batches_1
+        .iter()
+        .flat_map(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+
+    let starts_4: Vec<i64> = batches_4
+        .iter()
+        .flat_map(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+
+    // Both should have the same number of chr1 rows
+    assert_eq!(
+        starts_1.len(),
+        starts_4.len(),
+        "row count mismatch: single={} vs parallel={}",
+        starts_1.len(),
+        starts_4.len()
+    );
+    assert_eq!(starts_1.len(), 500, "expected 500 chr1 rows");
+
+    // Results should be identical
+    assert_eq!(
+        starts_1, starts_4,
+        "parallel results differ from single-partition"
+    );
+
+    // Verify ordering
+    for window in starts_4.windows(2) {
+        assert!(
+            window[0] <= window[1],
+            "results not ordered: {} > {}",
+            window[0],
+            window[1]
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn tabix_bgzf_single_partition_no_split() -> datafusion::common::Result<()> {
+    // With target_partitions=1, no bgzf splitting should occur.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_tabix_bgzf"));
+    options.target_partitions = Some(1);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(1);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT COUNT(*) FROM variation WHERE chrom = '1'")
+        .await?;
+
+    let batches = df.collect().await?;
+    let count = first_i64(&batches);
+    assert_eq!(count, 500, "expected 500 chr1 rows");
+
+    Ok(())
+}

@@ -60,6 +60,7 @@ pub(crate) struct EnsemblCacheExec {
     pub(crate) batch_size_hint: Option<usize>,
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) num_partitions: usize,
+    pub(crate) bgzf_partitions: Option<Vec<(PathBuf, crate::tabix_reader::BgzfPartition)>>,
     pub(crate) cache: PlanProperties,
 }
 
@@ -86,6 +87,10 @@ pub(crate) struct EnsemblCacheExecConfig {
     /// (e.g. `WHERE chrom = '1'`).  Used to declare `(start ASC)`
     /// per-partition ordering, enabling `SortPreservingMergeExec`.
     pub(crate) single_chrom_filter: Option<String>,
+    /// When set, the single tabix file is split into bgzf byte-range
+    /// partitions instead of distributing multiple files.  Each entry
+    /// is a `(file_path, BgzfPartition)` for one execution partition.
+    pub(crate) bgzf_partitions: Option<Vec<(PathBuf, crate::tabix_reader::BgzfPartition)>>,
 }
 
 impl Debug for EnsemblCacheExec {
@@ -169,9 +174,18 @@ fn assign_files_ordered(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<P
 
 impl EnsemblCacheExec {
     pub(crate) fn new(config: EnsemblCacheExecConfig) -> Self {
-        let num_partitions = config.num_partitions.max(1);
+        let bgzf_partitions = config.bgzf_partitions;
+        let num_partitions = if let Some(ref bp) = bgzf_partitions {
+            bp.len().max(1)
+        } else {
+            config.num_partitions.max(1)
+        };
 
-        let partition_files = if config.preserve_sort_order {
+        let partition_files = if bgzf_partitions.is_some() {
+            // bgzf partitions handle file assignment internally;
+            // create empty file lists (one per partition) as placeholder.
+            (0..num_partitions).map(|_| Vec::new()).collect()
+        } else if config.preserve_sort_order {
             assign_files_ordered(config.files, num_partitions)
         } else {
             assign_files_balanced(config.files, num_partitions)
@@ -217,6 +231,7 @@ impl EnsemblCacheExec {
             batch_size_hint: config.batch_size_hint,
             coordinate_system_zero_based: config.coordinate_system_zero_based,
             num_partitions,
+            bgzf_partitions,
             cache,
         }
     }
@@ -359,9 +374,16 @@ impl ExecutionPlan for EnsemblCacheExec {
         let cache_info = self.cache_info.clone();
         let predicate = self.predicate.clone();
 
+        let bgzf_partition = self
+            .bgzf_partitions
+            .as_ref()
+            .and_then(|p| p.get(partition))
+            .cloned();
+
         // Files for this partition (pre-balanced by size), with predicate pruning.
         // Variation files support chrom + region pruning via filename parsing;
         // all other entities support chrom-only pruning via directory/filename.
+        // When using bgzf partitions, file list is empty (handled separately).
         let files: Vec<PathBuf> = self.partition_files[partition]
             .iter()
             .filter(|path| {
@@ -395,6 +417,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                 variation_region_size,
                 coordinate_system_zero_based,
                 batch_size,
+                bgzf_partition,
             )
         });
         Ok(builder.build())
@@ -450,6 +473,7 @@ fn process_partition(
     variation_region_size: i64,
     coordinate_system_zero_based: bool,
     batch_size: usize,
+    bgzf_partition: Option<(PathBuf, crate::tabix_reader::BgzfPartition)>,
 ) -> Result<()> {
     let col_map = ColumnMap::from_schema(&stream_schema);
     let provenance = ProvenanceWriter::new(&col_map, &cache_info);
@@ -505,6 +529,65 @@ fn process_partition(
     let mut emitted_rows: usize = 0;
     let mut malformed_rows: usize = 0;
     let mut stop = false;
+
+    // BGZF partition path: read lines from a byte range of a bgzf file
+    // instead of iterating over multiple files.
+    if let Some((bgzf_path, bgzf_part)) = &bgzf_partition
+        && kind == EnsemblEntityKind::Variation
+    {
+        let source_file_str = bgzf_path.to_str().unwrap_or_default();
+        let mut bgzf_reader =
+            crate::tabix_reader::BgzfPartitionLineReader::open(bgzf_path, bgzf_part)?;
+
+        while let Some(line_trimmed) = bgzf_reader.next_line() {
+            match parse_variation_line_into(
+                line_trimmed,
+                source_file_str,
+                &predicate,
+                variation_region_size,
+                coordinate_system_zero_based,
+                &mut batch_builder,
+                variation_col_idx.as_ref().unwrap(),
+                variation_ctx.as_ref().unwrap(),
+                &provenance,
+                source_id_writer.as_mut().unwrap(),
+            )? {
+                VariationParseResult::Added => {
+                    match dispatch_row(
+                        &tx,
+                        &mut batch_builder,
+                        &mut emitted_rows,
+                        limit,
+                        batch_size,
+                    )? {
+                        RowDispatchState::Continue => {}
+                        RowDispatchState::Stop | RowDispatchState::ConsumerDropped => {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+                VariationParseResult::Skipped => {}
+                VariationParseResult::Malformed => {
+                    malformed_rows += 1;
+                }
+            }
+        }
+
+        // Flush remaining rows
+        if !stop && batch_builder.len() > 0 {
+            let batch = batch_builder.finish()?;
+            let _ = tx.blocking_send(Ok(batch));
+        }
+
+        if malformed_rows > 0 {
+            log::debug!(
+                "Skipped {malformed_rows} malformed variation lines from {}",
+                bgzf_path.display()
+            );
+        }
+        return Ok(());
+    }
 
     for source_file in &files {
         if stop {
