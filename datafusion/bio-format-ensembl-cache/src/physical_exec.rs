@@ -26,8 +26,9 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::stream::RecordBatchReceiverStreamBuilder;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_execution::TaskContext;
@@ -73,6 +74,11 @@ pub(crate) struct EnsemblCacheExecConfig {
     pub(crate) batch_size_hint: Option<usize>,
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) num_partitions: usize,
+    /// When true, files are assigned to partitions in discovery order
+    /// (consecutive chunks) and output ordering `(chrom, start)` is declared
+    /// per partition.  This allows DataFusion to use SortPreservingMergeExec
+    /// instead of a full SortExec when the caller adds `ORDER BY chrom, start`.
+    pub(crate) preserve_sort_order: bool,
 }
 
 impl Debug for EnsemblCacheExec {
@@ -107,6 +113,9 @@ fn estimate_file_size(path: &Path) -> u64 {
 /// This spreads large files across different partitions while keeping file
 /// counts even (±1), avoiding the greedy LPT pitfall where a few heavy
 /// partitions dominate wall-clock time.
+///
+/// **Note:** This destroys the original file order.  Use
+/// [`assign_files_ordered`] when output ordering must be preserved.
 fn assign_files_balanced(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<PathBuf>> {
     let mut partition_files: Vec<Vec<PathBuf>> = (0..num_partitions).map(|_| Vec::new()).collect();
     if files.is_empty() {
@@ -131,17 +140,61 @@ fn assign_files_balanced(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<
     partition_files
 }
 
+/// Assign files to partitions preserving discovery order.
+///
+/// Files are distributed in consecutive chunks so that each partition reads
+/// a contiguous slice of the sorted file list.  This preserves the
+/// within-partition sort invariant required for declaring output ordering.
+fn assign_files_ordered(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<PathBuf>> {
+    let mut partition_files: Vec<Vec<PathBuf>> = (0..num_partitions).map(|_| Vec::new()).collect();
+    if files.is_empty() {
+        return partition_files;
+    }
+
+    let chunk_size = files.len().div_ceil(num_partitions);
+    for (i, path) in files.into_iter().enumerate() {
+        let partition_idx = (i / chunk_size).min(num_partitions - 1);
+        partition_files[partition_idx].push(path);
+    }
+
+    partition_files
+}
+
 impl EnsemblCacheExec {
     pub(crate) fn new(config: EnsemblCacheExecConfig) -> Self {
         let num_partitions = config.num_partitions.max(1);
+
+        let partition_files = if config.preserve_sort_order {
+            assign_files_ordered(config.files, num_partitions)
+        } else {
+            assign_files_balanced(config.files, num_partitions)
+        };
+
+        // When preserve_sort_order is set AND chrom/start columns are present
+        // in the projected schema, declare per-partition output ordering so
+        // DataFusion can replace a full SortExec with SortPreservingMergeExec.
+        let eq_props = if config.preserve_sort_order {
+            let chrom_idx = config.schema.index_of("chrom").ok();
+            let start_idx = config.schema.index_of("start").ok();
+            if let (Some(ci), Some(si)) = (chrom_idx, start_idx) {
+                let sort_exprs = vec![
+                    PhysicalSortExpr::new_default(Arc::new(Column::new("chrom", ci))).asc(),
+                    PhysicalSortExpr::new_default(Arc::new(Column::new("start", si))).asc(),
+                ];
+                EquivalenceProperties::new_with_orderings(config.schema.clone(), [sort_exprs])
+            } else {
+                EquivalenceProperties::new(config.schema.clone())
+            }
+        } else {
+            EquivalenceProperties::new(config.schema.clone())
+        };
+
         let cache = PlanProperties::new(
-            EquivalenceProperties::new(config.schema.clone()),
+            eq_props,
             Partitioning::UnknownPartitioning(num_partitions),
             EmissionType::Final,
             Boundedness::Bounded,
         );
-
-        let partition_files = assign_files_balanced(config.files, num_partitions);
 
         Self {
             kind: config.kind,
@@ -1121,5 +1174,77 @@ mod tests {
         assert_eq!(total, 2);
         // Should have at most 1 file per partition
         assert!(result.iter().all(|p| p.len() <= 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // assign_files_ordered
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ordered_preserves_order() {
+        let files: Vec<PathBuf> = (0..6).map(|i| PathBuf::from(format!("f{i}.gz"))).collect();
+
+        let result = assign_files_ordered(files, 3);
+        assert_eq!(result.len(), 3);
+        // Each partition gets 2 consecutive files
+        assert_eq!(
+            result[0]
+                .iter()
+                .map(|p| p.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["f0.gz", "f1.gz"]
+        );
+        assert_eq!(
+            result[1]
+                .iter()
+                .map(|p| p.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["f2.gz", "f3.gz"]
+        );
+        assert_eq!(
+            result[2]
+                .iter()
+                .map(|p| p.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["f4.gz", "f5.gz"]
+        );
+    }
+
+    #[test]
+    fn ordered_uneven_distribution() {
+        let files: Vec<PathBuf> = (0..7).map(|i| PathBuf::from(format!("f{i}.gz"))).collect();
+
+        let result = assign_files_ordered(files, 3);
+        assert_eq!(result.len(), 3);
+        // ceil(7/3) = 3 files per chunk, last partition gets remainder
+        let counts: Vec<usize> = result.iter().map(|p| p.len()).collect();
+        assert_eq!(counts.iter().sum::<usize>(), 7);
+        // First partitions get 3, last gets 1
+        assert_eq!(counts, vec![3, 3, 1]);
+    }
+
+    #[test]
+    fn ordered_empty() {
+        let result = assign_files_ordered(Vec::new(), 4);
+        assert_eq!(result.len(), 4);
+        assert!(result.iter().all(|p| p.is_empty()));
+    }
+
+    #[test]
+    fn ordered_single_file() {
+        let files = vec![PathBuf::from("f0.gz")];
+        let result = assign_files_ordered(files, 4);
+        let total: usize = result.iter().map(|p| p.len()).sum();
+        assert_eq!(total, 1);
+        assert_eq!(result[0].len(), 1);
+    }
+
+    #[test]
+    fn ordered_more_partitions_than_files() {
+        let files: Vec<PathBuf> = (0..2).map(|i| PathBuf::from(format!("f{i}.gz"))).collect();
+
+        let result = assign_files_ordered(files, 8);
+        let total: usize = result.iter().map(|p| p.len()).sum();
+        assert_eq!(total, 2);
     }
 }

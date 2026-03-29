@@ -1,6 +1,7 @@
 use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
 use crate::physical_exec::parse_file_chrom_region;
+use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -47,7 +48,7 @@ pub(crate) fn discover_variation_files(cache_root: &Path) -> Result<Vec<PathBuf>
         .cloned()
         .collect();
 
-    region_files.sort();
+    sort_variation_files_genomic(&mut region_files);
     Ok(region_files)
 }
 
@@ -162,6 +163,66 @@ fn walk_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 
 fn is_index_sidecar_name(name: &str) -> bool {
     name.ends_with(".csi") || name.ends_with(".tbi")
+}
+
+/// Sort variation files in genomic order: (chromosome_numeric, region_start).
+///
+/// Canonical chromosomes sort first in karyotypic order (1..22, X, Y, MT),
+/// followed by non-canonical contigs in lexicographic order.  Within the same
+/// chromosome, files are sorted by their region start position.
+///
+/// Files whose names cannot be parsed (e.g. `all_vars.gz`) are placed at the
+/// end, preserving their relative order.
+pub(crate) fn sort_variation_files_genomic(files: &mut [PathBuf]) {
+    files.sort_by(|a, b| {
+        let pa = a
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_chrom_and_start);
+        let pb = b
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(parse_chrom_and_start);
+
+        match (pa, pb) {
+            (Some((ca, sa)), Some((cb, sb))) => chrom_sort_key(ca)
+                .cmp(&chrom_sort_key(cb))
+                .then(sa.cmp(&sb)),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => a.cmp(b),
+        }
+    });
+}
+
+/// Extract (chrom, start) from a variation filename like `1_1-1000000_var.gz`.
+fn parse_chrom_and_start(name: &str) -> Option<(&str, i64)> {
+    let marker = name.find('_')?;
+    let chrom = &name[..marker];
+    let suffix = &name[marker + 1..];
+    let start_end = suffix.split_once('_')?.0; // "1-1000000"
+    let start_str = start_end.split_once('-')?.0;
+    let start = start_str.parse::<i64>().ok()?;
+    Some((chrom, start))
+}
+
+/// Map chromosome name to a sort key that follows karyotypic order.
+///
+/// Canonical: 1-22 → 1-22, X → 23, Y → 24, MT → 25.
+/// Non-canonical: 100 + lexicographic position (sorts after canonical).
+fn chrom_sort_key(chrom: &str) -> (u32, String) {
+    match chrom {
+        "X" | "x" => (23, String::new()),
+        "Y" | "y" => (24, String::new()),
+        "MT" | "mt" | "Mt" => (25, String::new()),
+        s => {
+            if let Ok(n) = s.parse::<u32>() {
+                (n, String::new())
+            } else {
+                (100, s.to_string())
+            }
+        }
+    }
 }
 
 /// Well-known entity directory names that are NOT chromosome names.
@@ -653,5 +714,122 @@ mod tests {
     fn distinct_chroms_empty_files() {
         let chroms = extract_distinct_chroms(&[], EnsemblEntityKind::Variation).unwrap();
         assert!(chroms.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // sort_variation_files_genomic
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn genomic_sort_karyotypic_order() {
+        let mut files: Vec<PathBuf> = vec![
+            "2_1-1000000_var.gz",
+            "10_1-1000000_var.gz",
+            "1_1-1000000_var.gz",
+            "X_1-1000000_var.gz",
+            "Y_1-1000000_var.gz",
+            "MT_1-1000000_var.gz",
+            "22_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        let names: Vec<&str> = files.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "1_1-1000000_var.gz",
+                "2_1-1000000_var.gz",
+                "10_1-1000000_var.gz",
+                "22_1-1000000_var.gz",
+                "X_1-1000000_var.gz",
+                "Y_1-1000000_var.gz",
+                "MT_1-1000000_var.gz",
+            ]
+        );
+    }
+
+    #[test]
+    fn genomic_sort_within_chromosome() {
+        let mut files: Vec<PathBuf> = vec![
+            "1_2000001-3000000_var.gz",
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        let names: Vec<&str> = files.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "1_1-1000000_var.gz",
+                "1_1000001-2000000_var.gz",
+                "1_2000001-3000000_var.gz",
+            ]
+        );
+    }
+
+    #[test]
+    fn genomic_sort_unparseable_files_at_end() {
+        let mut files: Vec<PathBuf> =
+            vec!["2_1-1000000_var.gz", "all_vars.gz", "1_1-1000000_var.gz"]
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        let names: Vec<&str> = files.iter().map(|p| p.to_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec!["1_1-1000000_var.gz", "2_1-1000000_var.gz", "all_vars.gz",]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_chrom_and_start
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_chrom_start_typical() {
+        assert_eq!(parse_chrom_and_start("1_1-1000000_var.gz"), Some(("1", 1)));
+    }
+
+    #[test]
+    fn parse_chrom_start_x() {
+        assert_eq!(
+            parse_chrom_and_start("X_5000001-6000000_var.gz"),
+            Some(("X", 5000001))
+        );
+    }
+
+    #[test]
+    fn parse_chrom_start_unparseable() {
+        assert_eq!(parse_chrom_and_start("all_vars.gz"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // chrom_sort_key
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn chrom_sort_key_canonical_order() {
+        assert!(chrom_sort_key("1") < chrom_sort_key("2"));
+        assert!(chrom_sort_key("9") < chrom_sort_key("10"));
+        assert!(chrom_sort_key("22") < chrom_sort_key("X"));
+        assert!(chrom_sort_key("X") < chrom_sort_key("Y"));
+        assert!(chrom_sort_key("Y") < chrom_sort_key("MT"));
+    }
+
+    #[test]
+    fn chrom_sort_key_non_canonical_after_mt() {
+        assert!(chrom_sort_key("MT") < chrom_sort_key("GL000220.1"));
     }
 }

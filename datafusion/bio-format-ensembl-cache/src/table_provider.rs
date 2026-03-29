@@ -44,6 +44,14 @@ pub struct EnsemblCacheOptions {
     /// scales linearly with the number of concurrent partitions. Defaults to 4
     /// when unset.
     pub max_storable_partitions: Option<usize>,
+    /// When true, variation files are assigned to partitions in genomic order
+    /// (consecutive chunks) and per-partition output ordering `(chrom, start)`
+    /// is declared in the execution plan.  This allows DataFusion to replace a
+    /// full SortExec with a SortPreservingMergeExec when the caller adds
+    /// `ORDER BY chrom, start`, avoiding a redundant re-sort.
+    ///
+    /// Defaults to true for variation entities.
+    pub preserve_sort_order: Option<bool>,
 }
 
 impl EnsemblCacheOptions {
@@ -60,6 +68,7 @@ impl EnsemblCacheOptions {
             target_partitions: None,
             batch_size_hint: None,
             max_storable_partitions: None,
+            preserve_sort_order: None,
         }
     }
 }
@@ -227,6 +236,13 @@ impl ProviderInner {
         .max(1);
         let num_partitions = requested_partitions.min(self.files.len().max(1));
 
+        // Default: preserve sort order for variation (already sorted in
+        // genomic order by discovery), disable for other entities.
+        let preserve_sort_order = self
+            .options
+            .preserve_sort_order
+            .unwrap_or(self.kind == EnsemblEntityKind::Variation);
+
         Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
             kind: self.kind,
             cache_info: self.cache_info.clone(),
@@ -238,6 +254,7 @@ impl ProviderInner {
             batch_size_hint: self.options.batch_size_hint,
             coordinate_system_zero_based: self.options.coordinate_system_zero_based,
             num_partitions,
+            preserve_sort_order,
         })))
     }
 }
