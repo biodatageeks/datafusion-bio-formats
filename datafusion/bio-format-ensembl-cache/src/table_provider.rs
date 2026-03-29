@@ -238,24 +238,6 @@ impl ProviderInner {
             .cloned()
             .collect();
 
-        if files.is_empty() {
-            // All files pruned — still need a valid plan with at least 1 partition.
-            // Pass empty file list; execute() will produce zero batches.
-            return Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
-                kind: self.kind,
-                cache_info: self.cache_info.clone(),
-                files,
-                schema: projected_schema,
-                predicate,
-                limit,
-                variation_region_size: self.variation_region_size,
-                batch_size_hint: self.options.batch_size_hint,
-                coordinate_system_zero_based: self.options.coordinate_system_zero_based,
-                num_partitions: 1,
-                preserve_sort_order: false,
-            })));
-        }
-
         let base_partitions = match self.options.target_partitions {
             Some(target) => target,
             None => state.config().target_partitions(),
