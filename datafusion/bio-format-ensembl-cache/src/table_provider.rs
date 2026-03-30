@@ -281,12 +281,20 @@ impl ProviderInner {
         let bgzf_partitions = if is_tabix && files.len() == 1 && requested_partitions > 1 {
             let data_file = &files[0];
             let tbi_path = data_file.with_extension("gz.tbi");
+            let csi_path = data_file.with_extension("gz.csi");
+            let index_path = if tbi_path.exists() {
+                Some(tbi_path)
+            } else if csi_path.exists() {
+                Some(csi_path)
+            } else {
+                None
+            };
 
-            // Try tabix-index-aware partitioning first (chrom filter + .tbi exists)
+            // Try tabix-index-aware partitioning first (chrom filter + index exists)
             let parts = if let Some(ref chrom) = single_chrom_filter
-                && tbi_path.exists()
+                && let Some(ref idx_path) = index_path
             {
-                match crate::tabix_reader::tabix_chrom_byte_range(&tbi_path, chrom) {
+                match crate::tabix_reader::tabix_chrom_byte_range(idx_path, chrom) {
                     Ok(Some((start, end))) => {
                         crate::tabix_reader::compute_bgzf_partitions_in_range(
                             data_file,

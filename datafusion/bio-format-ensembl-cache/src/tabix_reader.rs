@@ -88,11 +88,25 @@ pub(crate) fn compute_bgzf_partitions(
     Ok(partitions)
 }
 
-/// Look up the compressed byte range for a chromosome in a tabix index.
+/// Look up the compressed byte range for a chromosome in a tabix or CSI index.
 ///
+/// Supports both `.tbi` (tabix) and `.csi` (coordinate-sorted index) files.
 /// Returns `Some((start_compressed, end_compressed))` if the chromosome
 /// is found in the index, `None` otherwise.
-pub(crate) fn tabix_chrom_byte_range(tbi_path: &Path, chrom: &str) -> Result<Option<(u64, u64)>> {
+pub(crate) fn tabix_chrom_byte_range(index_path: &Path, chrom: &str) -> Result<Option<(u64, u64)>> {
+    let is_csi = index_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("csi"));
+
+    if is_csi {
+        chrom_byte_range_from_csi(index_path, chrom)
+    } else {
+        chrom_byte_range_from_tbi(index_path, chrom)
+    }
+}
+
+fn chrom_byte_range_from_tbi(tbi_path: &Path, chrom: &str) -> Result<Option<(u64, u64)>> {
     let index = noodles_tabix::fs::read(tbi_path).map_err(|e| {
         exec_err(format!(
             "Failed reading tabix index {}: {e}",
@@ -100,7 +114,31 @@ pub(crate) fn tabix_chrom_byte_range(tbi_path: &Path, chrom: &str) -> Result<Opt
         ))
     })?;
 
-    let header = match index.header() {
+    extract_chrom_range_from_index(index.header(), index.reference_sequences(), chrom)
+}
+
+fn chrom_byte_range_from_csi(csi_path: &Path, chrom: &str) -> Result<Option<(u64, u64)>> {
+    let index = noodles_csi::fs::read(csi_path).map_err(|e| {
+        exec_err(format!(
+            "Failed reading CSI index {}: {e}",
+            csi_path.display()
+        ))
+    })?;
+
+    extract_chrom_range_from_index(index.header(), index.reference_sequences(), chrom)
+}
+
+/// Extract the compressed byte range for a chromosome from an index's
+/// header and reference sequences.  Works for both TBI and CSI indexes
+/// since both use the same `ReferenceSequence<I>` structure.
+fn extract_chrom_range_from_index<
+    I: noodles_csi::binning_index::index::reference_sequence::Index,
+>(
+    header: Option<&noodles_csi::binning_index::index::Header>,
+    ref_seqs: &[noodles_csi::binning_index::index::ReferenceSequence<I>],
+    chrom: &str,
+) -> Result<Option<(u64, u64)>> {
+    let header = match header {
         Some(h) => h,
         None => return Ok(None),
     };
@@ -111,14 +149,11 @@ pub(crate) fn tabix_chrom_byte_range(tbi_path: &Path, chrom: &str) -> Result<Opt
         .map(|n| String::from_utf8_lossy(n.as_ref()).to_string())
         .collect();
 
-    let tid = names.iter().position(|n| n == chrom);
-    let tid = match tid {
+    let tid = match names.iter().position(|n| n == chrom) {
         Some(t) => t,
         None => return Ok(None),
     };
 
-    // Get reference sequences from the concrete Index type (not the trait)
-    let ref_seqs: &[_] = index.reference_sequences();
     if tid >= ref_seqs.len() {
         return Ok(None);
     }
