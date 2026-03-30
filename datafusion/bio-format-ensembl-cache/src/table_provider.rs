@@ -272,17 +272,51 @@ impl ProviderInner {
         // For tabix variation caches with few files (typically 1 per chrom),
         // split the bgzf file into byte-range partitions for intra-file
         // parallelism.  This is the key optimization for VEP 110+ caches.
+        //
+        // When a chrom predicate is present AND a .tbi index exists, use
+        // the index to restrict partitioning to only the target chromosome's
+        // byte range.  This avoids decompressing data for other chromosomes.
         let is_tabix = self.kind == EnsemblEntityKind::Variation
             && self.cache_info.var_type.as_deref() == Some("tabix");
         let bgzf_partitions = if is_tabix && files.len() == 1 && requested_partitions > 1 {
-            match crate::tabix_reader::compute_bgzf_partitions(&files[0], requested_partitions) {
-                Ok(parts) if parts.len() > 1 => Some(
+            let data_file = &files[0];
+            let tbi_path = data_file.with_extension("gz.tbi");
+
+            // Try tabix-index-aware partitioning first (chrom filter + .tbi exists)
+            let parts = if let Some(ref chrom) = single_chrom_filter
+                && tbi_path.exists()
+            {
+                match crate::tabix_reader::tabix_chrom_byte_range(&tbi_path, chrom) {
+                    Ok(Some((start, end))) => {
+                        crate::tabix_reader::compute_bgzf_partitions_in_range(
+                            data_file,
+                            start,
+                            end,
+                            requested_partitions,
+                        )
+                        .ok()
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Fall back to whole-file partitioning
+            let parts = parts.unwrap_or_else(|| {
+                crate::tabix_reader::compute_bgzf_partitions(data_file, requested_partitions)
+                    .unwrap_or_default()
+            });
+
+            if parts.len() > 1 {
+                Some(
                     parts
                         .into_iter()
-                        .map(|p| (files[0].clone(), p))
+                        .map(|p| (data_file.clone(), p))
                         .collect::<Vec<_>>(),
-                ),
-                _ => None,
+                )
+            } else {
+                None
             }
         } else {
             None

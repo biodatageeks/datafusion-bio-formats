@@ -3208,7 +3208,7 @@ async fn tabix_bgzf_results_correct_and_ordered() -> datafusion::common::Result<
         starts_1.len(),
         starts_4.len()
     );
-    assert_eq!(starts_1.len(), 500, "expected 500 chr1 rows");
+    assert_eq!(starts_1.len(), 49991, "expected 49991 chr1 rows");
 
     // Results should be identical
     assert_eq!(
@@ -3244,7 +3244,7 @@ async fn tabix_bgzf_single_partition_no_split() -> datafusion::common::Result<()
 
     let batches = df.collect().await?;
     let count = first_i64(&batches);
-    assert_eq!(count, 500, "expected 500 chr1 rows");
+    assert_eq!(count, 49991, "expected 49991 chr1 rows");
 
     Ok(())
 }

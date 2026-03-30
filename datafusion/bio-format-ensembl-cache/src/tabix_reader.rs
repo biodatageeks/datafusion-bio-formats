@@ -7,6 +7,7 @@
 
 use crate::errors::{Result, exec_err};
 use noodles_bgzf as bgzf;
+use noodles_csi::binning_index::BinningIndex;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -82,6 +83,133 @@ pub(crate) fn compute_bgzf_partitions(
     partitions.push(BgzfPartition {
         start_compressed: current_start,
         end_compressed: file_size,
+    });
+
+    Ok(partitions)
+}
+
+/// Look up the compressed byte range for a chromosome in a tabix index.
+///
+/// Returns `Some((start_compressed, end_compressed))` if the chromosome
+/// is found in the index, `None` otherwise.
+pub(crate) fn tabix_chrom_byte_range(tbi_path: &Path, chrom: &str) -> Result<Option<(u64, u64)>> {
+    let index = noodles_tabix::fs::read(tbi_path).map_err(|e| {
+        exec_err(format!(
+            "Failed reading tabix index {}: {e}",
+            tbi_path.display()
+        ))
+    })?;
+
+    let header = match index.header() {
+        Some(h) => h,
+        None => return Ok(None),
+    };
+
+    let names: Vec<String> = header
+        .reference_sequence_names()
+        .iter()
+        .map(|n| String::from_utf8_lossy(n.as_ref()).to_string())
+        .collect();
+
+    let tid = names.iter().position(|n| n == chrom);
+    let tid = match tid {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    // Get reference sequences from the concrete Index type (not the trait)
+    let ref_seqs: &[_] = index.reference_sequences();
+    if tid >= ref_seqs.len() {
+        return Ok(None);
+    }
+
+    let ref_seq = &ref_seqs[tid];
+
+    // Scan bins/chunks to find the compressed byte range for this chromosome
+    let mut min_offset = u64::MAX;
+    let mut max_offset = 0u64;
+    for bin in ref_seq.bins().values() {
+        for chunk in bin.chunks() {
+            min_offset = min_offset.min(chunk.start().compressed());
+            max_offset = max_offset.max(chunk.end().compressed());
+        }
+    }
+
+    if min_offset == u64::MAX {
+        return Ok(None);
+    }
+
+    // The max chunk end from bins gives us a compressed offset guaranteed
+    // to be past the last chr data.  However, in BgzfPartitionLineReader
+    // the check `pos.compressed() >= end` happens BEFORE reading, so the
+    // block at `max_offset` might not be read if `max_offset` IS a block
+    // boundary.  Add 1 so the reader reads that block too.  The slight
+    // overshoot (reading into the next block) is fine — any extra lines
+    // from the next chromosome are discarded by the row-level filter.
+    Ok(Some((min_offset, max_offset + 1)))
+}
+
+/// Compute byte-range partitions restricted to a specific range within
+/// a bgzf file.  Used when the tabix index tells us which byte range
+/// belongs to a specific chromosome.
+pub(crate) fn compute_bgzf_partitions_in_range(
+    file_path: &Path,
+    range_start: u64,
+    range_end: u64,
+    num_partitions: usize,
+) -> Result<Vec<BgzfPartition>> {
+    let file_size = std::fs::metadata(file_path)
+        .map(|m| m.len())
+        .map_err(|e| exec_err(format!("Failed to stat {}: {e}", file_path.display())))?;
+
+    let range_end = range_end.min(file_size);
+
+    if range_start >= range_end || num_partitions <= 1 {
+        return Ok(vec![BgzfPartition {
+            start_compressed: range_start,
+            end_compressed: range_end,
+        }]);
+    }
+
+    // Scan only the blocks within the target range
+    let all_offsets = scan_bgzf_block_offsets(file_path, file_size)?;
+    let block_offsets: Vec<u64> = all_offsets
+        .into_iter()
+        .filter(|&off| off >= range_start && off < range_end)
+        .collect();
+
+    if block_offsets.len() <= 1 {
+        return Ok(vec![BgzfPartition {
+            start_compressed: range_start,
+            end_compressed: range_end,
+        }]);
+    }
+
+    let range_size = range_end - range_start;
+    let target_chunk = range_size / num_partitions as u64;
+    let mut partitions = Vec::with_capacity(num_partitions);
+    let mut current_start = block_offsets[0];
+
+    for i in 1..num_partitions {
+        let target_offset = range_start + target_chunk * i as u64;
+        let best = block_offsets
+            .iter()
+            .copied()
+            .filter(|&off| off > current_start)
+            .min_by_key(|&off| (off as i64 - target_offset as i64).unsigned_abs())
+            .unwrap_or(range_end);
+
+        if best < range_end && best > current_start {
+            partitions.push(BgzfPartition {
+                start_compressed: current_start,
+                end_compressed: best,
+            });
+            current_start = best;
+        }
+    }
+    partitions.push(BgzfPartition {
+        start_compressed: current_start,
+        end_compressed: range_end,
     });
 
     Ok(partitions)
@@ -290,10 +418,10 @@ mod tests {
         while let Some(line) = reader.next_line() {
             lines.push(line.to_string());
         }
-        // The bgzf fixture has 500 chr1 + 300 chr2 = 800 variation lines
-        assert_eq!(lines.len(), 800);
+        // The bgzf fixture has 49991 chr1 + 29991 chr2 = 79982 variation lines
+        assert_eq!(lines.len(), 79982);
         assert!(lines[0].starts_with("1\t"));
-        assert!(lines[799].starts_with("2\t"));
+        assert!(lines.last().unwrap().starts_with("2\t"));
     }
 
     #[test]
@@ -314,17 +442,94 @@ mod tests {
             per_partition_counts.push(count);
         }
 
-        // Should recover all 800 lines
         assert_eq!(
             all_lines.len(),
-            800,
+            79982,
             "partition counts: {per_partition_counts:?}, total: {}",
             all_lines.len()
         );
         // First line should be chr1 start=100
         assert!(all_lines[0].starts_with("1\t100\t"));
         // Last line should be chr2
-        assert!(all_lines[799].starts_with("2\t"));
+        assert!(all_lines.last().unwrap().starts_with("2\t"));
+    }
+
+    #[test]
+    fn tabix_chrom_byte_range_finds_chrom() {
+        let tbi_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz.tbi");
+        let range = tabix_chrom_byte_range(&tbi_path, "1").unwrap();
+        assert!(range.is_some(), "chr1 should be in the tabix index");
+        let (start, end) = range.unwrap();
+        assert!(end > start, "end ({end}) should be > start ({start})");
+    }
+
+    #[test]
+    fn tabix_chrom_byte_range_missing_chrom() {
+        let tbi_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz.tbi");
+        let range = tabix_chrom_byte_range(&tbi_path, "99").unwrap();
+        assert!(range.is_none(), "chr99 should not be in the index");
+    }
+
+    #[test]
+    fn range_partitions_cover_chrom_data() {
+        // Partition only chr1's byte range from the tabix index.
+        // Should read all chr1 lines. May include a few chr2 lines at
+        // the bgzf block boundary (which the row-level filter discards).
+        let data_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let tbi_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz.tbi");
+
+        let (start, end) = tabix_chrom_byte_range(&tbi_path, "1").unwrap().unwrap();
+        let partitions = compute_bgzf_partitions_in_range(&data_path, start, end, 4).unwrap();
+
+        let mut chr1_count = 0usize;
+        let mut other_count = 0usize;
+        for partition in &partitions {
+            let mut reader = BgzfPartitionLineReader::open(&data_path, partition).unwrap();
+            while let Some(line) = reader.next_line() {
+                if line.starts_with("1\t") {
+                    chr1_count += 1;
+                } else {
+                    other_count += 1;
+                }
+            }
+        }
+
+        // Must read ALL chr1 lines (49991)
+        assert_eq!(chr1_count, 49991, "must cover all chr1 lines");
+        // May read a few chr2 lines at the block boundary, but far
+        // fewer than the full 29991 chr2 lines in the file.
+        assert!(
+            other_count < 1000,
+            "should read very few non-chr1 lines, got {other_count}"
+        );
+    }
+
+    #[test]
+    fn range_partitions_preserve_order() {
+        let data_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let tbi_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz.tbi");
+
+        let (start, end) = tabix_chrom_byte_range(&tbi_path, "1").unwrap().unwrap();
+        let partitions = compute_bgzf_partitions_in_range(&data_path, start, end, 4).unwrap();
+
+        for (p_idx, partition) in partitions.iter().enumerate() {
+            let mut reader = BgzfPartitionLineReader::open(&data_path, partition).unwrap();
+            let mut prev_start: Option<i64> = None;
+            while let Some(line) = reader.next_line() {
+                // Only check ordering for chr1 lines (boundary may spill chr2)
+                if !line.starts_with("1\t") {
+                    continue;
+                }
+                let start: i64 = line.split('\t').nth(1).unwrap().parse().unwrap();
+                if let Some(prev) = prev_start {
+                    assert!(
+                        start >= prev,
+                        "partition {p_idx}: start {start} < prev {prev}"
+                    );
+                }
+                prev_start = Some(start);
+            }
+        }
     }
 
     #[test]
