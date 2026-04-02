@@ -24,6 +24,13 @@ pub(crate) struct BgzfPartition {
     /// The reader continues until the current line's compressed offset
     /// exceeds this value.
     pub end_compressed: u64,
+    /// Whether to skip the first line when reading from this partition.
+    ///
+    /// True when the preceding BGZF block's last uncompressed byte is
+    /// not `'\n'`, meaning a text line spans across the boundary.  The
+    /// first bytes at `start_compressed` are then a continuation fragment
+    /// already consumed by the previous partition's `read_line`.
+    pub skip_first_line: bool,
 }
 
 /// Compute byte-range partitions for a bgzf file.
@@ -43,6 +50,7 @@ pub(crate) fn compute_bgzf_partitions(
         return Ok(vec![BgzfPartition {
             start_compressed: 0,
             end_compressed: file_size,
+            skip_first_line: false,
         }]);
     }
 
@@ -53,17 +61,17 @@ pub(crate) fn compute_bgzf_partitions(
         return Ok(vec![BgzfPartition {
             start_compressed: 0,
             end_compressed: file_size,
+            skip_first_line: false,
         }]);
     }
 
-    // Distribute blocks across partitions in roughly equal byte ranges.
+    // Collect partition boundary offsets (each boundary is a block start).
     let target_chunk = file_size / num_partitions as u64;
-    let mut partitions = Vec::with_capacity(num_partitions);
+    let mut boundaries = vec![0u64];
     let mut current_start = 0u64;
 
     for i in 1..num_partitions {
         let target_offset = target_chunk * i as u64;
-        // Find the block offset closest to the target
         let best = block_offsets
             .iter()
             .copied()
@@ -72,20 +80,12 @@ pub(crate) fn compute_bgzf_partitions(
             .unwrap_or(file_size);
 
         if best < file_size && best > current_start {
-            partitions.push(BgzfPartition {
-                start_compressed: current_start,
-                end_compressed: best,
-            });
+            boundaries.push(best);
             current_start = best;
         }
     }
-    // Last partition covers the remainder
-    partitions.push(BgzfPartition {
-        start_compressed: current_start,
-        end_compressed: file_size,
-    });
 
-    Ok(partitions)
+    build_partitions_from_boundaries(file_path, &block_offsets, &boundaries, file_size)
 }
 
 /// Look up the compressed byte range for a chromosome in a tabix or CSI index.
@@ -203,13 +203,15 @@ pub(crate) fn compute_bgzf_partitions_in_range(
         return Ok(vec![BgzfPartition {
             start_compressed: range_start,
             end_compressed: range_end,
+            skip_first_line: false,
         }]);
     }
 
-    // Scan only the blocks within the target range
+    // Scan all blocks (need full list for skip-flag lookups).
     let all_offsets = scan_bgzf_block_offsets(file_path, file_size)?;
     let block_offsets: Vec<u64> = all_offsets
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|&off| off >= range_start && off < range_end)
         .collect();
 
@@ -217,12 +219,13 @@ pub(crate) fn compute_bgzf_partitions_in_range(
         return Ok(vec![BgzfPartition {
             start_compressed: range_start,
             end_compressed: range_end,
+            skip_first_line: false,
         }]);
     }
 
     let range_size = range_end - range_start;
     let target_chunk = range_size / num_partitions as u64;
-    let mut partitions = Vec::with_capacity(num_partitions);
+    let mut boundaries = vec![block_offsets[0]];
     let mut current_start = block_offsets[0];
 
     for i in 1..num_partitions {
@@ -235,19 +238,13 @@ pub(crate) fn compute_bgzf_partitions_in_range(
             .unwrap_or(range_end);
 
         if best < range_end && best > current_start {
-            partitions.push(BgzfPartition {
-                start_compressed: current_start,
-                end_compressed: best,
-            });
+            boundaries.push(best);
             current_start = best;
         }
     }
-    partitions.push(BgzfPartition {
-        start_compressed: current_start,
-        end_compressed: range_end,
-    });
 
-    Ok(partitions)
+    // Use all_offsets so we can look up the block before any boundary.
+    build_partitions_from_boundaries(file_path, &all_offsets, &boundaries, range_end)
 }
 
 /// Scan a bgzf file to find the compressed offsets of each block.
@@ -290,6 +287,78 @@ fn scan_bgzf_block_offsets(file_path: &Path, file_size: u64) -> Result<Vec<u64>>
     Ok(offsets)
 }
 
+/// Build partitions from a list of boundary offsets, computing `skip_first_line`
+/// for each non-first partition by checking whether the preceding BGZF block
+/// ends with a newline.
+fn build_partitions_from_boundaries(
+    file_path: &Path,
+    block_offsets: &[u64],
+    boundaries: &[u64],
+    file_end: u64,
+) -> Result<Vec<BgzfPartition>> {
+    let mut partitions = Vec::with_capacity(boundaries.len());
+    for (i, &start) in boundaries.iter().enumerate() {
+        let end = boundaries.get(i + 1).copied().unwrap_or(file_end);
+        let skip = if i == 0 {
+            false
+        } else {
+            // Find the BGZF block that ends right before this boundary.
+            // If its last uncompressed byte is not '\n', a text line spans
+            // the boundary and we must skip the continuation fragment.
+            match block_offsets.iter().copied().rev().find(|&off| off < start) {
+                Some(prev_block) => !block_ends_with_newline(file_path, prev_block)?,
+                None => false,
+            }
+        };
+        partitions.push(BgzfPartition {
+            start_compressed: start,
+            end_compressed: end,
+            skip_first_line: skip,
+        });
+    }
+    Ok(partitions)
+}
+
+/// Check whether the last uncompressed byte of a BGZF block is `'\n'`.
+///
+/// Used during partition construction to decide if the boundary between
+/// two partitions falls at a line boundary.  If the block ends with
+/// `'\n'`, the next block starts a new line and the following partition
+/// should NOT skip its first line.  Otherwise the boundary is mid-line
+/// and the first fragment must be discarded.
+fn block_ends_with_newline(file_path: &Path, block_offset: u64) -> Result<bool> {
+    use std::io::Read;
+
+    let file = File::open(file_path)
+        .map_err(|e| exec_err(format!("Failed opening {}: {e}", file_path.display())))?;
+    let mut reader = bgzf::Reader::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
+    let vpos = bgzf::VirtualPosition::try_from((block_offset, 0))
+        .map_err(|e| exec_err(format!("Invalid virtual position: {e}")))?;
+    reader
+        .seek(vpos)
+        .map_err(|e| exec_err(format!("BGZF seek failed: {e}")))?;
+
+    // Read the entire block's uncompressed data and check the last byte.
+    // BGZF blocks decompress to at most 65536 bytes.
+    let mut last_byte = None;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| exec_err(format!("BGZF read failed: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        last_byte = Some(buf[n - 1]);
+        // Stop once the reader advances past the target block.
+        if reader.virtual_position().compressed() != block_offset {
+            break;
+        }
+    }
+
+    Ok(last_byte == Some(b'\n'))
+}
+
 /// Wraps a bgzf reader that stops after the partition's end offset.
 pub(crate) struct BgzfPartitionLineReader {
     inner: bgzf::Reader<BufReader<File>>,
@@ -312,46 +381,15 @@ impl BgzfPartitionLineReader {
                 .seek(vpos)
                 .map_err(|e| exec_err(format!("BGZF seek failed: {e}")))?;
 
-            // Read the first line.  If the previous block ended mid-line,
-            // this is a partial line that we must discard.  If the previous
-            // block ended at a line boundary (i.e., last byte was '\n'),
-            // this is a complete line and belongs to this partition.
-            //
-            // We detect this by checking: the previous partition owns all
-            // lines that START before its end_compressed.  Since we sought
-            // to start_compressed (= previous partition's end_compressed),
-            // any line starting here belongs to US.  Lines that started
-            // in the previous block but spill into ours were already read
-            // by the previous partition (it reads until EOF of its last
-            // line, which may cross into our block).
-            //
-            // So we need to skip only if the block's first byte is NOT
-            // the start of a new line.  We detect this by peeking: if
-            // the uncompressed position after seek is 0 within the block,
-            // we're at a block boundary.  But the data might still be a
-            // continuation of the previous line.
-            //
-            // Simplest correct approach: read the first "line" and check
-            // if the previous block's last byte was '\n'.  Since bgzf
-            // blocks are independent, we check if the compressed position
-            // before this block is the end of the previous partition.
-            // Since start_compressed IS a block boundary, the previous
-            // block ended right before it.  But we don't know if that
-            // block's last uncompressed byte was '\n'.
-            //
-            // Pragmatic solution: read first chunk, if it doesn't contain
-            // a tab (variation lines always have tabs), it's a partial line.
-            let mut first_line = String::new();
-            if inner.read_line(&mut first_line).unwrap_or(0) > 0 {
-                let trimmed = first_line.trim_end_matches('\n').trim_end_matches('\r');
-                if trimmed.contains('\t') {
-                    // Looks like a complete variation line — this partition
-                    // should read it.  Re-seek and don't skip.
-                    inner
-                        .seek(vpos)
-                        .map_err(|e| exec_err(format!("BGZF re-seek failed: {e}")))?;
-                }
-                // If no tab, it's a partial line fragment — already discarded.
+            if partition.skip_first_line {
+                // The preceding block did not end with '\n', so the first
+                // bytes at this position are a continuation of a line
+                // already consumed by the previous partition.  Discard
+                // through the next newline.
+                let mut discard = String::new();
+                inner
+                    .read_line(&mut discard)
+                    .map_err(|e| exec_err(format!("BGZF read_line failed: {e}")))?;
             }
         }
 
@@ -363,12 +401,12 @@ impl BgzfPartitionLineReader {
         })
     }
 
-    /// Read the next line. Returns `None` when past the partition boundary
-    /// or at EOF.
-    pub fn next_line(&mut self) -> Option<&str> {
+    /// Read the next line. Returns `Ok(None)` when past the partition boundary
+    /// or at EOF, and `Err` on I/O or BGZF decompression failures.
+    pub fn next_line(&mut self) -> Result<Option<&str>> {
         loop {
             if self.done {
-                return None;
+                return Ok(None);
             }
 
             // Check position BEFORE reading: if the current compressed
@@ -377,14 +415,14 @@ impl BgzfPartitionLineReader {
             let pos = self.inner.virtual_position();
             if pos.compressed() >= self.end_compressed {
                 self.done = true;
-                return None;
+                return Ok(None);
             }
 
             self.buf.clear();
             match self.inner.read_line(&mut self.buf) {
                 Ok(0) => {
                     self.done = true;
-                    return None;
+                    return Ok(None);
                 }
                 Ok(_) => {
                     // Trim trailing newline
@@ -393,11 +431,11 @@ impl BgzfPartitionLineReader {
                     if self.buf.is_empty() {
                         continue; // skip empty lines
                     }
-                    return Some(&self.buf);
+                    return Ok(Some(&self.buf));
                 }
-                Err(_) => {
+                Err(e) => {
                     self.done = true;
-                    return None;
+                    return Err(exec_err(format!("BGZF read error: {e}")));
                 }
             }
         }
@@ -447,10 +485,11 @@ mod tests {
         let partition = BgzfPartition {
             start_compressed: 0,
             end_compressed: file_size,
+            skip_first_line: false,
         };
         let mut reader = BgzfPartitionLineReader::open(&path, &partition).unwrap();
         let mut lines = Vec::new();
-        while let Some(line) = reader.next_line() {
+        while let Some(line) = reader.next_line().unwrap() {
             lines.push(line.to_string());
         }
         // The bgzf fixture has 49991 chr1 + 29991 chr2 = 79982 variation lines
@@ -470,7 +509,7 @@ mod tests {
         for partition in &partitions {
             let mut count = 0;
             let mut reader = BgzfPartitionLineReader::open(&path, partition).unwrap();
-            while let Some(line) = reader.next_line() {
+            while let Some(line) = reader.next_line().unwrap() {
                 all_lines.push(line.to_string());
                 count += 1;
             }
@@ -520,7 +559,7 @@ mod tests {
         let mut other_count = 0usize;
         for partition in &partitions {
             let mut reader = BgzfPartitionLineReader::open(&data_path, partition).unwrap();
-            while let Some(line) = reader.next_line() {
+            while let Some(line) = reader.next_line().unwrap() {
                 if line.starts_with("1\t") {
                     chr1_count += 1;
                 } else {
@@ -550,7 +589,7 @@ mod tests {
         for (p_idx, partition) in partitions.iter().enumerate() {
             let mut reader = BgzfPartitionLineReader::open(&data_path, partition).unwrap();
             let mut prev_start: Option<i64> = None;
-            while let Some(line) = reader.next_line() {
+            while let Some(line) = reader.next_line().unwrap() {
                 // Only check ordering for chr1 lines (boundary may spill chr2)
                 if !line.starts_with("1\t") {
                     continue;
@@ -578,7 +617,7 @@ mod tests {
             let mut reader = BgzfPartitionLineReader::open(&path, partition).unwrap();
             let mut prev_start: Option<i64> = None;
             let mut prev_chrom = String::new();
-            while let Some(line) = reader.next_line() {
+            while let Some(line) = reader.next_line().unwrap() {
                 let fields: Vec<&str> = line.split('\t').collect();
                 let chrom = fields[0];
                 let start: i64 = fields[1].parse().unwrap();
@@ -595,5 +634,178 @@ mod tests {
                 prev_start = Some(start);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // skip_first_line flag correctness
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn first_partition_never_skips() {
+        let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let partitions = compute_bgzf_partitions(&path, 4).unwrap();
+        assert!(
+            !partitions[0].skip_first_line,
+            "first partition must not skip"
+        );
+    }
+
+    #[test]
+    fn single_partition_skip_is_false() {
+        let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let partitions = compute_bgzf_partitions(&path, 1).unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert!(!partitions[0].skip_first_line);
+    }
+
+    #[test]
+    fn range_first_partition_never_skips() {
+        let data_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let tbi_path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz.tbi");
+        let (start, end) = tabix_chrom_byte_range(&tbi_path, "1").unwrap().unwrap();
+        let partitions = compute_bgzf_partitions_in_range(&data_path, start, end, 4).unwrap();
+        assert!(
+            !partitions[0].skip_first_line,
+            "first partition of a range must not skip"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // block_ends_with_newline
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn block_ends_with_newline_first_block() {
+        // The first block of our fixture should end with '\n' because
+        // variation lines are short (~100 bytes) and many fit in one
+        // 64KB block, each terminated by '\n'.
+        let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        assert!(block_ends_with_newline(&path, 0).unwrap());
+    }
+
+    #[test]
+    fn block_ends_with_newline_all_boundary_blocks() {
+        // For each partition boundary, verify the helper agrees with
+        // the skip_first_line flag: skip iff preceding block does NOT
+        // end with newline.
+        let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let file_size = std::fs::metadata(&path).unwrap().len();
+        let block_offsets = scan_bgzf_block_offsets(&path, file_size).unwrap();
+        let partitions = compute_bgzf_partitions(&path, 8).unwrap();
+
+        for (i, p) in partitions.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            let prev_block = block_offsets
+                .iter()
+                .copied()
+                .rev()
+                .find(|&off| off < p.start_compressed);
+            if let Some(pb) = prev_block {
+                let ends_nl = block_ends_with_newline(&path, pb).unwrap();
+                assert_eq!(
+                    p.skip_first_line, !ends_nl,
+                    "partition {i}: skip_first_line={} but block at {pb} ends_with_nl={ends_nl}",
+                    p.skip_first_line
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // no duplicate or lost lines
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn multi_partition_no_duplicate_lines() {
+        // Read all lines via single partition and via 4 partitions,
+        // then compare line-by-line to ensure no duplicates or losses.
+        let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let file_size = std::fs::metadata(&path).unwrap().len();
+
+        // Single partition (ground truth)
+        let single = BgzfPartition {
+            start_compressed: 0,
+            end_compressed: file_size,
+            skip_first_line: false,
+        };
+        let mut reader = BgzfPartitionLineReader::open(&path, &single).unwrap();
+        let mut expected = Vec::new();
+        while let Some(line) = reader.next_line().unwrap() {
+            expected.push(line.to_string());
+        }
+
+        // Multi partition
+        let partitions = compute_bgzf_partitions(&path, 4).unwrap();
+        let mut actual = Vec::new();
+        for partition in &partitions {
+            let mut r = BgzfPartitionLineReader::open(&path, partition).unwrap();
+            while let Some(line) = r.next_line().unwrap() {
+                actual.push(line.to_string());
+            }
+        }
+
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "line count mismatch: expected {}, got {}",
+            expected.len(),
+            actual.len()
+        );
+        // Spot-check first, last, and a middle line
+        assert_eq!(actual[0], expected[0], "first line mismatch");
+        assert_eq!(
+            actual.last().unwrap(),
+            expected.last().unwrap(),
+            "last line mismatch"
+        );
+        let mid = expected.len() / 2;
+        assert_eq!(actual[mid], expected[mid], "middle line mismatch");
+    }
+
+    #[test]
+    fn partition_counts_stable_across_sizes() {
+        // Splitting into 2, 4, 8, or 16 partitions must always yield
+        // exactly 79982 lines total.
+        let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        for n in [2, 4, 8, 16] {
+            let partitions = compute_bgzf_partitions(&path, n).unwrap();
+            let mut total = 0usize;
+            for partition in &partitions {
+                let mut r = BgzfPartitionLineReader::open(&path, partition).unwrap();
+                while r.next_line().unwrap().is_some() {
+                    total += 1;
+                }
+            }
+            assert_eq!(
+                total, 79982,
+                "with {n} partitions: expected 79982 lines, got {total}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // error propagation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn next_line_returns_result_type() {
+        // Verify next_line returns Result<Option<&str>> (not Option<&str>)
+        // by using the ? operator in a Result-returning test.
+        fn inner() -> Result<()> {
+            let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+            let file_size = std::fs::metadata(&path).unwrap().len();
+            let partition = BgzfPartition {
+                start_compressed: 0,
+                end_compressed: file_size,
+                skip_first_line: false,
+            };
+            let mut reader = BgzfPartitionLineReader::open(&path, &partition)?;
+            let first = reader.next_line()?;
+            assert!(first.is_some());
+            Ok(())
+        }
+        inner().unwrap();
     }
 }

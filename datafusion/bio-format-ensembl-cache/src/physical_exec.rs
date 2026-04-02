@@ -342,12 +342,22 @@ impl ExecutionPlan for EnsemblCacheExec {
     fn statistics(&self) -> DFResult<datafusion::physical_plan::Statistics> {
         // Estimate row count from total compressed file sizes.
         // Rough heuristic: ~50 bytes per row in compressed VEP cache files.
-        let total_bytes: u64 = self
-            .partition_files
-            .iter()
-            .flatten()
-            .map(|p| estimate_file_size(p))
-            .sum();
+        let total_bytes: u64 = if let Some(ref bp) = self.bgzf_partitions {
+            // BGZF mode: partition_files is empty; use the actual file paths
+            // from bgzf_partitions (deduplicated since they may all point to
+            // the same file).
+            let mut seen = std::collections::HashSet::new();
+            bp.iter()
+                .filter(|(p, _)| seen.insert(p.clone()))
+                .map(|(p, _)| estimate_file_size(p))
+                .sum()
+        } else {
+            self.partition_files
+                .iter()
+                .flatten()
+                .map(|p| estimate_file_size(p))
+                .sum()
+        };
         let estimated_rows = total_bytes / 50;
         Ok(datafusion::physical_plan::Statistics {
             num_rows: datafusion::common::stats::Precision::Inexact(estimated_rows as usize),
@@ -539,7 +549,7 @@ fn process_partition(
         let mut bgzf_reader =
             crate::tabix_reader::BgzfPartitionLineReader::open(bgzf_path, bgzf_part)?;
 
-        while let Some(line_trimmed) = bgzf_reader.next_line() {
+        while let Some(line_trimmed) = bgzf_reader.next_line()? {
             match parse_variation_line_into(
                 line_trimmed,
                 source_file_str,
