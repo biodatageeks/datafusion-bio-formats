@@ -196,6 +196,11 @@ pub(crate) fn sort_variation_files_genomic(files: &mut [PathBuf]) {
 }
 
 /// Extract (chrom, start) from a variation filename like `1_1-1000000_var.gz`.
+///
+/// **Note:** splits on the first `_`, so contig names containing underscores
+/// (e.g. `HSCHR1_CTG1_UNLOCALIZED`) will mis-parse.  In practice these files
+/// fall through as "unparseable" and are placed at the end of the sort order,
+/// which is the correct behaviour for non-canonical contigs.
 fn parse_chrom_and_start(name: &str) -> Option<(&str, i64)> {
     let marker = name.find('_')?;
     let chrom = &name[..marker];

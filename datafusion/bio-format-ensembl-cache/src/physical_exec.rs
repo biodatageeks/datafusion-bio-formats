@@ -380,7 +380,7 @@ impl ExecutionPlan for EnsemblCacheExec {
             .and_then(|p| p.get(partition))
             .cloned();
 
-        // Files for this partition (pre-balanced by size), with predicate pruning.
+        // Files for this partition (balanced or ordered), with predicate pruning.
         // Variation files support chrom + region pruning via filename parsing;
         // all other entities support chrom-only pruning via directory/filename.
         // When using bgzf partitions, file list is empty (handled separately).

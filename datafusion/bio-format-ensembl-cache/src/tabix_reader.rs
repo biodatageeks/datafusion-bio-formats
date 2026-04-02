@@ -583,13 +583,13 @@ mod tests {
                 let chrom = fields[0];
                 let start: i64 = fields[1].parse().unwrap();
 
-                if chrom == prev_chrom {
-                    if let Some(prev) = prev_start {
-                        assert!(
-                            start >= prev,
-                            "partition {p_idx}: start {start} < prev {prev} for chrom {chrom}"
-                        );
-                    }
+                if chrom == prev_chrom
+                    && let Some(prev) = prev_start
+                {
+                    assert!(
+                        start >= prev,
+                        "partition {p_idx}: start {start} < prev {prev} for chrom {chrom}"
+                    );
                 }
                 prev_chrom = chrom.to_string();
                 prev_start = Some(start);
