@@ -665,9 +665,17 @@ fn build_format_column_map(
         let sample_name = &sample_names[0];
         for format_field in format_fields {
             if let Some(&idx) = format_id_to_idx.get(format_field.as_str()) {
+                // Best: found via bio.vcf.field.format_id metadata
+                map.insert((sample_name.clone(), format_field.clone()), idx);
+            } else if let Ok(idx) = schema.index_of(&format!("fmt_{format_field}")) {
+                // Renamed column (collision with INFO) — check before direct name to avoid
+                // matching the INFO column when metadata was stripped (e.g., Polars → Arrow)
+                map.insert((sample_name.clone(), format_field.clone()), idx);
+            } else if let Ok(idx) = schema.index_of(&format!("format_{format_field}")) {
+                // Secondary rename when fmt_ also collided
                 map.insert((sample_name.clone(), format_field.clone()), idx);
             } else if let Ok(idx) = schema.index_of(format_field) {
-                // Fallback: direct name lookup for legacy schemas without format_id metadata
+                // Direct name lookup: no collision (legacy schemas or no rename needed)
                 map.insert((sample_name.clone(), format_field.clone()), idx);
             }
         }

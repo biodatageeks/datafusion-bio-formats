@@ -246,6 +246,15 @@ fn find_format_field<'a>(
         }
     }
 
+    // Fallback: check for renamed column by convention when metadata was stripped
+    // (e.g., Polars → Arrow conversion drops field-level metadata)
+    for prefix in &["fmt_", "format_"] {
+        let prefixed = format!("{prefix}{format_name}");
+        if let Ok(idx) = schema.index_of(&prefixed) {
+            return Some(schema.field(idx));
+        }
+    }
+
     // Columnar multisample schema: genotypes: Struct<GT: List<T>, GQ: List<T>, ...>
     if let Ok(idx) = schema.index_of("genotypes") {
         let genotypes_field = schema.field(idx);

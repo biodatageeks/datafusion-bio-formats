@@ -687,3 +687,94 @@ async fn test_single_sample_collision_write_roundtrip() -> Result<(), Box<dyn st
 
     Ok(())
 }
+
+/// Regression test for #161: write path must find renamed fmt_ columns even when
+/// field-level metadata is stripped (e.g., Polars → Arrow conversion).
+/// Simulates this by creating a RecordBatch with fmt_DP column but no format_id metadata.
+#[tokio::test]
+async fn test_write_finds_fmt_column_without_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::array::{Float64Array, UInt32Array};
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion_bio_format_core::metadata::{
+        VCF_FILE_FORMAT_KEY, VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY,
+    };
+    let output_path = "/tmp/test_write_fmt_no_metadata.vcf";
+
+    // Build a schema with fmt_DP but NO format_id metadata (simulates Polars stripping it)
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("DP", DataType::Int32, true),       // INFO DP
+            Field::new("fmt_DP", DataType::Int32, true),    // FORMAT DP (renamed, no metadata)
+        ],
+        std::collections::HashMap::from([
+            (VCF_FILE_FORMAT_KEY.to_string(), "VCFv4.3".to_string()),
+            (
+                VCF_SAMPLE_NAMES_KEY.to_string(),
+                "[\"SampleA\"]".to_string(),
+            ),
+            (
+                VCF_FORMAT_FIELDS_KEY.to_string(),
+                "{\"DP\":{\"number\":\"1\",\"field_type\":\"Integer\",\"description\":\"Read depth\"}}"
+                    .to_string(),
+            ),
+        ]),
+    ));
+
+    let batch = datafusion::arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![Some("rs1")])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["T"])),
+            Arc::new(Float64Array::from(vec![Some(30.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+            Arc::new(Int32Array::from(vec![Some(50)])),
+            Arc::new(Int32Array::from(vec![Some(20)])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    let mem_table = datafusion::datasource::MemTable::try_new(schema.clone(), vec![vec![batch]])?;
+    ctx.register_table("source", Arc::new(mem_table))?;
+
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        schema,
+        vec!["DP".to_string()],
+        vec!["DP".to_string()],
+        vec!["SampleA".to_string()],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest))?;
+
+    // This should NOT fail even though fmt_DP has no format_id metadata
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await?
+        .collect()
+        .await?;
+
+    let content = fs::read_to_string(output_path).await?;
+    assert!(
+        content.contains("##FORMAT=<ID=DP,"),
+        "output should have FORMAT DP header"
+    );
+    // The data line should contain the FORMAT DP value
+    assert!(
+        content.contains("20"),
+        "output should contain FORMAT DP value 20"
+    );
+
+    let _ = fs::remove_file(output_path).await;
+    Ok(())
+}
