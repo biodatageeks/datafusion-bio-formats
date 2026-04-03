@@ -32,7 +32,7 @@ tokio-util = {  version="0.7.13", features = ["io-util", "compat"] }
 bytes = "1.10.0"
 futures = "0.3.31"
 async-stream = "0.3.6"
-futures-util = "0.3.31"
+futures-util = "0.3.32"
 async-compression = "0.4.19"
 log = "0.4.27"
 flate2 = { version = "1.0", features = ["zlib-rs"], default-features = false }

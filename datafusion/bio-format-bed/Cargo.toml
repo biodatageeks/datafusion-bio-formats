@@ -26,7 +26,7 @@ log = "0.4.27"
 async-stream = "0.3.6"
 env_logger = "0.11.8"
 noodles-bed = "0.26.0"
-futures-util = "0.3.31"
+futures-util = "0.3.32"
 
 [[example]]
 name = "test_bed_reader"
