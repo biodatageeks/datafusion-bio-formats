@@ -218,6 +218,9 @@ async fn determine_schema_from_header(
     if !format_tags.is_empty() && !sample_names.is_empty() {
         let single_sample = source_sample_names.len() == 1;
         if single_sample {
+            // Collect existing field names to detect collisions (e.g., INFO and FORMAT both define "DP")
+            let existing_names: std::collections::HashSet<String> =
+                fields.iter().map(|f| f.name().to_string()).collect();
             for tag in &format_tags {
                 let dtype = format_to_arrow_type(header_formats, tag);
                 // Store VCF header metadata in field metadata for round-trip preservation
@@ -236,7 +239,13 @@ async fn determine_schema_from_header(
                 }
                 field_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string());
                 field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
-                let field = Field::new(tag.clone(), dtype, true).with_metadata(field_metadata);
+                // Prefix with "fmt_" if the column name collides with an existing field (e.g., INFO field)
+                let column_name = if existing_names.contains(tag.as_str()) {
+                    format!("fmt_{tag}")
+                } else {
+                    tag.clone()
+                };
+                let field = Field::new(column_name, dtype, true).with_metadata(field_metadata);
                 fields.push(field);
             }
         } else {

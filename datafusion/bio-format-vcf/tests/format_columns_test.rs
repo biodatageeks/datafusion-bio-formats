@@ -402,3 +402,187 @@ async fn test_missing_requested_samples_are_skipped() -> Result<(), Box<dyn std:
 
     Ok(())
 }
+
+// --- Tests for INFO/FORMAT column name collision (issue polars-bio#350) ---
+
+/// VCF with both INFO=DP and FORMAT=DP in a single-sample file.
+/// This is the exact scenario from the reported bug.
+const SAMPLE_VCF_SINGLE_COLLISION: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Combined depth across samples">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SampleA
+chr1	100	rs1	A	T	60	PASS	DP=50;AF=0.5	GT:DP:GQ	0/1:20:99
+chr1	200	rs2	G	C	80	PASS	DP=60;AF=0.3	GT:DP:GQ	1/1:30:95
+"#;
+
+/// Multi-sample VCF with INFO/FORMAT collision — should remain unaffected
+/// since FORMAT fields are nested under genotypes struct.
+const SAMPLE_VCF_MULTI_COLLISION: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Combined depth">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
+chr1	100	rs1	A	T	60	PASS	DP=50	GT:DP	0/1:20	1/1:30
+"#;
+
+#[tokio::test]
+async fn test_single_sample_info_format_collision_schema() -> Result<(), Box<dyn std::error::Error>>
+{
+    let file_path =
+        create_test_vcf_file("single_collision_schema", SAMPLE_VCF_SINGLE_COLLISION).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None, // all INFO fields
+        None, // all FORMAT fields
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+
+    // INFO DP should keep its original name
+    assert!(
+        schema.field_with_name("DP").is_ok(),
+        "INFO DP should be present as 'DP'"
+    );
+
+    // FORMAT DP should be renamed to fmt_DP
+    assert!(
+        schema.field_with_name("fmt_DP").is_ok(),
+        "FORMAT DP should be renamed to 'fmt_DP'"
+    );
+
+    // Non-colliding FORMAT fields keep original names
+    assert!(schema.field_with_name("GT").is_ok());
+    assert!(schema.field_with_name("GQ").is_ok());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_single_sample_info_format_collision_query() -> Result<(), Box<dyn std::error::Error>>
+{
+    let file_path =
+        create_test_vcf_file("single_collision_query", SAMPLE_VCF_SINGLE_COLLISION).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    // Query both INFO DP and FORMAT fmt_DP
+    let df = ctx
+        .sql("SELECT \"DP\", \"fmt_DP\", \"GT\", \"GQ\" FROM test_vcf ORDER BY start")
+        .await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+
+    assert_eq!(batch.num_rows(), 2);
+
+    // INFO DP values
+    let info_dp = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(info_dp.value(0), 50);
+    assert_eq!(info_dp.value(1), 60);
+
+    // FORMAT DP values (renamed to fmt_DP)
+    let fmt_dp = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(fmt_dp.value(0), 20);
+    assert_eq!(fmt_dp.value(1), 30);
+
+    // GT and GQ should work normally
+    let gt = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(gt.value(0), "0/1");
+    assert_eq!(gt.value(1), "1/1");
+
+    let gq = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(gq.value(0), 99);
+    assert_eq!(gq.value(1), 95);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multi_sample_info_format_collision_unaffected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("multi_collision", SAMPLE_VCF_MULTI_COLLISION).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+
+    // INFO DP at top level
+    assert!(schema.field_with_name("DP").is_ok());
+    // FORMAT fields nested in genotypes — no collision
+    assert!(schema.field_with_name("genotypes").is_ok());
+    // No fmt_ prefix needed
+    assert!(schema.field_with_name("fmt_DP").is_err());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    let df = ctx.sql("SELECT \"DP\", genotypes FROM test_vcf").await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+
+    let info_dp = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(info_dp.value(0), 50);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_single_sample_no_collision_unchanged() -> Result<(), Box<dyn std::error::Error>> {
+    // SAMPLE_VCF_SINGLE has no INFO fields, so FORMAT DP should keep its name
+    let file_path = create_test_vcf_file("single_no_collision", SAMPLE_VCF_SINGLE).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None,
+        Some(vec!["GT".to_string(), "DP".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+    // No collision: FORMAT DP keeps original name
+    assert!(schema.field_with_name("DP").is_ok());
+    assert!(schema.field_with_name("fmt_DP").is_err());
+
+    Ok(())
+}
