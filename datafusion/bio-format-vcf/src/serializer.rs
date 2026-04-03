@@ -8,6 +8,7 @@ use datafusion::arrow::array::{
     ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
 };
 use datafusion::common::{DataFusionError, Result};
+use datafusion_bio_format_core::metadata::VCF_FIELD_FORMAT_ID_KEY;
 
 /// Enum to hold StringArray, LargeStringArray, or StringViewArray reference.
 /// This allows handling standard Arrow Utf8, Polars LargeUtf8, and DataFusion Utf8View types.
@@ -636,7 +637,12 @@ fn build_info_column_map(
     map
 }
 
-/// Builds a map from (sample_name, format_field) to column index
+/// Builds a map from (sample_name, format_field) to column index.
+///
+/// For single-sample VCFs, FORMAT columns may be prefixed with "fmt_" when their
+/// name collides with an INFO column (e.g., both INFO and FORMAT define "DP").
+/// This function checks the `bio.vcf.field.format_id` metadata to find format
+/// columns regardless of whether they were renamed.
 fn build_format_column_map(
     batch: &RecordBatch,
     format_fields: &[String],
@@ -645,17 +651,41 @@ fn build_format_column_map(
     let mut map = std::collections::HashMap::new();
     let single_sample = sample_names.len() == 1;
 
-    for sample_name in sample_names {
-        for format_field in format_fields {
-            // Column naming: single sample uses just format name, multi-sample uses sample_format
-            let column_name = if single_sample {
-                format_field.clone()
-            } else {
-                format!("{sample_name}_{format_field}")
-            };
+    if single_sample {
+        // Build a reverse lookup from format_id metadata → column index
+        let schema = batch.schema();
+        let mut format_id_to_idx: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for (idx, field) in schema.fields().iter().enumerate() {
+            if let Some(format_id) = field.metadata().get(VCF_FIELD_FORMAT_ID_KEY) {
+                format_id_to_idx.insert(format_id.as_str(), idx);
+            }
+        }
 
-            if let Ok(idx) = batch.schema().index_of(&column_name) {
+        let sample_name = &sample_names[0];
+        for format_field in format_fields {
+            if let Some(&idx) = format_id_to_idx.get(format_field.as_str()) {
+                // Best: found via bio.vcf.field.format_id metadata
                 map.insert((sample_name.clone(), format_field.clone()), idx);
+            } else if let Ok(idx) = schema.index_of(&format!("fmt_{format_field}")) {
+                // Renamed column (collision with INFO) — check before direct name to avoid
+                // matching the INFO column when metadata was stripped (e.g., Polars → Arrow)
+                map.insert((sample_name.clone(), format_field.clone()), idx);
+            } else if let Ok(idx) = schema.index_of(&format!("format_{format_field}")) {
+                // Secondary rename when fmt_ also collided
+                map.insert((sample_name.clone(), format_field.clone()), idx);
+            } else if let Ok(idx) = schema.index_of(format_field) {
+                // Direct name lookup: no collision (legacy schemas or no rename needed)
+                map.insert((sample_name.clone(), format_field.clone()), idx);
+            }
+        }
+    } else {
+        for sample_name in sample_names {
+            for format_field in format_fields {
+                let column_name = format!("{sample_name}_{format_field}");
+                if let Ok(idx) = batch.schema().index_of(&column_name) {
+                    map.insert((sample_name.clone(), format_field.clone()), idx);
+                }
             }
         }
     }

@@ -402,3 +402,379 @@ async fn test_missing_requested_samples_are_skipped() -> Result<(), Box<dyn std:
 
     Ok(())
 }
+
+// --- Tests for INFO/FORMAT column name collision (issue polars-bio#350) ---
+
+/// VCF with both INFO=DP and FORMAT=DP in a single-sample file.
+/// This is the exact scenario from the reported bug.
+const SAMPLE_VCF_SINGLE_COLLISION: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Combined depth across samples">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+##FORMAT=<ID=GQ,Number=1,Type=Integer,Description="Genotype quality">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SampleA
+chr1	100	rs1	A	T	60	PASS	DP=50;AF=0.5	GT:DP:GQ	0/1:20:99
+chr1	200	rs2	G	C	80	PASS	DP=60;AF=0.3	GT:DP:GQ	1/1:30:95
+"#;
+
+/// Multi-sample VCF with INFO/FORMAT collision — should remain unaffected
+/// since FORMAT fields are nested under genotypes struct.
+const SAMPLE_VCF_MULTI_COLLISION: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Combined depth">
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Read depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	Sample1	Sample2
+chr1	100	rs1	A	T	60	PASS	DP=50	GT:DP	0/1:20	1/1:30
+"#;
+
+#[tokio::test]
+async fn test_single_sample_info_format_collision_schema() -> Result<(), Box<dyn std::error::Error>>
+{
+    let file_path =
+        create_test_vcf_file("single_collision_schema", SAMPLE_VCF_SINGLE_COLLISION).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None, // all INFO fields
+        None, // all FORMAT fields
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+
+    // INFO DP should keep its original name
+    assert!(
+        schema.field_with_name("DP").is_ok(),
+        "INFO DP should be present as 'DP'"
+    );
+
+    // FORMAT DP should be renamed to fmt_DP
+    assert!(
+        schema.field_with_name("fmt_DP").is_ok(),
+        "FORMAT DP should be renamed to 'fmt_DP'"
+    );
+
+    // Non-colliding FORMAT fields keep original names
+    assert!(schema.field_with_name("GT").is_ok());
+    assert!(schema.field_with_name("GQ").is_ok());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_single_sample_info_format_collision_query() -> Result<(), Box<dyn std::error::Error>>
+{
+    let file_path =
+        create_test_vcf_file("single_collision_query", SAMPLE_VCF_SINGLE_COLLISION).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    // Query both INFO DP and FORMAT fmt_DP
+    let df = ctx
+        .sql("SELECT \"DP\", \"fmt_DP\", \"GT\", \"GQ\" FROM test_vcf ORDER BY start")
+        .await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+
+    assert_eq!(batch.num_rows(), 2);
+
+    // INFO DP values
+    let info_dp = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(info_dp.value(0), 50);
+    assert_eq!(info_dp.value(1), 60);
+
+    // FORMAT DP values (renamed to fmt_DP)
+    let fmt_dp = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(fmt_dp.value(0), 20);
+    assert_eq!(fmt_dp.value(1), 30);
+
+    // GT and GQ should work normally
+    let gt = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(gt.value(0), "0/1");
+    assert_eq!(gt.value(1), "1/1");
+
+    let gq = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(gq.value(0), 99);
+    assert_eq!(gq.value(1), 95);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_multi_sample_info_format_collision_unaffected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("multi_collision", SAMPLE_VCF_MULTI_COLLISION).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+
+    // INFO DP at top level
+    assert!(schema.field_with_name("DP").is_ok());
+    // FORMAT fields nested in genotypes — no collision
+    assert!(schema.field_with_name("genotypes").is_ok());
+    // No fmt_ prefix needed
+    assert!(schema.field_with_name("fmt_DP").is_err());
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    let df = ctx.sql("SELECT \"DP\", genotypes FROM test_vcf").await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+
+    let info_dp = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(info_dp.value(0), 50);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_single_sample_no_collision_unchanged() -> Result<(), Box<dyn std::error::Error>> {
+    // SAMPLE_VCF_SINGLE has no INFO fields, so FORMAT DP should keep its name
+    let file_path = create_test_vcf_file("single_no_collision", SAMPLE_VCF_SINGLE).await?;
+
+    let table = VcfTableProvider::new(
+        file_path,
+        None,
+        Some(vec!["GT".to_string(), "DP".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+    // No collision: FORMAT DP keeps original name
+    assert!(schema.field_with_name("DP").is_ok());
+    assert!(schema.field_with_name("fmt_DP").is_err());
+
+    Ok(())
+}
+
+/// Regression test: write round-trip for single-sample VCF with INFO/FORMAT DP collision.
+/// Verifies the written file has correct ##FORMAT and ##INFO header entries with their
+/// original descriptions, and that data values are preserved.
+#[tokio::test]
+async fn test_single_sample_collision_write_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let input_path =
+        create_test_vcf_file("collision_roundtrip_in", SAMPLE_VCF_SINGLE_COLLISION).await?;
+    let output_path = "/tmp/test_collision_roundtrip_out.vcf";
+
+    // Read source
+    let source = VcfTableProvider::new(
+        input_path.clone(),
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+    let source_schema = source.schema();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("source", Arc::new(source))?;
+
+    // Register write destination
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string(), "AF".to_string()],
+        vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()],
+        vec!["SampleA".to_string()],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest))?;
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await?
+        .collect()
+        .await?;
+
+    // Read the written file and verify headers
+    let content = fs::read_to_string(output_path).await?;
+
+    // INFO DP should have its own description
+    assert!(
+        content.contains("##INFO=<ID=DP,"),
+        "written file should have ##INFO=<ID=DP> header"
+    );
+    // FORMAT DP should have the FORMAT description, not the INFO description
+    assert!(
+        content.contains("##FORMAT=<ID=DP,"),
+        "written file should have ##FORMAT=<ID=DP> header"
+    );
+    assert!(
+        content.contains("Description=\"Read depth\""),
+        "FORMAT DP should have 'Read depth' description, not the INFO description"
+    );
+    assert!(
+        content.contains("Description=\"Combined depth across samples\""),
+        "INFO DP should have 'Combined depth across samples' description"
+    );
+
+    // Read back and verify data values
+    let readback = VcfTableProvider::new(
+        output_path.to_string(),
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+    let ctx2 = SessionContext::new();
+    ctx2.register_table("readback", Arc::new(readback))?;
+
+    let df = ctx2
+        .sql("SELECT \"DP\", \"fmt_DP\", \"GT\" FROM readback ORDER BY start")
+        .await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+    assert_eq!(batch.num_rows(), 2);
+
+    let info_dp = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(info_dp.value(0), 50);
+    assert_eq!(info_dp.value(1), 60);
+
+    let fmt_dp = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(fmt_dp.value(0), 20);
+    assert_eq!(fmt_dp.value(1), 30);
+
+    // Cleanup
+    let _ = fs::remove_file(output_path).await;
+    let _ = fs::remove_file(&input_path).await;
+
+    Ok(())
+}
+
+/// Regression test for #161: write path must find renamed fmt_ columns even when
+/// field-level metadata is stripped (e.g., Polars → Arrow conversion).
+/// Simulates this by creating a RecordBatch with fmt_DP column but no format_id metadata.
+#[tokio::test]
+async fn test_write_finds_fmt_column_without_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::array::{Float64Array, UInt32Array};
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use datafusion_bio_format_core::metadata::{
+        VCF_FILE_FORMAT_KEY, VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY,
+    };
+    let output_path = "/tmp/test_write_fmt_no_metadata.vcf";
+
+    // Build a schema with fmt_DP but NO format_id metadata (simulates Polars stripping it)
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("DP", DataType::Int32, true),       // INFO DP
+            Field::new("fmt_DP", DataType::Int32, true),    // FORMAT DP (renamed, no metadata)
+        ],
+        std::collections::HashMap::from([
+            (VCF_FILE_FORMAT_KEY.to_string(), "VCFv4.3".to_string()),
+            (
+                VCF_SAMPLE_NAMES_KEY.to_string(),
+                "[\"SampleA\"]".to_string(),
+            ),
+            (
+                VCF_FORMAT_FIELDS_KEY.to_string(),
+                "{\"DP\":{\"number\":\"1\",\"field_type\":\"Integer\",\"description\":\"Read depth\"}}"
+                    .to_string(),
+            ),
+        ]),
+    ));
+
+    let batch = datafusion::arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![Some("rs1")])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["T"])),
+            Arc::new(Float64Array::from(vec![Some(30.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+            Arc::new(Int32Array::from(vec![Some(50)])),
+            Arc::new(Int32Array::from(vec![Some(20)])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    let mem_table = datafusion::datasource::MemTable::try_new(schema.clone(), vec![vec![batch]])?;
+    ctx.register_table("source", Arc::new(mem_table))?;
+
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        schema,
+        vec!["DP".to_string()],
+        vec!["DP".to_string()],
+        vec!["SampleA".to_string()],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest))?;
+
+    // This should NOT fail even though fmt_DP has no format_id metadata
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await?
+        .collect()
+        .await?;
+
+    let content = fs::read_to_string(output_path).await?;
+    assert!(
+        content.contains("##FORMAT=<ID=DP,"),
+        "output should have FORMAT DP header"
+    );
+    // The data line should contain the FORMAT DP value
+    assert!(
+        content.contains("20"),
+        "output should contain FORMAT DP value 20"
+    );
+
+    let _ = fs::remove_file(output_path).await;
+    Ok(())
+}

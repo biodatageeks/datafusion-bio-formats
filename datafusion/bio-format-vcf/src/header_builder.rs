@@ -11,8 +11,8 @@ use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::common::Result;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
-    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
-    VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, from_json_string,
+    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
+    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, from_json_string,
 };
 use std::collections::HashSet;
 
@@ -210,15 +210,49 @@ fn get_format_field_metadata(field: &Field, format_name: &str) -> (String, Strin
     (vcf_type, number, description)
 }
 
-/// Finds a FORMAT field in the schema by name (handles both single and multi-sample naming)
+/// Finds a FORMAT field in the schema by name (handles both single and multi-sample naming).
+///
+/// For single-sample VCFs, FORMAT columns may be prefixed with "fmt_" when their name
+/// collides with an INFO column. This function checks `bio.vcf.field.format_id` metadata
+/// as a fallback when direct name lookup fails.
 fn find_format_field<'a>(
     schema: &'a SchemaRef,
     format_name: &str,
     _sample_names: &[String],
 ) -> Option<&'a Field> {
-    // First try direct name lookup (single sample case)
+    // First try direct name lookup (single sample case, no collision).
+    // Only return early if the field has matching format_id metadata, confirming it's
+    // actually a FORMAT field. Without this check, an INFO field with the same name
+    // (e.g., INFO "DP") would be returned instead of the renamed FORMAT "fmt_DP".
     if let Ok(idx) = schema.index_of(format_name) {
-        return Some(schema.field(idx));
+        let field = schema.field(idx);
+        if field
+            .metadata()
+            .get(VCF_FIELD_FORMAT_ID_KEY)
+            .is_some_and(|id| id == format_name)
+        {
+            return Some(field);
+        }
+    }
+
+    // Check for renamed FORMAT columns (e.g., "fmt_DP") via format_id metadata
+    for field in schema.fields() {
+        if field
+            .metadata()
+            .get(VCF_FIELD_FORMAT_ID_KEY)
+            .is_some_and(|id| id == format_name)
+        {
+            return Some(field.as_ref());
+        }
+    }
+
+    // Fallback: check for renamed column by convention when metadata was stripped
+    // (e.g., Polars → Arrow conversion drops field-level metadata)
+    for prefix in &["fmt_", "format_"] {
+        let prefixed = format!("{prefix}{format_name}");
+        if let Ok(idx) = schema.index_of(&prefixed) {
+            return Some(schema.field(idx));
+        }
     }
 
     // Columnar multisample schema: genotypes: Struct<GT: List<T>, GQ: List<T>, ...>
@@ -227,8 +261,6 @@ fn find_format_field<'a>(
         if let DataType::Struct(struct_fields) = genotypes_field.data_type()
             && let Some(field) = struct_fields.iter().find(|f| f.name() == format_name)
         {
-            // field is List<T>; return a reference so callers can extract metadata.
-            // The caller needs to unwrap List to get scalar type for VCF header.
             return Some(field.as_ref());
         }
     }
@@ -370,9 +402,11 @@ mod tests {
 
     #[test]
     fn test_find_format_field_single_sample() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
         let schema = Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, false),
-            Field::new("GT", DataType::Utf8, true),
+            Field::new("GT", DataType::Utf8, true).with_metadata(metadata),
         ]));
 
         let field = find_format_field(&schema, "GT", &["SAMPLE1".to_string()]);
