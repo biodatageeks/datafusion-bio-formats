@@ -246,4 +246,96 @@ mod tests {
         );
         assert_eq!(gzip_exec.compression(), FastaCompressionType::Gzip);
     }
+
+    #[test]
+    fn test_with_new_children_wrong_count() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+            schema.clone(),
+        ));
+
+        let exec = Arc::new(FastaWriteExec::new(
+            empty.clone(),
+            "/tmp/test.fasta".to_string(),
+            None,
+        ));
+
+        // 0 children should fail
+        let result = exec.clone().with_new_children(vec![]);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one child")
+        );
+
+        // 2 children should fail
+        let result = exec.with_new_children(vec![empty.clone(), empty.clone()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_with_new_children_preserves_properties() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+            schema.clone(),
+        ));
+
+        let exec = Arc::new(FastaWriteExec::new(
+            empty.clone(),
+            "/tmp/test.fasta.bgz".to_string(),
+            Some(FastaCompressionType::Bgzf),
+        ));
+
+        let new_exec = exec.with_new_children(vec![empty]).unwrap();
+        let new_fasta_exec = new_exec.as_any().downcast_ref::<FastaWriteExec>().unwrap();
+
+        assert_eq!(new_fasta_exec.output_path(), "/tmp/test.fasta.bgz");
+        assert_eq!(new_fasta_exec.compression(), FastaCompressionType::Bgzf);
+    }
+
+    #[test]
+    fn test_display_as() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let exec = FastaWriteExec::new(
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema)),
+            "/tmp/out.fasta.bgz".to_string(),
+            None,
+        );
+
+        // Verify Debug doesn't panic and contains expected fields
+        let debug = format!("{:?}", exec);
+        assert!(debug.contains("FastaWriteExec"));
+        assert!(debug.contains("/tmp/out.fasta.bgz"));
+    }
+
+    #[test]
+    fn test_required_input_distribution() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let exec = FastaWriteExec::new(
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema)),
+            "/tmp/test.fasta".to_string(),
+            None,
+        );
+
+        let dist = exec.required_input_distribution();
+        assert_eq!(dist.len(), 1);
+        assert!(matches!(dist[0], Distribution::SinglePartition));
+    }
+
+    #[test]
+    fn test_output_schema_is_count() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        let exec = FastaWriteExec::new(
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema)),
+            "/tmp/test.fasta".to_string(),
+            None,
+        );
+
+        let output_schema = exec.schema();
+        assert_eq!(output_schema.fields().len(), 1);
+        assert_eq!(output_schema.field(0).name(), "count");
+        assert_eq!(output_schema.field(0).data_type(), &DataType::UInt64);
+    }
 }

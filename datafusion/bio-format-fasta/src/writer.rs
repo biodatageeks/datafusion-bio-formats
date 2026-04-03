@@ -267,4 +267,109 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_write_records_multiple() -> Result<()> {
+        let temp_file = NamedTempFile::with_suffix(".fasta").unwrap();
+        let path = temp_file.path();
+
+        let records: Vec<fasta::Record> = (0..5)
+            .map(|i| {
+                let def = Definition::new(format!("seq{i}"), None);
+                let seq = Sequence::from(b"ACGT".to_vec());
+                fasta::Record::new(def, seq)
+            })
+            .collect();
+
+        {
+            let mut writer = FastaLocalWriter::new(path)?;
+            writer.write_records(&records)?;
+            writer.finish()?;
+        }
+
+        let mut content = String::new();
+        let mut file = File::open(path).unwrap();
+        file.read_to_string(&mut content).unwrap();
+
+        for i in 0..5 {
+            assert!(content.contains(&format!(">seq{i}")));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_with_compression_override() -> Result<()> {
+        // Create a .fasta file but force GZIP compression
+        let temp_file = NamedTempFile::with_suffix(".fasta").unwrap();
+        let path = temp_file.path();
+
+        let record = fasta::Record::new(
+            Definition::new("seq1", None),
+            Sequence::from(b"ACGT".to_vec()),
+        );
+
+        {
+            let mut writer = FastaLocalWriter::with_compression(path, FastaCompressionType::Gzip)?;
+            writer.write_record(&record)?;
+            writer.finish()?;
+        }
+
+        // The file should be GZIP-compressed despite .fasta extension
+        let mut raw_bytes = Vec::new();
+        let mut file = File::open(path).unwrap();
+        file.read_to_end(&mut raw_bytes).unwrap();
+        // GZIP magic bytes
+        assert_eq!(raw_bytes[0], 0x1f);
+        assert_eq!(raw_bytes[1], 0x8b);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_flush() -> Result<()> {
+        let temp_file = NamedTempFile::with_suffix(".fasta").unwrap();
+        let path = temp_file.path();
+
+        let record = fasta::Record::new(
+            Definition::new("seq1", None),
+            Sequence::from(b"ACGT".to_vec()),
+        );
+
+        let mut writer = FastaLocalWriter::new(path)?;
+        writer.write_record(&record)?;
+        writer.flush()?;
+        writer.finish()?;
+
+        let metadata = std::fs::metadata(path).unwrap();
+        assert!(metadata.len() > 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_with_description() -> Result<()> {
+        let temp_file = NamedTempFile::with_suffix(".fasta").unwrap();
+        let path = temp_file.path();
+
+        let record = fasta::Record::new(
+            Definition::new("protein1", Some(bstr::BString::from("Homo sapiens"))),
+            Sequence::from(b"MKTLLIFLAG".to_vec()),
+        );
+
+        {
+            let mut writer = FastaLocalWriter::new(path)?;
+            writer.write_record(&record)?;
+            writer.finish()?;
+        }
+
+        let mut content = String::new();
+        let mut file = File::open(path).unwrap();
+        file.read_to_string(&mut content).unwrap();
+
+        assert!(content.contains(">protein1 Homo sapiens"));
+        assert!(content.contains("MKTLLIFLAG"));
+
+        Ok(())
+    }
 }

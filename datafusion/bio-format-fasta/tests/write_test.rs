@@ -740,3 +740,115 @@ async fn test_write_with_no_description() {
     assert_eq!(names.value(0), "seq_no_desc");
     assert_eq!(sequences.value(0), "MKTLLIFLAG");
 }
+
+#[tokio::test]
+async fn test_write_rejects_remote_path() {
+    let tmp_dir = TempDir::new().unwrap();
+    let input_path = tmp_dir.path().join("input.fasta");
+    generate_test_fasta(input_path.to_str().unwrap(), 5);
+
+    let ctx = SessionContext::new();
+
+    let input_provider =
+        FastaTableProvider::new(input_path.to_str().unwrap().to_string(), None).unwrap();
+    ctx.register_table("input_fasta", Arc::new(input_provider))
+        .unwrap();
+
+    // Register an S3 output path
+    let output_provider =
+        FastaTableProvider::new("s3://bucket/output.fasta".to_string(), None).unwrap();
+    ctx.register_table("output_fasta", Arc::new(output_provider))
+        .unwrap();
+
+    let result = async {
+        let df = ctx
+            .sql("INSERT OVERWRITE output_fasta SELECT * FROM input_fasta")
+            .await?;
+        df.collect().await
+    }
+    .await;
+
+    assert!(result.is_err(), "Remote path write should be rejected");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("local files"),
+        "Error should mention local files, got: {err_msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_write_mixed_descriptions() {
+    let tmp_dir = TempDir::new().unwrap();
+    let input_path = tmp_dir.path().join("input.fasta");
+    let output_path = tmp_dir.path().join("output.fasta");
+
+    // Create file with mixed: some records have descriptions, some don't
+    {
+        let mut file = std::fs::File::create(&input_path).unwrap();
+        writeln!(file, ">seq_a has description").unwrap();
+        writeln!(file, "ACGT").unwrap();
+        writeln!(file, ">seq_b").unwrap();
+        writeln!(file, "TGCA").unwrap();
+        writeln!(file, ">seq_c another desc").unwrap();
+        writeln!(file, "GGGG").unwrap();
+    }
+
+    let ctx = SessionContext::new();
+
+    let input_provider =
+        FastaTableProvider::new(input_path.to_str().unwrap().to_string(), None).unwrap();
+    ctx.register_table("input_fasta", Arc::new(input_provider))
+        .unwrap();
+
+    let output_provider =
+        FastaTableProvider::new(output_path.to_str().unwrap().to_string(), None).unwrap();
+    ctx.register_table("output_fasta", Arc::new(output_provider))
+        .unwrap();
+
+    ctx.sql("INSERT OVERWRITE output_fasta SELECT * FROM input_fasta")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    // Read back and verify descriptions round-trip correctly
+    let ctx2 = SessionContext::new();
+    let read_provider =
+        FastaTableProvider::new(output_path.to_str().unwrap().to_string(), None).unwrap();
+    ctx2.register_table("written_fasta", Arc::new(read_provider))
+        .unwrap();
+
+    let df = ctx2
+        .sql("SELECT name, description, sequence FROM written_fasta ORDER BY name")
+        .await
+        .unwrap();
+    let batches = df.collect().await.unwrap();
+
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, 3);
+
+    let batch = &batches[0];
+    let names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let descriptions = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    assert_eq!(names.value(0), "seq_a");
+    assert_eq!(descriptions.value(0), "has description");
+
+    assert_eq!(names.value(1), "seq_b");
+    assert!(
+        descriptions.is_null(1) || descriptions.value(1).is_empty(),
+        "seq_b should have no description"
+    );
+
+    assert_eq!(names.value(2), "seq_c");
+    assert_eq!(descriptions.value(2), "another desc");
+}
