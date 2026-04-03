@@ -4,7 +4,7 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
-use datafusion::physical_plan::ExecutionPlanProperties;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::test_utils::find_leaf_exec;
@@ -2872,6 +2872,379 @@ async fn transcript_object_hash_stable_text() -> datafusion::common::Result<()> 
             );
         }
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Sort-preserving merge and parallel execution tests
+//
+// Uses the `variation_multi_region` fixture which has 4 chr1 files and
+// 2 chr2 files, enough to distribute across multiple partitions and
+// verify true parallel execution (not just optimizer-added merge).
+// ---------------------------------------------------------------------------
+
+/// Recursively search for an execution plan node by name.
+fn find_exec_by_name(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Option<Arc<dyn ExecutionPlan>> {
+    if plan.name() == name {
+        return Some(Arc::clone(plan));
+    }
+    for child in plan.children() {
+        if let Some(found) = find_exec_by_name(child, name) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Check that a plan tree does NOT contain a node with the given name.
+fn assert_no_exec_named(plan: &Arc<dyn ExecutionPlan>, name: &str) {
+    assert!(
+        find_exec_by_name(plan, name).is_none(),
+        "unexpected {name} found in plan"
+    );
+}
+
+#[tokio::test]
+async fn variation_multi_region_parallel_exec_with_merge() -> datafusion::common::Result<()> {
+    // With 4 chr1 files and target_partitions=2, the EnsemblCacheExec should
+    // have 2 partitions (2 files each) and be wrapped by SortPreservingMergeExec.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    options.target_partitions = Some(2);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(2);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+
+    // SortPreservingMergeExec should be present (from our scan() wrapping)
+    let merge = find_exec_by_name(&plan, "SortPreservingMergeExec");
+    assert!(merge.is_some(), "expected SortPreservingMergeExec in plan");
+
+    // No CoalescePartitionsExec (which would serialize to 1 thread)
+    assert_no_exec_named(&plan, "CoalescePartitionsExec");
+
+    // The EnsemblCacheExec must have >1 partition for true parallelism
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "EnsemblCacheExec");
+    let num_partitions = leaf.output_partitioning().partition_count();
+    assert!(
+        num_partitions > 1,
+        "expected >1 partitions for parallel exec, got {num_partitions}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_multi_region_partition_count_scales() -> datafusion::common::Result<()> {
+    // Verify that EnsemblCacheExec partition count scales with target_partitions
+    // up to the number of matching files (4 chr1 files).
+    for target_partitions in [2, 3, 4] {
+        let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+        options.target_partitions = Some(target_partitions);
+        let provider = VariationTableProvider::new(options)?;
+        let ctx = session_ctx_with_target_partitions(target_partitions);
+        let table_name = format!("var_{target_partitions}");
+        ctx.register_table(&table_name, Arc::new(provider))?;
+
+        let df = ctx
+            .sql(&format!(
+                "SELECT start FROM {table_name} WHERE chrom = '1' ORDER BY start"
+            ))
+            .await?;
+        let plan = df.create_physical_plan().await?;
+
+        let leaf = find_leaf_exec(&plan);
+        let actual_partitions = leaf.output_partitioning().partition_count();
+        let expected = target_partitions.min(4); // capped by 4 chr1 files
+        assert_eq!(
+            actual_partitions, expected,
+            "target_partitions={target_partitions}: expected {expected} partitions, got {actual_partitions}"
+        );
+
+        // Merge should be present when >1 partition
+        if expected > 1 {
+            assert!(
+                find_exec_by_name(&plan, "SortPreservingMergeExec").is_some(),
+                "expected SortPreservingMergeExec with {expected} partitions"
+            );
+        }
+
+        // Never coalesce
+        assert_no_exec_named(&plan, "CoalescePartitionsExec");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_multi_region_single_partition_no_merge() -> datafusion::common::Result<()> {
+    // With 1 partition, no SortPreservingMergeExec is needed.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    options.target_partitions = Some(1);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(1);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.output_partitioning().partition_count(), 1);
+
+    // Our scan() should not wrap with merge for single partition
+    // (DataFusion's optimizer may add one, but we don't explicitly)
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_multi_region_no_chrom_filter_no_merge() -> datafusion::common::Result<()> {
+    // Without WHERE chrom = '...', scan() should NOT wrap with
+    // SortPreservingMergeExec (karyotypic != lexicographic).
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    options.target_partitions = Some(4);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(4);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx.sql("SELECT chrom, start FROM variation").await?;
+    let plan = df.create_physical_plan().await?;
+
+    // No SortPreservingMergeExec from our scan() for unfiltered queries.
+    // DataFusion may add its own CoalescePartitionsExec, which is fine —
+    // we just don't add merge because our ordering declaration would be wrong.
+    assert_no_exec_named(&plan, "SortPreservingMergeExec");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_multi_region_no_coalesce_for_various_partitions()
+-> datafusion::common::Result<()> {
+    // Verify that for partition counts 2..4, the plan never coalesces
+    // when filtering to a single chromosome with ORDER BY.
+    for target_partitions in 2..=4 {
+        let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+        options.target_partitions = Some(target_partitions);
+        let provider = VariationTableProvider::new(options)?;
+        let ctx = session_ctx_with_target_partitions(target_partitions);
+        let table_name = format!("var_{target_partitions}");
+        ctx.register_table(&table_name, Arc::new(provider))?;
+
+        let df = ctx
+            .sql(&format!(
+                "SELECT start FROM {table_name} WHERE chrom = '1' ORDER BY start"
+            ))
+            .await?;
+        let plan = df.create_physical_plan().await?;
+
+        assert_no_exec_named(&plan, "CoalescePartitionsExec");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn variation_multi_region_results_ordered_with_parallel_exec()
+-> datafusion::common::Result<()> {
+    // End-to-end: with 4 chr1 files across 2 partitions, verify that
+    // results come back correctly ordered by start.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    options.target_partitions = Some(2);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(2);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+
+    let starts: Vec<i64> = batches
+        .iter()
+        .flat_map(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+
+    // Should have all 8 rows from 4 chr1 files (2 rows each)
+    assert_eq!(starts.len(), 8, "expected 8 rows from 4 chr1 files");
+
+    // Verify monotonically non-decreasing
+    for window in starts.windows(2) {
+        assert!(
+            window[0] <= window[1],
+            "results not ordered: {} > {}",
+            window[0],
+            window[1]
+        );
+    }
+
+    // Verify expected start values span all 4 regions
+    assert_eq!(starts[0], 100, "first row should be from region 1");
+    assert!(
+        starts.last().unwrap() >= &3000100,
+        "last row should be from region 4"
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tabix bgzf intra-file parallelism tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn tabix_bgzf_parallel_partitions() -> datafusion::common::Result<()> {
+    // With a single bgzf all_vars.gz and target_partitions=4,
+    // the EnsemblCacheExec should split into multiple bgzf byte-range
+    // partitions for true intra-file parallelism.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_tabix_bgzf"));
+    options.target_partitions = Some(4);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(4);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT start FROM variation WHERE chrom = '1' ORDER BY start")
+        .await?;
+    let plan = df.create_physical_plan().await?;
+
+    // EnsemblCacheExec should have multiple partitions (bgzf byte-range split)
+    let leaf = find_leaf_exec(&plan);
+    assert_eq!(leaf.name(), "EnsemblCacheExec");
+    let num_partitions = leaf.output_partitioning().partition_count();
+    assert!(
+        num_partitions > 1,
+        "expected >1 partitions for tabix bgzf split, got {num_partitions}"
+    );
+
+    // SortPreservingMergeExec should be present
+    assert!(
+        find_exec_by_name(&plan, "SortPreservingMergeExec").is_some(),
+        "expected SortPreservingMergeExec in plan"
+    );
+
+    // No CoalescePartitionsExec
+    assert_no_exec_named(&plan, "CoalescePartitionsExec");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn tabix_bgzf_results_correct_and_ordered() -> datafusion::common::Result<()> {
+    // End-to-end: verify that parallel bgzf reading produces correct
+    // ordered results that match single-partition reading.
+    let fixture = fixture_path("variation_tabix_bgzf");
+
+    // Single partition (baseline)
+    let mut options_1 = EnsemblCacheOptions::new(&fixture);
+    options_1.target_partitions = Some(1);
+    let provider_1 = VariationTableProvider::new(options_1)?;
+    let ctx_1 = session_ctx_with_target_partitions(1);
+    ctx_1.register_table("var", Arc::new(provider_1))?;
+    let batches_1 = ctx_1
+        .sql("SELECT start FROM var WHERE chrom = '1' ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+
+    // Multiple partitions (parallel bgzf)
+    let mut options_4 = EnsemblCacheOptions::new(&fixture);
+    options_4.target_partitions = Some(4);
+    let provider_4 = VariationTableProvider::new(options_4)?;
+    let ctx_4 = session_ctx_with_target_partitions(4);
+    ctx_4.register_table("var", Arc::new(provider_4))?;
+    let batches_4 = ctx_4
+        .sql("SELECT start FROM var WHERE chrom = '1' ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+
+    let starts_1: Vec<i64> = batches_1
+        .iter()
+        .flat_map(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+
+    let starts_4: Vec<i64> = batches_4
+        .iter()
+        .flat_map(|b| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .iter()
+                .copied()
+        })
+        .collect();
+
+    // Both should have the same number of chr1 rows
+    assert_eq!(
+        starts_1.len(),
+        starts_4.len(),
+        "row count mismatch: single={} vs parallel={}",
+        starts_1.len(),
+        starts_4.len()
+    );
+    assert_eq!(starts_1.len(), 49991, "expected 49991 chr1 rows");
+
+    // Results should be identical
+    assert_eq!(
+        starts_1, starts_4,
+        "parallel results differ from single-partition"
+    );
+
+    // Verify ordering
+    for window in starts_4.windows(2) {
+        assert!(
+            window[0] <= window[1],
+            "results not ordered: {} > {}",
+            window[0],
+            window[1]
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn tabix_bgzf_single_partition_no_split() -> datafusion::common::Result<()> {
+    // With target_partitions=1, no bgzf splitting should occur.
+    let mut options = EnsemblCacheOptions::new(fixture_path("variation_tabix_bgzf"));
+    options.target_partitions = Some(1);
+    let provider = VariationTableProvider::new(options)?;
+    let ctx = session_ctx_with_target_partitions(1);
+    ctx.register_table("variation", Arc::new(provider))?;
+
+    let df = ctx
+        .sql("SELECT COUNT(*) FROM variation WHERE chrom = '1'")
+        .await?;
+
+    let batches = df.collect().await?;
+    let count = first_i64(&batches);
+    assert_eq!(count, 49991, "expected 49991 chr1 rows");
 
     Ok(())
 }

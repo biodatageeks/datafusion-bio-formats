@@ -26,8 +26,9 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result as DFResult};
 use datafusion::execution::SendableRecordBatchStream;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::stream::RecordBatchReceiverStreamBuilder;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_execution::TaskContext;
@@ -59,6 +60,7 @@ pub(crate) struct EnsemblCacheExec {
     pub(crate) batch_size_hint: Option<usize>,
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) num_partitions: usize,
+    pub(crate) bgzf_partitions: Option<Vec<(PathBuf, crate::tabix_reader::BgzfPartition)>>,
     pub(crate) cache: PlanProperties,
 }
 
@@ -73,6 +75,22 @@ pub(crate) struct EnsemblCacheExecConfig {
     pub(crate) batch_size_hint: Option<usize>,
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) num_partitions: usize,
+    /// When true, files are assigned to partitions in discovery order
+    /// (consecutive chunks) and per-partition output ordering is declared.
+    ///
+    /// When combined with a single-chromosome predicate, the declared
+    /// ordering is `(start ASC)` which is always correct.  Without a
+    /// chromosome filter, no ordering is declared because karyotypic
+    /// file order differs from lexicographic string comparison.
+    pub(crate) preserve_sort_order: bool,
+    /// When set, indicates the query filters to a single chromosome
+    /// (e.g. `WHERE chrom = '1'`).  Used to declare `(start ASC)`
+    /// per-partition ordering, enabling `SortPreservingMergeExec`.
+    pub(crate) single_chrom_filter: Option<String>,
+    /// When set, the single tabix file is split into bgzf byte-range
+    /// partitions instead of distributing multiple files.  Each entry
+    /// is a `(file_path, BgzfPartition)` for one execution partition.
+    pub(crate) bgzf_partitions: Option<Vec<(PathBuf, crate::tabix_reader::BgzfPartition)>>,
 }
 
 impl Debug for EnsemblCacheExec {
@@ -107,6 +125,9 @@ fn estimate_file_size(path: &Path) -> u64 {
 /// This spreads large files across different partitions while keeping file
 /// counts even (±1), avoiding the greedy LPT pitfall where a few heavy
 /// partitions dominate wall-clock time.
+///
+/// **Note:** This destroys the original file order.  Use
+/// [`assign_files_ordered`] when output ordering must be preserved.
 fn assign_files_balanced(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<PathBuf>> {
     let mut partition_files: Vec<Vec<PathBuf>> = (0..num_partitions).map(|_| Vec::new()).collect();
     if files.is_empty() {
@@ -131,17 +152,73 @@ fn assign_files_balanced(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<
     partition_files
 }
 
+/// Assign files to partitions preserving discovery order.
+///
+/// Files are distributed in consecutive chunks so that each partition reads
+/// a contiguous slice of the sorted file list.  This preserves the
+/// within-partition sort invariant required for declaring output ordering.
+fn assign_files_ordered(files: Vec<PathBuf>, num_partitions: usize) -> Vec<Vec<PathBuf>> {
+    let mut partition_files: Vec<Vec<PathBuf>> = (0..num_partitions).map(|_| Vec::new()).collect();
+    if files.is_empty() {
+        return partition_files;
+    }
+
+    let chunk_size = files.len().div_ceil(num_partitions);
+    for (i, path) in files.into_iter().enumerate() {
+        let partition_idx = (i / chunk_size).min(num_partitions - 1);
+        partition_files[partition_idx].push(path);
+    }
+
+    partition_files
+}
+
 impl EnsemblCacheExec {
     pub(crate) fn new(config: EnsemblCacheExecConfig) -> Self {
-        let num_partitions = config.num_partitions.max(1);
+        let bgzf_partitions = config.bgzf_partitions;
+        let num_partitions = if let Some(ref bp) = bgzf_partitions {
+            bp.len().max(1)
+        } else {
+            config.num_partitions.max(1)
+        };
+
+        let partition_files = if bgzf_partitions.is_some() {
+            // bgzf partitions handle file assignment internally;
+            // create empty file lists (one per partition) as placeholder.
+            (0..num_partitions).map(|_| Vec::new()).collect()
+        } else if config.preserve_sort_order {
+            assign_files_ordered(config.files, num_partitions)
+        } else {
+            assign_files_balanced(config.files, num_partitions)
+        };
+
+        // Declare per-partition output ordering when preserve_sort_order is set.
+        //
+        // Single-chrom filter (WHERE chrom = '1'): declare (start ASC).
+        //   Correct because within each partition, files are consecutive
+        //   genomic chunks with monotonically increasing start positions.
+        //
+        // No chrom filter: do NOT declare ordering. Karyotypic file order
+        //   (1, 2, ..., 10, ..., 22, X, Y, MT) differs from lexicographic
+        //   string order ("1" < "10" < "2"), so declaring (chrom ASC, start ASC)
+        //   would be incorrect and could produce wrong merge results.
+        let eq_props = if config.preserve_sort_order && config.single_chrom_filter.is_some() {
+            if let Ok(si) = config.schema.index_of("start") {
+                let sort_exprs =
+                    vec![PhysicalSortExpr::new_default(Arc::new(Column::new("start", si))).asc()];
+                EquivalenceProperties::new_with_orderings(config.schema.clone(), [sort_exprs])
+            } else {
+                EquivalenceProperties::new(config.schema.clone())
+            }
+        } else {
+            EquivalenceProperties::new(config.schema.clone())
+        };
+
         let cache = PlanProperties::new(
-            EquivalenceProperties::new(config.schema.clone()),
+            eq_props,
             Partitioning::UnknownPartitioning(num_partitions),
             EmissionType::Final,
             Boundedness::Bounded,
         );
-
-        let partition_files = assign_files_balanced(config.files, num_partitions);
 
         Self {
             kind: config.kind,
@@ -154,6 +231,7 @@ impl EnsemblCacheExec {
             batch_size_hint: config.batch_size_hint,
             coordinate_system_zero_based: config.coordinate_system_zero_based,
             num_partitions,
+            bgzf_partitions,
             cache,
         }
     }
@@ -165,7 +243,7 @@ impl EnsemblCacheExec {
 
 /// Prunes variation files by chrom AND genomic region using the
 /// `{chrom}_{start}-{end}_var.gz` naming convention.
-fn variation_file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
+pub(crate) fn variation_file_matches_predicate(path: &Path, predicate: &SimplePredicate) -> bool {
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return true; // can't parse, don't prune
     };
@@ -200,7 +278,7 @@ fn variation_file_matches_predicate(path: &Path, predicate: &SimplePredicate) ->
 /// Prunes files by chromosome using directory structure or filename
 /// conventions. Works for all entity kinds. Returns `true` (don't prune)
 /// if the chromosome cannot be determined from the path.
-fn file_matches_chrom_predicate(
+pub(crate) fn file_matches_chrom_predicate(
     path: &Path,
     predicate: &SimplePredicate,
     kind: EnsemblEntityKind,
@@ -264,12 +342,22 @@ impl ExecutionPlan for EnsemblCacheExec {
     fn statistics(&self) -> DFResult<datafusion::physical_plan::Statistics> {
         // Estimate row count from total compressed file sizes.
         // Rough heuristic: ~50 bytes per row in compressed VEP cache files.
-        let total_bytes: u64 = self
-            .partition_files
-            .iter()
-            .flatten()
-            .map(|p| estimate_file_size(p))
-            .sum();
+        let total_bytes: u64 = if let Some(ref bp) = self.bgzf_partitions {
+            // BGZF mode: partition_files is empty; use the actual file paths
+            // from bgzf_partitions (deduplicated since they may all point to
+            // the same file).
+            let mut seen = std::collections::HashSet::new();
+            bp.iter()
+                .filter(|(p, _)| seen.insert(p.clone()))
+                .map(|(p, _)| estimate_file_size(p))
+                .sum()
+        } else {
+            self.partition_files
+                .iter()
+                .flatten()
+                .map(|p| estimate_file_size(p))
+                .sum()
+        };
         let estimated_rows = total_bytes / 50;
         Ok(datafusion::physical_plan::Statistics {
             num_rows: datafusion::common::stats::Precision::Inexact(estimated_rows as usize),
@@ -296,9 +384,16 @@ impl ExecutionPlan for EnsemblCacheExec {
         let cache_info = self.cache_info.clone();
         let predicate = self.predicate.clone();
 
-        // Files for this partition (pre-balanced by size), with predicate pruning.
+        let bgzf_partition = self
+            .bgzf_partitions
+            .as_ref()
+            .and_then(|p| p.get(partition))
+            .cloned();
+
+        // Files for this partition (balanced or ordered), with predicate pruning.
         // Variation files support chrom + region pruning via filename parsing;
         // all other entities support chrom-only pruning via directory/filename.
+        // When using bgzf partitions, file list is empty (handled separately).
         let files: Vec<PathBuf> = self.partition_files[partition]
             .iter()
             .filter(|path| {
@@ -332,6 +427,7 @@ impl ExecutionPlan for EnsemblCacheExec {
                 variation_region_size,
                 coordinate_system_zero_based,
                 batch_size,
+                bgzf_partition,
             )
         });
         Ok(builder.build())
@@ -387,6 +483,7 @@ fn process_partition(
     variation_region_size: i64,
     coordinate_system_zero_based: bool,
     batch_size: usize,
+    bgzf_partition: Option<(PathBuf, crate::tabix_reader::BgzfPartition)>,
 ) -> Result<()> {
     let col_map = ColumnMap::from_schema(&stream_schema);
     let provenance = ProvenanceWriter::new(&col_map, &cache_info);
@@ -442,6 +539,65 @@ fn process_partition(
     let mut emitted_rows: usize = 0;
     let mut malformed_rows: usize = 0;
     let mut stop = false;
+
+    // BGZF partition path: read lines from a byte range of a bgzf file
+    // instead of iterating over multiple files.
+    if let Some((bgzf_path, bgzf_part)) = &bgzf_partition
+        && kind == EnsemblEntityKind::Variation
+    {
+        let source_file_str = bgzf_path.to_str().unwrap_or_default();
+        let mut bgzf_reader =
+            crate::tabix_reader::BgzfPartitionLineReader::open(bgzf_path, bgzf_part)?;
+
+        while let Some(line_trimmed) = bgzf_reader.next_line()? {
+            match parse_variation_line_into(
+                line_trimmed,
+                source_file_str,
+                &predicate,
+                variation_region_size,
+                coordinate_system_zero_based,
+                &mut batch_builder,
+                variation_col_idx.as_ref().unwrap(),
+                variation_ctx.as_ref().unwrap(),
+                &provenance,
+                source_id_writer.as_mut().unwrap(),
+            )? {
+                VariationParseResult::Added => {
+                    match dispatch_row(
+                        &tx,
+                        &mut batch_builder,
+                        &mut emitted_rows,
+                        limit,
+                        batch_size,
+                    )? {
+                        RowDispatchState::Continue => {}
+                        RowDispatchState::Stop | RowDispatchState::ConsumerDropped => {
+                            stop = true;
+                            break;
+                        }
+                    }
+                }
+                VariationParseResult::Skipped => {}
+                VariationParseResult::Malformed => {
+                    malformed_rows += 1;
+                }
+            }
+        }
+
+        // Flush remaining rows
+        if !stop && batch_builder.len() > 0 {
+            let batch = batch_builder.finish()?;
+            let _ = tx.blocking_send(Ok(batch));
+        }
+
+        if malformed_rows > 0 {
+            log::debug!(
+                "Skipped {malformed_rows} malformed variation lines from {}",
+                bgzf_path.display()
+            );
+        }
+        return Ok(());
+    }
 
     for source_file in &files {
         if stop {
@@ -1121,5 +1277,281 @@ mod tests {
         assert_eq!(total, 2);
         // Should have at most 1 file per partition
         assert!(result.iter().all(|p| p.len() <= 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // assign_files_ordered
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ordered_preserves_order() {
+        let files: Vec<PathBuf> = (0..6).map(|i| PathBuf::from(format!("f{i}.gz"))).collect();
+
+        let result = assign_files_ordered(files, 3);
+        assert_eq!(result.len(), 3);
+        // Each partition gets 2 consecutive files
+        assert_eq!(
+            result[0]
+                .iter()
+                .map(|p| p.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["f0.gz", "f1.gz"]
+        );
+        assert_eq!(
+            result[1]
+                .iter()
+                .map(|p| p.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["f2.gz", "f3.gz"]
+        );
+        assert_eq!(
+            result[2]
+                .iter()
+                .map(|p| p.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["f4.gz", "f5.gz"]
+        );
+    }
+
+    #[test]
+    fn ordered_uneven_distribution() {
+        let files: Vec<PathBuf> = (0..7).map(|i| PathBuf::from(format!("f{i}.gz"))).collect();
+
+        let result = assign_files_ordered(files, 3);
+        assert_eq!(result.len(), 3);
+        // ceil(7/3) = 3 files per chunk, last partition gets remainder
+        let counts: Vec<usize> = result.iter().map(|p| p.len()).collect();
+        assert_eq!(counts.iter().sum::<usize>(), 7);
+        // First partitions get 3, last gets 1
+        assert_eq!(counts, vec![3, 3, 1]);
+    }
+
+    #[test]
+    fn ordered_empty() {
+        let result = assign_files_ordered(Vec::new(), 4);
+        assert_eq!(result.len(), 4);
+        assert!(result.iter().all(|p| p.is_empty()));
+    }
+
+    #[test]
+    fn ordered_single_file() {
+        let files = vec![PathBuf::from("f0.gz")];
+        let result = assign_files_ordered(files, 4);
+        let total: usize = result.iter().map(|p| p.len()).sum();
+        assert_eq!(total, 1);
+        assert_eq!(result[0].len(), 1);
+    }
+
+    #[test]
+    fn ordered_more_partitions_than_files() {
+        let files: Vec<PathBuf> = (0..2).map(|i| PathBuf::from(format!("f{i}.gz"))).collect();
+
+        let result = assign_files_ordered(files, 8);
+        let total: usize = result.iter().map(|p| p.len()).sum();
+        assert_eq!(total, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Ordering preserved with partitions > 1
+    // -----------------------------------------------------------------------
+
+    /// Helper: collect all files from partitions in partition order,
+    /// simulating how DataFusion's SortPreservingMergeExec would see them.
+    fn flatten_partitions(partitions: &[Vec<PathBuf>]) -> Vec<String> {
+        partitions
+            .iter()
+            .flat_map(|p| p.iter().map(|f| f.to_str().unwrap().to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn ordered_genomic_sort_preserved_across_partitions() {
+        // Simulate variation files in karyotypic genomic order (as produced
+        // by sort_variation_files_genomic). Verify that assign_files_ordered
+        // distributes them so that flattening partitions in order recovers
+        // the original genomic order.
+        use crate::discovery::sort_variation_files_genomic;
+
+        let mut files: Vec<PathBuf> = vec![
+            "10_1-1000000_var.gz",
+            "2_1-1000000_var.gz",
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "2_1000001-2000000_var.gz",
+            "X_1-1000000_var.gz",
+            "22_1-1000000_var.gz",
+            "22_1000001-2000000_var.gz",
+            "Y_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+        let expected_order: Vec<String> = files
+            .iter()
+            .map(|f| f.to_str().unwrap().to_string())
+            .collect();
+
+        // Distribute across 4 partitions
+        let partitions = assign_files_ordered(files, 4);
+        assert_eq!(partitions.len(), 4);
+
+        // Each partition's files must be a contiguous sub-slice of the
+        // genomic order.
+        let flattened = flatten_partitions(&partitions);
+        assert_eq!(flattened, expected_order);
+    }
+
+    #[test]
+    fn ordered_within_partition_monotonic_chrom_start() {
+        // Verify that within each partition, (chrom_sort_key, start) is
+        // monotonically non-decreasing using karyotypic order.
+        use crate::discovery::{chrom_sort_key, sort_variation_files_genomic};
+
+        let mut files: Vec<PathBuf> = vec![
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "1_2000001-3000000_var.gz",
+            "2_1-1000000_var.gz",
+            "2_1000001-2000000_var.gz",
+            "10_1-1000000_var.gz",
+            "22_1-1000000_var.gz",
+            "X_1-1000000_var.gz",
+            "X_1000001-2000000_var.gz",
+            "Y_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        for num_partitions in [2, 3, 4, 5, 8] {
+            let partitions = assign_files_ordered(files.clone(), num_partitions);
+
+            for (p_idx, partition) in partitions.iter().enumerate() {
+                let regions: Vec<_> = partition
+                    .iter()
+                    .filter_map(|f| {
+                        let name = f.to_str()?;
+                        parse_file_chrom_region(name)
+                    })
+                    .collect();
+
+                for window in regions.windows(2) {
+                    let (chrom_a, start_a, _) = window[0];
+                    let (chrom_b, start_b, _) = window[1];
+                    let key_a = (chrom_sort_key(chrom_a), start_a);
+                    let key_b = (chrom_sort_key(chrom_b), start_b);
+                    assert!(
+                        key_a <= key_b,
+                        "partition {p_idx} with {num_partitions} partitions: \
+                         ({chrom_a}, {start_a}) > ({chrom_b}, {start_b})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordered_pruned_subset_preserves_order() {
+        // Simulate the scan() flow: genomic sort → predicate prune → ordered assign.
+        // Verify ordering is preserved when only one chromosome's files remain.
+        use crate::discovery::sort_variation_files_genomic;
+        use crate::filter::SimplePredicate;
+
+        let mut files: Vec<PathBuf> = vec![
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "2_1-1000000_var.gz",
+            "2_1000001-2000000_var.gz",
+            "2_2000001-3000000_var.gz",
+            "10_1-1000000_var.gz",
+            "X_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        // Prune to chrom 2 only (simulating WHERE chrom = '2')
+        let predicate = SimplePredicate {
+            chrom: Some("2".to_string()),
+            ..Default::default()
+        };
+        let pruned: Vec<PathBuf> = files
+            .into_iter()
+            .filter(|f| variation_file_matches_predicate(f, &predicate))
+            .collect();
+
+        assert_eq!(pruned.len(), 3);
+
+        // Distribute across 3 partitions — each should get 1 file
+        let partitions = assign_files_ordered(pruned.clone(), 3);
+        let flattened = flatten_partitions(&partitions);
+        let expected: Vec<String> = pruned
+            .iter()
+            .map(|f| f.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(flattened, expected);
+
+        // All files should be chr2 in ascending start order
+        let starts: Vec<i64> = flattened
+            .iter()
+            .filter_map(|name| parse_file_chrom_region(name).map(|(_, s, _)| s))
+            .collect();
+        assert_eq!(starts, vec![1, 1000001, 2000001]);
+    }
+
+    #[test]
+    fn ordered_pruned_region_within_chrom_preserves_order() {
+        // Prune to a specific region within a chromosome and verify
+        // ordering is preserved across partitions.
+        use crate::discovery::sort_variation_files_genomic;
+        use crate::filter::SimplePredicate;
+
+        let mut files: Vec<PathBuf> = vec![
+            "1_1-1000000_var.gz",
+            "1_1000001-2000000_var.gz",
+            "1_2000001-3000000_var.gz",
+            "1_3000001-4000000_var.gz",
+            "1_4000001-5000000_var.gz",
+            "1_5000001-6000000_var.gz",
+            "2_1-1000000_var.gz",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+        sort_variation_files_genomic(&mut files);
+
+        // Prune to chr1:2000001-4000000.
+        // File overlap logic: file_end < start_min prunes, file_start > end_max prunes.
+        // 1_2000001-3000000 → overlaps (start=2000001, end=3000000)
+        // 1_3000001-4000000 → overlaps (start=3000001, end=4000000)
+        // 1_1000001-2000000 → pruned (file_end=2000000 < start_min=2000001)
+        // 1_4000001-5000000 → pruned (file_start=4000001 > end_max=4000000)
+        let predicate = SimplePredicate {
+            chrom: Some("1".to_string()),
+            start_min: Some(2000001),
+            end_max: Some(4000000),
+            ..Default::default()
+        };
+        let pruned: Vec<PathBuf> = files
+            .into_iter()
+            .filter(|f| variation_file_matches_predicate(f, &predicate))
+            .collect();
+
+        assert_eq!(pruned.len(), 2);
+
+        let partitions = assign_files_ordered(pruned.clone(), 2);
+        let flattened = flatten_partitions(&partitions);
+        let expected: Vec<String> = pruned
+            .iter()
+            .map(|f| f.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(flattened, expected);
     }
 }

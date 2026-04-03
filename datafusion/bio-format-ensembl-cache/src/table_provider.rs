@@ -6,18 +6,25 @@ use crate::entity::EnsemblEntityKind;
 use crate::errors::{Result, exec_err};
 use crate::filter::{extract_simple_predicate, is_pushdown_supported};
 use crate::info::CacheInfo;
-use crate::physical_exec::{EnsemblCacheExec, EnsemblCacheExecConfig};
+use crate::physical_exec::{
+    EnsemblCacheExec, EnsemblCacheExecConfig, file_matches_chrom_predicate,
+    variation_file_matches_predicate,
+};
 use crate::schema::{
     exon_schema, motif_feature_schema, regulatory_feature_schema, transcript_schema,
     translation_schema, variation_schema,
 };
 use crate::variation::detect_region_size;
 use async_trait::async_trait;
+use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
+use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::expressions::Column;
+use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
 use std::any::Any;
 use std::path::Path;
 use std::sync::Arc;
@@ -44,6 +51,15 @@ pub struct EnsemblCacheOptions {
     /// scales linearly with the number of concurrent partitions. Defaults to 4
     /// when unset.
     pub max_storable_partitions: Option<usize>,
+    /// When true, variation files are assigned to partitions in genomic order
+    /// (consecutive chunks).  When combined with a single-chromosome predicate
+    /// (`WHERE chrom = '1'`), per-partition output ordering `(start ASC)` is
+    /// declared, allowing DataFusion to use a SortPreservingMergeExec instead
+    /// of a full SortExec.  Without a chromosome filter, no ordering is
+    /// declared because karyotypic file order differs from lexicographic.
+    ///
+    /// Defaults to true for variation entities.
+    pub preserve_sort_order: Option<bool>,
 }
 
 impl EnsemblCacheOptions {
@@ -60,6 +76,7 @@ impl EnsemblCacheOptions {
             target_partitions: None,
             batch_size_hint: None,
             max_storable_partitions: None,
+            preserve_sort_order: None,
         }
     }
 }
@@ -209,6 +226,23 @@ impl ProviderInner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let projected_schema = project_schema(&self.schema, projection);
         let predicate = extract_simple_predicate(filters);
+
+        // Prune files by predicate BEFORE partition assignment so that
+        // per-chromosome queries distribute matching files across all
+        // partitions instead of concentrating them in one.
+        let files: Vec<std::path::PathBuf> = self
+            .files
+            .iter()
+            .filter(|path| {
+                if self.kind == EnsemblEntityKind::Variation {
+                    variation_file_matches_predicate(path, &predicate)
+                } else {
+                    file_matches_chrom_predicate(path, &predicate, self.kind)
+                }
+            })
+            .cloned()
+            .collect();
+
         let base_partitions = match self.options.target_partitions {
             Some(target) => target,
             None => state.config().target_partitions(),
@@ -225,20 +259,123 @@ impl ProviderInner {
             base_partitions
         }
         .max(1);
-        let num_partitions = requested_partitions.min(self.files.len().max(1));
+        let num_partitions = requested_partitions.min(files.len().max(1));
 
-        Ok(Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
+        // Default: preserve sort order for variation (already sorted in
+        // genomic order by discovery), disable for other entities.
+        let preserve_sort_order = self
+            .options
+            .preserve_sort_order
+            .unwrap_or(self.kind == EnsemblEntityKind::Variation);
+
+        let single_chrom_filter = predicate.chrom.clone();
+
+        // For tabix variation caches with few files (typically 1 per chrom),
+        // split the bgzf file into byte-range partitions for intra-file
+        // parallelism.  This is the key optimization for VEP 110+ caches.
+        //
+        // When a chrom predicate is present AND a .tbi index exists, use
+        // the index to restrict partitioning to only the target chromosome's
+        // byte range.  This avoids decompressing data for other chromosomes.
+        let is_tabix = self.kind == EnsemblEntityKind::Variation
+            && self.cache_info.var_type.as_deref() == Some("tabix");
+        let bgzf_partitions = if is_tabix && files.len() == 1 && requested_partitions > 1 {
+            let data_file = &files[0];
+            let tbi_path = data_file.with_extension("gz.tbi");
+            let csi_path = data_file.with_extension("gz.csi");
+            let index_path = if tbi_path.exists() {
+                Some(tbi_path)
+            } else if csi_path.exists() {
+                Some(csi_path)
+            } else {
+                None
+            };
+
+            // Try tabix-index-aware partitioning first (chrom filter + index exists)
+            let parts = if let Some(ref chrom) = single_chrom_filter
+                && let Some(ref idx_path) = index_path
+            {
+                match crate::tabix_reader::tabix_chrom_byte_range(idx_path, chrom) {
+                    Ok(Some((start, end))) => {
+                        crate::tabix_reader::compute_bgzf_partitions_in_range(
+                            data_file,
+                            start,
+                            end,
+                            requested_partitions,
+                        )
+                        .ok()
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Fall back to whole-file partitioning
+            let parts = parts.unwrap_or_else(|| {
+                crate::tabix_reader::compute_bgzf_partitions(data_file, requested_partitions)
+                    .unwrap_or_default()
+            });
+
+            if parts.len() > 1 {
+                Some(
+                    parts
+                        .into_iter()
+                        .map(|p| (data_file.clone(), p))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let effective_partitions = if let Some(ref bp) = bgzf_partitions {
+            bp.len()
+        } else {
+            num_partitions
+        };
+
+        let exec = Arc::new(EnsemblCacheExec::new(EnsemblCacheExecConfig {
             kind: self.kind,
             cache_info: self.cache_info.clone(),
-            files: self.files.clone(),
-            schema: projected_schema,
+            files,
+            schema: projected_schema.clone(),
             predicate,
             limit,
             variation_region_size: self.variation_region_size,
             batch_size_hint: self.options.batch_size_hint,
             coordinate_system_zero_based: self.options.coordinate_system_zero_based,
-            num_partitions,
-        })))
+            num_partitions: effective_partitions,
+            preserve_sort_order,
+            single_chrom_filter: single_chrom_filter.clone(),
+            bgzf_partitions,
+        }));
+
+        // When sort order is preserved, a single chrom is filtered, and
+        // there are multiple partitions, wrap with SortPreservingMergeExec
+        // to merge the pre-sorted partition streams by (start ASC).
+        // This guarantees parallel execution instead of relying on the
+        // optimizer to choose merge over a full single-threaded SortExec.
+        if preserve_sort_order
+            && single_chrom_filter.is_some()
+            && effective_partitions > 1
+            && let Ok(si) = projected_schema.index_of("start")
+        {
+            let sort_exprs = LexOrdering::new(vec![PhysicalSortExpr::new(
+                Arc::new(Column::new("start", si)),
+                SortOptions {
+                    descending: false,
+                    nulls_first: false,
+                },
+            )])
+            .expect("sort expressions should not be empty");
+
+            return Ok(Arc::new(SortPreservingMergeExec::new(sort_exprs, exec)));
+        }
+
+        Ok(exec)
     }
 }
 

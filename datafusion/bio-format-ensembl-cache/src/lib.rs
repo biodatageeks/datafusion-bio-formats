@@ -15,6 +15,7 @@ mod info;
 mod physical_exec;
 mod regulatory;
 pub(crate) mod schema;
+mod tabix_reader;
 mod table_provider;
 mod transcript;
 mod translation;
