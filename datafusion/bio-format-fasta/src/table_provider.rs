@@ -11,7 +11,9 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::object_storage::{
+    ObjectStorageOptions, StorageType, get_storage_type,
+};
 use log::debug;
 use std::any::Any;
 use std::sync::Arc;
@@ -157,6 +159,17 @@ impl TableProvider for FastaTableProvider {
                 "FASTA write only supports OVERWRITE mode (INSERT OVERWRITE). \
                  APPEND mode is not supported."
                     .to_string(),
+            ));
+        }
+
+        // Only local file writes are supported
+        let store_type = get_storage_type(self.file_path.clone());
+        if !matches!(store_type, StorageType::LOCAL) {
+            return Err(datafusion::common::DataFusionError::NotImplemented(
+                format!(
+                    "FASTA write only supports local files, got {:?} path: {}",
+                    store_type, self.file_path
+                ),
             ));
         }
 
