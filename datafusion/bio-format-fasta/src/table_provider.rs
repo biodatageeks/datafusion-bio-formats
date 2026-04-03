@@ -1,10 +1,11 @@
 use crate::physical_exec::FastaExec;
+use crate::write_exec::FastaWriteExec;
+use crate::writer::FastaCompressionType;
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
-
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, dml::InsertOp};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
@@ -141,5 +142,38 @@ impl TableProvider for FastaTableProvider {
             limit,
             object_storage_options: self.object_storage_options.clone(),
         }))
+    }
+
+    async fn insert_into(
+        &self,
+        _state: &dyn Session,
+        input: Arc<dyn ExecutionPlan>,
+        insert_op: InsertOp,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        debug!("FastaTableProvider::insert_into");
+
+        if insert_op != InsertOp::Overwrite {
+            return Err(datafusion::common::DataFusionError::NotImplemented(
+                "FASTA write only supports OVERWRITE mode (INSERT OVERWRITE). \
+                 APPEND mode is not supported."
+                    .to_string(),
+            ));
+        }
+
+        let input_schema = input.schema();
+        if input_schema.fields().len() < 3 {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "Input schema must have at least 3 columns: name, description, sequence"
+                    .to_string(),
+            ));
+        }
+
+        let compression = FastaCompressionType::from_path(&self.file_path);
+
+        Ok(Arc::new(FastaWriteExec::new(
+            input,
+            self.file_path.clone(),
+            Some(compression),
+        )))
     }
 }
