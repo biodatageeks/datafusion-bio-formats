@@ -142,6 +142,12 @@ impl ExecutionPlan for FastaWriteExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        if partition != 0 {
+            return Err(DataFusionError::Internal(format!(
+                "FastaWriteExec only supports 1 partition, got partition={partition}"
+            )));
+        }
+
         debug!(
             "FastaWriteExec::execute partition={}, path={}",
             partition, self.output_path

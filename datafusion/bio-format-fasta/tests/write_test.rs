@@ -4,7 +4,7 @@
 //! INSERT OVERWRITE path and that data round-trips properly through
 //! read -> write -> read cycles across all compression formats.
 
-use datafusion::arrow::array::{StringArray, UInt64Array};
+use datafusion::arrow::array::{Array, StringArray, UInt64Array};
 use datafusion::prelude::*;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_fasta::FastaTableProvider;
@@ -275,8 +275,12 @@ async fn test_write_preserves_all_fields() {
     assert_eq!(descriptions.value(0), "description text here");
     assert_eq!(sequences.value(0), "ACGTACGT");
 
-    // Row 1: seq_beta
+    // Row 1: seq_beta (no description)
     assert_eq!(names.value(1), "seq_beta");
+    assert!(
+        descriptions.is_null(1) || descriptions.value(1).is_empty(),
+        "seq_beta description should be null or empty"
+    );
     assert_eq!(sequences.value(1), "TTTTGGGG");
 }
 
