@@ -220,12 +220,17 @@ fn find_format_field<'a>(
     format_name: &str,
     _sample_names: &[String],
 ) -> Option<&'a Field> {
-    // First try direct name lookup (single sample case, no collision)
+    // First try direct name lookup (single sample case, no collision).
+    // Only return early if the field has matching format_id metadata, confirming it's
+    // actually a FORMAT field. Without this check, an INFO field with the same name
+    // (e.g., INFO "DP") would be returned instead of the renamed FORMAT "fmt_DP".
     if let Ok(idx) = schema.index_of(format_name) {
         let field = schema.field(idx);
-        // Accept if it has matching format_id metadata, or no format_id metadata (legacy schemas)
-        let format_id = field.metadata().get(VCF_FIELD_FORMAT_ID_KEY);
-        if format_id.is_none() || format_id.is_some_and(|id| id == format_name) {
+        if field
+            .metadata()
+            .get(VCF_FIELD_FORMAT_ID_KEY)
+            .is_some_and(|id| id == format_name)
+        {
             return Some(field);
         }
     }
@@ -388,9 +393,11 @@ mod tests {
 
     #[test]
     fn test_find_format_field_single_sample() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
         let schema = Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, false),
-            Field::new("GT", DataType::Utf8, true),
+            Field::new("GT", DataType::Utf8, true).with_metadata(metadata),
         ]));
 
         let field = find_format_field(&schema, "GT", &["SAMPLE1".to_string()]);

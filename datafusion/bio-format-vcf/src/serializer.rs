@@ -8,6 +8,7 @@ use datafusion::arrow::array::{
     ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
 };
 use datafusion::common::{DataFusionError, Result};
+use datafusion_bio_format_core::metadata::VCF_FIELD_FORMAT_ID_KEY;
 
 /// Enum to hold StringArray, LargeStringArray, or StringViewArray reference.
 /// This allows handling standard Arrow Utf8, Polars LargeUtf8, and DataFusion Utf8View types.
@@ -647,8 +648,6 @@ fn build_format_column_map(
     format_fields: &[String],
     sample_names: &[String],
 ) -> std::collections::HashMap<(String, String), usize> {
-    use datafusion_bio_format_core::metadata::VCF_FIELD_FORMAT_ID_KEY;
-
     let mut map = std::collections::HashMap::new();
     let single_sample = sample_names.len() == 1;
 

@@ -586,3 +586,104 @@ async fn test_single_sample_no_collision_unchanged() -> Result<(), Box<dyn std::
 
     Ok(())
 }
+
+/// Regression test: write round-trip for single-sample VCF with INFO/FORMAT DP collision.
+/// Verifies the written file has correct ##FORMAT and ##INFO header entries with their
+/// original descriptions, and that data values are preserved.
+#[tokio::test]
+async fn test_single_sample_collision_write_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+    let input_path =
+        create_test_vcf_file("collision_roundtrip_in", SAMPLE_VCF_SINGLE_COLLISION).await?;
+    let output_path = "/tmp/test_collision_roundtrip_out.vcf";
+
+    // Read source
+    let source = VcfTableProvider::new(
+        input_path.clone(),
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+    let source_schema = source.schema();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("source", Arc::new(source))?;
+
+    // Register write destination
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string(), "AF".to_string()],
+        vec!["GT".to_string(), "DP".to_string(), "GQ".to_string()],
+        vec!["SampleA".to_string()],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest))?;
+
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await?
+        .collect()
+        .await?;
+
+    // Read the written file and verify headers
+    let content = fs::read_to_string(output_path).await?;
+
+    // INFO DP should have its own description
+    assert!(
+        content.contains("##INFO=<ID=DP,"),
+        "written file should have ##INFO=<ID=DP> header"
+    );
+    // FORMAT DP should have the FORMAT description, not the INFO description
+    assert!(
+        content.contains("##FORMAT=<ID=DP,"),
+        "written file should have ##FORMAT=<ID=DP> header"
+    );
+    assert!(
+        content.contains("Description=\"Read depth\""),
+        "FORMAT DP should have 'Read depth' description, not the INFO description"
+    );
+    assert!(
+        content.contains("Description=\"Combined depth across samples\""),
+        "INFO DP should have 'Combined depth across samples' description"
+    );
+
+    // Read back and verify data values
+    let readback = VcfTableProvider::new(
+        output_path.to_string(),
+        None,
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+    let ctx2 = SessionContext::new();
+    ctx2.register_table("readback", Arc::new(readback))?;
+
+    let df = ctx2
+        .sql("SELECT \"DP\", \"fmt_DP\", \"GT\" FROM readback ORDER BY start")
+        .await?;
+    let results = df.collect().await?;
+    let batch = &results[0];
+    assert_eq!(batch.num_rows(), 2);
+
+    let info_dp = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(info_dp.value(0), 50);
+    assert_eq!(info_dp.value(1), 60);
+
+    let fmt_dp = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(fmt_dp.value(0), 20);
+    assert_eq!(fmt_dp.value(1), 30);
+
+    // Cleanup
+    let _ = fs::remove_file(output_path).await;
+    let _ = fs::remove_file(&input_path).await;
+
+    Ok(())
+}
