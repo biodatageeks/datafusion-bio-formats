@@ -24,7 +24,7 @@ pub(crate) fn discover_variation_files(cache_root: &Path) -> Result<Vec<PathBuf>
         .collect();
 
     if !all_vars.is_empty() {
-        all_vars.sort();
+        sort_variation_files_genomic(&mut all_vars);
         return Ok(all_vars);
     }
 

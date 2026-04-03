@@ -52,10 +52,11 @@ pub struct EnsemblCacheOptions {
     /// when unset.
     pub max_storable_partitions: Option<usize>,
     /// When true, variation files are assigned to partitions in genomic order
-    /// (consecutive chunks) and per-partition output ordering `(chrom, start)`
-    /// is declared in the execution plan.  This allows DataFusion to replace a
-    /// full SortExec with a SortPreservingMergeExec when the caller adds
-    /// `ORDER BY chrom, start`, avoiding a redundant re-sort.
+    /// (consecutive chunks).  When combined with a single-chromosome predicate
+    /// (`WHERE chrom = '1'`), per-partition output ordering `(start ASC)` is
+    /// declared, allowing DataFusion to use a SortPreservingMergeExec instead
+    /// of a full SortExec.  Without a chromosome filter, no ordering is
+    /// declared because karyotypic file order differs from lexicographic.
     ///
     /// Defaults to true for variation entities.
     pub preserve_sort_order: Option<bool>,
