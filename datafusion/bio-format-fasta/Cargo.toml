@@ -14,14 +14,19 @@ datafusion.workspace = true
 opendal.workspace = true
 noodles.workspace = true
 noodles-bgzf.workspace = true
+noodles-fasta.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 datafusion-bio-format-core = {path = "../bio-format-core"}
-noodles-fasta= { git = "https://github.com/biodatageeks/noodles.git",rev = "289ef32e7d43d142914fb3f02335044ae293871c", features = ["async"] }
 futures.workspace = true
 futures-util.workspace = true
 async-compression.workspace = true
 async-stream.workspace = true
+flate2.workspace = true
+bstr.workspace = true
 log = "0.4.27"
 async-trait = "0.1.81"
+
+[dev-dependencies]
+tempfile = "3"
