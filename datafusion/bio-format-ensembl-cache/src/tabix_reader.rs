@@ -263,7 +263,6 @@ fn scan_bgzf_block_offsets(file_path: &Path, file_size: u64) -> Result<Vec<u64>>
     let mut header = [0u8; 18]; // bgzf block header is 18 bytes
 
     while pos + 28 <= file_size {
-        // The EOF block is exactly 28 bytes; skip it
         file.seek(SeekFrom::Start(pos))
             .map_err(|e| exec_err(format!("Seek failed: {e}")))?;
 
@@ -276,11 +275,17 @@ fn scan_bgzf_block_offsets(file_path: &Path, file_size: u64) -> Result<Vec<u64>>
             break;
         }
 
-        offsets.push(pos);
-
         // Extract BSIZE from bytes 16-17 (little-endian u16).
         // BSIZE is the total block size minus 1.
         let bsize = u16::from_le_bytes([header[16], header[17]]) as u64 + 1;
+
+        // Skip the BGZF EOF marker: a 28-byte empty block at the end of
+        // the file.  Including it would create an empty trailing partition.
+        let is_eof_marker = bsize == 28 && pos + bsize >= file_size;
+        if !is_eof_marker {
+            offsets.push(pos);
+        }
+
         pos += bsize;
     }
 
@@ -681,6 +686,23 @@ mod tests {
         // 64KB block, each terminated by '\n'.
         let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
         assert!(block_ends_with_newline(&path, 0).unwrap());
+    }
+
+    #[test]
+    fn scan_excludes_eof_marker() {
+        // The EOF marker is a 28-byte empty block at the end of the file.
+        // It should NOT appear in block_offsets, otherwise it could become
+        // a partition boundary creating an empty trailing partition.
+        let path = fixture_path("variation_tabix_bgzf/variation/all_vars.gz");
+        let file_size = std::fs::metadata(&path).unwrap().len();
+        let block_offsets = scan_bgzf_block_offsets(&path, file_size).unwrap();
+        // Last data block must end before the 28-byte EOF marker
+        let last_offset = *block_offsets.last().unwrap();
+        assert!(
+            last_offset + 28 < file_size,
+            "last block offset ({last_offset}) + 28 should be < file_size ({file_size}); \
+             EOF marker should not be in block_offsets"
+        );
     }
 
     #[test]
