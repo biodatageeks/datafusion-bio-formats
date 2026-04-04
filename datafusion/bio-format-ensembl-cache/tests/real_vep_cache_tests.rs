@@ -1106,3 +1106,66 @@ async fn real_factory_all_entities() -> datafusion::common::Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// HGNC_ID propagation (biodatageeks/datafusion-bio-functions#105)
+// ---------------------------------------------------------------------------
+
+/// After applying the HGNC propagation query, every transcript whose gene_symbol
+/// has *at least one* non-null gene_hgnc_id should itself have a non-null value.
+/// This mirrors VEP's `merge_features()` behaviour.
+#[tokio::test]
+async fn hgnc_propagation_fills_all_siblings() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::Transcript,
+        EnsemblCacheOptions::new(fixture_path(REAL_FIXTURE)),
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", provider)?;
+
+    // Build the same propagation query used by storable_to_parquet.
+    let schema: Arc<datafusion::arrow::datatypes::Schema> =
+        Arc::new(ctx.table("tx").await?.schema().as_arrow().clone());
+
+    let columns: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            if f.name() == "gene_hgnc_id" {
+                "COALESCE(gene_hgnc_id, \
+                     CASE WHEN gene_symbol IS NOT NULL \
+                          THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
+                               OVER (PARTITION BY gene_symbol) \
+                          ELSE NULL END) AS gene_hgnc_id"
+                    .to_string()
+            } else {
+                format!("\"{}\"", f.name())
+            }
+        })
+        .collect();
+    let select_list = columns.join(", ");
+
+    // After propagation, count transcripts where gene_symbol has at least one
+    // sibling with gene_hgnc_id but this row is still NULL — should be zero.
+    let query = format!(
+        "SELECT COUNT(*) FROM (\
+            SELECT {select_list} FROM tx\
+        ) AS propagated \
+        WHERE gene_hgnc_id IS NULL \
+          AND gene_symbol IN (\
+              SELECT gene_symbol FROM tx \
+              WHERE gene_hgnc_id IS NOT NULL AND gene_symbol IS NOT NULL\
+          )"
+    );
+
+    let batches = ctx.sql(&query).await?.collect().await?;
+    let remaining_gaps = first_i64(&batches);
+    assert_eq!(
+        remaining_gaps, 0,
+        "after HGNC propagation, {remaining_gaps} transcripts still missing gene_hgnc_id \
+         despite a sibling having it"
+    );
+
+    Ok(())
+}
