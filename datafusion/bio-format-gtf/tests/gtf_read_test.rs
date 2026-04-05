@@ -342,7 +342,7 @@ async fn test_gtf_attribute_unquoted_value() {
 #[tokio::test]
 async fn test_gtf_attribute_duplicate_keys() {
     // GTF allows duplicate keys (e.g., multiple "tag" entries)
-    // In unnested mode, we keep the first value
+    // In unnested mode, all values should be comma-separated
     let ctx = setup_ctx(Some(vec!["tag".to_string()]), true).await;
     let df = ctx.sql("SELECT tag FROM gtf LIMIT 1").await.unwrap();
     let results = df.collect().await.unwrap();
@@ -352,8 +352,97 @@ async fn test_gtf_attribute_duplicate_keys() {
         .as_any()
         .downcast_ref::<datafusion::arrow::array::StringArray>()
         .unwrap();
-    // First tag value should be "basic"
-    assert_eq!(tag.value(0), "basic");
+    // All tag values should be comma-separated
+    assert_eq!(tag.value(0), "basic,TAGENE,appris_principal_3,CCDS");
+}
+
+#[tokio::test]
+async fn test_gtf_attribute_duplicate_keys_all_rows() {
+    // Every row in the test data has 4 tag values — verify all rows
+    let ctx = setup_ctx(Some(vec!["tag".to_string()]), true).await;
+    let df = ctx.sql("SELECT tag FROM gtf").await.unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 23);
+    for batch in &results {
+        let tag = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(tag.value(i), "basic,TAGENE,appris_principal_3,CCDS");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_gtf_attribute_mixed_unique_and_duplicate() {
+    // Request a mix of unique keys (gene_id, gene_name) and a duplicate key (tag)
+    let ctx = setup_ctx(
+        Some(vec![
+            "gene_id".to_string(),
+            "tag".to_string(),
+            "gene_name".to_string(),
+        ]),
+        true,
+    )
+    .await;
+    let df = ctx
+        .sql("SELECT gene_id, tag, gene_name FROM gtf LIMIT 1")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let batch = &results[0];
+
+    let gene_id = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+    let tag = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+    let gene_name = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+
+    assert_eq!(gene_id.value(0), "ENSG00000111640.16");
+    assert_eq!(tag.value(0), "basic,TAGENE,appris_principal_3,CCDS");
+    assert_eq!(gene_name.value(0), "GAPDH");
+}
+
+#[tokio::test]
+async fn test_gtf_attribute_single_occurrence_key_unchanged() {
+    // Regression guard: keys that appear once should still return a single value
+    let ctx = setup_ctx(
+        Some(vec!["gene_id".to_string(), "ccdsid".to_string()]),
+        true,
+    )
+    .await;
+    let df = ctx
+        .sql("SELECT gene_id, ccdsid FROM gtf LIMIT 1")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    let batch = &results[0];
+
+    let gene_id = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+    let ccdsid = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+
+    assert_eq!(gene_id.value(0), "ENSG00000111640.16");
+    assert_eq!(ccdsid.value(0), "CCDS8549.1");
 }
 
 #[tokio::test]
@@ -788,4 +877,185 @@ async fn test_gtf_corrupt_index_falls_back_to_sequential() {
     let df = ctx.sql("SELECT chrom FROM gtf_no_idx").await.unwrap();
     let results = df.collect().await.unwrap();
     assert_eq!(total_rows(&results), 23);
+}
+
+// ─── GENCODE integration tests (multi-tag GTF) ──────────────────
+
+fn gencode_gtf_path() -> String {
+    format!("{}/tests/gencode_multi_tag.gtf", env!("CARGO_MANIFEST_DIR"))
+}
+
+async fn setup_gencode_ctx(attr_fields: Option<Vec<String>>) -> SessionContext {
+    let table = GtfTableProvider::new(gencode_gtf_path(), attr_fields, None, true).unwrap();
+    let ctx = SessionContext::new();
+    ctx.register_table("gencode", Arc::new(table)).unwrap();
+    ctx
+}
+
+#[tokio::test]
+async fn test_gencode_total_rows() {
+    let ctx = setup_gencode_ctx(None).await;
+    let df = ctx.sql("SELECT chrom FROM gencode").await.unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 10);
+}
+
+#[tokio::test]
+async fn test_gencode_single_tag_gene() {
+    // Gene records have only 1 tag value
+    let ctx = setup_gencode_ctx(Some(vec!["gene_name".to_string(), "tag".to_string()])).await;
+    let df = ctx
+        .sql("SELECT gene_name, tag FROM gencode WHERE type = 'gene' AND gene_name = 'DDX11L2'")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 1);
+    let batch = &results[0];
+    let tag = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(tag.value(0), "overlapping_locus");
+}
+
+#[tokio::test]
+async fn test_gencode_two_tags_transcript() {
+    // DDX11L2 transcript has 2 tags: basic, Ensembl_canonical
+    let ctx = setup_gencode_ctx(Some(vec!["tag".to_string()])).await;
+    let df = ctx
+        .sql("SELECT tag FROM gencode WHERE type = 'transcript' AND start = 11868")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 1);
+    let batch = &results[0];
+    let tag = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(tag.value(0), "basic,Ensembl_canonical");
+}
+
+#[tokio::test]
+async fn test_gencode_three_tags_transcript() {
+    // MIR1302-2HG transcript has 3 tags: basic, Ensembl_canonical, MANE_Select
+    let ctx = setup_gencode_ctx(Some(vec!["tag".to_string()])).await;
+    let df = ctx
+        .sql("SELECT tag FROM gencode WHERE type = 'transcript' AND start = 29553")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 1);
+    let batch = &results[0];
+    let tag = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::StringArray>()
+        .unwrap();
+    assert_eq!(tag.value(0), "basic,Ensembl_canonical,MANE_Select");
+}
+
+#[tokio::test]
+async fn test_gencode_multi_tag_with_other_attrs() {
+    // Verify duplicate-key fix doesn't interfere with other attributes
+    let ctx = setup_gencode_ctx(Some(vec![
+        "gene_id".to_string(),
+        "gene_name".to_string(),
+        "tag".to_string(),
+        "level".to_string(),
+    ]))
+    .await;
+    let df = ctx
+        .sql("SELECT gene_id, gene_name, tag, level FROM gencode WHERE type = 'transcript'")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+    assert_eq!(total_rows(&results), 2);
+
+    // Collect all rows across batches to avoid batch-boundary sensitivity
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+    for batch in &results {
+        let gene_id = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let gene_name = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let tag = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let level = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            rows.push((
+                gene_id.value(i).to_string(),
+                gene_name.value(i).to_string(),
+                tag.value(i).to_string(),
+                level.value(i).to_string(),
+            ));
+        }
+    }
+
+    assert_eq!(rows.len(), 2);
+
+    // First transcript: DDX11L2
+    assert_eq!(rows[0].0, "ENSG00000290825.1");
+    assert_eq!(rows[0].1, "DDX11L2");
+    assert_eq!(rows[0].2, "basic,Ensembl_canonical");
+    assert_eq!(rows[0].3, "2");
+
+    // Second transcript: MIR1302-2HG
+    assert_eq!(rows[1].0, "ENSG00000243485.5");
+    assert_eq!(rows[1].1, "MIR1302-2HG");
+    assert_eq!(rows[1].2, "basic,Ensembl_canonical,MANE_Select");
+    assert_eq!(rows[1].3, "3");
+}
+
+#[tokio::test]
+async fn test_gencode_varying_tag_counts_per_gene() {
+    // DDX11L2 gene records: gene has 1 tag, transcript/exons have 2 tags
+    // MIR1302-2HG gene records: gene has 1 tag, transcript/exons have 3 tags
+    let ctx = setup_gencode_ctx(Some(vec!["gene_name".to_string(), "tag".to_string()])).await;
+    let df = ctx
+        .sql("SELECT gene_name, tag FROM gencode ORDER BY start")
+        .await
+        .unwrap();
+    let results = df.collect().await.unwrap();
+
+    let mut tag_values: Vec<String> = Vec::new();
+    for batch in &results {
+        let tag = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            tag_values.push(tag.value(i).to_string());
+        }
+    }
+
+    assert_eq!(tag_values.len(), 10);
+    // DDX11L2: gene(1 tag), transcript(2), exon(2), exon(2), exon(2)
+    assert_eq!(tag_values[0], "overlapping_locus");
+    assert_eq!(tag_values[1], "basic,Ensembl_canonical");
+    assert_eq!(tag_values[2], "basic,Ensembl_canonical");
+    assert_eq!(tag_values[3], "basic,Ensembl_canonical");
+    assert_eq!(tag_values[4], "basic,Ensembl_canonical");
+    // MIR1302-2HG: gene(1 tag), transcript(3), exon(3), exon(3), exon(3)
+    assert_eq!(tag_values[5], "ncRNA_host");
+    assert_eq!(tag_values[6], "basic,Ensembl_canonical,MANE_Select");
+    assert_eq!(tag_values[7], "basic,Ensembl_canonical,MANE_Select");
+    assert_eq!(tag_values[8], "basic,Ensembl_canonical,MANE_Select");
+    assert_eq!(tag_values[9], "basic,Ensembl_canonical,MANE_Select");
 }

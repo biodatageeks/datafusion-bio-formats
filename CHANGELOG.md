@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Preserved case sensitivity for VCF INFO and FORMAT fields
+- GTF `attr_fields` now concatenates duplicate attribute keys with commas instead of silently dropping subsequent values (#164)
 
 ## [0.1.0] - 2025-01-XX
 
