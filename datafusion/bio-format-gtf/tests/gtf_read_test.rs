@@ -974,41 +974,52 @@ async fn test_gencode_multi_tag_with_other_attrs() {
     let results = df.collect().await.unwrap();
     assert_eq!(total_rows(&results), 2);
 
-    let batch = &results[0];
-    let gene_id = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringArray>()
-        .unwrap();
-    let gene_name = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringArray>()
-        .unwrap();
-    let tag = batch
-        .column(2)
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringArray>()
-        .unwrap();
-    let level = batch
-        .column(3)
-        .as_any()
-        .downcast_ref::<datafusion::arrow::array::StringArray>()
-        .unwrap();
+    // Collect all rows across batches to avoid batch-boundary sensitivity
+    let mut rows: Vec<(String, String, String, String)> = Vec::new();
+    for batch in &results {
+        let gene_id = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let gene_name = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let tag = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let level = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            rows.push((
+                gene_id.value(i).to_string(),
+                gene_name.value(i).to_string(),
+                tag.value(i).to_string(),
+                level.value(i).to_string(),
+            ));
+        }
+    }
+
+    assert_eq!(rows.len(), 2);
 
     // First transcript: DDX11L2
-    assert_eq!(gene_id.value(0), "ENSG00000290825.1");
-    assert_eq!(gene_name.value(0), "DDX11L2");
-    assert_eq!(tag.value(0), "basic,Ensembl_canonical");
-    assert_eq!(level.value(0), "2");
+    assert_eq!(rows[0].0, "ENSG00000290825.1");
+    assert_eq!(rows[0].1, "DDX11L2");
+    assert_eq!(rows[0].2, "basic,Ensembl_canonical");
+    assert_eq!(rows[0].3, "2");
 
     // Second transcript: MIR1302-2HG
-    if batch.num_rows() > 1 {
-        assert_eq!(gene_id.value(1), "ENSG00000243485.5");
-        assert_eq!(gene_name.value(1), "MIR1302-2HG");
-        assert_eq!(tag.value(1), "basic,Ensembl_canonical,MANE_Select");
-        assert_eq!(level.value(1), "3");
-    }
+    assert_eq!(rows[1].0, "ENSG00000243485.5");
+    assert_eq!(rows[1].1, "MIR1302-2HG");
+    assert_eq!(rows[1].2, "basic,Ensembl_canonical,MANE_Select");
+    assert_eq!(rows[1].3, "3");
 }
 
 #[tokio::test]
