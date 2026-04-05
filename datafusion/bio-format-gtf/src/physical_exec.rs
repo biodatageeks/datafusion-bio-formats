@@ -415,9 +415,13 @@ fn load_attributes_unnest_from_string(
             if let Some((key, value)) = parse_gtf_pair(pair)
                 && wanted.contains(key)
             {
-                // For duplicate keys, keep the first value (consistent with attribute extraction)
+                // For duplicate keys, concatenate values with commas (consistent with GFF3 multi-value handling)
                 attributes_map
                     .entry(key.to_string())
+                    .and_modify(|existing: &mut String| {
+                        existing.push(',');
+                        existing.push_str(value);
+                    })
                     .or_insert_with(|| value.to_string());
             }
         }

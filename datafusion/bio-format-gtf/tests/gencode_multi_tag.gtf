@@ -1,0 +1,13 @@
+##description: evidence-based annotation of the human genome (GRCh38), version 41 (Ensembl 107) - trimmed for testing
+##provider: GENCODE
+##format: gtf
+chr1	HAVANA	gene	11869	14409	.	+	.	gene_id "ENSG00000290825.1"; gene_type "lncRNA"; gene_name "DDX11L2"; level 2; tag "overlapping_locus";
+chr1	HAVANA	transcript	11869	14409	.	+	.	gene_id "ENSG00000290825.1"; transcript_id "ENST00000456328.2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; level 2; tag "basic"; tag "Ensembl_canonical";
+chr1	HAVANA	exon	11869	12227	.	+	.	gene_id "ENSG00000290825.1"; transcript_id "ENST00000456328.2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; exon_number 1; exon_id "ENSE00002234944.1"; level 2; tag "basic"; tag "Ensembl_canonical";
+chr1	HAVANA	exon	12613	12721	.	+	.	gene_id "ENSG00000290825.1"; transcript_id "ENST00000456328.2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; exon_number 2; exon_id "ENSE00003582793.1"; level 2; tag "basic"; tag "Ensembl_canonical";
+chr1	HAVANA	exon	13221	14409	.	+	.	gene_id "ENSG00000290825.1"; transcript_id "ENST00000456328.2"; gene_type "lncRNA"; gene_name "DDX11L2"; transcript_type "lncRNA"; transcript_name "DDX11L2-202"; exon_number 3; exon_id "ENSE00002312635.1"; level 2; tag "basic"; tag "Ensembl_canonical";
+chr1	ENSEMBL	gene	29554	31109	.	+	.	gene_id "ENSG00000243485.5"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; level 3; tag "ncRNA_host";
+chr1	ENSEMBL	transcript	29554	31097	.	+	.	gene_id "ENSG00000243485.5"; transcript_id "ENST00000473358.1"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; transcript_type "lncRNA"; transcript_name "MIR1302-2HG-202"; level 3; tag "basic"; tag "Ensembl_canonical"; tag "MANE_Select";
+chr1	ENSEMBL	exon	29554	30039	.	+	.	gene_id "ENSG00000243485.5"; transcript_id "ENST00000473358.1"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; transcript_type "lncRNA"; transcript_name "MIR1302-2HG-202"; exon_number 1; exon_id "ENSE00001947070.1"; level 3; tag "basic"; tag "Ensembl_canonical"; tag "MANE_Select";
+chr1	ENSEMBL	exon	30564	30667	.	+	.	gene_id "ENSG00000243485.5"; transcript_id "ENST00000473358.1"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; transcript_type "lncRNA"; transcript_name "MIR1302-2HG-202"; exon_number 2; exon_id "ENSE00001922571.1"; level 3; tag "basic"; tag "Ensembl_canonical"; tag "MANE_Select";
+chr1	ENSEMBL	exon	30976	31097	.	+	.	gene_id "ENSG00000243485.5"; transcript_id "ENST00000473358.1"; gene_type "lncRNA"; gene_name "MIR1302-2HG"; transcript_type "lncRNA"; transcript_name "MIR1302-2HG-202"; exon_number 3; exon_id "ENSE00001827679.1"; level 3; tag "basic"; tag "Ensembl_canonical"; tag "MANE_Select";
