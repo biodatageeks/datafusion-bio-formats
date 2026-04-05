@@ -109,7 +109,8 @@ fn build_dedup_query(
                         "COALESCE(gene_hgnc_id, \
                              CASE WHEN gene_symbol IS NOT NULL \
                                   THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
-                                       OVER (PARTITION BY gene_symbol) \
+                                       OVER (PARTITION BY gene_symbol \
+                                             ORDER BY gene_hgnc_id NULLS LAST) \
                                   ELSE NULL END) AS gene_hgnc_id"
                             .to_string()
                     } else {
