@@ -24,7 +24,7 @@ use datafusion::parquet::format::SortingColumn;
 use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
-    EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
+    EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, build_export_query,
 };
 use futures::StreamExt;
 use std::fs::File;
@@ -71,92 +71,6 @@ fn rss_mb() -> f64 {
         }
     }
     0.0
-}
-
-/// Build the dedup + sort query for each entity type.
-/// Sort order is chosen to match downstream access patterns (see issue #131).
-///
-/// For transcripts, this also applies region-local HGNC propagation to keep the
-/// promoted `gene_hgnc_id` column aligned with VEP cache locality. VEP merges
-/// features inside 1 Mb cache regions, not across every same-symbol transcript
-/// on a chromosome.
-const VEP_CACHE_REGION_SIZE_BP: i64 = 1_000_000;
-
-fn build_dedup_query(
-    kind: EnsemblEntityKind,
-    table_name: &str,
-    chrom_filter: &Option<String>,
-    schema: Option<&SchemaRef>,
-) -> String {
-    let where_clause = if let Some(chrom) = chrom_filter {
-        format!(" WHERE chrom = '{chrom}'")
-    } else {
-        String::new()
-    };
-
-    match kind {
-        // Transcript: dedup by stable_id, sort by (chrom, start) for interval queries.
-        // Propagate gene_hgnc_id only within a VEP-sized cache region. This
-        // avoids copying HGNC IDs across distant loci that reuse the same symbol.
-        EnsemblEntityKind::Transcript => {
-            let schema = schema.expect("Transcript entity requires schema for HGNC propagation");
-            let region_expr =
-                format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
-            let columns: Vec<String> = schema
-                .fields()
-                .iter()
-                .map(|f| {
-                    if f.name() == "gene_hgnc_id" {
-                        format!(
-                            "COALESCE(gene_hgnc_id, \
-                                 CASE WHEN gene_symbol IS NOT NULL \
-                                      THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
-                                           OVER (PARTITION BY chrom, gene_symbol, {region_expr} \
-                                                 ORDER BY gene_hgnc_id NULLS LAST) \
-                                      ELSE NULL END) AS gene_hgnc_id"
-                        )
-                    } else {
-                        format!("\"{}\"", f.name())
-                    }
-                })
-                .collect();
-            let select_list = columns.join(", ");
-
-            format!(
-                "SELECT {select_list} FROM (\
-                    SELECT *, ROW_NUMBER() OVER (\
-                        PARTITION BY stable_id \
-                        ORDER BY cds_start NULLS LAST\
-                    ) AS _rn \
-                    FROM {table_name}{where_clause}\
-                ) WHERE _rn = 1 \
-                ORDER BY chrom, start"
-            )
-        }
-        // Translation is handled separately by write_translation_split() — not via this path.
-        EnsemblEntityKind::Translation => unreachable!("use write_translation_split() instead"),
-        // Exon: dedup by (transcript_id, exon_number), sort by (transcript_id, start)
-        // to enable RG pruning for WHERE transcript_id IN (...) queries
-        EnsemblEntityKind::Exon => {
-            format!(
-                "SELECT * FROM (\
-                    SELECT *, ROW_NUMBER() OVER (\
-                        PARTITION BY transcript_id, exon_number \
-                        ORDER BY stable_id NULLS LAST\
-                    ) AS _rn \
-                    FROM {table_name}{where_clause}\
-                ) WHERE _rn = 1 \
-                ORDER BY transcript_id, start"
-            )
-        }
-        // Other entities (variation, regulatory, motif): sort by (chrom, start)
-        _ => {
-            format!(
-                "SELECT * FROM {table_name}{where_clause} \
-                ORDER BY chrom, start"
-            )
-        }
-    }
 }
 
 /// Row group sizing per entity type.
@@ -535,7 +449,12 @@ async fn main() -> datafusion::common::Result<()> {
         None
     };
 
-    let query = build_dedup_query(kind, table_name, &chrom_filter, provider_schema.as_ref());
+    let query = build_export_query(
+        kind,
+        table_name,
+        chrom_filter.as_deref(),
+        provider_schema.as_deref(),
+    );
     println!("Query: {query}");
 
     let df = ctx.sql(&query).await?;

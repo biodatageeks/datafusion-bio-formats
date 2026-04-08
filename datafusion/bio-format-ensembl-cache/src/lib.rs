@@ -10,6 +10,7 @@ mod discovery;
 mod entity;
 mod errors;
 mod exon;
+mod export_query;
 mod filter;
 mod info;
 mod physical_exec;
@@ -23,6 +24,9 @@ mod util;
 mod variation;
 
 pub use entity::EnsemblEntityKind;
+pub use export_query::{
+    VEP_CACHE_REGION_SIZE_BP, build_export_query, build_export_query_multi_chrom,
+};
 pub use schema::{translation_core_schema, translation_sift_schema};
 pub use table_provider::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, ExonTableProvider, MotifFeatureTableProvider,
