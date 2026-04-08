@@ -7,6 +7,20 @@ use datafusion::arrow::datatypes::Schema;
 /// export query mirrors that locality when propagating `gene_hgnc_id`.
 pub const VEP_CACHE_REGION_SIZE_BP: i64 = 1_000_000;
 
+fn transcript_region_start_expr(start_col: &str) -> String {
+    format!(
+        "(CAST(FLOOR(({start_col} - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT) * {VEP_CACHE_REGION_SIZE_BP} + 1)"
+    )
+}
+
+fn source_region_preference_expr(start_col: &str, source_file_col: &str) -> String {
+    let region_start = transcript_region_start_expr(start_col);
+    let region_end = format!("({region_start} + {} - 1)", VEP_CACHE_REGION_SIZE_BP);
+    format!(
+        "CASE WHEN {source_file_col} LIKE CONCAT('%/', CAST({region_start} AS VARCHAR), '-', CAST({region_end} AS VARCHAR), '.gz') THEN 0 ELSE 1 END"
+    )
+}
+
 fn transcript_select_list(schema: &Schema) -> String {
     let region_expr = format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
     schema
@@ -40,11 +54,12 @@ fn build_export_query_with_where_clause(
         EnsemblEntityKind::Transcript => {
             let schema = schema.expect("Transcript requires schema for HGNC propagation");
             let select_list = transcript_select_list(schema);
+            let source_pref = source_region_preference_expr("start", "source_file");
             format!(
                 "SELECT {select_list} FROM (\
                     SELECT *, ROW_NUMBER() OVER (\
                         PARTITION BY stable_id \
-                        ORDER BY cds_start NULLS LAST\
+                        ORDER BY {source_pref}, cds_start NULLS LAST, source_file\
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
                 ) WHERE _rn = 1 \
@@ -70,6 +85,19 @@ fn build_export_query_with_where_clause(
     }
 }
 
+fn build_translation_dedup_query_with_where_clause(table_name: &str, where_clause: &str) -> String {
+    let source_pref = source_region_preference_expr("start", "source_file");
+    format!(
+        "SELECT * FROM (\
+            SELECT *, ROW_NUMBER() OVER (\
+                PARTITION BY transcript_id \
+                ORDER BY {source_pref}, cdna_coding_start NULLS LAST, source_file\
+            ) AS _rn \
+            FROM {table_name}{where_clause}\
+        ) WHERE _rn = 1"
+    )
+}
+
 /// Build the export SQL query for one entity with an optional single-chromosome filter.
 pub fn build_export_query(
     kind: EnsemblEntityKind,
@@ -81,6 +109,19 @@ pub fn build_export_query(
         .map(|chrom| format!(" WHERE chrom = '{chrom}'"))
         .unwrap_or_default();
     build_export_query_with_where_clause(kind, table_name, &where_clause, schema)
+}
+
+/// Build the translation dedup SQL query with an optional single-chromosome filter.
+///
+/// Translation rows are duplicated across 1 Mb cache region files for transcripts
+/// that span region boundaries. VEP's observed DOMAINS order matches the copy from
+/// the region containing the transcript start, so the export query prefers that
+/// source file before falling back to `cdna_coding_start`.
+pub fn build_translation_dedup_query(table_name: &str, chrom_filter: Option<&str>) -> String {
+    let where_clause = chrom_filter
+        .map(|chrom| format!(" WHERE chrom = '{chrom}'"))
+        .unwrap_or_default();
+    build_translation_dedup_query_with_where_clause(table_name, &where_clause)
 }
 
 /// Build the export SQL query for one entity filtered to multiple chromosomes/contigs.
@@ -99,9 +140,23 @@ pub fn build_export_query_multi_chrom(
     build_export_query_with_where_clause(kind, table_name, &where_clause, schema)
 }
 
+/// Build the translation dedup SQL query filtered to multiple chromosomes/contigs.
+pub fn build_translation_dedup_query_multi_chrom(table_name: &str, chroms: &[&str]) -> String {
+    let list = chroms
+        .iter()
+        .map(|chrom| format!("'{chrom}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let where_clause = format!(" WHERE chrom IN ({list})");
+    build_translation_dedup_query_with_where_clause(table_name, &where_clause)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{VEP_CACHE_REGION_SIZE_BP, build_export_query, build_export_query_multi_chrom};
+    use super::{
+        VEP_CACHE_REGION_SIZE_BP, build_export_query, build_export_query_multi_chrom,
+        build_translation_dedup_query, build_translation_dedup_query_multi_chrom,
+    };
     use crate::entity::EnsemblEntityKind;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
 
@@ -146,6 +201,7 @@ mod tests {
         assert!(q.contains("WHERE _rn = 1"));
         assert!(q.contains("ORDER BY chrom, start"));
         assert!(q.contains("WHERE chrom = 'X'"));
+        assert!(q.contains("source_file LIKE CONCAT('%/'"));
     }
 
     #[test]
@@ -198,5 +254,23 @@ mod tests {
         assert!(q.contains("ROW_NUMBER()"));
         assert!(q.contains("WHERE _rn = 1"));
         assert!(q.contains("PARTITION BY chrom, gene_symbol"));
+        assert!(q.contains("source_file LIKE CONCAT('%/'"));
+    }
+
+    #[test]
+    fn build_translation_dedup_query_prefers_transcript_start_region() {
+        let q = build_translation_dedup_query("tl", Some("2"));
+        assert!(q.contains("PARTITION BY transcript_id"));
+        assert!(q.contains("source_file LIKE CONCAT('%/'"));
+        assert!(q.contains("cdna_coding_start NULLS LAST"));
+        assert!(q.contains("WHERE chrom = '2'"));
+    }
+
+    #[test]
+    fn build_translation_dedup_query_multi_chrom_prefers_transcript_start_region() {
+        let q = build_translation_dedup_query_multi_chrom("tl", &["2", "X"]);
+        assert!(q.contains("PARTITION BY transcript_id"));
+        assert!(q.contains("source_file LIKE CONCAT('%/'"));
+        assert!(q.contains("WHERE chrom IN ('2', 'X')"));
     }
 }

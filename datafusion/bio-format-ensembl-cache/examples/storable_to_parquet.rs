@@ -25,6 +25,7 @@ use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, build_export_query,
+    build_translation_dedup_query,
 };
 use futures::StreamExt;
 use std::fs::File;
@@ -178,12 +179,6 @@ async fn write_translation_split(
     cache_dir_name: &str,
     coordinate_system_zero_based: bool,
 ) -> datafusion::common::Result<Vec<(String, usize)>> {
-    let where_clause = if let Some(chrom) = chrom_filter {
-        format!(" WHERE chrom = '{chrom}'")
-    } else {
-        String::new()
-    };
-
     let chrom_suffix = if let Some(chrom) = &chrom_filter {
         format!("_{chrom}")
     } else {
@@ -191,15 +186,7 @@ async fn write_translation_split(
     };
 
     // Dedup query — we'll re-sort per split
-    let dedup_query = format!(
-        "SELECT * FROM (\
-            SELECT *, ROW_NUMBER() OVER (\
-                PARTITION BY transcript_id \
-                ORDER BY cdna_coding_start NULLS LAST\
-            ) AS _rn \
-            FROM {table_name}{where_clause}\
-        ) WHERE _rn = 1"
-    );
+    let dedup_query = build_translation_dedup_query(table_name, chrom_filter.as_deref());
 
     // Register deduped data as a temp table so we can query it twice with different sorts
     let df = ctx.sql(&dedup_query).await?;

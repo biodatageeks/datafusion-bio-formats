@@ -26,6 +26,7 @@ mod variation;
 pub use entity::EnsemblEntityKind;
 pub use export_query::{
     VEP_CACHE_REGION_SIZE_BP, build_export_query, build_export_query_multi_chrom,
+    build_translation_dedup_query, build_translation_dedup_query_multi_chrom,
 };
 pub use schema::{translation_core_schema, translation_sift_schema};
 pub use table_provider::{
