@@ -76,10 +76,12 @@ fn rss_mb() -> f64 {
 /// Build the dedup + sort query for each entity type.
 /// Sort order is chosen to match downstream access patterns (see issue #131).
 ///
-/// For transcripts, this also replicates VEP's `merge_features()` propagation of
-/// `_gene_hgnc_id`: if any transcript sharing a `gene_symbol` has a non-null
-/// `gene_hgnc_id`, the value is propagated to all other transcripts with the same
-/// symbol (see biodatageeks/datafusion-bio-functions#105).
+/// For transcripts, this also applies region-local HGNC propagation to keep the
+/// promoted `gene_hgnc_id` column aligned with VEP cache locality. VEP merges
+/// features inside 1 Mb cache regions, not across every same-symbol transcript
+/// on a chromosome.
+const VEP_CACHE_REGION_SIZE_BP: i64 = 1_000_000;
+
 fn build_dedup_query(
     kind: EnsemblEntityKind,
     table_name: &str,
@@ -94,25 +96,25 @@ fn build_dedup_query(
 
     match kind {
         // Transcript: dedup by stable_id, sort by (chrom, start) for interval queries.
-        // Propagate gene_hgnc_id across transcripts sharing the same gene_symbol,
-        // replicating VEP's merge_features() behaviour.
+        // Propagate gene_hgnc_id only within a VEP-sized cache region. This
+        // avoids copying HGNC IDs across distant loci that reuse the same symbol.
         EnsemblEntityKind::Transcript => {
             let schema = schema.expect("Transcript entity requires schema for HGNC propagation");
+            let region_expr =
+                format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
             let columns: Vec<String> = schema
                 .fields()
                 .iter()
                 .map(|f| {
                     if f.name() == "gene_hgnc_id" {
-                        // Propagate: fill NULL gene_hgnc_id from any sibling transcript
-                        // sharing the same gene_symbol.  Guard with gene_symbol IS NOT NULL
-                        // to avoid cross-pollination among NULL-symbol transcripts.
-                        "COALESCE(gene_hgnc_id, \
-                             CASE WHEN gene_symbol IS NOT NULL \
-                                  THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
-                                       OVER (PARTITION BY gene_symbol \
-                                             ORDER BY gene_hgnc_id NULLS LAST) \
-                                  ELSE NULL END) AS gene_hgnc_id"
-                            .to_string()
+                        format!(
+                            "COALESCE(gene_hgnc_id, \
+                                 CASE WHEN gene_symbol IS NOT NULL \
+                                      THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
+                                           OVER (PARTITION BY chrom, gene_symbol, {region_expr} \
+                                                 ORDER BY gene_hgnc_id NULLS LAST) \
+                                      ELSE NULL END) AS gene_hgnc_id"
+                        )
                     } else {
                         format!("\"{}\"", f.name())
                     }
