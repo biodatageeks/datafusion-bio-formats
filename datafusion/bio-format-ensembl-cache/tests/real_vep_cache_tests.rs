@@ -20,7 +20,7 @@ use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, ExonTableProvider,
     MotifFeatureTableProvider, RegulatoryFeatureTableProvider, TranscriptTableProvider,
-    TranslationTableProvider, VariationTableProvider,
+    TranslationTableProvider, VEP_CACHE_REGION_SIZE_BP, VariationTableProvider, build_export_query,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1108,14 +1108,13 @@ async fn real_factory_all_entities() -> datafusion::common::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// HGNC_ID propagation (biodatageeks/datafusion-bio-functions#105)
+// HGNC_ID propagation locality (biodatageeks/datafusion-bio-functions#105, #108)
 // ---------------------------------------------------------------------------
 
-/// After applying the HGNC propagation query, every transcript whose gene_symbol
-/// has *at least one* non-null gene_hgnc_id should itself have a non-null value.
-/// This mirrors VEP's `merge_features()` behaviour.
+/// After applying the HGNC propagation query, every transcript in the same VEP
+/// cache region as an HGNC-bearing sibling should itself have a non-null value.
 #[tokio::test]
-async fn hgnc_propagation_fills_all_siblings() -> datafusion::common::Result<()> {
+async fn hgnc_propagation_fills_local_siblings() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::Transcript,
         EnsemblCacheOptions::new(fixture_path(REAL_FIXTURE)),
@@ -1124,48 +1123,42 @@ async fn hgnc_propagation_fills_all_siblings() -> datafusion::common::Result<()>
     let ctx = SessionContext::new();
     ctx.register_table("tx", provider)?;
 
-    // Build the same propagation query used by storable_to_parquet.
     let schema: Arc<datafusion::arrow::datatypes::Schema> =
         Arc::new(ctx.table("tx").await?.schema().as_arrow().clone());
 
-    let columns: Vec<String> = schema
-        .fields()
-        .iter()
-        .map(|f| {
-            if f.name() == "gene_hgnc_id" {
-                "COALESCE(gene_hgnc_id, \
-                     CASE WHEN gene_symbol IS NOT NULL \
-                          THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
-                               OVER (PARTITION BY gene_symbol \
-                                             ORDER BY gene_hgnc_id NULLS LAST) \
-                          ELSE NULL END) AS gene_hgnc_id"
-                    .to_string()
-            } else {
-                format!("\"{}\"", f.name())
-            }
-        })
-        .collect();
-    let select_list = columns.join(", ");
+    // Use the same propagation + dedup query used by storable_to_parquet.
+    let propagation_query =
+        build_export_query(EnsemblEntityKind::Transcript, "tx", None, Some(&schema));
 
-    // After propagation, count transcripts where gene_symbol has at least one
-    // sibling with gene_hgnc_id but this row is still NULL — should be zero.
+    let region_expr = format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
+
+    // After propagation, count transcripts that still miss gene_hgnc_id even
+    // though the same `(chrom, gene_symbol, 1 Mb region)` contains a sibling
+    // with a non-null value — should be zero.
     let query = format!(
-        "SELECT COUNT(*) FROM (\
-            SELECT {select_list} FROM tx\
-        ) AS propagated \
-        WHERE gene_hgnc_id IS NULL \
-          AND gene_symbol IN (\
-              SELECT gene_symbol FROM tx \
-              WHERE gene_hgnc_id IS NOT NULL AND gene_symbol IS NOT NULL\
-          )"
+        "WITH propagated AS (\
+             {propagation_query}\
+         ), local_hgnc AS (\
+             SELECT chrom, gene_symbol, {region_expr} AS hgnc_region \
+             FROM tx \
+             WHERE gene_hgnc_id IS NOT NULL AND gene_symbol IS NOT NULL \
+             GROUP BY chrom, gene_symbol, {region_expr}\
+         ) \
+         SELECT COUNT(*) \
+         FROM propagated p \
+         JOIN local_hgnc l \
+           ON p.chrom = l.chrom \
+          AND p.gene_symbol = l.gene_symbol \
+          AND CAST(FLOOR((p.start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT) = l.hgnc_region \
+         WHERE p.gene_hgnc_id IS NULL"
     );
 
     let batches = ctx.sql(&query).await?.collect().await?;
     let remaining_gaps = first_i64(&batches);
     assert_eq!(
         remaining_gaps, 0,
-        "after HGNC propagation, {remaining_gaps} transcripts still missing gene_hgnc_id \
-         despite a sibling having it"
+        "after local HGNC propagation, {remaining_gaps} transcripts still missing gene_hgnc_id \
+         despite a sibling in the same cache region having it"
     );
 
     Ok(())
