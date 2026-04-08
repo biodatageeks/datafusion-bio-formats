@@ -9,9 +9,8 @@ use datafusion::arrow::array::{Array, RecordBatch, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
+use datafusion_bio_format_ensembl_cache::VEP_CACHE_REGION_SIZE_BP;
 use std::sync::Arc;
-
-const VEP_CACHE_REGION_SIZE_BP: i64 = 1_000_000;
 type PropagationInput<'a> = (&'a str, &'a str, i64, Option<&'a str>, Option<&'a str>);
 type PropagationResult = (String, Option<String>, Option<String>);
 

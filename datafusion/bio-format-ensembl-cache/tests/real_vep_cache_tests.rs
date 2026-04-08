@@ -20,7 +20,7 @@ use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, ExonTableProvider,
     MotifFeatureTableProvider, RegulatoryFeatureTableProvider, TranscriptTableProvider,
-    TranslationTableProvider, VariationTableProvider,
+    TranslationTableProvider, VEP_CACHE_REGION_SIZE_BP, VariationTableProvider, build_export_query,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1111,8 +1111,6 @@ async fn real_factory_all_entities() -> datafusion::common::Result<()> {
 // HGNC_ID propagation locality (biodatageeks/datafusion-bio-functions#105, #108)
 // ---------------------------------------------------------------------------
 
-const VEP_CACHE_REGION_SIZE_BP: i64 = 1_000_000;
-
 /// After applying the HGNC propagation query, every transcript in the same VEP
 /// cache region as an HGNC-bearing sibling should itself have a non-null value.
 #[tokio::test]
@@ -1125,38 +1123,21 @@ async fn hgnc_propagation_fills_local_siblings() -> datafusion::common::Result<(
     let ctx = SessionContext::new();
     ctx.register_table("tx", provider)?;
 
-    let region_expr = format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
-
-    // Build the same propagation query used by storable_to_parquet.
     let schema: Arc<datafusion::arrow::datatypes::Schema> =
         Arc::new(ctx.table("tx").await?.schema().as_arrow().clone());
 
-    let columns: Vec<String> = schema
-        .fields()
-        .iter()
-        .map(|f| {
-            if f.name() == "gene_hgnc_id" {
-                format!(
-                    "COALESCE(gene_hgnc_id, \
-                         CASE WHEN gene_symbol IS NOT NULL \
-                              THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
-                                   OVER (PARTITION BY chrom, gene_symbol, {region_expr} \
-                                         ORDER BY gene_hgnc_id NULLS LAST) \
-                              ELSE NULL END) AS gene_hgnc_id"
-                )
-            } else {
-                format!("\"{}\"", f.name())
-            }
-        })
-        .collect();
-    let select_list = columns.join(", ");
+    // Use the same propagation + dedup query used by storable_to_parquet.
+    let propagation_query =
+        build_export_query(EnsemblEntityKind::Transcript, "tx", None, Some(&schema));
+
+    let region_expr = format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
 
     // After propagation, count transcripts that still miss gene_hgnc_id even
     // though the same `(chrom, gene_symbol, 1 Mb region)` contains a sibling
     // with a non-null value — should be zero.
     let query = format!(
         "WITH propagated AS (\
-             SELECT {select_list} FROM tx\
+             {propagation_query}\
          ), local_hgnc AS (\
              SELECT chrom, gene_symbol, {region_expr} AS hgnc_region \
              FROM tx \
