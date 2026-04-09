@@ -1,367 +1,25 @@
-//! Serializer for converting Arrow RecordBatches to BAM records
-//!
-//! This module provides functionality for converting DataFusion Arrow data back
-//! to BAM/SAM format for writing to files.
+//! Serializer for converting Arrow RecordBatches to BAM records.
 
-use datafusion::arrow::array::{
-    Array, BinaryArray, Int32Array, RecordBatch, StringArray, UInt32Array,
-};
-use datafusion::arrow::datatypes::DataType;
-use datafusion::common::{DataFusionError, Result};
-use datafusion_bio_format_core::BAM_TAG_TAG_KEY;
-use datafusion_bio_format_core::sam_tag_io::build_tag_data;
+use datafusion::arrow::array::RecordBatch;
+use datafusion::common::Result;
+use datafusion_bio_format_core::sam_record_serializer::batch_to_alignment_records;
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
-use noodles_sam::alignment::record_buf::{Cigar, QualityScores, Sequence};
-use std::collections::HashMap;
 
 /// Converts an Arrow RecordBatch to a vector of BAM records.
-///
-/// The RecordBatch must have columns matching BAM schema names. Columns are
-/// looked up by name, so the order in the batch does not matter.
-///
-/// # Arguments
-///
-/// * `batch` - The Arrow RecordBatch to convert
-/// * `header` - The SAM header (needed for reference sequence lookups)
-/// * `tag_fields` - Names of alignment tag fields to include
-/// * `coordinate_system_zero_based` - If true, coordinates are 0-based (need +1 for BAM POS)
-///
-/// # Returns
-///
-/// A vector of BAM records that can be written to a file
-///
-/// # Errors
-///
-/// Returns an error if required columns are missing or have wrong types
 pub fn batch_to_bam_records(
     batch: &RecordBatch,
     header: &sam::Header,
     tag_fields: &[String],
     coordinate_system_zero_based: bool,
 ) -> Result<Vec<RecordBuf>> {
-    let num_rows = batch.num_rows();
-    if num_rows == 0 {
-        return Ok(Vec::new());
-    }
-
-    // Build reference sequence name -> ID mapping
-    let ref_map = build_reference_map(header);
-
-    // Look up core columns by name
-    let names = get_string_column_by_name(batch, "name")?;
-    let chroms = get_string_column_by_name(batch, "chrom")?;
-    let starts = get_u32_column_by_name(batch, "start")?;
-    let flags = get_u32_column_by_name(batch, "flags")?;
-
-    // CIGAR column can be either String (Utf8) or Binary
-    let cigar_col = get_cigar_column(batch)?;
-
-    let mapping_qualities = get_u32_column_by_name(batch, "mapping_quality")?;
-    let mate_chroms = get_string_column_by_name(batch, "mate_chrom")?;
-    let mate_starts = get_u32_column_by_name(batch, "mate_start")?;
-    let sequences = get_string_column_by_name(batch, "sequence")?;
-    let quality_scores = get_string_column_by_name(batch, "quality_scores")?;
-    let template_lengths = get_i32_column_by_name(batch, "template_length")?;
-
-    // Build tag column map
-    let tag_columns = build_tag_column_map(batch, tag_fields);
-
-    let mut records = Vec::with_capacity(num_rows);
-
-    for row in 0..num_rows {
-        let record = build_single_record(
-            row,
-            names,
-            chroms,
-            starts,
-            flags,
-            &cigar_col,
-            mapping_qualities,
-            mate_chroms,
-            mate_starts,
-            sequences,
-            quality_scores,
-            template_lengths,
-            &ref_map,
-            batch,
-            tag_fields,
-            &tag_columns,
-            coordinate_system_zero_based,
-        )?;
-        records.push(record);
-    }
-
-    Ok(records)
-}
-
-/// Cigar column data: either string or binary
-enum CigarColumn<'a> {
-    String(&'a StringArray),
-    Binary(&'a BinaryArray),
-}
-
-/// Look up the cigar column, handling both Utf8 and Binary types
-fn get_cigar_column(batch: &RecordBatch) -> Result<CigarColumn<'_>> {
-    let idx = batch.schema().index_of("cigar").map_err(|_| {
-        DataFusionError::Execution("Required column 'cigar' not found in batch".to_string())
-    })?;
-    let col = batch.column(idx);
-    match col.data_type() {
-        DataType::Binary => {
-            let arr = col.as_any().downcast_ref::<BinaryArray>().ok_or_else(|| {
-                DataFusionError::Execution("Column 'cigar' downcast to BinaryArray failed".into())
-            })?;
-            Ok(CigarColumn::Binary(arr))
-        }
-        _ => {
-            let arr = col.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                DataFusionError::Execution("Column 'cigar' must be String or Binary type".into())
-            })?;
-            Ok(CigarColumn::String(arr))
-        }
-    }
-}
-
-/// Builds a single BAM record from Arrow array values
-#[allow(clippy::too_many_arguments)]
-fn build_single_record(
-    row: usize,
-    names: &StringArray,
-    chroms: &StringArray,
-    starts: &UInt32Array,
-    flags: &UInt32Array,
-    cigar_col: &CigarColumn<'_>,
-    mapping_qualities: &UInt32Array,
-    mate_chroms: &StringArray,
-    mate_starts: &UInt32Array,
-    sequences: &StringArray,
-    quality_scores: &StringArray,
-    template_lengths: &Int32Array,
-    ref_map: &HashMap<String, usize>,
-    batch: &RecordBatch,
-    tag_fields: &[String],
-    tag_columns: &HashMap<String, usize>,
-    coordinate_system_zero_based: bool,
-) -> Result<RecordBuf> {
-    // Create a new mutable BAM record
-    let mut record = RecordBuf::default();
-
-    // 1. QNAME (read name) - "*" means unavailable; convert back to None for noodles
-    let name = if names.is_null(row) || names.value(row) == "*" {
-        None
-    } else {
-        Some(names.value(row).as_bytes().to_vec().into())
-    };
-    *record.name_mut() = name;
-
-    // 2. FLAG
-    let flag_value = flags.value(row);
-    if flag_value > u32::from(u16::MAX) {
-        return Err(DataFusionError::Execution(format!(
-            "Flag value {flag_value} does not fit into 16-bit SAM flags"
-        )));
-    }
-    *record.flags_mut() = sam::alignment::record::Flags::from(flag_value as u16);
-
-    // 3. RNAME (reference sequence ID)
-    let ref_id = if chroms.is_null(row) {
-        None
-    } else {
-        let chrom_name = chroms.value(row);
-        ref_map.get(chrom_name).copied()
-    };
-    *record.reference_sequence_id_mut() = ref_id;
-
-    // 4. POS (alignment position)
-    use noodles_core::Position as CorePosition;
-    let alignment_start = if starts.is_null(row) {
-        None
-    } else {
-        let pos_value = starts.value(row);
-        // Convert 0-based to 1-based if needed
-        let pos_1based = if coordinate_system_zero_based {
-            pos_value + 1
-        } else {
-            pos_value
-        };
-        // BAM uses 1-based positions, try_from expects usize
-        CorePosition::try_from(pos_1based as usize).ok()
-    };
-    *record.alignment_start_mut() = alignment_start;
-
-    // 5. MAPQ (mapping quality) - non-nullable, 255 means unavailable per SAM spec
-    let mapq = sam::alignment::record::MappingQuality::new(mapping_qualities.value(row) as u8);
-    *record.mapping_quality_mut() = mapq;
-
-    // 6. CIGAR
-    let cigar = match cigar_col {
-        CigarColumn::String(arr) => {
-            let cigar_str = arr.value(row);
-            parse_cigar_string(cigar_str)?
-        }
-        CigarColumn::Binary(arr) => {
-            let bytes = arr.value(row);
-            let ops =
-                datafusion_bio_format_core::alignment_utils::decode_binary_cigar_to_ops(bytes)
-                    .map_err(|e| {
-                        DataFusionError::Execution(format!("Failed to decode binary CIGAR: {e}"))
-                    })?;
-            Cigar::from(ops)
-        }
-    };
-    *record.cigar_mut() = cigar;
-
-    // 7. RNEXT (mate reference sequence ID)
-    let mate_ref_id = if mate_chroms.is_null(row) {
-        None
-    } else {
-        let mate_chrom_name = mate_chroms.value(row);
-        if mate_chrom_name == "=" {
-            // Same as RNAME
-            ref_id
-        } else {
-            ref_map.get(mate_chrom_name).copied()
-        }
-    };
-    *record.mate_reference_sequence_id_mut() = mate_ref_id;
-
-    // 8. PNEXT (mate position)
-    let mate_alignment_start = if mate_starts.is_null(row) {
-        None
-    } else {
-        let mate_pos_value = mate_starts.value(row);
-        // Convert 0-based to 1-based if needed
-        let mate_pos_1based = if coordinate_system_zero_based {
-            mate_pos_value + 1
-        } else {
-            mate_pos_value
-        };
-        CorePosition::try_from(mate_pos_1based as usize).ok()
-    };
-    *record.mate_alignment_start_mut() = mate_alignment_start;
-
-    // 9. TLEN (template length)
-    *record.template_length_mut() = template_lengths.value(row);
-
-    // 10. SEQ (sequence)
-    let seq_str = sequences.value(row);
-    let sequence = if seq_str == "*" || seq_str.is_empty() {
-        Sequence::default()
-    } else {
-        // Convert sequence string to bytes
-        Sequence::from(seq_str.as_bytes().to_vec())
-    };
-    *record.sequence_mut() = sequence;
-
-    // 11. QUAL (quality scores)
-    let qual_str = quality_scores.value(row);
-    let quality_scores_vec = decode_quality_scores(qual_str)?;
-    *record.quality_scores_mut() = QualityScores::from(quality_scores_vec);
-
-    // 12. Tags (optional)
-    let data = build_tag_data(row, batch, tag_fields, tag_columns)?;
-    *record.data_mut() = data;
-
-    Ok(record)
-}
-
-/// Builds reference sequence name to ID mapping from header
-fn build_reference_map(header: &sam::Header) -> HashMap<String, usize> {
-    header
-        .reference_sequences()
-        .iter()
-        .enumerate()
-        .map(|(i, (name, _))| (name.to_string(), i))
-        .collect()
-}
-
-/// Parses a CIGAR string into noodles CIGAR operations
-///
-/// Supports: M, I, D, N, S, H, P, =, X
-fn parse_cigar_string(cigar_str: &str) -> Result<Cigar> {
-    if cigar_str == "*" || cigar_str.is_empty() {
-        return Ok(Cigar::default());
-    }
-
-    // Use record::Cigar to parse the string
-    let cigar_bytes = cigar_str.as_bytes();
-    let record_cigar = sam::record::Cigar::new(cigar_bytes);
-
-    // Collect operations from the iterator
-    let ops: std::result::Result<Vec<_>, _> = record_cigar.iter().collect();
-    let ops = ops.map_err(|e| {
-        DataFusionError::Execution(format!("Failed to parse CIGAR '{cigar_str}': {e}"))
-    })?;
-
-    Ok(Cigar::from(ops))
-}
-
-/// Decodes Phred+33 quality scores from ASCII string to u8 values
-fn decode_quality_scores(qual_str: &str) -> Result<Vec<u8>> {
-    if qual_str == "*" || qual_str.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Phred+33: ASCII char - 33 = quality score
-    Ok(qual_str.bytes().map(|b| b.saturating_sub(33)).collect())
-}
-
-/// Gets a string column from the batch by name
-fn get_string_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
-    let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
-    })?;
-    batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be String type")))
-}
-
-/// Gets a u32 column from the batch by name
-fn get_u32_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a UInt32Array> {
-    let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
-    })?;
-    batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<UInt32Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be UInt32 type")))
-}
-
-/// Gets an i32 column from the batch by name
-fn get_i32_column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
-    let idx = batch.schema().index_of(name).map_err(|_| {
-        DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
-    })?;
-    batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .ok_or_else(|| DataFusionError::Execution(format!("Column '{name}' must be Int32 type")))
-}
-
-/// Builds a map from tag name to column index
-fn build_tag_column_map(batch: &RecordBatch, tag_fields: &[String]) -> HashMap<String, usize> {
-    let mut map = HashMap::new();
-    let schema = batch.schema();
-    for tag_name in tag_fields {
-        if let Ok(idx) = schema.index_of(tag_name) {
-            // Verify this is actually a tag field by checking metadata
-            let field = schema.field(idx);
-            if field.metadata().contains_key(BAM_TAG_TAG_KEY) {
-                map.insert(tag_name.clone(), idx);
-            }
-        }
-    }
-    map
+    batch_to_alignment_records(batch, header, tag_fields, coordinate_system_zero_based)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion::arrow::array::{Int32Array, StringArray, UInt32Array};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use noodles_sam::header::record::value::Map;
     use noodles_sam::header::record::value::map::ReferenceSequence;
@@ -369,62 +27,14 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn test_parse_cigar_string() -> Result<()> {
-        use sam::alignment::record::Cigar as CigarTrait;
-
-        let cigar = parse_cigar_string("10M5I3D")?;
-        assert!(CigarTrait::len(&cigar) > 0);
-
-        let empty = parse_cigar_string("*")?;
-        assert_eq!(CigarTrait::len(&empty), 0);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_decode_quality_scores() -> Result<()> {
-        // Phred+33 encoding: ! = 0, " = 1, etc.
-        let scores = decode_quality_scores("!!\"#")?;
-        assert_eq!(scores, vec![0, 0, 1, 2]);
-
-        let empty = decode_quality_scores("*")?;
-        assert!(empty.is_empty());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_build_reference_map() {
-        use sam::header::record::value::Map;
-        use sam::header::record::value::map::ReferenceSequence;
-        use std::num::NonZeroUsize;
-
-        let header = sam::Header::builder()
-            .add_reference_sequence(
-                "chr1",
-                Map::<ReferenceSequence>::new(NonZeroUsize::new(249250621).unwrap()),
-            )
-            .add_reference_sequence(
-                "chr2",
-                Map::<ReferenceSequence>::new(NonZeroUsize::new(242193529).unwrap()),
-            )
-            .build();
-
-        let ref_map = build_reference_map(&header);
-        assert_eq!(ref_map.get("chr1"), Some(&0));
-        assert_eq!(ref_map.get("chr2"), Some(&1));
-    }
-
-    #[test]
     fn test_batch_to_bam_records_basic() -> Result<()> {
-        // Create a minimal schema
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, true),
             Field::new("chrom", DataType::Utf8, true),
             Field::new("start", DataType::UInt32, true),
             Field::new("flags", DataType::UInt32, false),
             Field::new("cigar", DataType::Utf8, false),
-            Field::new("mapping_quality", DataType::UInt32, true),
+            Field::new("mapping_quality", DataType::UInt32, false),
             Field::new("mate_chrom", DataType::Utf8, true),
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),
@@ -432,37 +42,24 @@ mod tests {
             Field::new("template_length", DataType::Int32, false),
         ]));
 
-        // Create test data
-        let names = StringArray::from(vec![Some("read1")]);
-        let chroms = StringArray::from(vec![Some("chr1")]);
-        let starts = UInt32Array::from(vec![Some(100u32)]);
-        let flags = UInt32Array::from(vec![0u32]);
-        let cigars = StringArray::from(vec!["10M"]);
-        let mapping_qualities = UInt32Array::from(vec![60u32]);
-        let mate_chroms = StringArray::from(vec![Option::<&str>::None]);
-        let mate_starts = UInt32Array::from(vec![Option::<u32>::None]);
-        let sequences = StringArray::from(vec!["ACGTACGTAC"]);
-        let quality_scores = StringArray::from(vec!["!!!!!!!!!!"]);
-
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(names),
-                Arc::new(chroms),
-                Arc::new(starts),
-                Arc::new(flags),
-                Arc::new(cigars),
-                Arc::new(mapping_qualities),
-                Arc::new(mate_chroms),
-                Arc::new(mate_starts),
-                Arc::new(sequences),
-                Arc::new(quality_scores),
+                Arc::new(StringArray::from(vec![Some("read1")])),
+                Arc::new(StringArray::from(vec![Some("chr1")])),
+                Arc::new(UInt32Array::from(vec![Some(100u32)])),
+                Arc::new(UInt32Array::from(vec![0u32])),
+                Arc::new(StringArray::from(vec!["10M"])),
+                Arc::new(UInt32Array::from(vec![60u32])),
+                Arc::new(StringArray::from(vec![Option::<&str>::None])),
+                Arc::new(UInt32Array::from(vec![Option::<u32>::None])),
+                Arc::new(StringArray::from(vec!["ACGTACGTAC"])),
+                Arc::new(StringArray::from(vec!["!!!!!!!!!!"])),
                 Arc::new(Int32Array::from(vec![0i32])),
             ],
         )
         .unwrap();
 
-        // Create header with reference sequences
         let header = sam::Header::builder()
             .add_reference_sequence(
                 "chr1",
@@ -484,7 +81,7 @@ mod tests {
             Field::new("start", DataType::UInt32, true),
             Field::new("flags", DataType::UInt32, false),
             Field::new("cigar", DataType::Utf8, false),
-            Field::new("mapping_quality", DataType::UInt32, true),
+            Field::new("mapping_quality", DataType::UInt32, false),
             Field::new("mate_chrom", DataType::Utf8, true),
             Field::new("mate_start", DataType::UInt32, true),
             Field::new("sequence", DataType::Utf8, false),

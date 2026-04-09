@@ -236,11 +236,11 @@ fn arrow_to_sam_tag_value(
 
 fn arrow_to_integer_tag_value(array: &dyn Array, row: usize, sam_type: char) -> Result<TagValue> {
     if let Some(value) = extract_signed_int(array, row) {
-        return convert_signed_integer_tag_value(value, sam_type);
+        return convert_integer_tag_value(value, sam_type);
     }
 
     if let Some(value) = extract_unsigned_int(array, row) {
-        return convert_unsigned_integer_tag_value(value, sam_type);
+        return convert_integer_tag_value(value, sam_type);
     }
 
     Err(DataFusionError::Execution(format!(
@@ -249,33 +249,16 @@ fn arrow_to_integer_tag_value(array: &dyn Array, row: usize, sam_type: char) -> 
     )))
 }
 
-fn convert_signed_integer_tag_value(value: i64, sam_type: char) -> Result<TagValue> {
-    match sam_type {
-        'c' => Ok(TagValue::Int8(i8::try_from(value).map_err(|_| {
-            DataFusionError::Execution(format!("Integer value {value} does not fit SAM type 'c'"))
-        })?)),
-        's' => Ok(TagValue::Int16(i16::try_from(value).map_err(|_| {
-            DataFusionError::Execution(format!("Integer value {value} does not fit SAM type 's'"))
-        })?)),
-        'C' => Ok(TagValue::UInt8(u8::try_from(value).map_err(|_| {
-            DataFusionError::Execution(format!("Integer value {value} does not fit SAM type 'C'"))
-        })?)),
-        'S' => Ok(TagValue::UInt16(u16::try_from(value).map_err(|_| {
-            DataFusionError::Execution(format!("Integer value {value} does not fit SAM type 'S'"))
-        })?)),
-        'i' => Ok(TagValue::Int32(i32::try_from(value).map_err(|_| {
-            DataFusionError::Execution(format!("Integer value {value} does not fit SAM type 'i'"))
-        })?)),
-        'I' => Ok(TagValue::UInt32(u32::try_from(value).map_err(|_| {
-            DataFusionError::Execution(format!("Integer value {value} does not fit SAM type 'I'"))
-        })?)),
-        _ => Err(DataFusionError::Execution(format!(
-            "Unsupported SAM integer type '{sam_type}'"
-        ))),
-    }
-}
-
-fn convert_unsigned_integer_tag_value(value: u64, sam_type: char) -> Result<TagValue> {
+fn convert_integer_tag_value<T>(value: T, sam_type: char) -> Result<TagValue>
+where
+    T: Copy + std::fmt::Display,
+    i8: TryFrom<T>,
+    i16: TryFrom<T>,
+    u8: TryFrom<T>,
+    u16: TryFrom<T>,
+    i32: TryFrom<T>,
+    u32: TryFrom<T>,
+{
     match sam_type {
         'c' => Ok(TagValue::Int8(i8::try_from(value).map_err(|_| {
             DataFusionError::Execution(format!("Integer value {value} does not fit SAM type 'c'"))
@@ -648,11 +631,13 @@ fn collect_array_as_u32(array: &dyn Array) -> Result<Vec<u32>> {
 fn collect_array_as_f32(array: &dyn Array) -> Result<Vec<f32>> {
     ensure_non_null_list_elements(array)?;
 
-    (0..array.len())
-        .map(|idx| {
-            if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-                Ok(arr.value(idx))
-            } else if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+    if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+        return Ok((0..array.len()).map(|idx| arr.value(idx)).collect());
+    }
+
+    if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+        return (0..array.len())
+            .map(|idx| {
                 let value = arr.value(idx);
                 if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
                     return Err(DataFusionError::Execution(format!(
@@ -660,14 +645,14 @@ fn collect_array_as_f32(array: &dyn Array) -> Result<Vec<f32>> {
                     )));
                 }
                 Ok(value as f32)
-            } else {
-                Err(DataFusionError::Execution(format!(
-                    "Unsupported array element type for SAM subtype 'f': {:?}",
-                    array.data_type()
-                )))
-            }
-        })
-        .collect()
+            })
+            .collect();
+    }
+
+    Err(DataFusionError::Execution(format!(
+        "Unsupported array element type for SAM subtype 'f': {:?}",
+        array.data_type()
+    )))
 }
 
 fn append_tag_value(
@@ -1053,7 +1038,13 @@ fn append_array_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table_utils::builders_to_arrays;
+    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use noodles_sam::alignment::RecordBuf;
     use noodles_sam::alignment::record::data::field::Tag;
+    use std::collections::HashMap;
+    use std::sync::Arc;
 
     #[test]
     fn test_arrow_to_integer_tag_value_uses_signed_type_for_i_metadata() -> Result<()> {
@@ -1074,5 +1065,66 @@ mod tests {
 
         assert_eq!(tag_to_index[&Tag::from([b'N', b'M'])], 0);
         assert_eq!(tag_to_index[&Tag::from([b'M', b'D'])], 1);
+    }
+
+    #[test]
+    fn test_build_tag_data_uses_schema_metadata() -> Result<()> {
+        let mut field_metadata = HashMap::new();
+        field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), "i".to_string());
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("NM", DataType::Int32, true).with_metadata(field_metadata),
+        ]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![Some(7)]))]).unwrap();
+
+        let tag_fields = vec!["NM".to_string()];
+        let tag_columns = HashMap::from([(String::from("NM"), 0_usize)]);
+        let data = build_tag_data(0, &batch, &tag_fields, &tag_columns)?;
+
+        assert_eq!(
+            data.get(&Tag::from([b'N', b'M'])),
+            Some(&TagValue::Int32(7))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_record_tags_reads_present_values_and_backfills_nulls() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("NM", DataType::Int32, true),
+            Field::new("MD", DataType::Utf8, true),
+        ]));
+        let mut tag_builders =
+            TagBuilders::from_schema(1, Some(vec!["NM".to_string(), "MD".to_string()]), schema);
+        let tag_to_index = build_tag_to_index(tag_builders.parsed_tags());
+        let mut tag_populated = vec![false; tag_builders.len()];
+
+        let mut record = RecordBuf::default();
+        record
+            .data_mut()
+            .insert(Tag::from([b'N', b'M']), TagValue::Int32(3));
+
+        load_record_tags(
+            &record,
+            &mut tag_builders,
+            &tag_to_index,
+            &mut tag_populated,
+            "BAM",
+            |_, _| Ok(false),
+        )
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+
+        assert_eq!(tag_populated, vec![true, false]);
+
+        let arrays = builders_to_arrays(tag_builders.builders_mut());
+        let nm = arrays[0].as_any().downcast_ref::<Int32Array>().unwrap();
+        let md = arrays[1].as_any().downcast_ref::<StringArray>().unwrap();
+
+        assert_eq!(nm.value(0), 3);
+        assert!(md.is_null(0));
+
+        Ok(())
     }
 }
