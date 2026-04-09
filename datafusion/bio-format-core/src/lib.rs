@@ -72,6 +72,10 @@ pub mod object_storage;
 pub mod partition_balancer;
 /// Shared record-level filter evaluation for all formats
 pub mod record_filter;
+/// Shared serializer helpers for alignment records written to BAM/CRAM
+pub mod sam_record_serializer;
+/// Shared SAM/BAM/CRAM optional tag IO helpers
+pub mod sam_tag_io;
 /// Table utilities for building DataFusion table providers
 pub mod table_utils;
 /// Tag registry for BAM/CRAM alignment tags
