@@ -3,8 +3,13 @@
 //! Tests verify that SAM files can be read correctly, including round-trip
 //! through write -> read cycles and format detection.
 
-use datafusion::arrow::array::{Array, Int32Array, StringArray, UInt32Array};
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::arrow::array::{
+    Array, Float32Array, Float64Array, Int32Array, ListArray, StringArray, UInt8Array, UInt16Array,
+    UInt32Array,
+};
+use datafusion::arrow::datatypes::{
+    DataType, Field, Float64Type, Int64Type, Schema, UInt8Type, UInt16Type,
+};
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_bam::storage::is_sam_file;
@@ -54,6 +59,10 @@ fn create_test_schema(tag_fields: &[(&str, DataType, &str, &str)]) -> Arc<Schema
     );
 
     Arc::new(Schema::new_with_metadata(fields, schema_metadata))
+}
+
+fn list_type(item_type: DataType) -> DataType {
+    DataType::List(Arc::new(Field::new("item", item_type, true)))
 }
 
 /// Helper to create basic test data without tags
@@ -317,6 +326,215 @@ async fn test_sam_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(as_tag.value(0), 50);
     assert_eq!(as_tag.value(1), 45);
     assert_eq!(as_tag.value(2), 60);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sam_array_and_custom_tags_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let output_path = temp_dir.path().join("test_array_tags.sam");
+
+    let schema = create_test_schema(&[
+        (
+            "ML",
+            list_type(DataType::UInt8),
+            "B:C",
+            "Base modification probabilities",
+        ),
+        (
+            "FZ",
+            list_type(DataType::UInt16),
+            "B:S",
+            "Flow signal intensities",
+        ),
+        ("ch", DataType::Utf8, "A", "Custom character tag"),
+        ("hx", DataType::Utf8, "H", "Custom hex tag"),
+        ("de", DataType::Float64, "f", "Custom float tag"),
+        (
+            "pa",
+            list_type(DataType::Int64),
+            "B:i",
+            "Custom integer array tag",
+        ),
+        (
+            "pf",
+            list_type(DataType::Float64),
+            "B:f",
+            "Custom float array tag",
+        ),
+    ]);
+
+    let batch = datafusion::arrow::array::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["read1", "read2"])),
+            Arc::new(StringArray::from(vec!["chr1", "chr2"])),
+            Arc::new(UInt32Array::from(vec![100, 200])),
+            Arc::new(UInt32Array::from(vec![0, 16])),
+            Arc::new(StringArray::from(vec!["10M", "8M2S"])),
+            Arc::new(UInt32Array::from(vec![60, 55])),
+            Arc::new(StringArray::from(vec![None::<&str>, None])),
+            Arc::new(UInt32Array::from(vec![None::<u32>, None])),
+            Arc::new(StringArray::from(vec!["ACGTACGTAC", "TTTTGGGGAA"])),
+            Arc::new(StringArray::from(vec!["IIIIIIIIII", "JJJJJJJJJJ"])),
+            Arc::new(Int32Array::from(vec![0, 0])),
+            Arc::new(ListArray::from_iter_primitive::<UInt8Type, _, _>(vec![
+                Some(vec![Some(1), Some(2), Some(3)]),
+                Some(vec![Some(4), Some(5)]),
+            ])),
+            Arc::new(ListArray::from_iter_primitive::<UInt16Type, _, _>(vec![
+                Some(vec![Some(10), Some(1000)]),
+                Some(vec![Some(65000)]),
+            ])),
+            Arc::new(StringArray::from(vec![Some("A"), Some("B")])),
+            Arc::new(StringArray::from(vec![Some("0fa0"), Some("beef")])),
+            Arc::new(Float64Array::from(vec![Some(1.5), Some(2.25)])),
+            Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
+                Some(vec![Some(100000), Some(200000)]),
+                Some(vec![Some(-5), Some(17)]),
+            ])),
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+                Some(vec![Some(1.25), Some(2.5)]),
+                Some(vec![Some(3.75)]),
+            ])),
+        ],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("input_data", batch)?;
+
+    let tag_fields = vec![
+        "ML".to_string(),
+        "FZ".to_string(),
+        "ch".to_string(),
+        "hx".to_string(),
+        "de".to_string(),
+        "pa".to_string(),
+        "pf".to_string(),
+    ];
+    let write_provider = BamTableProvider::new_for_write(
+        output_path.to_str().unwrap().to_string(),
+        schema.clone(),
+        Some(tag_fields.clone()),
+        true,
+        false,
+    );
+    ctx.register_table("output_sam", Arc::new(write_provider))?;
+
+    ctx.sql("INSERT OVERWRITE output_sam SELECT * FROM input_data")
+        .await?
+        .collect()
+        .await?;
+
+    let read_provider = BamTableProvider::new(
+        output_path.to_str().unwrap().to_string(),
+        None,
+        true,
+        Some(tag_fields.clone()),
+        false,
+        true,
+        100,
+        Some(vec![
+            "ch:A".to_string(),
+            "hx:H".to_string(),
+            "de:f".to_string(),
+            "pa:B:i".to_string(),
+            "pf:B:f".to_string(),
+        ]),
+    )
+    .await?;
+
+    let read_schema = read_provider.schema();
+    assert_eq!(
+        read_schema.field_with_name("ML")?.data_type(),
+        &list_type(DataType::UInt8)
+    );
+    assert_eq!(
+        read_schema.field_with_name("FZ")?.data_type(),
+        &list_type(DataType::UInt16)
+    );
+    assert_eq!(
+        read_schema.field_with_name("pa")?.data_type(),
+        &list_type(DataType::Int32)
+    );
+    assert_eq!(
+        read_schema.field_with_name("pf")?.data_type(),
+        &list_type(DataType::Float32)
+    );
+    assert!(
+        read_schema.field_with_name("CG").is_err(),
+        "CG should not be part of SAM round-trip coverage"
+    );
+
+    ctx.register_table("test_sam_arrays", Arc::new(read_provider))?;
+    let results = ctx
+        .sql(
+            "SELECT name, \"ML\", \"FZ\", \"ch\", \"hx\", \"de\", \"pa\", \"pf\" \
+             FROM test_sam_arrays ORDER BY name",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(results.len(), 1);
+
+    let batch = &results[0];
+    let ml = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(0);
+    let ml = ml.as_any().downcast_ref::<UInt8Array>().unwrap();
+    assert_eq!(ml.value(0), 1);
+    assert_eq!(ml.value(1), 2);
+    assert_eq!(ml.value(2), 3);
+
+    let fz = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(1);
+    let fz = fz.as_any().downcast_ref::<UInt16Array>().unwrap();
+    assert_eq!(fz.value(0), 65000);
+
+    let ch = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let hx = batch
+        .column(4)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let de = batch
+        .column(5)
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .unwrap();
+    let pa = batch
+        .column(6)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(0);
+    let pa = pa.as_any().downcast_ref::<Int32Array>().unwrap();
+    let pf = batch
+        .column(7)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(1);
+    let pf = pf.as_any().downcast_ref::<Float32Array>().unwrap();
+
+    assert_eq!(ch.value(0), "A");
+    assert_eq!(hx.value(0), "0FA0");
+    assert!((de.value(0) - 1.5).abs() < 0.01);
+    assert_eq!(pa.value(0), 100000);
+    assert_eq!(pa.value(1), 200000);
+    assert!((pf.value(0) - 3.75).abs() < 0.01);
 
     Ok(())
 }

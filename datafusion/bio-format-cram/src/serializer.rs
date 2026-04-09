@@ -4,11 +4,14 @@
 //! to CRAM format for writing to files.
 
 use datafusion::arrow::array::{
-    Array, BinaryArray, Float32Array, Int32Array, ListArray, RecordBatch, StringArray, UInt8Array,
-    UInt32Array,
+    Array, BinaryArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    ListArray, RecordBatch, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DataFusionError, Result};
+use datafusion_bio_format_core::tag_registry::{
+    parse_sam_tag_type, sam_array_subtype_from_arrow_type,
+};
 use datafusion_bio_format_core::{BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY};
 use noodles_sam as sam;
 use noodles_sam::alignment::RecordBuf;
@@ -328,8 +331,8 @@ fn build_tags(
         let sam_type = field
             .metadata()
             .get(BAM_TAG_TYPE_KEY)
-            .and_then(|s| s.chars().next())
-            .unwrap_or('Z'); // Default to string
+            .map(String::as_str)
+            .unwrap_or("Z"); // Default to string
 
         // Parse tag (2-char code)
         if tag_name.len() != 2 {
@@ -351,100 +354,25 @@ fn build_tags(
 fn arrow_to_sam_tag_value(
     array: &dyn Array,
     row: usize,
-    sam_type: char,
+    sam_type_spec: &str,
 ) -> Result<Option<TagValue>> {
     if array.is_null(row) {
         return Ok(None);
     }
 
-    match sam_type {
-        // Integer types
-        'i' | 'c' | 's' | 'C' | 'S' | 'I' => {
-            if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
-                Ok(Some(TagValue::from(arr.value(row))))
-            } else if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
-                Ok(Some(TagValue::from(arr.value(row) as i32)))
-            } else {
-                Err(DataFusionError::Execution(
-                    "Tag value type mismatch for integer".to_string(),
-                ))
-            }
-        }
-        // Float
-        'f' => {
-            if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
-                Ok(Some(TagValue::from(arr.value(row))))
-            } else {
-                Err(DataFusionError::Execution(
-                    "Tag value type mismatch for float".to_string(),
-                ))
-            }
-        }
-        // String
-        'Z' | 'H' => {
-            if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-                Ok(Some(TagValue::from(arr.value(row))))
-            } else {
-                Err(DataFusionError::Execution(
-                    "Tag value type mismatch for string".to_string(),
-                ))
-            }
-        }
-        // Character
-        'A' => {
-            if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
-                let s = arr.value(row);
-                if let Some(ch) = s.chars().next() {
-                    // Create a Character value, not an integer
-                    Ok(Some(TagValue::Character(ch as u8)))
-                } else {
-                    Ok(None)
-                }
-            } else {
-                Err(DataFusionError::Execution(
-                    "Tag value type mismatch for character".to_string(),
-                ))
-            }
-        }
-        // Array (Int or Float)
-        'B' => {
-            if let Some(arr) = array.as_any().downcast_ref::<ListArray>() {
-                let list = arr.value(row);
+    let (sam_type, array_subtype) = parse_sam_tag_type(sam_type_spec)
+        .map_err(|e| DataFusionError::Execution(format!("Invalid SAM tag type metadata: {e}")))?;
 
-                // Check element type
-                if !list.is_empty() {
-                    if let Some(int_arr) = list.as_any().downcast_ref::<Int32Array>() {
-                        // Integer array
-                        let values: Vec<i32> =
-                            (0..int_arr.len()).map(|i| int_arr.value(i)).collect();
-                        Ok(Some(TagValue::from(values)))
-                    } else if let Some(float_arr) = list.as_any().downcast_ref::<Float32Array>() {
-                        // Float array
-                        let values: Vec<f32> =
-                            (0..float_arr.len()).map(|i| float_arr.value(i)).collect();
-                        Ok(Some(TagValue::from(values)))
-                    } else if let Some(uint8_arr) = list.as_any().downcast_ref::<UInt8Array>() {
-                        // UInt8 array
-                        let values: Vec<u8> =
-                            (0..uint8_arr.len()).map(|i| uint8_arr.value(i)).collect();
-                        Ok(Some(TagValue::from(values)))
-                    } else {
-                        Err(DataFusionError::Execution(
-                            "Unsupported array element type for tag".to_string(),
-                        ))
-                    }
-                } else {
-                    // Empty array
-                    Ok(None)
-                }
-            } else {
-                Err(DataFusionError::Execution(
-                    "Tag value type mismatch for array".to_string(),
-                ))
-            }
+    match sam_type {
+        'i' | 'c' | 's' | 'C' | 'S' | 'I' => {
+            Ok(Some(arrow_to_integer_tag_value(array, row, sam_type)?))
         }
+        'f' => Ok(Some(arrow_to_float_tag_value(array, row)?)),
+        'Z' => Ok(Some(arrow_to_string_tag_value(array, row)?)),
+        'H' => Ok(Some(arrow_to_hex_tag_value(array, row)?)),
+        'A' => Ok(Some(arrow_to_character_tag_value(array, row)?)),
+        'B' => Ok(Some(arrow_to_array_tag_value(array, row, array_subtype)?)),
         _ => {
-            // Unknown type, try string as fallback
             if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
                 Ok(Some(TagValue::from(arr.value(row))))
             } else {
@@ -452,6 +380,464 @@ fn arrow_to_sam_tag_value(
             }
         }
     }
+}
+
+fn arrow_to_integer_tag_value(array: &dyn Array, row: usize, sam_type: char) -> Result<TagValue> {
+    if let Some(value) = extract_signed_int(array, row) {
+        match sam_type {
+            'c' => Ok(TagValue::from(i8::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'c'"
+                ))
+            })?)),
+            's' => Ok(TagValue::from(i16::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 's'"
+                ))
+            })?)),
+            'C' => Ok(TagValue::from(u8::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'C'"
+                ))
+            })?)),
+            'S' => Ok(TagValue::from(u16::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'S'"
+                ))
+            })?)),
+            'I' => Ok(TagValue::from(u32::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'I'"
+                ))
+            })?)),
+            _ => TagValue::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM integer range"
+                ))
+            }),
+        }
+    } else if let Some(value) = extract_unsigned_int(array, row) {
+        match sam_type {
+            'c' => Ok(TagValue::from(i8::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'c'"
+                ))
+            })?)),
+            's' => Ok(TagValue::from(i16::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 's'"
+                ))
+            })?)),
+            'C' => Ok(TagValue::from(u8::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'C'"
+                ))
+            })?)),
+            'S' => Ok(TagValue::from(u16::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'S'"
+                ))
+            })?)),
+            'I' | 'i' => Ok(TagValue::from(u32::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM integer range"
+                ))
+            })?)),
+            _ => Err(DataFusionError::Execution(format!(
+                "Unsupported SAM integer type '{sam_type}'"
+            ))),
+        }
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "Tag value type mismatch for integer: {:?}",
+            array.data_type()
+        )))
+    }
+}
+
+fn arrow_to_float_tag_value(array: &dyn Array, row: usize) -> Result<TagValue> {
+    if let Some(arr) = array.as_any().downcast_ref::<Float32Array>() {
+        Ok(TagValue::from(arr.value(row)))
+    } else if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
+        let value = arr.value(row);
+        if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+            return Err(DataFusionError::Execution(format!(
+                "Float value {value} does not fit SAM type 'f'"
+            )));
+        }
+        Ok(TagValue::from(value as f32))
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "Tag value type mismatch for float: {:?}",
+            array.data_type()
+        )))
+    }
+}
+
+fn arrow_to_string_tag_value(array: &dyn Array, row: usize) -> Result<TagValue> {
+    if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+        Ok(TagValue::from(arr.value(row)))
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "Tag value type mismatch for string: {:?}",
+            array.data_type()
+        )))
+    }
+}
+
+fn arrow_to_hex_tag_value(array: &dyn Array, row: usize) -> Result<TagValue> {
+    let arr = array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "Tag value type mismatch for hex string: {:?}",
+                array.data_type()
+            ))
+        })?;
+    let normalized = arr.value(row).to_ascii_uppercase();
+    if normalized.len() % 2 != 0
+        || !normalized
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'A'..=b'F'))
+    {
+        return Err(DataFusionError::Execution(format!(
+            "Invalid SAM hex tag value '{normalized}'"
+        )));
+    }
+
+    Ok(TagValue::Hex(normalized.into_bytes().into()))
+}
+
+fn arrow_to_character_tag_value(array: &dyn Array, row: usize) -> Result<TagValue> {
+    if let Some(arr) = array.as_any().downcast_ref::<StringArray>() {
+        let value = arr.value(row);
+        let bytes = value.as_bytes();
+        if bytes.len() != 1 || !bytes[0].is_ascii() {
+            return Err(DataFusionError::Execution(format!(
+                "Character tags must be a single ASCII byte, got '{value}'"
+            )));
+        }
+        Ok(TagValue::Character(bytes[0]))
+    } else if let Some(value) = extract_unsigned_int(array, row) {
+        let byte = u8::try_from(value).map_err(|_| {
+            DataFusionError::Execution(format!(
+                "Character tag value {value} does not fit into a single byte"
+            ))
+        })?;
+        Ok(TagValue::Character(byte))
+    } else if let Some(value) = extract_signed_int(array, row) {
+        let byte = u8::try_from(value).map_err(|_| {
+            DataFusionError::Execution(format!(
+                "Character tag value {value} does not fit into a single byte"
+            ))
+        })?;
+        Ok(TagValue::Character(byte))
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "Tag value type mismatch for character: {:?}",
+            array.data_type()
+        )))
+    }
+}
+
+fn arrow_to_array_tag_value(
+    array: &dyn Array,
+    row: usize,
+    array_subtype: Option<char>,
+) -> Result<TagValue> {
+    let arr = array.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "Tag value type mismatch for array: {:?}",
+            array.data_type()
+        ))
+    })?;
+    let list = arr.value(row);
+
+    let subtype = array_subtype
+        .or_else(|| sam_array_subtype_from_arrow_type(list.data_type()))
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "Unable to determine SAM array subtype for Arrow type {:?}",
+                list.data_type()
+            ))
+        })?;
+
+    match subtype {
+        'c' => Ok(TagValue::from(collect_array_as_i8(list.as_ref())?)),
+        'C' => Ok(TagValue::from(collect_array_as_u8(list.as_ref())?)),
+        's' => Ok(TagValue::from(collect_array_as_i16(list.as_ref())?)),
+        'S' => Ok(TagValue::from(collect_array_as_u16(list.as_ref())?)),
+        'i' => Ok(TagValue::from(collect_array_as_i32(list.as_ref())?)),
+        'I' => Ok(TagValue::from(collect_array_as_u32(list.as_ref())?)),
+        'f' => Ok(TagValue::from(collect_array_as_f32(list.as_ref())?)),
+        _ => Err(DataFusionError::Execution(format!(
+            "Unsupported SAM array subtype '{subtype}'"
+        ))),
+    }
+}
+
+fn extract_signed_int(array: &dyn Array, row: usize) -> Option<i64> {
+    array
+        .as_any()
+        .downcast_ref::<Int8Array>()
+        .map(|arr| i64::from(arr.value(row)))
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .map(|arr| i64::from(arr.value(row)))
+        })
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .map(|arr| i64::from(arr.value(row)))
+        })
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .map(|arr| arr.value(row))
+        })
+}
+
+fn extract_unsigned_int(array: &dyn Array, row: usize) -> Option<u64> {
+    array
+        .as_any()
+        .downcast_ref::<UInt8Array>()
+        .map(|arr| u64::from(arr.value(row)))
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .map(|arr| u64::from(arr.value(row)))
+        })
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .map(|arr| u64::from(arr.value(row)))
+        })
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .map(|arr| arr.value(row))
+        })
+}
+
+fn extract_float(array: &dyn Array, row: usize) -> Option<f64> {
+    array
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .map(|arr| f64::from(arr.value(row)))
+        .or_else(|| {
+            array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .map(|arr| arr.value(row))
+        })
+}
+
+fn ensure_non_null_list_elements(array: &dyn Array) -> Result<()> {
+    if array.null_count() > 0 {
+        return Err(DataFusionError::Execution(
+            "SAM array tags cannot contain null elements".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn collect_array_as_i8(array: &dyn Array) -> Result<Vec<i8>> {
+    ensure_non_null_list_elements(array)?;
+
+    (0..array.len())
+        .map(|i| {
+            if let Some(value) = extract_signed_int(array, i) {
+                i8::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'c'"
+                    ))
+                })
+            } else if let Some(value) = extract_unsigned_int(array, i) {
+                i8::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'c'"
+                    ))
+                })
+            } else {
+                Err(DataFusionError::Execution(format!(
+                    "Unsupported array element type for SAM subtype 'c': {:?}",
+                    array.data_type()
+                )))
+            }
+        })
+        .collect()
+}
+
+fn collect_array_as_u8(array: &dyn Array) -> Result<Vec<u8>> {
+    ensure_non_null_list_elements(array)?;
+
+    (0..array.len())
+        .map(|i| {
+            if let Some(value) = extract_unsigned_int(array, i) {
+                u8::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'C'"
+                    ))
+                })
+            } else if let Some(value) = extract_signed_int(array, i) {
+                u8::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'C'"
+                    ))
+                })
+            } else {
+                Err(DataFusionError::Execution(format!(
+                    "Unsupported array element type for SAM subtype 'C': {:?}",
+                    array.data_type()
+                )))
+            }
+        })
+        .collect()
+}
+
+fn collect_array_as_i16(array: &dyn Array) -> Result<Vec<i16>> {
+    ensure_non_null_list_elements(array)?;
+
+    (0..array.len())
+        .map(|i| {
+            if let Some(value) = extract_signed_int(array, i) {
+                i16::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 's'"
+                    ))
+                })
+            } else if let Some(value) = extract_unsigned_int(array, i) {
+                i16::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 's'"
+                    ))
+                })
+            } else {
+                Err(DataFusionError::Execution(format!(
+                    "Unsupported array element type for SAM subtype 's': {:?}",
+                    array.data_type()
+                )))
+            }
+        })
+        .collect()
+}
+
+fn collect_array_as_u16(array: &dyn Array) -> Result<Vec<u16>> {
+    ensure_non_null_list_elements(array)?;
+
+    (0..array.len())
+        .map(|i| {
+            if let Some(value) = extract_unsigned_int(array, i) {
+                u16::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'S'"
+                    ))
+                })
+            } else if let Some(value) = extract_signed_int(array, i) {
+                u16::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'S'"
+                    ))
+                })
+            } else {
+                Err(DataFusionError::Execution(format!(
+                    "Unsupported array element type for SAM subtype 'S': {:?}",
+                    array.data_type()
+                )))
+            }
+        })
+        .collect()
+}
+
+fn collect_array_as_i32(array: &dyn Array) -> Result<Vec<i32>> {
+    ensure_non_null_list_elements(array)?;
+
+    (0..array.len())
+        .map(|i| {
+            if let Some(value) = extract_signed_int(array, i) {
+                i32::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'i'"
+                    ))
+                })
+            } else if let Some(value) = extract_unsigned_int(array, i) {
+                i32::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'i'"
+                    ))
+                })
+            } else {
+                Err(DataFusionError::Execution(format!(
+                    "Unsupported array element type for SAM subtype 'i': {:?}",
+                    array.data_type()
+                )))
+            }
+        })
+        .collect()
+}
+
+fn collect_array_as_u32(array: &dyn Array) -> Result<Vec<u32>> {
+    ensure_non_null_list_elements(array)?;
+
+    (0..array.len())
+        .map(|i| {
+            if let Some(value) = extract_unsigned_int(array, i) {
+                Ok(value)
+            } else if let Some(value) = extract_signed_int(array, i) {
+                u64::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'I'"
+                    ))
+                })
+            } else {
+                Err(DataFusionError::Execution(format!(
+                    "Unsupported array element type for SAM subtype 'I': {:?}",
+                    array.data_type()
+                )))
+            }
+        })
+        .map(|result| {
+            result.and_then(|value| {
+                u32::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "Array element {value} does not fit SAM subtype 'I'"
+                    ))
+                })
+            })
+        })
+        .collect()
+}
+
+fn collect_array_as_f32(array: &dyn Array) -> Result<Vec<f32>> {
+    ensure_non_null_list_elements(array)?;
+
+    (0..array.len())
+        .map(|i| {
+            let value = extract_float(array, i).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "Unsupported array element type for SAM subtype 'f': {:?}",
+                    array.data_type()
+                ))
+            })?;
+
+            if !value.is_finite() || value < f32::MIN as f64 || value > f32::MAX as f64 {
+                return Err(DataFusionError::Execution(format!(
+                    "Array element {value} does not fit SAM subtype 'f'"
+                )));
+            }
+
+            Ok(value as f32)
+        })
+        .collect()
 }
 
 /// Gets a string column from the batch by name

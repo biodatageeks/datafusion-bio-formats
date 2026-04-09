@@ -1,7 +1,7 @@
 use datafusion::arrow::array::{
-    Array, ArrayRef, BinaryArray, BinaryBuilder, BooleanBuilder, Float32Builder, Int32Array,
-    Int32Builder, ListBuilder, NullArray, StringArray, StringBuilder, UInt8Builder, UInt16Builder,
-    UInt32Array, UInt32Builder,
+    Array, ArrayRef, BinaryArray, BinaryBuilder, BooleanBuilder, Float32Builder, Int8Builder,
+    Int16Builder, Int32Array, Int32Builder, ListBuilder, NullArray, StringArray, StringBuilder,
+    UInt8Builder, UInt16Builder, UInt32Array, UInt32Builder,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
@@ -35,6 +35,13 @@ fn new_null_array(data_type: &DataType, length: usize) -> ArrayRef {
             }
             Arc::new(builder.finish())
         }
+        DataType::UInt32 => {
+            let mut builder = UInt32Builder::new();
+            for _ in 0..length {
+                builder.append_null();
+            }
+            Arc::new(builder.finish())
+        }
         DataType::Float32 => {
             let mut builder = Float32Builder::new();
             for _ in 0..length {
@@ -57,8 +64,22 @@ fn new_null_array(data_type: &DataType, length: usize) -> ArrayRef {
             Arc::new(builder.finish())
         }
         DataType::List(field) => match field.data_type() {
+            DataType::Int8 => {
+                let mut builder = ListBuilder::new(Int8Builder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
             DataType::Int32 => {
                 let mut builder = ListBuilder::new(Int32Builder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
+            DataType::Int16 => {
+                let mut builder = ListBuilder::new(Int16Builder::new());
                 for _ in 0..length {
                     builder.append_null();
                 }
@@ -87,6 +108,13 @@ fn new_null_array(data_type: &DataType, length: usize) -> ArrayRef {
             }
             DataType::UInt16 => {
                 let mut builder = ListBuilder::new(UInt16Builder::new());
+                for _ in 0..length {
+                    builder.append_null();
+                }
+                Arc::new(builder.finish())
+            }
+            DataType::UInt32 => {
+                let mut builder = ListBuilder::new(UInt32Builder::new());
                 for _ in 0..length {
                     builder.append_null();
                 }
