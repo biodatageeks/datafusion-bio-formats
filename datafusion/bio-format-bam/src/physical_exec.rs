@@ -28,7 +28,7 @@ use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures::SinkExt;
 use futures_util::{StreamExt, TryStreamExt};
-use log::{debug, info};
+use log::{debug, info, warn};
 use noodles_bam as bam;
 use noodles_csi::binning_index::BinningIndex as _;
 use noodles_sam::alignment::Record;
@@ -297,7 +297,10 @@ fn load_tags<R: Record>(
                     append_tag_value(builder, expected_type, value)?;
                 }
             }
-            Err(_) => continue, // skip malformed tags
+            Err(e) => {
+                warn!("Skipping malformed BAM tag while loading optional fields: {e}");
+                continue;
+            }
         }
     }
 
@@ -324,7 +327,7 @@ fn append_int_value(
 ) -> Result<(), ArrowError> {
     if matches!(expected_type, DataType::Utf8) {
         // Integer stored as character code - convert to ASCII char
-        if let Some(ch) = char::from_u32(value as u32) {
+        if let Some(ch) = u32::try_from(value).ok().and_then(char::from_u32) {
             builder.append_string(&ch.to_string())
         } else {
             builder.append_string(&value.to_string())

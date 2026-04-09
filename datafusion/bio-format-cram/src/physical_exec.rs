@@ -24,7 +24,7 @@ use datafusion_bio_format_core::table_utils::OptionalField;
 use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures_util::{StreamExt, TryStreamExt};
-use log::{debug, info};
+use log::{debug, info, warn};
 use noodles_sam::alignment::Record;
 use noodles_sam::alignment::record::data::field::value::Array as SamArray;
 use noodles_sam::alignment::record::data::field::{Tag, Value};
@@ -298,7 +298,10 @@ fn load_tags<R: Record>(
                     append_tag_value(builder, expected_type, value)?;
                 }
             }
-            Err(_) => continue, // skip malformed tags
+            Err(e) => {
+                warn!("Skipping malformed CRAM tag while loading optional fields: {e}");
+                continue;
+            }
         }
     }
 
@@ -334,7 +337,7 @@ fn append_int_value(
     value: i64,
 ) -> Result<(), ArrowError> {
     if matches!(expected_type, DataType::Utf8) {
-        if let Some(ch) = char::from_u32(value as u32) {
+        if let Some(ch) = u32::try_from(value).ok().and_then(char::from_u32) {
             builder.append_string(&ch.to_string())
         } else {
             builder.append_string(&value.to_string())

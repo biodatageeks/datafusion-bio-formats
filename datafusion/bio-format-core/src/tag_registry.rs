@@ -709,13 +709,19 @@ pub fn parse_tag_type_hints(hints: &[String]) -> Result<HashMap<String, (char, D
                 }
 
                 let sam_type = type_str.chars().next().unwrap();
+                if sam_type == 'B' {
+                    return Err(format!(
+                        "Invalid tag type hint '{hint}': array type 'B' requires a subtype. \
+                         Use 'TAG:B:c|C|s|S|i|I|f'"
+                    ));
+                }
                 if !matches!(
                     sam_type,
-                    'A' | 'c' | 'C' | 's' | 'S' | 'i' | 'I' | 'f' | 'Z' | 'H' | 'B'
+                    'A' | 'c' | 'C' | 's' | 'S' | 'i' | 'I' | 'f' | 'Z' | 'H'
                 ) {
                     return Err(format!(
                         "Invalid tag type hint '{hint}': unsupported SAM type '{sam_type}'. \
-                         Supported types: A, c, C, s, S, i, I, f, Z, H, B"
+                         Supported types: A, c, C, s, S, i, I, f, Z, H"
                     ));
                 }
 
@@ -766,12 +772,10 @@ pub fn sam_tag_type_to_arrow_type(sam_type: char) -> DataType {
 pub fn infer_type_from_noodles_value(value: &Value) -> (char, DataType) {
     match value {
         Value::Character(_) => ('A', DataType::Utf8),
-        Value::Int8(_)
-        | Value::UInt8(_)
-        | Value::Int16(_)
-        | Value::UInt16(_)
-        | Value::Int32(_)
-        | Value::UInt32(_) => ('i', DataType::Int32),
+        Value::Int8(_) | Value::UInt8(_) | Value::Int16(_) | Value::UInt16(_) | Value::Int32(_) => {
+            ('i', DataType::Int32)
+        }
+        Value::UInt32(_) => ('I', DataType::UInt32),
         Value::Float(_) => ('f', DataType::Float32),
         Value::String(_) => ('Z', DataType::Utf8),
         Value::Hex(_) => ('H', DataType::Utf8),
@@ -871,7 +875,7 @@ mod tests {
         // Unsupported SAM type character
         assert!(parse_tag_type_hints(&["pt:X".to_string()]).is_err());
         assert!(parse_tag_type_hints(&["pt:z".to_string()]).is_err());
-        assert!(parse_tag_type_hints(&["ml:B".to_string()]).is_ok());
+        assert!(parse_tag_type_hints(&["ml:B".to_string()]).is_err());
         assert!(parse_tag_type_hints(&["ml:B:Q".to_string()]).is_err());
     }
 
@@ -881,5 +885,25 @@ mod tests {
         assert_eq!(parse_sam_tag_type("B:C").unwrap(), ('B', Some('C')));
         assert!(parse_sam_tag_type("B:Q").is_err());
         assert!(parse_sam_tag_type("B:C:extra").is_err());
+    }
+
+    #[test]
+    fn test_infer_scalar_integer_types() {
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::Int8(-1)),
+            ('i', DataType::Int32)
+        );
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::UInt8(1)),
+            ('i', DataType::Int32)
+        );
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::Int16(-1)),
+            ('i', DataType::Int32)
+        );
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::UInt32(u32::MAX)),
+            ('I', DataType::UInt32)
+        );
     }
 }

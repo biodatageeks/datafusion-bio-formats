@@ -159,6 +159,11 @@ fn build_single_record(
 
     // 2. FLAG
     let flag_value = flags.value(row);
+    if flag_value > u32::from(u16::MAX) {
+        return Err(DataFusionError::Execution(format!(
+            "Flag value {flag_value} does not fit into 16-bit SAM flags"
+        )));
+    }
     *record.flags_mut() = sam::alignment::record::Flags::from(flag_value as u16);
 
     // 3. RNAME (reference sequence ID)
@@ -385,62 +390,70 @@ fn arrow_to_sam_tag_value(
 fn arrow_to_integer_tag_value(array: &dyn Array, row: usize, sam_type: char) -> Result<TagValue> {
     if let Some(value) = extract_signed_int(array, row) {
         match sam_type {
-            'c' => Ok(TagValue::from(i8::try_from(value).map_err(|_| {
+            'c' => Ok(TagValue::Int8(i8::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 'c'"
                 ))
             })?)),
-            's' => Ok(TagValue::from(i16::try_from(value).map_err(|_| {
+            's' => Ok(TagValue::Int16(i16::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 's'"
                 ))
             })?)),
-            'C' => Ok(TagValue::from(u8::try_from(value).map_err(|_| {
+            'C' => Ok(TagValue::UInt8(u8::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 'C'"
                 ))
             })?)),
-            'S' => Ok(TagValue::from(u16::try_from(value).map_err(|_| {
+            'S' => Ok(TagValue::UInt16(u16::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 'S'"
                 ))
             })?)),
-            'I' => Ok(TagValue::from(u32::try_from(value).map_err(|_| {
+            'i' => Ok(TagValue::Int32(i32::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'i'"
+                ))
+            })?)),
+            'I' => Ok(TagValue::UInt32(u32::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 'I'"
                 ))
             })?)),
-            _ => TagValue::try_from(value).map_err(|_| {
-                DataFusionError::Execution(format!(
-                    "Integer value {value} does not fit SAM integer range"
-                ))
-            }),
+            _ => Err(DataFusionError::Execution(format!(
+                "Unsupported SAM integer type '{sam_type}'"
+            ))),
         }
     } else if let Some(value) = extract_unsigned_int(array, row) {
         match sam_type {
-            'c' => Ok(TagValue::from(i8::try_from(value).map_err(|_| {
+            'c' => Ok(TagValue::Int8(i8::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 'c'"
                 ))
             })?)),
-            's' => Ok(TagValue::from(i16::try_from(value).map_err(|_| {
+            's' => Ok(TagValue::Int16(i16::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 's'"
                 ))
             })?)),
-            'C' => Ok(TagValue::from(u8::try_from(value).map_err(|_| {
+            'C' => Ok(TagValue::UInt8(u8::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 'C'"
                 ))
             })?)),
-            'S' => Ok(TagValue::from(u16::try_from(value).map_err(|_| {
+            'S' => Ok(TagValue::UInt16(u16::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
                     "Integer value {value} does not fit SAM type 'S'"
                 ))
             })?)),
-            'I' | 'i' => Ok(TagValue::from(u32::try_from(value).map_err(|_| {
+            'i' => Ok(TagValue::Int32(i32::try_from(value).map_err(|_| {
                 DataFusionError::Execution(format!(
-                    "Integer value {value} does not fit SAM integer range"
+                    "Integer value {value} does not fit SAM type 'i'"
+                ))
+            })?)),
+            'I' => Ok(TagValue::UInt32(u32::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Integer value {value} does not fit SAM type 'I'"
                 ))
             })?)),
             _ => Err(DataFusionError::Execution(format!(
@@ -790,28 +803,25 @@ fn collect_array_as_u32(array: &dyn Array) -> Result<Vec<u32>> {
 
     (0..array.len())
         .map(|i| {
-            if let Some(value) = extract_unsigned_int(array, i) {
-                Ok(value)
+            let value = if let Some(value) = extract_unsigned_int(array, i) {
+                value
             } else if let Some(value) = extract_signed_int(array, i) {
                 u64::try_from(value).map_err(|_| {
                     DataFusionError::Execution(format!(
                         "Array element {value} does not fit SAM subtype 'I'"
                     ))
-                })
+                })?
             } else {
-                Err(DataFusionError::Execution(format!(
+                return Err(DataFusionError::Execution(format!(
                     "Unsupported array element type for SAM subtype 'I': {:?}",
                     array.data_type()
-                )))
-            }
-        })
-        .map(|result| {
-            result.and_then(|value| {
-                u32::try_from(value).map_err(|_| {
-                    DataFusionError::Execution(format!(
-                        "Array element {value} does not fit SAM subtype 'I'"
-                    ))
-                })
+                )));
+            };
+
+            u32::try_from(value).map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "Array element {value} does not fit SAM subtype 'I'"
+                ))
             })
         })
         .collect()

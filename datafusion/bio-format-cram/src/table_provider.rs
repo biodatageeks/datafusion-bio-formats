@@ -147,8 +147,8 @@ fn infer_type_from_cram_value(
         | CramValue::UInt8(_)
         | CramValue::Int16(_)
         | CramValue::UInt16(_)
-        | CramValue::Int32(_)
-        | CramValue::UInt32(_) => ('i', DataType::Int32),
+        | CramValue::Int32(_) => ('i', DataType::Int32),
+        CramValue::UInt32(_) => ('I', DataType::UInt32),
         CramValue::Float(_) => ('f', DataType::Float32),
         CramValue::String(_) => ('Z', DataType::Utf8),
         CramValue::Hex(_) => ('H', DataType::Utf8),
