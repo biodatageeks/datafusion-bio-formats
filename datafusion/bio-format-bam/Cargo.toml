@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-bam"
-version = "1.2.0"
+version = "1.3.0"
 description = "BAM file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
