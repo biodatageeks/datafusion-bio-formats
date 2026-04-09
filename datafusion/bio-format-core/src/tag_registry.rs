@@ -14,6 +14,97 @@ pub struct TagDefinition {
     pub description: String,
 }
 
+fn list_type(inner: DataType) -> DataType {
+    DataType::List(Arc::new(Field::new("item", inner, true)))
+}
+
+fn sam_array_subtype_to_arrow_type(subtype: char) -> Result<DataType, String> {
+    let inner = match subtype {
+        'c' => DataType::Int8,
+        'C' => DataType::UInt8,
+        's' => DataType::Int16,
+        'S' => DataType::UInt16,
+        'i' => DataType::Int32,
+        'I' => DataType::UInt32,
+        'f' => DataType::Float32,
+        _ => {
+            return Err(format!(
+                "unsupported array subtype '{subtype}'. Supported subtypes: c, C, s, S, i, I, f"
+            ));
+        }
+    };
+
+    Ok(list_type(inner))
+}
+
+fn arrow_list_inner_type(arrow_type: &DataType) -> Option<&DataType> {
+    match arrow_type {
+        DataType::List(field) => Some(field.data_type()),
+        _ => None,
+    }
+}
+
+/// Infer a SAM `B` array subtype from an Arrow list type.
+pub fn sam_array_subtype_from_arrow_type(arrow_type: &DataType) -> Option<char> {
+    match arrow_list_inner_type(arrow_type) {
+        Some(DataType::Int8) => Some('c'),
+        Some(DataType::UInt8) => Some('C'),
+        Some(DataType::Int16) => Some('s'),
+        Some(DataType::UInt16) => Some('S'),
+        Some(DataType::Int32) => Some('i'),
+        Some(DataType::UInt32) => Some('I'),
+        Some(DataType::Float32) => Some('f'),
+        _ => None,
+    }
+}
+
+/// Format a SAM tag type spec for schema metadata.
+///
+/// For array tags this returns `B:<subtype>` when the Arrow type carries a
+/// concrete list element type such as `UInt8` or `UInt16`.
+pub fn format_sam_tag_type(sam_type: char, arrow_type: &DataType) -> String {
+    if sam_type == 'B'
+        && let Some(subtype) = sam_array_subtype_from_arrow_type(arrow_type)
+    {
+        return format!("B:{subtype}");
+    }
+
+    sam_type.to_string()
+}
+
+/// Parse a SAM tag type spec from schema metadata.
+///
+/// Accepts either a scalar type like `i` or an array type like `B:C`.
+pub fn parse_sam_tag_type(type_spec: &str) -> Result<(char, Option<char>), String> {
+    let parts: Vec<&str> = type_spec.split(':').collect();
+
+    match parts.as_slice() {
+        [type_str] => {
+            if type_str.len() != 1 {
+                return Err(format!(
+                    "Invalid SAM tag type '{type_spec}': type must be a single character"
+                ));
+            }
+
+            Ok((type_str.chars().next().unwrap(), None))
+        }
+        ["B", subtype_str] => {
+            if subtype_str.len() != 1 {
+                return Err(format!(
+                    "Invalid SAM tag array type '{type_spec}': subtype must be a single character"
+                ));
+            }
+
+            let subtype = subtype_str.chars().next().unwrap();
+            sam_array_subtype_to_arrow_type(subtype)?;
+            Ok(('B', Some(subtype)))
+        }
+        _ => Err(format!(
+            "Invalid SAM tag type '{type_spec}': expected 'TYPE' or 'B:SUBTYPE'"
+        )),
+    }
+}
+
 /// Returns the registry of standard SAM specification alignment tags.
 ///
 /// Contains 63 tags from the SAM specification (SAMtags.pdf, 9 Sep 2024):
@@ -346,7 +437,7 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
         "ML".to_string(),
         TagDefinition {
             sam_type: 'B',
-            arrow_type: DataType::List(Arc::new(Field::new("item", DataType::UInt8, true))),
+            arrow_type: list_type(DataType::UInt8),
             description: "Base modification probabilities".to_string(),
         },
     );
@@ -479,7 +570,7 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
         "FZ".to_string(),
         TagDefinition {
             sam_type: 'B',
-            arrow_type: DataType::List(Arc::new(Field::new("item", DataType::UInt16, true))),
+            arrow_type: list_type(DataType::UInt16),
             description: "Flow signal intensities".to_string(),
         },
     );
@@ -524,7 +615,7 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
         "CG".to_string(),
         TagDefinition {
             sam_type: 'B',
-            arrow_type: DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+            arrow_type: list_type(DataType::UInt32),
             description:
                 "BAM-only: CIGAR in BAM's binary encoding if it consists of >65535 operators"
                     .to_string(),
@@ -594,8 +685,12 @@ pub fn get_known_tags() -> HashMap<String, TagDefinition> {
 
 /// Parse SAM-style type hint strings into a tag type map.
 ///
-/// Each hint is in `"TAG:TYPE"` format where TYPE is a SAM type character:
-/// - `i` → Int32, `f` → Float32, `Z` → Utf8, `A` → Utf8 (char), `H` → Utf8 (hex)
+/// Each hint is in `"TAG:TYPE"` or `"TAG:B:SUBTYPE"` format:
+/// - `c`, `s`, `i` → Int32
+/// - `C`, `S`, `I` → UInt32
+/// - `f` → Float32
+/// - `Z`, `A`, `H` → Utf8
+/// - `B:c|C|s|S|i|I|f` → typed Arrow list
 ///
 /// See <https://samtools.github.io/hts-specs/SAMtags.pdf> for tag type syntax.
 ///
@@ -604,27 +699,54 @@ pub fn parse_tag_type_hints(hints: &[String]) -> Result<HashMap<String, (char, D
     let mut map = HashMap::new();
     for hint in hints {
         let parts: Vec<&str> = hint.split(':').collect();
-        if parts.len() != 2 {
-            return Err(format!(
-                "Invalid tag type hint '{hint}': expected 'TAG:TYPE' format (e.g., 'pt:i', 'de:f', 'sv:Z')"
-            ));
+
+        match parts.as_slice() {
+            [tag, type_str] => {
+                if type_str.len() != 1 {
+                    return Err(format!(
+                        "Invalid tag type hint '{hint}': TYPE must be a single character"
+                    ));
+                }
+
+                let sam_type = type_str.chars().next().unwrap();
+                if sam_type == 'B' {
+                    return Err(format!(
+                        "Invalid tag type hint '{hint}': array type 'B' requires a subtype. \
+                         Use 'TAG:B:c|C|s|S|i|I|f'"
+                    ));
+                }
+                if !matches!(
+                    sam_type,
+                    'A' | 'c' | 'C' | 's' | 'S' | 'i' | 'I' | 'f' | 'Z' | 'H'
+                ) {
+                    return Err(format!(
+                        "Invalid tag type hint '{hint}': unsupported SAM type '{sam_type}'. \
+                         Supported types: A, c, C, s, S, i, I, f, Z, H"
+                    ));
+                }
+
+                let arrow_type = sam_tag_type_to_arrow_type(sam_type);
+                map.insert(tag.to_string(), (sam_type, arrow_type));
+            }
+            [tag, "B", subtype_str] => {
+                if subtype_str.len() != 1 {
+                    return Err(format!(
+                        "Invalid tag type hint '{hint}': array subtype must be a single character"
+                    ));
+                }
+
+                let subtype = subtype_str.chars().next().unwrap();
+                let arrow_type = sam_array_subtype_to_arrow_type(subtype)
+                    .map_err(|e| format!("Invalid tag type hint '{hint}': {e}"))?;
+
+                map.insert(tag.to_string(), ('B', arrow_type));
+            }
+            _ => {
+                return Err(format!(
+                    "Invalid tag type hint '{hint}': expected 'TAG:TYPE' or 'TAG:B:SUBTYPE' format"
+                ));
+            }
         }
-        let tag = parts[0];
-        let type_str = parts[1];
-        if type_str.len() != 1 {
-            return Err(format!(
-                "Invalid tag type hint '{hint}': TYPE must be a single character (i, f, Z, A, H)"
-            ));
-        }
-        let sam_type = type_str.chars().next().unwrap();
-        if !matches!(sam_type, 'A' | 'i' | 'f' | 'Z' | 'H') {
-            return Err(format!(
-                "Invalid tag type hint '{hint}': unsupported SAM type '{sam_type}'. \
-                 Supported types: A (character), i (integer), f (float), Z (string), H (hex)"
-            ));
-        }
-        let arrow_type = sam_tag_type_to_arrow_type(sam_type);
-        map.insert(tag.to_string(), (sam_type, arrow_type));
     }
     Ok(map)
 }
@@ -634,12 +756,14 @@ pub fn parse_tag_type_hints(hints: &[String]) -> Result<HashMap<String, (char, D
 /// See <https://samtools.github.io/hts-specs/SAMtags.pdf> for type definitions.
 pub fn sam_tag_type_to_arrow_type(sam_type: char) -> DataType {
     match sam_type {
-        'A' => DataType::Utf8,    // Character
-        'i' => DataType::Int32,   // Integer
-        'f' => DataType::Float32, // Float
-        'Z' => DataType::Utf8,    // String
-        'H' => DataType::Utf8,    // Hex string
-        _ => DataType::Utf8,      // Default to string for unknown types
+        'A' => DataType::Utf8,               // Character
+        'c' | 's' | 'i' => DataType::Int32,  // Signed integer
+        'C' | 'S' | 'I' => DataType::UInt32, // Unsigned integer
+        'f' => DataType::Float32,            // Float
+        'Z' => DataType::Utf8,               // String
+        'H' => DataType::Utf8,               // Hex string
+        'B' => list_type(DataType::Int32),
+        _ => DataType::Utf8, // Default to string for unknown types
     }
 }
 
@@ -648,29 +772,21 @@ pub fn sam_tag_type_to_arrow_type(sam_type: char) -> DataType {
 pub fn infer_type_from_noodles_value(value: &Value) -> (char, DataType) {
     match value {
         Value::Character(_) => ('A', DataType::Utf8),
-        Value::Int8(_)
-        | Value::UInt8(_)
-        | Value::Int16(_)
-        | Value::UInt16(_)
-        | Value::Int32(_)
-        | Value::UInt32(_) => ('i', DataType::Int32),
+        Value::Int8(_) | Value::UInt8(_) | Value::Int16(_) | Value::UInt16(_) | Value::Int32(_) => {
+            ('i', DataType::Int32)
+        }
+        Value::UInt32(_) => ('I', DataType::UInt32),
         Value::Float(_) => ('f', DataType::Float32),
         Value::String(_) => ('Z', DataType::Utf8),
         Value::Hex(_) => ('H', DataType::Utf8),
         Value::Array(arr) => match arr {
-            Array::Int8(_)
-            | Array::UInt8(_)
-            | Array::Int16(_)
-            | Array::UInt16(_)
-            | Array::Int32(_)
-            | Array::UInt32(_) => (
-                'B',
-                DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
-            ),
-            Array::Float(_) => (
-                'B',
-                DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
-            ),
+            Array::Int8(_) => ('B', list_type(DataType::Int8)),
+            Array::UInt8(_) => ('B', list_type(DataType::UInt8)),
+            Array::Int16(_) => ('B', list_type(DataType::Int16)),
+            Array::UInt16(_) => ('B', list_type(DataType::UInt16)),
+            Array::Int32(_) => ('B', list_type(DataType::Int32)),
+            Array::UInt32(_) => ('B', list_type(DataType::UInt32)),
+            Array::Float(_) => ('B', list_type(DataType::Float32)),
         },
     }
 }
@@ -705,10 +821,20 @@ mod tests {
     #[test]
     fn test_type_mapping() {
         assert_eq!(sam_tag_type_to_arrow_type('i'), DataType::Int32);
+        assert_eq!(sam_tag_type_to_arrow_type('I'), DataType::UInt32);
         assert_eq!(sam_tag_type_to_arrow_type('Z'), DataType::Utf8);
         assert_eq!(sam_tag_type_to_arrow_type('A'), DataType::Utf8);
         assert_eq!(sam_tag_type_to_arrow_type('f'), DataType::Float32);
         assert_eq!(sam_tag_type_to_arrow_type('H'), DataType::Utf8);
+        assert_eq!(sam_tag_type_to_arrow_type('B'), list_type(DataType::Int32));
+        assert_eq!(
+            sam_array_subtype_from_arrow_type(&list_type(DataType::UInt8)),
+            Some('C')
+        );
+        assert_eq!(
+            format_sam_tag_type('B', &list_type(DataType::UInt16)),
+            "B:S"
+        );
     }
 
     #[test]
@@ -723,12 +849,22 @@ mod tests {
 
     #[test]
     fn test_parse_tag_type_hints() {
-        let hints = vec!["pt:i".to_string(), "de:f".to_string(), "sv:Z".to_string()];
+        let hints = vec![
+            "pt:i".to_string(),
+            "de:f".to_string(),
+            "sv:Z".to_string(),
+            "ui:I".to_string(),
+            "ml:B:C".to_string(),
+            "cg:B:I".to_string(),
+        ];
         let map = parse_tag_type_hints(&hints).unwrap();
-        assert_eq!(map.len(), 3);
+        assert_eq!(map.len(), 6);
         assert_eq!(map["pt"], ('i', DataType::Int32));
         assert_eq!(map["de"], ('f', DataType::Float32));
         assert_eq!(map["sv"], ('Z', DataType::Utf8));
+        assert_eq!(map["ui"], ('I', DataType::UInt32));
+        assert_eq!(map["ml"], ('B', list_type(DataType::UInt8)));
+        assert_eq!(map["cg"], ('B', list_type(DataType::UInt32)));
     }
 
     #[test]
@@ -739,5 +875,35 @@ mod tests {
         // Unsupported SAM type character
         assert!(parse_tag_type_hints(&["pt:X".to_string()]).is_err());
         assert!(parse_tag_type_hints(&["pt:z".to_string()]).is_err());
+        assert!(parse_tag_type_hints(&["ml:B".to_string()]).is_err());
+        assert!(parse_tag_type_hints(&["ml:B:Q".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_parse_sam_tag_type() {
+        assert_eq!(parse_sam_tag_type("i").unwrap(), ('i', None));
+        assert_eq!(parse_sam_tag_type("B:C").unwrap(), ('B', Some('C')));
+        assert!(parse_sam_tag_type("B:Q").is_err());
+        assert!(parse_sam_tag_type("B:C:extra").is_err());
+    }
+
+    #[test]
+    fn test_infer_scalar_integer_types() {
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::Int8(-1)),
+            ('i', DataType::Int32)
+        );
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::UInt8(1)),
+            ('i', DataType::Int32)
+        );
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::Int16(-1)),
+            ('i', DataType::Int32)
+        );
+        assert_eq!(
+            infer_type_from_noodles_value(&Value::UInt32(u32::MAX)),
+            ('I', DataType::UInt32)
+        );
     }
 }

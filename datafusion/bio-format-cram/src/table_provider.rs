@@ -17,7 +17,7 @@ use datafusion_bio_format_core::index_utils::discover_cram_index;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
-use datafusion_bio_format_core::tag_registry::get_known_tags;
+use datafusion_bio_format_core::tag_registry::{format_sam_tag_type, get_known_tags};
 use datafusion_bio_format_core::{
     BAM_BINARY_CIGAR_KEY, BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY,
     BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
@@ -111,7 +111,10 @@ fn determine_schema(
                 ('Z', DataType::Utf8, "Unknown tag".to_string())
             };
 
-            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), sam_type.to_string());
+            field_metadata.insert(
+                BAM_TAG_TYPE_KEY.to_string(),
+                format_sam_tag_type(sam_type, &arrow_type),
+            );
             field_metadata.insert(BAM_TAG_DESCRIPTION_KEY.to_string(), description);
 
             fields.push(Field::new(tag.clone(), arrow_type, true).with_metadata(field_metadata));
@@ -144,21 +147,41 @@ fn infer_type_from_cram_value(
         | CramValue::UInt8(_)
         | CramValue::Int16(_)
         | CramValue::UInt16(_)
-        | CramValue::Int32(_)
-        | CramValue::UInt32(_) => ('i', DataType::Int32),
+        | CramValue::Int32(_) => ('i', DataType::Int32),
+        CramValue::UInt32(_) => ('I', DataType::UInt32),
         CramValue::Float(_) => ('f', DataType::Float32),
         CramValue::String(_) => ('Z', DataType::Utf8),
         CramValue::Hex(_) => ('H', DataType::Utf8),
         CramValue::Array(arr) => {
             use noodles_sam::alignment::record_buf::data::field::value::Array as CramArray;
             match arr {
+                CramArray::Int8(_) => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::Int8, true))),
+                ),
+                CramArray::UInt8(_) => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt8, true))),
+                ),
+                CramArray::Int16(_) => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::Int16, true))),
+                ),
+                CramArray::UInt16(_) => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt16, true))),
+                ),
+                CramArray::Int32(_) => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                ),
+                CramArray::UInt32(_) => (
+                    'B',
+                    DataType::List(Arc::new(Field::new("item", DataType::UInt32, true))),
+                ),
                 CramArray::Float(_) => (
                     'B',
                     DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
-                ),
-                _ => (
-                    'B',
-                    DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
                 ),
             }
         }

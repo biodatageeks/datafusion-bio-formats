@@ -28,7 +28,7 @@ use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures::SinkExt;
 use futures_util::{StreamExt, TryStreamExt};
-use log::{debug, info};
+use log::{debug, info, warn};
 use noodles_bam as bam;
 use noodles_csi::binning_index::BinningIndex as _;
 use noodles_sam::alignment::Record;
@@ -37,6 +37,7 @@ use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
+use std::io;
 use std::sync::Arc;
 
 #[allow(dead_code)]
@@ -228,12 +229,12 @@ fn append_tag_value(
     value: Value<'_>,
 ) -> Result<(), ArrowError> {
     match value {
-        Value::Int8(v) => append_int_value(builder, expected_type, v as i32),
-        Value::UInt8(v) => append_int_value(builder, expected_type, v as i32),
-        Value::Int16(v) => append_int_value(builder, expected_type, v as i32),
-        Value::UInt16(v) => append_int_value(builder, expected_type, v as i32),
-        Value::Int32(v) => append_int_value(builder, expected_type, v),
-        Value::UInt32(v) => append_int_value(builder, expected_type, v as i32),
+        Value::Int8(v) => append_int_value(builder, expected_type, i64::from(v)),
+        Value::UInt8(v) => append_uint_value(builder, expected_type, u32::from(v)),
+        Value::Int16(v) => append_int_value(builder, expected_type, i64::from(v)),
+        Value::UInt16(v) => append_uint_value(builder, expected_type, u32::from(v)),
+        Value::Int32(v) => append_int_value(builder, expected_type, i64::from(v)),
+        Value::UInt32(v) => append_uint_value(builder, expected_type, v),
         Value::Float(f) => {
             if matches!(expected_type, DataType::Utf8) {
                 builder.append_string(&f.to_string())
@@ -246,8 +247,10 @@ fn append_tag_value(
             Err(_) => builder.append_null(),
         },
         Value::Character(c) => {
-            if matches!(expected_type, DataType::Int32) {
-                builder.append_int(c as i32)
+            if matches!(expected_type, DataType::UInt32) {
+                builder.append_uint(u32::from(c))
+            } else if matches!(expected_type, DataType::Int32) {
+                builder.append_int(i32::from(c))
             } else {
                 let ch = char::from(c);
                 builder.append_string(&ch.to_string())
@@ -255,60 +258,12 @@ fn append_tag_value(
         }
         Value::Hex(h) => {
             let bytes: &[u8] = h.as_ref();
-            let hex_str = hex::encode(bytes);
-            builder.append_string(&hex_str)
+            match std::str::from_utf8(bytes) {
+                Ok(hex_str) => builder.append_string(hex_str),
+                Err(_) => builder.append_null(),
+            }
         }
-        Value::Array(arr) => match arr {
-            SamArray::Int8(vals) => {
-                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                match vec {
-                    Ok(v) => builder.append_array_int(v),
-                    Err(_) => builder.append_null(),
-                }
-            }
-            SamArray::UInt8(vals) => {
-                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                match vec {
-                    Ok(v) => builder.append_array_int(v),
-                    Err(_) => builder.append_null(),
-                }
-            }
-            SamArray::Int16(vals) => {
-                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                match vec {
-                    Ok(v) => builder.append_array_int(v),
-                    Err(_) => builder.append_null(),
-                }
-            }
-            SamArray::UInt16(vals) => {
-                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                match vec {
-                    Ok(v) => builder.append_array_int(v),
-                    Err(_) => builder.append_null(),
-                }
-            }
-            SamArray::Int32(vals) => {
-                let vec: Result<Vec<i32>, _> = vals.iter().collect();
-                match vec {
-                    Ok(v) => builder.append_array_int(v),
-                    Err(_) => builder.append_null(),
-                }
-            }
-            SamArray::UInt32(vals) => {
-                let vec: Result<Vec<i32>, _> = vals.iter().map(|v| v.map(|x| x as i32)).collect();
-                match vec {
-                    Ok(v) => builder.append_array_int(v),
-                    Err(_) => builder.append_null(),
-                }
-            }
-            SamArray::Float(vals) => {
-                let vec: Result<Vec<f32>, _> = vals.iter().collect();
-                match vec {
-                    Ok(v) => builder.append_array_float(v),
-                    Err(_) => builder.append_null(),
-                }
-            }
-        },
+        Value::Array(arr) => append_array_value(builder, expected_type, arr),
     }
 }
 
@@ -342,7 +297,10 @@ fn load_tags<R: Record>(
                     append_tag_value(builder, expected_type, value)?;
                 }
             }
-            Err(_) => continue, // skip malformed tags
+            Err(e) => {
+                warn!("Skipping malformed BAM tag while loading optional fields: {e}");
+                continue;
+            }
         }
     }
 
@@ -365,17 +323,329 @@ fn load_tags<R: Record>(
 fn append_int_value(
     builder: &mut OptionalField,
     expected_type: &DataType,
-    value: i32,
+    value: i64,
 ) -> Result<(), ArrowError> {
     if matches!(expected_type, DataType::Utf8) {
         // Integer stored as character code - convert to ASCII char
-        if let Some(ch) = char::from_u32(value as u32) {
+        if let Some(ch) = u32::try_from(value).ok().and_then(char::from_u32) {
             builder.append_string(&ch.to_string())
         } else {
             builder.append_string(&value.to_string())
         }
+    } else if matches!(expected_type, DataType::UInt32) {
+        let converted = u32::try_from(value).map_err(|_| {
+            ArrowError::SchemaError(format!("integer value {value} does not fit UInt32"))
+        })?;
+        builder.append_uint(converted)
     } else {
-        builder.append_int(value)
+        let converted = i32::try_from(value).map_err(|_| {
+            ArrowError::SchemaError(format!("integer value {value} does not fit Int32"))
+        })?;
+        builder.append_int(converted)
+    }
+}
+
+fn append_uint_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    value: u32,
+) -> Result<(), ArrowError> {
+    if matches!(expected_type, DataType::Utf8) {
+        if let Some(ch) = char::from_u32(value) {
+            builder.append_string(&ch.to_string())
+        } else {
+            builder.append_string(&value.to_string())
+        }
+    } else if matches!(expected_type, DataType::UInt32) {
+        builder.append_uint(value)
+    } else {
+        let converted = i32::try_from(value).map_err(|_| {
+            ArrowError::SchemaError(format!("unsigned integer value {value} does not fit Int32"))
+        })?;
+        builder.append_int(converted)
+    }
+}
+
+fn type_mismatch(expected_type: &DataType, actual: &str) -> ArrowError {
+    ArrowError::SchemaError(format!(
+        "tag value type mismatch: expected {expected_type:?}, got {actual}"
+    ))
+}
+
+fn collect_array_values<T, U>(
+    iter: impl Iterator<Item = io::Result<T>>,
+    mut convert: impl FnMut(T) -> Result<U, ArrowError>,
+) -> Result<Vec<U>, ArrowError> {
+    iter.map(|result| {
+        result
+            .map_err(|e| ArrowError::ExternalError(Box::new(e)))
+            .and_then(&mut convert)
+    })
+    .collect()
+}
+
+fn append_array_value(
+    builder: &mut OptionalField,
+    expected_type: &DataType,
+    arr: SamArray<'_>,
+) -> Result<(), ArrowError> {
+    let DataType::List(field) = expected_type else {
+        return Err(type_mismatch(expected_type, "array"));
+    };
+
+    match field.data_type() {
+        DataType::Int8 => match arr {
+            SamArray::Int8(vals) => {
+                builder.append_array_int8_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
+            }
+            SamArray::UInt8(vals) => builder.append_array_int8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Int16(vals) => builder.append_array_int8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt16(vals) => builder.append_array_int8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Int32(vals) => builder.append_array_int8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt32(vals) => builder.append_array_int8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
+        },
+        DataType::UInt8 => match arr {
+            SamArray::Int8(vals) => builder.append_array_uint8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt8(vals) => {
+                builder.append_array_uint8_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
+            }
+            SamArray::Int16(vals) => builder.append_array_uint8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt16(vals) => builder.append_array_uint8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Int32(vals) => builder.append_array_uint8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt32(vals) => builder.append_array_uint8_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u8::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
+        },
+        DataType::Int16 => match arr {
+            SamArray::Int8(vals) => builder.append_array_int16_iter(
+                collect_array_values(vals.iter(), |value| Ok(i16::from(value)))?.into_iter(),
+            ),
+            SamArray::UInt8(vals) => builder.append_array_int16_iter(
+                collect_array_values(vals.iter(), |value| Ok(i16::from(value)))?.into_iter(),
+            ),
+            SamArray::Int16(vals) => {
+                builder.append_array_int16_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
+            }
+            SamArray::UInt16(vals) => builder.append_array_int16_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i16::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int16"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Int32(vals) => builder.append_array_int16_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i16::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int16"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt32(vals) => builder.append_array_int16_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i16::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int16"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
+        },
+        DataType::UInt16 => match arr {
+            SamArray::Int8(vals) => builder.append_array_uint16_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u16::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!(
+                            "array element {value} does not fit UInt16"
+                        ))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt8(vals) => builder.append_array_uint16_iter(
+                collect_array_values(vals.iter(), |value| Ok(u16::from(value)))?.into_iter(),
+            ),
+            SamArray::Int16(vals) => builder.append_array_uint16_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u16::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!(
+                            "array element {value} does not fit UInt16"
+                        ))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt16(vals) => {
+                builder.append_array_uint16_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
+            }
+            SamArray::Int32(vals) => builder.append_array_uint16_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u16::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!(
+                            "array element {value} does not fit UInt16"
+                        ))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt32(vals) => builder.append_array_uint16_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u16::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!(
+                            "array element {value} does not fit UInt16"
+                        ))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
+        },
+        DataType::Int32 => match arr {
+            SamArray::Int8(vals) => builder.append_array_int_iter(
+                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
+            ),
+            SamArray::UInt8(vals) => builder.append_array_int_iter(
+                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
+            ),
+            SamArray::Int16(vals) => builder.append_array_int_iter(
+                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
+            ),
+            SamArray::UInt16(vals) => builder.append_array_int_iter(
+                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
+            ),
+            SamArray::Int32(vals) => {
+                builder.append_array_int_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
+            }
+            SamArray::UInt32(vals) => builder.append_array_int_iter(
+                collect_array_values(vals.iter(), |value| {
+                    i32::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!("array element {value} does not fit Int32"))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
+        },
+        DataType::UInt32 => match arr {
+            SamArray::Int8(vals) => builder.append_array_uint32_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u32::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!(
+                            "array element {value} does not fit UInt32"
+                        ))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt8(vals) => builder.append_array_uint32_iter(
+                collect_array_values(vals.iter(), |value| Ok(u32::from(value)))?.into_iter(),
+            ),
+            SamArray::Int16(vals) => builder.append_array_uint32_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u32::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!(
+                            "array element {value} does not fit UInt32"
+                        ))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt16(vals) => builder.append_array_uint32_iter(
+                collect_array_values(vals.iter(), |value| Ok(u32::from(value)))?.into_iter(),
+            ),
+            SamArray::Int32(vals) => builder.append_array_uint32_iter(
+                collect_array_values(vals.iter(), |value| {
+                    u32::try_from(value).map_err(|_| {
+                        ArrowError::SchemaError(format!(
+                            "array element {value} does not fit UInt32"
+                        ))
+                    })
+                })?
+                .into_iter(),
+            ),
+            SamArray::UInt32(vals) => {
+                builder.append_array_uint32_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
+            }
+            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
+        },
+        DataType::Float32 => match arr {
+            SamArray::Float(vals) => {
+                builder.append_array_float_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
+            }
+            _ => Err(type_mismatch(expected_type, "integer array")),
+        },
+        other => Err(type_mismatch(other, "unsupported array builder")),
     }
 }
 

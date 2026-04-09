@@ -1,6 +1,7 @@
 use datafusion::arrow::array::{
-    Array, ArrayBuilder, ArrayRef, BooleanBuilder, Float32Builder, Int32Builder, ListBuilder,
-    StringBuilder, StructBuilder,
+    Array, ArrayBuilder, ArrayRef, BooleanBuilder, Float32Builder, Int8Builder, Int16Builder,
+    Int32Builder, ListBuilder, StringBuilder, StructBuilder, UInt8Builder, UInt16Builder,
+    UInt32Builder,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Fields};
 use datafusion::arrow::error::ArrowError;
@@ -19,10 +20,22 @@ pub struct Attribute {
 /// Supports various data types including scalar and array types for building Arrow columns
 #[derive(Debug)]
 pub enum OptionalField {
+    /// Builder for UInt32 scalar values
+    UInt32Builder(UInt32Builder),
     /// Builder for Int32 scalar values
     Int32Builder(Int32Builder),
+    /// Builder for Int8 array values
+    ArrayInt8Builder(ListBuilder<Int8Builder>),
+    /// Builder for UInt8 array values
+    ArrayUInt8Builder(ListBuilder<UInt8Builder>),
+    /// Builder for Int16 array values
+    ArrayInt16Builder(ListBuilder<Int16Builder>),
+    /// Builder for UInt16 array values
+    ArrayUInt16Builder(ListBuilder<UInt16Builder>),
     /// Builder for Int32 array values
     ArrayInt32Builder(ListBuilder<Int32Builder>),
+    /// Builder for UInt32 array values
+    ArrayUInt32Builder(ListBuilder<UInt32Builder>),
     /// Builder for Float32 scalar values
     Float32Builder(Float32Builder),
     /// Builder for Float32 array values
@@ -56,6 +69,9 @@ impl OptionalField {
     /// Returns an error if the data type is not supported
     pub fn new(data_type: &DataType, batch_size: usize) -> Result<OptionalField, ArrowError> {
         match data_type {
+            DataType::UInt32 => Ok(OptionalField::UInt32Builder(UInt32Builder::with_capacity(
+                batch_size,
+            ))),
             DataType::Int32 => Ok(OptionalField::Int32Builder(Int32Builder::with_capacity(
                 batch_size,
             ))),
@@ -71,8 +87,30 @@ impl OptionalField {
             )),
 
             DataType::List(f) => match f.data_type() {
+                DataType::Int8 => Ok(OptionalField::ArrayInt8Builder(ListBuilder::with_capacity(
+                    Int8Builder::with_capacity(batch_size),
+                    batch_size,
+                ))),
+                DataType::UInt8 => Ok(OptionalField::ArrayUInt8Builder(
+                    ListBuilder::with_capacity(UInt8Builder::with_capacity(batch_size), batch_size),
+                )),
+                DataType::Int16 => Ok(OptionalField::ArrayInt16Builder(
+                    ListBuilder::with_capacity(Int16Builder::with_capacity(batch_size), batch_size),
+                )),
+                DataType::UInt16 => Ok(OptionalField::ArrayUInt16Builder(
+                    ListBuilder::with_capacity(
+                        UInt16Builder::with_capacity(batch_size),
+                        batch_size,
+                    ),
+                )),
                 DataType::Int32 => Ok(OptionalField::ArrayInt32Builder(
                     ListBuilder::with_capacity(Int32Builder::with_capacity(batch_size), batch_size),
+                )),
+                DataType::UInt32 => Ok(OptionalField::ArrayUInt32Builder(
+                    ListBuilder::with_capacity(
+                        UInt32Builder::with_capacity(batch_size),
+                        batch_size,
+                    ),
                 )),
                 DataType::Float32 => Ok(OptionalField::ArrayFloat32Builder(
                     ListBuilder::with_capacity(
@@ -185,6 +223,22 @@ impl OptionalField {
         }
     }
 
+    /// Appends an unsigned integer value to the builder.
+    pub fn append_uint(&mut self, value: u32) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::UInt32Builder(builder) => {
+                builder.append_value(value);
+                Ok(())
+            }
+            OptionalField::ArrayUInt32Builder(builder) => {
+                builder.values().append_value(value);
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected UInt32Builder".into())),
+        }
+    }
+
     /// Appends a boolean value to the builder
     ///
     /// # Arguments
@@ -231,6 +285,95 @@ impl OptionalField {
                 Ok(())
             }
             _ => Err(ArrowError::SchemaError("Expected ArrayInt32Builder".into())),
+        }
+    }
+
+    /// Appends Int8 values from an iterator as an array element.
+    pub fn append_array_int8_iter(
+        &mut self,
+        iter: impl Iterator<Item = i8>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayInt8Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayInt8Builder".into())),
+        }
+    }
+
+    /// Appends UInt8 values from an iterator as an array element.
+    pub fn append_array_uint8_iter(
+        &mut self,
+        iter: impl Iterator<Item = u8>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayUInt8Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayUInt8Builder".into())),
+        }
+    }
+
+    /// Appends Int16 values from an iterator as an array element.
+    pub fn append_array_int16_iter(
+        &mut self,
+        iter: impl Iterator<Item = i16>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayInt16Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError("Expected ArrayInt16Builder".into())),
+        }
+    }
+
+    /// Appends UInt16 values from an iterator as an array element.
+    pub fn append_array_uint16_iter(
+        &mut self,
+        iter: impl Iterator<Item = u16>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayUInt16Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError(
+                "Expected ArrayUInt16Builder".into(),
+            )),
+        }
+    }
+
+    /// Appends UInt32 values from an iterator as an array element.
+    pub fn append_array_uint32_iter(
+        &mut self,
+        iter: impl Iterator<Item = u32>,
+    ) -> Result<(), ArrowError> {
+        match self {
+            OptionalField::ArrayUInt32Builder(builder) => {
+                for v in iter {
+                    builder.values().append_value(v);
+                }
+                builder.append(true);
+                Ok(())
+            }
+            _ => Err(ArrowError::SchemaError(
+                "Expected ArrayUInt32Builder".into(),
+            )),
         }
     }
 
@@ -568,11 +711,35 @@ impl OptionalField {
     /// This method does not return errors in practice
     pub fn append_null(&mut self) -> Result<(), ArrowError> {
         match self {
+            OptionalField::UInt32Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
             OptionalField::Int32Builder(builder) => {
                 builder.append_null();
                 Ok(())
             }
+            OptionalField::ArrayInt8Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayUInt8Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayInt16Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayUInt16Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
             OptionalField::ArrayInt32Builder(builder) => {
+                builder.append_null();
+                Ok(())
+            }
+            OptionalField::ArrayUInt32Builder(builder) => {
                 builder.append_null();
                 Ok(())
             }
@@ -618,8 +785,14 @@ impl OptionalField {
     /// This method does not return errors in practice
     pub fn finish(&mut self) -> Result<ArrayRef, ArrowError> {
         match self {
+            OptionalField::UInt32Builder(builder) => Ok(Arc::new(builder.finish())),
             OptionalField::Int32Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayInt8Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayUInt8Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayInt16Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayUInt16Builder(builder) => Ok(Arc::new(builder.finish())),
             OptionalField::ArrayInt32Builder(builder) => Ok(Arc::new(builder.finish())),
+            OptionalField::ArrayUInt32Builder(builder) => Ok(Arc::new(builder.finish())),
             OptionalField::Utf8Builder(builder) => Ok(Arc::new(builder.finish())),
             OptionalField::ArrayUtf8Builder(builder) => Ok(Arc::new(builder.finish())),
             OptionalField::Float32Builder(builder) => Ok(Arc::new(builder.finish())),

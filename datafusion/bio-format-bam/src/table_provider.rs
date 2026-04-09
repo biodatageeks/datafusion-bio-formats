@@ -20,7 +20,7 @@ use datafusion_bio_format_core::index_utils::discover_bam_index;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
-use datafusion_bio_format_core::tag_registry::get_known_tags;
+use datafusion_bio_format_core::tag_registry::{format_sam_tag_type, get_known_tags};
 use datafusion_bio_format_core::{
     BAM_BINARY_CIGAR_KEY, BAM_SORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY,
     BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
@@ -115,7 +115,10 @@ fn determine_schema(
                 ('Z', DataType::Utf8, "Unknown tag".to_string())
             };
 
-            field_metadata.insert(BAM_TAG_TYPE_KEY.to_string(), sam_type.to_string());
+            field_metadata.insert(
+                BAM_TAG_TYPE_KEY.to_string(),
+                format_sam_tag_type(sam_type, &arrow_type),
+            );
             field_metadata.insert(BAM_TAG_DESCRIPTION_KEY.to_string(), description);
 
             fields.push(Field::new(tag.clone(), arrow_type, true).with_metadata(field_metadata));
