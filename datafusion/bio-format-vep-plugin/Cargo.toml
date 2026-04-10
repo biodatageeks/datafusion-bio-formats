@@ -1,0 +1,22 @@
+[package]
+name = "datafusion-bio-format-vep-plugin"
+version = "1.2.0"
+description = "VEP plugin source format support for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[dependencies]
+datafusion.workspace = true
+tokio.workspace = true
+futures.workspace = true
+flate2.workspace = true
+once_cell = "1.17"
+tempfile = "3"
+datafusion-bio-format-vcf = { path = "../bio-format-vcf" }
+
+[dev-dependencies]
+tempfile = "3"
