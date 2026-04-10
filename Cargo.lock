@@ -1315,6 +1315,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-bio-format-vep-plugin"
+version = "1.2.0"
+dependencies = [
+ "datafusion",
+ "datafusion-bio-format-vcf",
+ "flate2",
+ "futures",
+ "once_cell",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "datafusion-catalog"
 version = "50.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
