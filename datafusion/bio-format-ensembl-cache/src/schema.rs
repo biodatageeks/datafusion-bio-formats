@@ -167,6 +167,7 @@ pub(crate) fn transcript_schema(
         Field::new("gene_symbol", DataType::Utf8, true),
         Field::new("gene_symbol_source", DataType::Utf8, true),
         Field::new("gene_hgnc_id", DataType::Utf8, true),
+        Field::new("gene_hgnc_id_native", DataType::Utf8, true),
         Field::new("refseq_id", DataType::Utf8, true),
         Field::new("cds_start", DataType::Int64, true),
         Field::new("cds_end", DataType::Int64, true),

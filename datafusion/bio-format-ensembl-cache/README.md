@@ -98,7 +98,8 @@ of transcripts that would otherwise have no exon entries.
 | `gene_stable_id` | Utf8 | yes | Parent gene ID (ENSG...) |
 | `gene_symbol` | Utf8 | yes | Gene symbol (e.g. BRCA1) |
 | `gene_symbol_source` | Utf8 | yes | Gene symbol source (e.g. HGNC) |
-| `gene_hgnc_id` | Utf8 | yes | HGNC ID |
+| `gene_hgnc_id` | Utf8 | yes | HGNC ID (native value from raw VEP object, no propagation) |
+| `gene_hgnc_id_native` | Utf8 | yes | Native HGNC ID parsed directly from raw VEP object (identical to `gene_hgnc_id`; provided for downstream consumers that need an explicit native-provenance column) |
 | `refseq_id` | Utf8 | yes | RefSeq transcript ID |
 | `cds_start` | Int64 | yes | CDS genomic start |
 | `cds_end` | Int64 | yes | CDS genomic end |

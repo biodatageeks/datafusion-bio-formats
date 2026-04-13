@@ -35,6 +35,7 @@ pub(crate) struct TranscriptColumnIndices {
     gene_symbol: Option<usize>,
     gene_symbol_source: Option<usize>,
     gene_hgnc_id: Option<usize>,
+    gene_hgnc_id_native: Option<usize>,
     refseq_id: Option<usize>,
     coding_region_start: Option<usize>,
     coding_region_end: Option<usize>,
@@ -127,6 +128,7 @@ impl TranscriptColumnIndices {
             gene_symbol: col_map.get("gene_symbol"),
             gene_symbol_source: col_map.get("gene_symbol_source"),
             gene_hgnc_id: col_map.get("gene_hgnc_id"),
+            gene_hgnc_id_native: col_map.get("gene_hgnc_id_native"),
             refseq_id: col_map.get("refseq_id"),
             coding_region_start: col_map.get("cds_start"),
             coding_region_end: col_map.get("cds_end"),
@@ -1092,16 +1094,18 @@ pub(crate) fn parse_transcript_line_into(
             .as_ref(),
         );
     }
-    if let Some(idx) = col_idx.gene_hgnc_id {
-        batch.set_opt_utf8_owned(
-            idx,
-            json_str(
-                object
-                    .get("gene_hgnc_id")
-                    .or_else(|| object.get("_gene_hgnc_id")),
-            )
-            .as_ref(),
+    if col_idx.gene_hgnc_id.is_some() || col_idx.gene_hgnc_id_native.is_some() {
+        let native_value = json_str(
+            object
+                .get("gene_hgnc_id")
+                .or_else(|| object.get("_gene_hgnc_id")),
         );
+        if let Some(idx) = col_idx.gene_hgnc_id {
+            batch.set_opt_utf8_owned(idx, native_value.as_ref());
+        }
+        if let Some(idx) = col_idx.gene_hgnc_id_native {
+            batch.set_opt_utf8_owned(idx, native_value.as_ref());
+        }
     }
     if let Some(idx) = col_idx.refseq_id {
         let refseq_id = json_str(object.get("refseq_id").or_else(|| object.get("_refseq")))
@@ -1611,13 +1615,18 @@ fn append_transcript_storable_row_into(
         );
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
-    if let Some(idx) = col_idx.gene_hgnc_id {
-        let value = sv_str(
+    if col_idx.gene_hgnc_id.is_some() || col_idx.gene_hgnc_id_native.is_some() {
+        let native_value = sv_str(
             object
                 .get("gene_hgnc_id")
                 .or_else(|| object.get("_gene_hgnc_id")),
         );
-        batch.set_opt_utf8_owned(idx, value.as_ref());
+        if let Some(idx) = col_idx.gene_hgnc_id {
+            batch.set_opt_utf8_owned(idx, native_value.as_ref());
+        }
+        if let Some(idx) = col_idx.gene_hgnc_id_native {
+            batch.set_opt_utf8_owned(idx, native_value.as_ref());
+        }
     }
     if let Some(idx) = col_idx.refseq_id {
         let value =

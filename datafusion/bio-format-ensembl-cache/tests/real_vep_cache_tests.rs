@@ -20,7 +20,7 @@ use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, ExonTableProvider,
     MotifFeatureTableProvider, RegulatoryFeatureTableProvider, TranscriptTableProvider,
-    TranslationTableProvider, VEP_CACHE_REGION_SIZE_BP, VariationTableProvider, build_export_query,
+    TranslationTableProvider, VariationTableProvider, build_export_query,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -1108,13 +1108,14 @@ async fn real_factory_all_entities() -> datafusion::common::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// HGNC_ID propagation locality (biodatageeks/datafusion-bio-functions#105, #108)
+// HGNC_ID native column (biodatageeks/datafusion-bio-formats#166)
 // ---------------------------------------------------------------------------
 
-/// After applying the HGNC propagation query, every transcript in the same VEP
-/// cache region as an HGNC-bearing sibling should itself have a non-null value.
+/// The export query no longer propagates gene_hgnc_id. Both gene_hgnc_id and
+/// gene_hgnc_id_native should be identical — reflecting the native VEP cache
+/// object value with no backfill.
 #[tokio::test]
-async fn hgnc_propagation_fills_local_siblings() -> datafusion::common::Result<()> {
+async fn hgnc_native_column_matches_gene_hgnc_id() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::Transcript,
         EnsemblCacheOptions::new(fixture_path(REAL_FIXTURE)),
@@ -1126,39 +1127,51 @@ async fn hgnc_propagation_fills_local_siblings() -> datafusion::common::Result<(
     let schema: Arc<datafusion::arrow::datatypes::Schema> =
         Arc::new(ctx.table("tx").await?.schema().as_arrow().clone());
 
-    // Use the same propagation + dedup query used by storable_to_parquet.
-    let propagation_query =
-        build_export_query(EnsemblEntityKind::Transcript, "tx", None, Some(&schema));
+    // Use the same export query used by storable_to_parquet.
+    let export_query = build_export_query(EnsemblEntityKind::Transcript, "tx", None, Some(&schema));
 
-    let region_expr = format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
-
-    // After propagation, count transcripts that still miss gene_hgnc_id even
-    // though the same `(chrom, gene_symbol, 1 Mb region)` contains a sibling
-    // with a non-null value — should be zero.
+    // Every row: gene_hgnc_id must equal gene_hgnc_id_native (both are the
+    // raw VEP object value, no propagation applied).
     let query = format!(
-        "WITH propagated AS (\
-             {propagation_query}\
-         ), local_hgnc AS (\
-             SELECT chrom, gene_symbol, {region_expr} AS hgnc_region \
-             FROM tx \
-             WHERE gene_hgnc_id IS NOT NULL AND gene_symbol IS NOT NULL \
-             GROUP BY chrom, gene_symbol, {region_expr}\
-         ) \
-         SELECT COUNT(*) \
-         FROM propagated p \
-         JOIN local_hgnc l \
-           ON p.chrom = l.chrom \
-          AND p.gene_symbol = l.gene_symbol \
-          AND CAST(FLOOR((p.start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT) = l.hgnc_region \
-         WHERE p.gene_hgnc_id IS NULL"
+        "WITH exported AS ({export_query}) \
+         SELECT COUNT(*) FROM exported \
+         WHERE gene_hgnc_id IS DISTINCT FROM gene_hgnc_id_native"
     );
 
     let batches = ctx.sql(&query).await?.collect().await?;
-    let remaining_gaps = first_i64(&batches);
+    let mismatches = first_i64(&batches);
     assert_eq!(
-        remaining_gaps, 0,
-        "after local HGNC propagation, {remaining_gaps} transcripts still missing gene_hgnc_id \
-         despite a sibling in the same cache region having it"
+        mismatches, 0,
+        "{mismatches} rows where gene_hgnc_id differs from gene_hgnc_id_native"
+    );
+
+    Ok(())
+}
+
+/// The gene_hgnc_id_native column should be present in the transcript schema.
+#[tokio::test]
+async fn transcript_schema_has_gene_hgnc_id_native() -> datafusion::common::Result<()> {
+    let provider = EnsemblCacheTableProvider::for_entity(
+        EnsemblEntityKind::Transcript,
+        EnsemblCacheOptions::new(fixture_path(REAL_FIXTURE)),
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", provider)?;
+
+    let table = ctx.table("tx").await?;
+    let schema = table.schema();
+    let arrow_schema = schema.as_arrow();
+
+    assert!(
+        arrow_schema.column_with_name("gene_hgnc_id").is_some(),
+        "gene_hgnc_id column must exist"
+    );
+    assert!(
+        arrow_schema
+            .column_with_name("gene_hgnc_id_native")
+            .is_some(),
+        "gene_hgnc_id_native column must exist"
     );
 
     Ok(())
