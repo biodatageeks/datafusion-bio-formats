@@ -7,8 +7,8 @@
 #![warn(missing_docs)]
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use datafusion::arrow::array::{
     Array, ArrayRef, Float32Array, Float32Builder, Int32Array, Int32Builder, StringArray,
@@ -21,13 +21,7 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::file_format::file_compression_type::FileCompressionType;
 use datafusion::prelude::{CsvReadOptions, SessionContext};
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
-use flate2::Compression as GzCompression;
 use flate2::read::MultiGzDecoder;
-use flate2::write::GzEncoder;
-use once_cell::sync::Lazy;
-use tempfile::{Builder, NamedTempFile};
-
-static SANITIZED_TSVS: Lazy<Mutex<Vec<NamedTempFile>>> = Lazy::new(|| Mutex::new(Vec::new()));
 
 /// Supported raw plugin source kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +88,7 @@ impl PluginSourceKind {
                 "SELECT chrom, CAST(start AS INTEGER) AS pos, ref AS ref, alt AS alt, split_part(\"SpliceAI\", '|', 2) AS symbol, CAST(split_part(\"SpliceAI\", '|', 3) AS FLOAT) AS ds_ag, CAST(split_part(\"SpliceAI\", '|', 4) AS FLOAT) AS ds_al, CAST(split_part(\"SpliceAI\", '|', 5) AS FLOAT) AS ds_dg, CAST(split_part(\"SpliceAI\", '|', 6) AS FLOAT) AS ds_dl, CAST(NULLIF(regexp_replace(split_part(\"SpliceAI\", '|', 7), '[^0-9-]', ''), '') AS INTEGER) AS dp_ag, CAST(NULLIF(regexp_replace(split_part(\"SpliceAI\", '|', 8), '[^0-9-]', ''), '') AS INTEGER) AS dp_al, CAST(NULLIF(regexp_replace(split_part(\"SpliceAI\", '|', 9), '[^0-9-]', ''), '') AS INTEGER) AS dp_dg, CAST(NULLIF(regexp_replace(split_part(\"SpliceAI\", '|', 10), '[^0-9-]', ''), '') AS INTEGER) AS dp_dl FROM source"
             }
             Self::DbNSFP => {
-                "SELECT chr AS chrom, CAST(\"pos(1-based)\" AS INTEGER) AS pos, ref AS ref, alt AS alt, sift4g_score, sift4g_pred, polyphen2_hdiv_score, polyphen2_hvar_score, lrt_score, lrt_pred, mutationtaster_score, mutationtaster_pred, fathmm_score, fathmm_pred, provean_score, provean_pred, vest4_score, metasvm_score, metasvm_pred, metalr_score, metalr_pred, CAST(revel_score AS FLOAT) AS revel_score, CAST(\"gerp++_rs\" AS FLOAT) AS gerp_rs, CAST(phyloP100way_vertebrate AS FLOAT) AS phylop100way, CAST(phyloP30way_mammalian AS FLOAT) AS phylop30way, CAST(phastCons100way_vertebrate AS FLOAT) AS phastcons100way, CAST(phastCons30way_mammalian AS FLOAT) AS phastcons30way, CAST(\"siphy_29way_logodds\" AS FLOAT) AS siphy_29way, CAST(cadd_raw AS FLOAT) AS cadd_raw, CAST(cadd_phred AS FLOAT) AS cadd_phred FROM source"
+                "SELECT chr AS chrom, CAST(\"pos(1-based)\" AS INTEGER) AS pos, ref AS ref, alt AS alt, sift4g_score, sift4g_pred, polyphen2_hdiv_score, polyphen2_hvar_score, CAST(NULL AS VARCHAR) AS lrt_score, CAST(NULL AS VARCHAR) AS lrt_pred, mutationtaster_score, mutationtaster_pred, CAST(NULL AS VARCHAR) AS fathmm_score, CAST(NULL AS VARCHAR) AS fathmm_pred, provean_score, provean_pred, vest4_score, metasvm_score, metasvm_pred, metalr_score, metalr_pred, CASE WHEN revel_score IS NULL OR CAST(revel_score AS VARCHAR) = '.' OR CAST(revel_score AS VARCHAR) LIKE '%;%' THEN NULL ELSE CAST(revel_score AS FLOAT) END AS revel_score, CASE WHEN \"gerp++_rs\" IS NULL OR CAST(\"gerp++_rs\" AS VARCHAR) = '.' OR CAST(\"gerp++_rs\" AS VARCHAR) LIKE '%;%' THEN NULL ELSE CAST(\"gerp++_rs\" AS FLOAT) END AS gerp_rs, CASE WHEN phylop100way_vertebrate IS NULL OR CAST(phylop100way_vertebrate AS VARCHAR) = '.' OR CAST(phylop100way_vertebrate AS VARCHAR) LIKE '%;%' THEN NULL ELSE CAST(phylop100way_vertebrate AS FLOAT) END AS phylop100way, CAST(NULL AS FLOAT) AS phylop30way, CASE WHEN phastcons100way_vertebrate IS NULL OR CAST(phastcons100way_vertebrate AS VARCHAR) = '.' OR CAST(phastcons100way_vertebrate AS VARCHAR) LIKE '%;%' THEN NULL ELSE CAST(phastcons100way_vertebrate AS FLOAT) END AS phastcons100way, CAST(NULL AS FLOAT) AS phastcons30way, CAST(NULL AS FLOAT) AS siphy_29way, CASE WHEN cadd_raw IS NULL OR CAST(cadd_raw AS VARCHAR) = '.' OR CAST(cadd_raw AS VARCHAR) LIKE '%;%' THEN NULL ELSE CAST(cadd_raw AS FLOAT) END AS cadd_raw, CASE WHEN cadd_phred IS NULL OR CAST(cadd_phred AS VARCHAR) = '.' OR CAST(cadd_phred AS VARCHAR) LIKE '%;%' THEN NULL ELSE CAST(cadd_phred AS FLOAT) END AS cadd_phred FROM source"
             }
         }
     }
@@ -135,10 +129,13 @@ pub async fn register_plugin_source(
             Ok(())
         }
         PluginSourceKind::Cadd | PluginSourceKind::AlphaMissense | PluginSourceKind::DbNSFP => {
-            let (table_path, is_gzip) = sanitize_plugin_source(source_path)?;
+            let (table_path, is_gzip) = inspect_plugin_source(source_path)?;
+            let schema = plugin_source_schema(source_path)?;
             let mut options = CsvReadOptions::new()
                 .delimiter(b'\t')
-                .has_header(true)
+                .has_header(false)
+                .comment(b'#')
+                .schema(schema.as_ref())
                 .file_extension(".gz");
             if is_gzip {
                 options = options.file_compression_type(FileCompressionType::GZIP);
@@ -176,14 +173,20 @@ pub fn normalize_plugin_schema(schema: &SchemaRef) -> SchemaRef {
 }
 
 /// SQL used to merge two CADD sources into one logical output.
-pub fn cadd_union_query(raw_chroms: &[String]) -> String {
+pub fn cadd_union_query(raw_chroms: &[String], per_source_limit: Option<usize>) -> String {
     let snv_where = build_where_clause("chrom", raw_chroms);
     let indel_where = build_where_clause("chrom", raw_chroms);
+    let snv_limit = per_source_limit
+        .map(|limit| format!(" LIMIT {limit}"))
+        .unwrap_or_default();
+    let indel_limit = per_source_limit
+        .map(|limit| format!(" LIMIT {limit}"))
+        .unwrap_or_default();
     format!(
         "SELECT * FROM (\
-         SELECT chrom AS chrom, CAST(pos AS INTEGER) AS pos, ref AS ref, alt AS alt, CAST(rawscore AS FLOAT) AS raw_score, CAST(phred AS FLOAT) AS phred_score FROM source_snv{snv_where} \
+         SELECT * FROM (SELECT chrom AS chrom, CAST(pos AS INTEGER) AS pos, ref AS ref, alt AS alt, CAST(rawscore AS FLOAT) AS raw_score, CAST(phred AS FLOAT) AS phred_score FROM source_snv{snv_where}){snv_limit} \
          UNION ALL \
-         SELECT chrom AS chrom, CAST(pos AS INTEGER) AS pos, ref AS ref, alt AS alt, CAST(rawscore AS FLOAT) AS raw_score, CAST(phred AS FLOAT) AS phred_score FROM source_indel{indel_where}\
+         SELECT * FROM (SELECT chrom AS chrom, CAST(pos AS INTEGER) AS pos, ref AS ref, alt AS alt, CAST(rawscore AS FLOAT) AS raw_score, CAST(phred AS FLOAT) AS phred_score FROM source_indel{indel_where}){indel_limit}\
          ) ORDER BY chrom, pos, ref, alt"
     )
 }
@@ -205,7 +208,7 @@ pub fn build_where_clause(chrom_col: &str, raw_chroms: &[String]) -> String {
     }
 }
 
-fn sanitize_plugin_source(source_path: &str) -> Result<(String, bool)> {
+fn inspect_plugin_source(source_path: &str) -> Result<(String, bool)> {
     let mut source_file = File::open(source_path).map_err(|e| {
         DataFusionError::Execution(format!("Failed to open plugin source {source_path}: {e}"))
     })?;
@@ -226,64 +229,41 @@ fn sanitize_plugin_source(source_path: &str) -> Result<(String, bool)> {
         }
     };
 
-    if !is_gzip {
-        return Ok((source_path.to_string(), false));
-    }
+    Ok((source_path.to_string(), is_gzip))
+}
 
-    let temp = Builder::new()
-        .prefix("vepyr_plugin_tsv_")
-        .suffix(".sanitized.tsv.gz")
-        .tempfile()
-        .map_err(|e| {
-            DataFusionError::Execution(format!("Failed to create sanitized plugin source: {e}"))
-        })?;
-    let mut reader = BufReader::new(MultiGzDecoder::new(source_file));
-    let writer = temp.reopen().map_err(|e| {
-        DataFusionError::Execution(format!("Failed to open temp file for writing: {e}"))
+fn plugin_source_schema(source_path: &str) -> Result<SchemaRef> {
+    let source_file = File::open(source_path).map_err(|e| {
+        DataFusionError::Execution(format!("Failed to open plugin source {source_path}: {e}"))
     })?;
-    let mut encoder = GzEncoder::new(writer, GzCompression::default());
+    let mut reader: Box<dyn BufRead> = if source_path.ends_with(".gz") {
+        Box::new(BufReader::new(MultiGzDecoder::new(source_file)))
+    } else {
+        Box::new(BufReader::new(source_file))
+    };
 
     let mut buffer = String::new();
-    let mut header_written = false;
-
     while reader.read_line(&mut buffer)? != 0 {
         let line = buffer.trim_end_matches(&['\r', '\n'][..]);
         if line.is_empty() {
             buffer.clear();
             continue;
         }
-        if !header_written {
-            if line.starts_with("##") || !line.contains('\t') {
-                buffer.clear();
-                continue;
-            }
-            let header_line = line.trim_start_matches('#').to_lowercase();
-            encoder.write_all(header_line.as_bytes())?;
-            encoder.write_all(b"\n")?;
-            header_written = true;
-        } else {
-            encoder.write_all(line.as_bytes())?;
-            encoder.write_all(b"\n")?;
+        if line.starts_with("##") || !line.contains('\t') {
+            buffer.clear();
+            continue;
         }
-        buffer.clear();
+        let fields = line
+            .trim_start_matches('#')
+            .split('\t')
+            .map(|value| Arc::new(Field::new(value.to_lowercase(), DataType::Utf8, true)))
+            .collect::<Vec<_>>();
+        return Ok(Arc::new(Schema::new(fields)));
     }
 
-    if !header_written {
-        return Err(DataFusionError::Execution(format!(
-            "Plugin source {source_path} missing header row"
-        )));
-    }
-
-    encoder.finish().map_err(|e| {
-        DataFusionError::Execution(format!("Failed to finish sanitized source: {e}"))
-    })?;
-
-    let sanitized_path = temp.path().to_string_lossy().into_owned();
-    let mut storage = SANITIZED_TSVS
-        .lock()
-        .map_err(|e| DataFusionError::Execution(format!("Sanitized path cache poisoned: {e}")))?;
-    storage.push(temp);
-    Ok((sanitized_path, true))
+    Err(DataFusionError::Execution(format!(
+        "Plugin source {source_path} missing header row"
+    )))
 }
 
 fn coerce_plugin_batch_types(batch: &RecordBatch) -> Result<RecordBatch> {
@@ -471,8 +451,15 @@ fn expand_column(
 
 #[cfg(test)]
 mod tests {
-    use super::{PluginSourceKind, build_where_clause, cadd_union_query, normalize_plugin_schema};
+    use super::{
+        PluginSourceKind, build_where_clause, cadd_union_query, normalize_plugin_schema,
+        plugin_source_schema,
+    };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use flate2::Compression as GzipCompression;
+    use flate2::write::GzEncoder;
+    use std::fs::File;
+    use std::io::Write;
     use std::sync::Arc;
 
     #[test]
@@ -501,7 +488,7 @@ mod tests {
 
     #[test]
     fn cadd_union_uses_both_sources() {
-        let query = cadd_union_query(&["chr1".to_string()]);
+        let query = cadd_union_query(&["chr1".to_string()], None);
         assert!(query.contains("FROM source_snv"));
         assert!(query.contains("FROM source_indel"));
         assert!(query.contains("ORDER BY chrom, pos, ref, alt"));
@@ -524,5 +511,48 @@ mod tests {
     fn where_clause_supports_multi_values() {
         let clause = build_where_clause("chrom", &["1".to_string(), "chr1".to_string()]);
         assert!(clause.contains("IN"));
+    }
+
+    fn write_gzip_text(path: &std::path::Path, text: &str) {
+        let file = File::create(path).expect("create gzip");
+        let mut encoder = GzEncoder::new(file, GzipCompression::default());
+        encoder.write_all(text.as_bytes()).expect("write gzip");
+        encoder.finish().expect("finish gzip");
+    }
+
+    #[test]
+    fn plugin_source_schema_uses_commented_header_without_rewrite() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source = temp.path().join("alphamissense.tsv.gz");
+        write_gzip_text(
+            &source,
+            concat!(
+                "# comment\n",
+                "#CHROM\tPOS\tREF\tALT\tgenome\tuniprot_id\ttranscript_id\tprotein_variant\tam_pathogenicity\tam_class\n",
+                "chr1\t1\tA\tG\thg38\tU\tT\tP\t0.1\tbenign\n",
+            ),
+        );
+
+        let schema = plugin_source_schema(source.to_str().unwrap()).expect("schema");
+        let names = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "chrom",
+                "pos",
+                "ref",
+                "alt",
+                "genome",
+                "uniprot_id",
+                "transcript_id",
+                "protein_variant",
+                "am_pathogenicity",
+                "am_class",
+            ]
+        );
     }
 }
