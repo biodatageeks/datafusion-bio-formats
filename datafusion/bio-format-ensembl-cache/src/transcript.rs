@@ -896,8 +896,8 @@ fn json_promoted_vef_sequence(
     object
         .get("_variation_effect_feature_cache")
         .and_then(unwrap_blessed_object_optional)
-        .and_then(|vef_cache| json_str(vef_cache.get(key)))
-        .or_else(|| json_str(object.get(key)))
+        .and_then(|vef_cache| json_sequence_value(vef_cache.get(key)))
+        .or_else(|| json_sequence_value(object.get(key)))
 }
 
 fn storable_promoted_vef_sequence(
@@ -907,8 +907,32 @@ fn storable_promoted_vef_sequence(
     object
         .get("_variation_effect_feature_cache")
         .and_then(SValue::as_hash)
-        .and_then(|vef_cache| sv_str(vef_cache.get(key)))
-        .or_else(|| sv_str(object.get(key)))
+        .and_then(|vef_cache| storable_sequence_value(vef_cache.get(key)))
+        .or_else(|| storable_sequence_value(object.get(key)))
+}
+
+fn json_sequence_value(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    json_str(Some(value)).or_else(|| {
+        let obj = unwrap_blessed_object_optional(value)?;
+        json_str(obj.get("seq")).or_else(|| {
+            obj.get("primary_seq")
+                .and_then(unwrap_blessed_object_optional)
+                .and_then(|primary| json_str(primary.get("seq")))
+        })
+    })
+}
+
+fn storable_sequence_value(value: Option<&SValue>) -> Option<String> {
+    let value = value?;
+    sv_str(Some(value)).or_else(|| {
+        let obj = value.as_hash()?;
+        sv_str(obj.get("seq")).or_else(|| {
+            obj.get("primary_seq")
+                .and_then(SValue::as_hash)
+                .and_then(|primary| sv_str(primary.get("seq")))
+        })
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2063,6 +2087,28 @@ mod tests {
         }
     }
 
+    fn storable_bioseq(seq: &str) -> SValue {
+        let mut primary = HashMap::new();
+        primary.insert(
+            "seq".to_string(),
+            SValue::String(Arc::from(seq.to_string())),
+        );
+
+        let mut bioseq = HashMap::new();
+        bioseq.insert(
+            "primary_seq".to_string(),
+            SValue::Blessed {
+                class: Arc::from("Bio::PrimarySeq"),
+                value: Arc::new(SValue::Hash(Arc::new(primary))),
+            },
+        );
+
+        SValue::Blessed {
+            class: Arc::from("Bio::Seq"),
+            value: Arc::new(SValue::Hash(Arc::new(bioseq))),
+        }
+    }
+
     #[test]
     fn parse_transcript_line_promotes_nested_vef_sequences() {
         let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
@@ -2156,14 +2202,8 @@ mod tests {
             "translateable_seq".to_string(),
             SValue::String(Arc::from("NESTED_SEQ")),
         );
-        vef_cache.insert(
-            "three_prime_utr".to_string(),
-            SValue::String(Arc::from("TTAA")),
-        );
-        vef_cache.insert(
-            "five_prime_utr".to_string(),
-            SValue::String(Arc::from("GGCC")),
-        );
+        vef_cache.insert("three_prime_utr".to_string(), storable_bioseq("TTAA"));
+        vef_cache.insert("five_prime_utr".to_string(), storable_bioseq("GGCC"));
 
         let mut object = HashMap::new();
         object.insert(
@@ -2201,6 +2241,73 @@ mod tests {
             &provenance,
         )
         .unwrap();
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "translateable_seq").as_deref(),
+            Some("NESTED_SEQ")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "three_prime_utr_seq").as_deref(),
+            Some("TTAA")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "five_prime_utr_seq").as_deref(),
+            Some("GGCC")
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_promotes_bioseq_utrs() {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let payload = json!({
+            "stable_id": "ENST000004",
+            "strand": 1,
+            "biotype": "protein_coding",
+            "_variation_effect_feature_cache": {
+                "translateable_seq": "NESTED_SEQ",
+                "three_prime_utr": {
+                    "__class": "Bio::Seq",
+                    "__value": {
+                        "primary_seq": {
+                            "__class": "Bio::PrimarySeq",
+                            "__value": {
+                                "seq": "TTAA"
+                            }
+                        }
+                    }
+                },
+                "five_prime_utr": {
+                    "__class": "Bio::Seq",
+                    "__value": {
+                        "primary_seq": {
+                            "__class": "Bio::PrimarySeq",
+                            "__value": {
+                                "seq": "GGCC"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let line = format!(
+            "1\t100\t200\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        assert!(written);
 
         let batch = batch.finish().unwrap();
         assert_eq!(
