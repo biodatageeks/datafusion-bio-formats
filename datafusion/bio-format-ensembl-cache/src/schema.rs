@@ -198,6 +198,8 @@ pub(crate) fn transcript_schema(
         Field::new("ncrna_structure", DataType::Utf8, true),
         // Promoted VEP fields (issue #125)
         Field::new("translateable_seq", DataType::Utf8, true),
+        Field::new("three_prime_utr_seq", DataType::Utf8, true),
+        Field::new("five_prime_utr_seq", DataType::Utf8, true),
         Field::new(
             "cdna_mapper_segments",
             cdna_mapper_segment_list_data_type(),
@@ -531,6 +533,9 @@ mod tests {
         assert!(schema.column_with_name("gene_stable_id").is_some());
         assert!(schema.column_with_name("exons").is_some());
         assert!(schema.column_with_name("cdna_seq").is_some());
+        assert!(schema.column_with_name("translateable_seq").is_some());
+        assert!(schema.column_with_name("three_prime_utr_seq").is_some());
+        assert!(schema.column_with_name("five_prime_utr_seq").is_some());
         assert!(schema.column_with_name("tsl").is_some());
         assert!(schema.column_with_name("mane_select").is_some());
         assert!(schema.column_with_name("raw_object_json").is_some());

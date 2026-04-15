@@ -70,6 +70,8 @@ pub(crate) struct TranscriptColumnIndices {
     transcript_attributes_projected: bool,
     // Promoted VEP fields (issue #125)
     translateable_seq: Option<usize>,
+    three_prime_utr_seq: Option<usize>,
+    five_prime_utr_seq: Option<usize>,
     cdna_mapper_segments: Option<usize>,
     cdna_mapper_projected: bool,
     bam_edit_status: Option<usize>,
@@ -161,6 +163,8 @@ impl TranscriptColumnIndices {
             ncrna_structure,
             transcript_attributes_projected,
             translateable_seq: col_map.get("translateable_seq"),
+            three_prime_utr_seq: col_map.get("three_prime_utr_seq"),
+            five_prime_utr_seq: col_map.get("five_prime_utr_seq"),
             cdna_mapper_segments,
             cdna_mapper_projected,
             bam_edit_status: col_map.get("bam_edit_status"),
@@ -885,6 +889,28 @@ fn build_flags_str(attrs: &TranscriptAttributes) -> Option<String> {
     }
 }
 
+fn json_promoted_vef_sequence(
+    object: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<String> {
+    object
+        .get("_variation_effect_feature_cache")
+        .and_then(unwrap_blessed_object_optional)
+        .and_then(|vef_cache| json_str(vef_cache.get(key)))
+        .or_else(|| json_str(object.get(key)))
+}
+
+fn storable_promoted_vef_sequence(
+    object: &std::collections::HashMap<String, SValue>,
+    key: &str,
+) -> Option<String> {
+    object
+        .get("_variation_effect_feature_cache")
+        .and_then(SValue::as_hash)
+        .and_then(|vef_cache| sv_str(vef_cache.get(key)))
+        .or_else(|| sv_str(object.get(key)))
+}
+
 // ---------------------------------------------------------------------------
 // Direct builder parser for text lines (Phase 1+2+6)
 // ---------------------------------------------------------------------------
@@ -1253,7 +1279,15 @@ pub(crate) fn parse_transcript_line_into(
 
     // Top-level promoted fields (issue #125)
     if let Some(idx) = col_idx.translateable_seq {
-        let value = json_str(object.get("translateable_seq"));
+        let value = json_promoted_vef_sequence(object, "translateable_seq");
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.three_prime_utr_seq {
+        let value = json_promoted_vef_sequence(object, "three_prime_utr");
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.five_prime_utr_seq {
+        let value = json_promoted_vef_sequence(object, "five_prime_utr");
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     if let Some(idx) = col_idx.bam_edit_status {
@@ -1774,7 +1808,15 @@ fn append_transcript_storable_row_into(
 
     // Top-level promoted fields (issue #125)
     if let Some(idx) = col_idx.translateable_seq {
-        let value = sv_str(object.get("translateable_seq"));
+        let value = storable_promoted_vef_sequence(object, "translateable_seq");
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.three_prime_utr_seq {
+        let value = storable_promoted_vef_sequence(object, "three_prime_utr");
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.five_prime_utr_seq {
+        let value = storable_promoted_vef_sequence(object, "five_prime_utr");
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     if let Some(idx) = col_idx.bam_edit_status {
@@ -1956,9 +1998,224 @@ fn sv_bool(value: Option<&SValue>) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::filter::SimplePredicate;
+    use crate::info::CacheInfo;
+    use crate::schema::transcript_schema;
+    use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter};
+    use datafusion::arrow::array::{Array, StringArray};
     use serde_json::json;
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::sync::Arc;
+
+    fn test_cache_info(serializer_type: &str) -> CacheInfo {
+        CacheInfo {
+            cache_root: PathBuf::from("/tmp/test"),
+            source_cache_path: "/tmp/test".to_string(),
+            species: "homo_sapiens".to_string(),
+            assembly: "GRCh38".to_string(),
+            cache_version: "115".to_string(),
+            serializer_type: Some(serializer_type.to_string()),
+            var_type: Some("region".to_string()),
+            cache_region_size: Some(1_000_000),
+            variation_cols: vec!["chr", "start", "end", "variation_name", "allele_string"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            source_descriptors: vec![],
+        }
+    }
+
+    fn transcript_test_components(
+        serializer_type: &str,
+    ) -> (
+        BatchBuilder,
+        TranscriptColumnIndices,
+        ProvenanceWriter,
+        CacheInfo,
+    ) {
+        let cache_info = test_cache_info(serializer_type);
+        let schema = transcript_schema(&cache_info, false);
+        let col_map = ColumnMap::from_schema(&schema);
+        let batch = BatchBuilder::new(schema, 1).unwrap();
+        let col_idx = TranscriptColumnIndices::new(&col_map);
+        let provenance = ProvenanceWriter::new(&col_map, &cache_info);
+        (batch, col_idx, provenance, cache_info)
+    }
+
+    fn batch_utf8_value(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+        col: &str,
+    ) -> Option<String> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name(col)
+            .unwrap_or_else(|| panic!("missing column: {col}"));
+        let values = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap_or_else(|| panic!("expected Utf8 column: {col}"));
+        if values.is_null(0) {
+            None
+        } else {
+            Some(values.value(0).to_string())
+        }
+    }
+
+    #[test]
+    fn parse_transcript_line_promotes_nested_vef_sequences() {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let payload = json!({
+            "stable_id": "ENST000001",
+            "strand": 1,
+            "biotype": "protein_coding",
+            "translateable_seq": "TOP_LEVEL_SEQ",
+            "_variation_effect_feature_cache": {
+                "translateable_seq": "NESTED_SEQ",
+                "three_prime_utr": "TTAA",
+                "five_prime_utr": "GGCC"
+            }
+        });
+        let line = format!(
+            "1\t100\t200\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        assert!(written);
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "translateable_seq").as_deref(),
+            Some("NESTED_SEQ")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "three_prime_utr_seq").as_deref(),
+            Some("TTAA")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "five_prime_utr_seq").as_deref(),
+            Some("GGCC")
+        );
+    }
+
+    #[test]
+    fn parse_transcript_line_falls_back_to_top_level_translateable_seq() {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let payload = json!({
+            "stable_id": "ENST000002",
+            "strand": 1,
+            "biotype": "protein_coding",
+            "translateable_seq": "TOP_LEVEL_ONLY"
+        });
+        let line = format!(
+            "1\t100\t200\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        assert!(written);
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "translateable_seq").as_deref(),
+            Some("TOP_LEVEL_ONLY")
+        );
+        assert_eq!(batch_utf8_value(&batch, "three_prime_utr_seq"), None);
+        assert_eq!(batch_utf8_value(&batch, "five_prime_utr_seq"), None);
+    }
+
+    #[test]
+    fn append_transcript_storable_row_promotes_nested_vef_sequences() {
+        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+        let mut vef_cache = HashMap::new();
+        vef_cache.insert(
+            "translateable_seq".to_string(),
+            SValue::String(Arc::from("NESTED_SEQ")),
+        );
+        vef_cache.insert(
+            "three_prime_utr".to_string(),
+            SValue::String(Arc::from("TTAA")),
+        );
+        vef_cache.insert(
+            "five_prime_utr".to_string(),
+            SValue::String(Arc::from("GGCC")),
+        );
+
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        object.insert(
+            "translateable_seq".to_string(),
+            SValue::String(Arc::from("TOP_LEVEL_SEQ")),
+        );
+        object.insert(
+            "_variation_effect_feature_cache".to_string(),
+            SValue::Hash(Arc::new(vef_cache)),
+        );
+
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "1".to_string(),
+            start: 100,
+            end: 200,
+            source_start: 100,
+            source_end: 200,
+            strand: 1,
+            stable_id: "ENST000003".to_string(),
+        };
+
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "translateable_seq").as_deref(),
+            Some("NESTED_SEQ")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "three_prime_utr_seq").as_deref(),
+            Some("TTAA")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "five_prime_utr_seq").as_deref(),
+            Some("GGCC")
+        );
+    }
 
     #[test]
     fn json_transcript_attributes_parse_flags_and_mirna_regions_plus_strand() {
