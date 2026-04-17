@@ -172,8 +172,10 @@ Standalone translation table — one row per coding transcript.
 | `cdna_coding_start` | Int64 | yes | cDNA coding start offset |
 | `cdna_coding_end` | Int64 | yes | cDNA coding end offset |
 | `cds_len` | Int64 | yes | CDS length (derived: `cdna_coding_end - cdna_coding_start + 1`) |
-| `translation_seq` | Utf8 | yes | Protein/peptide sequence |
-| `cds_sequence` | Utf8 | yes | Translatable CDS nucleotide sequence |
+| `translation_seq` | Utf8 | yes | Protein/peptide sequence (BAM-edited for RefSeq transcripts with `bam_edit_status=ok`; sourced from `_variation_effect_feature_cache.peptide`) |
+| `cds_sequence` | Utf8 | yes | Translatable CDS nucleotide sequence (BAM-edited counterpart; sourced from `_variation_effect_feature_cache.translateable_seq`) |
+| `translation_seq_canonical` | Utf8 | yes | Canonical (pre-BAM-edit) protein sequence sourced from `translation.primary_seq`. Falls back to `translation_seq` when the canonical field is absent. Use this for HGVSp-style consumers that need parity with VEP. |
+| `cds_sequence_canonical` | Utf8 | yes | Canonical (pre-BAM-edit) CDS sourced from the transcript-level `translateable_seq`. Falls back to `cds_sequence` when absent. |
 | `protein_features` | `List<Struct<analysis:Utf8, hseqname:Utf8, start:Int64, end:Int64>>` | yes | Protein domain/feature annotations (see below) |
 | `sift_predictions` | `List<Struct<position:Int32, amino_acid:Utf8, prediction:Utf8, score:Float32>>` | yes | SIFT pathogenicity predictions (see below) |
 | `polyphen_predictions` | `List<Struct<position:Int32, amino_acid:Utf8, prediction:Utf8, score:Float32>>` | yes | PolyPhen-2 pathogenicity predictions (see below) |
@@ -300,6 +302,7 @@ All entity schemas also include **provenance columns**: `species`, `assembly`, `
 Transcript, exon, and translation schemas support projection pushdown. When VEP-related
 columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `mature_mirna_regions`,
 `cdna_mapper_segments`, `spliced_seq`, `translation_seq`, `cds_sequence`,
+`translation_seq_canonical`, `cds_sequence_canonical`,
 `protein_features`, `sift_predictions`, `polyphen_predictions`) are not
 selected in a query, the parser skips extracting those fields, significantly
 reducing parse overhead.

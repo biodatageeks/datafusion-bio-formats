@@ -36,6 +36,8 @@ pub(crate) struct TranslationColumnIndices {
     cds_len: Option<usize>,
     peptide_seq: Option<usize>,
     cdna_seq: Option<usize>,
+    peptide_seq_canonical: Option<usize>,
+    cdna_seq_canonical: Option<usize>,
     sequences_projected: bool,
     protein_features: Option<usize>,
     protein_features_projected: bool,
@@ -52,7 +54,12 @@ impl TranslationColumnIndices {
         let cdna_coding_end = col_map.get("cdna_coding_end");
         let peptide_seq = col_map.get("translation_seq");
         let cdna_seq = col_map.get("cds_sequence");
-        let sequences_projected = peptide_seq.is_some() || cdna_seq.is_some();
+        let peptide_seq_canonical = col_map.get("translation_seq_canonical");
+        let cdna_seq_canonical = col_map.get("cds_sequence_canonical");
+        let sequences_projected = peptide_seq.is_some()
+            || cdna_seq.is_some()
+            || peptide_seq_canonical.is_some()
+            || cdna_seq_canonical.is_some();
         let protein_features = col_map.get("protein_features");
         let protein_features_projected = protein_features.is_some();
         let sift_predictions = col_map.get("sift_predictions");
@@ -74,6 +81,8 @@ impl TranslationColumnIndices {
             cds_len: col_map.get("cds_len"),
             peptide_seq,
             cdna_seq,
+            peptide_seq_canonical,
+            cdna_seq_canonical,
             sequences_projected,
             protein_features,
             protein_features_projected,
@@ -271,12 +280,22 @@ pub(crate) fn parse_translation_line_into(
         let vef_cache = object
             .get("_variation_effect_feature_cache")
             .and_then(unwrap_blessed_object_optional);
+        let edited_peptide = vef_cache.and_then(|c| json_str(c.get("peptide")));
+        let edited_cds = vef_cache.and_then(|c| json_str(c.get("translateable_seq")));
         if let Some(idx) = col_idx.peptide_seq {
-            let value = vef_cache.and_then(|c| json_str(c.get("peptide")));
-            batch.set_opt_utf8_owned(idx, value.as_ref());
+            batch.set_opt_utf8_owned(idx, edited_peptide.as_ref());
         }
         if let Some(idx) = col_idx.cdna_seq {
-            let value = vef_cache.and_then(|c| json_str(c.get("translateable_seq")));
+            batch.set_opt_utf8_owned(idx, edited_cds.as_ref());
+        }
+        if let Some(idx) = col_idx.peptide_seq_canonical {
+            let value = json_primary_seq_value(translation_obj.get("primary_seq"))
+                .or_else(|| edited_peptide.clone());
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.cdna_seq_canonical {
+            let value = json_primary_seq_value(object.get("translateable_seq"))
+                .or_else(|| edited_cds.clone());
             batch.set_opt_utf8_owned(idx, value.as_ref());
         }
         if let Some(idx) = col_idx.protein_features {
@@ -455,38 +474,51 @@ where
         }
 
         // Sequences, protein features, and predictions from _variation_effect_feature_cache.
-        if (col_idx.sequences_projected
+        if col_idx.sequences_projected
             || col_idx.protein_features_projected
-            || col_idx.predictions_projected)
-            && let Some(vef_cache) = obj
-                .get("_variation_effect_feature_cache")
-                .and_then(SValue::as_hash)
+            || col_idx.predictions_projected
         {
+            let vef_cache = obj
+                .get("_variation_effect_feature_cache")
+                .and_then(SValue::as_hash);
+            let edited_peptide = vef_cache.and_then(|c| sv_str(c.get("peptide")));
+            let edited_cds = vef_cache.and_then(|c| sv_str(c.get("translateable_seq")));
+
             if let Some(idx) = col_idx.peptide_seq {
-                let value = sv_str(vef_cache.get("peptide"));
-                batch.set_opt_utf8_owned(idx, value.as_ref());
+                batch.set_opt_utf8_owned(idx, edited_peptide.as_ref());
             }
             if let Some(idx) = col_idx.cdna_seq {
-                let value = sv_str(vef_cache.get("translateable_seq"));
+                batch.set_opt_utf8_owned(idx, edited_cds.as_ref());
+            }
+            if let Some(idx) = col_idx.peptide_seq_canonical {
+                let value = storable_primary_seq_value(translation_obj.get("primary_seq"))
+                    .or_else(|| edited_peptide.clone());
                 batch.set_opt_utf8_owned(idx, value.as_ref());
             }
-            if let Some(idx) = col_idx.protein_features {
-                let features = extract_protein_features_storable(vef_cache);
-                batch.set_protein_feature_list(idx, features.as_deref());
+            if let Some(idx) = col_idx.cdna_seq_canonical {
+                let value = storable_primary_seq_value(obj.get("translateable_seq"))
+                    .or_else(|| edited_cds.clone());
+                batch.set_opt_utf8_owned(idx, value.as_ref());
             }
-            // SIFT/PolyPhen predictions — populated from pre-decoded data.
-            if col_idx.predictions_projected {
-                let pfp = vef_cache
-                    .get("protein_function_predictions")
-                    .and_then(SValue::as_hash);
-                if let Some(idx) = col_idx.sift_predictions {
-                    let preds = pfp.and_then(|p| extract_predictions_storable(p, "sift"));
-                    batch.set_prediction_list(idx, preds.as_deref());
+            if let Some(vef_cache) = vef_cache {
+                if let Some(idx) = col_idx.protein_features {
+                    let features = extract_protein_features_storable(vef_cache);
+                    batch.set_protein_feature_list(idx, features.as_deref());
                 }
-                if let Some(idx) = col_idx.polyphen_predictions {
-                    let preds =
-                        pfp.and_then(|p| extract_predictions_storable(p, "polyphen_humvar"));
-                    batch.set_prediction_list(idx, preds.as_deref());
+                // SIFT/PolyPhen predictions — populated from pre-decoded data.
+                if col_idx.predictions_projected {
+                    let pfp = vef_cache
+                        .get("protein_function_predictions")
+                        .and_then(SValue::as_hash);
+                    if let Some(idx) = col_idx.sift_predictions {
+                        let preds = pfp.and_then(|p| extract_predictions_storable(p, "sift"));
+                        batch.set_prediction_list(idx, preds.as_deref());
+                    }
+                    if let Some(idx) = col_idx.polyphen_predictions {
+                        let preds =
+                            pfp.and_then(|p| extract_predictions_storable(p, "polyphen_humvar"));
+                        batch.set_prediction_list(idx, preds.as_deref());
+                    }
                 }
             }
         }
@@ -813,6 +845,40 @@ fn extract_predictions_storable(
     } else {
         Some(entries)
     }
+}
+
+/// Unwrap a Perl sequence value into a plain `String`.
+///
+/// Storable caches represent sequences either as raw scalars or as blessed
+/// `Bio::PrimarySeq` objects — sometimes doubly nested (outer object's
+/// `primary_seq` holding the actual payload). Mirrors the equivalent helper
+/// in `transcript.rs`.
+fn json_primary_seq_value(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    if let Some(s) = json_str(Some(value)) {
+        return Some(s);
+    }
+    let obj = unwrap_blessed_object_optional(value)?;
+    if let Some(s) = json_str(obj.get("seq")) {
+        return Some(s);
+    }
+    obj.get("primary_seq")
+        .and_then(unwrap_blessed_object_optional)
+        .and_then(|primary| json_str(primary.get("seq")))
+}
+
+fn storable_primary_seq_value(value: Option<&SValue>) -> Option<String> {
+    let value = value?;
+    if let Some(s) = sv_str(Some(value)) {
+        return Some(s);
+    }
+    let obj = value.as_hash()?;
+    if let Some(s) = sv_str(obj.get("seq")) {
+        return Some(s);
+    }
+    obj.get("primary_seq")
+        .and_then(SValue::as_hash)
+        .and_then(|primary| sv_str(primary.get("seq")))
 }
 
 fn unwrap_blessed_object(
@@ -1164,5 +1230,104 @@ mod tests {
             SValue::Array(std::sync::Arc::new(vec![])),
         );
         assert!(extract_protein_features_storable(&vef_cache).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // json_primary_seq_value / storable_primary_seq_value
+    //
+    // Canonical (pre-BAM-edit) translation and CDS live in Perl fields that
+    // VEP stores in one of three shapes: plain string, blessed Bio::PrimarySeq
+    // with a `seq` slot, or a transcript-level object whose `primary_seq` slot
+    // itself wraps a Bio::PrimarySeq. These helpers normalize all three.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_primary_seq_value_plain_string() {
+        let v = serde_json::json!("MVFP");
+        assert_eq!(json_primary_seq_value(Some(&v)).as_deref(), Some("MVFP"));
+    }
+
+    #[test]
+    fn json_primary_seq_value_blessed_seq_slot() {
+        let v = serde_json::json!({
+            "__class": "Bio::PrimarySeq",
+            "__value": { "seq": "MVFPQA" }
+        });
+        assert_eq!(json_primary_seq_value(Some(&v)).as_deref(), Some("MVFPQA"));
+    }
+
+    #[test]
+    fn json_primary_seq_value_nested_primary_seq() {
+        let v = serde_json::json!({
+            "__class": "Bio::EnsEMBL::Translation",
+            "__value": {
+                "primary_seq": {
+                    "__class": "Bio::PrimarySeq",
+                    "__value": { "seq": "MVFPQAK" }
+                }
+            }
+        });
+        assert_eq!(json_primary_seq_value(Some(&v)).as_deref(), Some("MVFPQAK"));
+    }
+
+    #[test]
+    fn json_primary_seq_value_none_and_missing_seq() {
+        assert!(json_primary_seq_value(None).is_none());
+        let empty_obj = serde_json::json!({ "other": "field" });
+        assert!(json_primary_seq_value(Some(&empty_obj)).is_none());
+    }
+
+    #[test]
+    fn storable_primary_seq_value_plain_string() {
+        let v = SValue::String(std::sync::Arc::from("MVFP"));
+        assert_eq!(
+            storable_primary_seq_value(Some(&v)).as_deref(),
+            Some("MVFP")
+        );
+    }
+
+    #[test]
+    fn storable_primary_seq_value_seq_slot() {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert(
+            "seq".to_string(),
+            SValue::String(std::sync::Arc::from("MVFPQA")),
+        );
+        let v = SValue::Hash(std::sync::Arc::new(inner));
+        assert_eq!(
+            storable_primary_seq_value(Some(&v)).as_deref(),
+            Some("MVFPQA")
+        );
+    }
+
+    #[test]
+    fn storable_primary_seq_value_nested_primary_seq() {
+        let mut primary = std::collections::HashMap::new();
+        primary.insert(
+            "seq".to_string(),
+            SValue::String(std::sync::Arc::from("MVFPQAK")),
+        );
+        let mut outer = std::collections::HashMap::new();
+        outer.insert(
+            "primary_seq".to_string(),
+            SValue::Hash(std::sync::Arc::new(primary)),
+        );
+        let v = SValue::Hash(std::sync::Arc::new(outer));
+        assert_eq!(
+            storable_primary_seq_value(Some(&v)).as_deref(),
+            Some("MVFPQAK")
+        );
+    }
+
+    #[test]
+    fn storable_primary_seq_value_none_and_missing_seq() {
+        assert!(storable_primary_seq_value(None).is_none());
+        let mut empty = std::collections::HashMap::new();
+        empty.insert(
+            "other".to_string(),
+            SValue::String(std::sync::Arc::from("x")),
+        );
+        let v = SValue::Hash(std::sync::Arc::new(empty));
+        assert!(storable_primary_seq_value(Some(&v)).is_none());
     }
 }

@@ -303,6 +303,8 @@ pub(crate) fn translation_schema(
         Field::new("cds_len", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
+        Field::new("translation_seq_canonical", DataType::Utf8, true),
+        Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
         Field::new("sift_predictions", prediction_list_data_type(), true),
         Field::new("polyphen_predictions", prediction_list_data_type(), true),
@@ -324,6 +326,8 @@ pub fn translation_core_schema(coordinate_system_zero_based: bool) -> SchemaRef 
         Field::new("protein_len", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
+        Field::new("translation_seq_canonical", DataType::Utf8, true),
+        Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
     ];
     new_schema(fields, coordinate_system_zero_based)
@@ -598,6 +602,22 @@ mod tests {
         assert!(schema.column_with_name("transcript_id").is_some());
         assert!(schema.column_with_name("translation_seq").is_some());
         assert!(schema.column_with_name("cds_sequence").is_some());
+        assert!(
+            schema
+                .column_with_name("translation_seq_canonical")
+                .is_some()
+        );
+        assert!(schema.column_with_name("cds_sequence_canonical").is_some());
+        for col in [
+            "translation_seq",
+            "cds_sequence",
+            "translation_seq_canonical",
+            "cds_sequence_canonical",
+        ] {
+            let f = schema.field_with_name(col).unwrap();
+            assert_eq!(f.data_type(), &DataType::Utf8);
+            assert!(f.is_nullable());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -613,12 +633,29 @@ mod tests {
         assert!(schema.column_with_name("protein_len").is_some());
         assert!(schema.column_with_name("translation_seq").is_some());
         assert!(schema.column_with_name("cds_sequence").is_some());
+        assert!(
+            schema
+                .column_with_name("translation_seq_canonical")
+                .is_some()
+        );
+        assert!(schema.column_with_name("cds_sequence_canonical").is_some());
         assert!(schema.column_with_name("protein_features").is_some());
         // Should NOT contain position or sift/polyphen columns
         assert!(schema.column_with_name("chrom").is_none());
         assert!(schema.column_with_name("start").is_none());
         assert!(schema.column_with_name("sift_predictions").is_none());
         assert!(schema.column_with_name("polyphen_predictions").is_none());
+
+        for col in [
+            "translation_seq",
+            "cds_sequence",
+            "translation_seq_canonical",
+            "cds_sequence_canonical",
+        ] {
+            let f = schema.field_with_name(col).unwrap();
+            assert_eq!(f.data_type(), &DataType::Utf8);
+            assert!(f.is_nullable());
+        }
     }
 
     #[test]
