@@ -288,15 +288,30 @@ pub(crate) fn parse_translation_line_into(
         if let Some(idx) = col_idx.cdna_seq {
             batch.set_opt_utf8_owned(idx, edited_cds.as_ref());
         }
+        // Derive canonical (pre-BAM-edit) sequences by reversing the list of
+        // `_rna_edit` attribute insertions on the edited CDS. For non-BAM-
+        // edited transcripts this is a no-op (canonical ≡ edited). See the
+        // RnaEdit docs above for coordinate semantics.
+        //
+        // The upstream extractor used to look for `translation.primary_seq`
+        // or a top-level `translateable_seq` — neither is populated in raw
+        // VEP merged caches (the primary_seq is a lazy Perl method, and
+        // translateable_seq only appears inside `_variation_effect_feature_cache`).
+        // Reversing the explicitly-stored edits is the only path that
+        // actually recovers the canonical peptide for BAM-edited RefSeq.
+        let edits_json = parse_rna_edits_json(object.get("attributes"));
+        let (canonical_cds, canonical_peptide) = derive_canonical_sequences(
+            edited_cds.as_deref(),
+            edited_peptide.as_deref(),
+            &edits_json,
+            cdna_coding_start_val,
+            cdna_coding_end_val,
+        );
         if let Some(idx) = col_idx.peptide_seq_canonical {
-            let value = json_primary_seq_value(translation_obj.get("primary_seq"))
-                .or_else(|| edited_peptide.clone());
-            batch.set_opt_utf8_owned(idx, value.as_ref());
+            batch.set_opt_utf8_owned(idx, canonical_peptide.as_ref());
         }
         if let Some(idx) = col_idx.cdna_seq_canonical {
-            let value = json_primary_seq_value(object.get("translateable_seq"))
-                .or_else(|| edited_cds.clone());
-            batch.set_opt_utf8_owned(idx, value.as_ref());
+            batch.set_opt_utf8_owned(idx, canonical_cds.as_ref());
         }
         if let Some(idx) = col_idx.protein_features {
             let features = vef_cache.and_then(extract_protein_features_json);
@@ -490,15 +505,22 @@ where
             if let Some(idx) = col_idx.cdna_seq {
                 batch.set_opt_utf8_owned(idx, edited_cds.as_ref());
             }
+            // Reverse `_rna_edit` insertions on the edited CDS to recover
+            // canonical. Non-edited transcripts: no-op (canonical ≡ edited).
+            // See RnaEdit / derive_canonical_sequences for details.
+            let edits = parse_rna_edits_storable(obj.get("attributes"));
+            let (canonical_cds, canonical_peptide) = derive_canonical_sequences(
+                edited_cds.as_deref(),
+                edited_peptide.as_deref(),
+                &edits,
+                cdna_coding_start_val,
+                cdna_coding_end_val,
+            );
             if let Some(idx) = col_idx.peptide_seq_canonical {
-                let value = storable_primary_seq_value(translation_obj.get("primary_seq"))
-                    .or_else(|| edited_peptide.clone());
-                batch.set_opt_utf8_owned(idx, value.as_ref());
+                batch.set_opt_utf8_owned(idx, canonical_peptide.as_ref());
             }
             if let Some(idx) = col_idx.cdna_seq_canonical {
-                let value = storable_primary_seq_value(obj.get("translateable_seq"))
-                    .or_else(|| edited_cds.clone());
-                batch.set_opt_utf8_owned(idx, value.as_ref());
+                batch.set_opt_utf8_owned(idx, canonical_cds.as_ref());
             }
             if let Some(vef_cache) = vef_cache {
                 if let Some(idx) = col_idx.protein_features {
@@ -847,38 +869,265 @@ fn extract_predictions_storable(
     }
 }
 
-/// Unwrap a Perl sequence value into a plain `String`.
+// ---------------------------------------------------------------------------
+// RNA-edit (BAM-edit) reversal for canonical sequence recovery.
+//
+// Raw VEP merged caches for BAM-edited RefSeq transcripts carry the edited
+// peptide / CDS in `_variation_effect_feature_cache.{peptide,translateable_seq}`.
+// They do NOT separately serialize the pre-edit (canonical) versions —
+// `translation.primary_seq` is a lazy Perl method, not a stored field. What
+// IS stored is the list of edits as `_rna_edit` attribute entries on the
+// transcript, e.g. `"256 255 GCAGCA"` meaning "insert GCAGCA between cdna
+// positions 255 and 256". Reversing those insertions on the BAM-edited CDS
+// reconstructs the canonical CDS, which is then translated to the canonical
+// peptide.
+//
+// Edit semantics follow Ensembl `Bio::EnsEMBL::SeqEdit`:
+//   start, end = 1-based cdna coordinates. If `end < start` (conventionally
+//   end = start - 1) the edit is a pure insertion between `end` and `start`.
+//   `alt` is the inserted bases. The edit is applied with
+//   `substr($seq, $start - 1, $end - $start + 1) = $alt`, so a 0-len slice at
+//   0-indexed position `start - 1` receives `alt`.
+//
+// Ensembl applies edits in ascending `start` order against the current
+// sequence, so each edit's coordinates reference the already-edited sequence
+// produced by preceding edits. To undo we traverse in DESCENDING start order
+// and remove `alt.len()` bytes at position `start - 1` (0-indexed) — later
+// undoes cannot disturb earlier positions because they act above them.
+// ---------------------------------------------------------------------------
+
+/// A single RNA edit parsed from an Ensembl `_rna_edit` attribute value.
 ///
-/// Storable caches represent sequences either as raw scalars or as blessed
-/// `Bio::PrimarySeq` objects — sometimes doubly nested (outer object's
-/// `primary_seq` holding the actual payload). Mirrors the equivalent helper
-/// in `transcript.rs`.
-fn json_primary_seq_value(value: Option<&serde_json::Value>) -> Option<String> {
-    let value = value?;
-    if let Some(s) = json_str(Some(value)) {
-        return Some(s);
-    }
-    let obj = unwrap_blessed_object_optional(value)?;
-    if let Some(s) = json_str(obj.get("seq")) {
-        return Some(s);
-    }
-    obj.get("primary_seq")
-        .and_then(unwrap_blessed_object_optional)
-        .and_then(|primary| json_str(primary.get("seq")))
+/// Coordinates are 1-based cdna (transcript-relative). `end < start` denotes
+/// a pure insertion (the BAM-edit case).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RnaEdit {
+    pub start: i64,
+    pub end: i64,
+    pub alt: String,
 }
 
-fn storable_primary_seq_value(value: Option<&SValue>) -> Option<String> {
-    let value = value?;
-    if let Some(s) = sv_str(Some(value)) {
-        return Some(s);
+impl RnaEdit {
+    /// Parse an attribute value like `"256 255 GCAGCA"` into a structured edit.
+    ///
+    /// Returns `None` on malformed values (missing fields, non-integer
+    /// coordinates, etc.) rather than erroring — the caller skips unparseable
+    /// edits without aborting translation ingestion.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let mut parts = value.split_whitespace();
+        let start = parts.next()?.parse::<i64>().ok()?;
+        let end = parts.next()?.parse::<i64>().ok()?;
+        let alt = parts.next().unwrap_or("").to_string();
+        // Remaining tokens (if any) ignored — VEP's format has exactly 3.
+        Some(Self { start, end, alt })
     }
-    let obj = value.as_hash()?;
-    if let Some(s) = sv_str(obj.get("seq")) {
-        return Some(s);
+
+    /// True if this edit is a pure insertion (no bases replaced).
+    pub(crate) fn is_pure_insertion(&self) -> bool {
+        self.end + 1 == self.start && !self.alt.is_empty()
     }
-    obj.get("primary_seq")
-        .and_then(SValue::as_hash)
-        .and_then(|primary| sv_str(primary.get("seq")))
+}
+
+/// Extract `_rna_edit` attributes from a Storable transcript attributes array.
+///
+/// Each element of `attributes` is expected to be a blessed
+/// `Bio::EnsEMBL::Attribute` hash with `code` and `value` keys. Entries whose
+/// `code` is not `"_rna_edit"` are skipped. Unparseable values are skipped.
+fn parse_rna_edits_storable(attributes: Option<&SValue>) -> Vec<RnaEdit> {
+    let Some(array) = attributes.and_then(SValue::as_array) else {
+        return Vec::new();
+    };
+    array
+        .iter()
+        .filter_map(|attr| {
+            let obj = attr.as_hash()?;
+            let code = sv_str(obj.get("code"))?;
+            if code != "_rna_edit" {
+                return None;
+            }
+            let value = sv_str(obj.get("value"))?;
+            RnaEdit::parse(&value)
+        })
+        .collect()
+}
+
+/// JSON-path equivalent of [`parse_rna_edits_storable`]. The JSON caches wrap
+/// attributes as blessed objects (payload under `__value`) so we unwrap first.
+fn parse_rna_edits_json(attributes: Option<&serde_json::Value>) -> Vec<RnaEdit> {
+    let Some(arr) = attributes.and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|attr| {
+            let obj = unwrap_blessed_object_optional(attr).or_else(|| attr.as_object())?;
+            let code = json_str(obj.get("code"))?;
+            if code != "_rna_edit" {
+                return None;
+            }
+            let value = json_str(obj.get("value"))?;
+            RnaEdit::parse(&value)
+        })
+        .collect()
+}
+
+/// Reverse the given `_rna_edit` insertions against the edited cdna / CDS
+/// string to recover the pre-edit sequence.
+///
+/// Only pure insertions are undone. Deletions or substitutions leave the
+/// sequence shorter than it would be in pre-edit form *and* require the
+/// original bases (which the attribute value does not carry), so this helper
+/// bails out (returns `None`) if any non-insertion edit appears. That signals
+/// to the caller "the cache lacks enough information to recover canonical" —
+/// the canonical column is then left null rather than populated with a
+/// half-undone mix.
+///
+/// `coord_offset` is subtracted from each edit's 1-based cdna start to
+/// translate into the coordinate space of `edited`:
+/// - `0` when `edited` is the spliced (cdna) sequence
+/// - `cdna_coding_start - 1` when `edited` is the translateable (CDS)
+///   sequence — this filters out edits that fall outside the CDS as a
+///   side effect.
+fn undo_rna_edit_insertions(
+    edited: &str,
+    edits: &[RnaEdit],
+    coord_offset: i64,
+    keep_range: Option<(i64, i64)>,
+) -> Option<String> {
+    let mut relevant: Vec<&RnaEdit> = edits
+        .iter()
+        .filter(|e| match keep_range {
+            Some((lo, hi)) => e.start >= lo && e.start <= hi,
+            None => true,
+        })
+        .collect();
+    relevant.sort_by(|a, b| b.start.cmp(&a.start)); // descending
+    let mut seq: Vec<u8> = edited.as_bytes().to_vec();
+    for edit in relevant {
+        if !edit.is_pure_insertion() {
+            return None;
+        }
+        let offset_start = edit.start - coord_offset;
+        if offset_start < 1 {
+            // Insertion is before the window `edited` represents — for a CDS
+            // window this means the edit is in the 5' UTR, outside the CDS.
+            // Skip it silently.
+            continue;
+        }
+        let start_idx = (offset_start - 1) as usize;
+        let end_idx = start_idx + edit.alt.len();
+        if end_idx > seq.len() {
+            return None;
+        }
+        // Sanity check: the bytes we're about to remove must equal the edit's
+        // alt payload. If they don't, our coordinate / ordering assumption is
+        // wrong and we should bail instead of silently corrupting the result.
+        if &seq[start_idx..end_idx] != edit.alt.as_bytes() {
+            return None;
+        }
+        seq.drain(start_idx..end_idx);
+    }
+    String::from_utf8(seq).ok()
+}
+
+/// Translate a CDS byte slice to a peptide string using NCBI translation
+/// table 1 (the standard code), trimming at the first stop codon.
+///
+/// Returns `None` if the CDS length is not a multiple of 3 or contains
+/// non-ACGT characters that can't be resolved unambiguously. Ambiguous IUPAC
+/// codes are not supported — BAM-edited RefSeq and Ensembl canonical CDSes
+/// in the cache are unambiguous, so this is fine in practice.
+fn translate_cds_table1(cds: &str) -> Option<String> {
+    let bytes = cds.as_bytes();
+    if !bytes.len().is_multiple_of(3) {
+        return None;
+    }
+    let mut peptide = String::with_capacity(bytes.len() / 3);
+    for chunk in bytes.chunks_exact(3) {
+        let codon = [
+            chunk[0].to_ascii_uppercase(),
+            chunk[1].to_ascii_uppercase(),
+            chunk[2].to_ascii_uppercase(),
+        ];
+        let aa = codon_table1(codon)?;
+        if aa == '*' {
+            break;
+        }
+        peptide.push(aa);
+    }
+    Some(peptide)
+}
+
+#[inline]
+fn codon_table1(codon: [u8; 3]) -> Option<char> {
+    // NCBI translation table 1 (standard). Stop codons = '*'.
+    match codon {
+        [b'T', b'T', b'T'] | [b'T', b'T', b'C'] => Some('F'),
+        [b'T', b'T', b'A'] | [b'T', b'T', b'G'] => Some('L'),
+        [b'C', b'T', _] => Some('L'),
+        [b'A', b'T', b'T'] | [b'A', b'T', b'C'] | [b'A', b'T', b'A'] => Some('I'),
+        [b'A', b'T', b'G'] => Some('M'),
+        [b'G', b'T', _] => Some('V'),
+        [b'T', b'C', _] => Some('S'),
+        [b'C', b'C', _] => Some('P'),
+        [b'A', b'C', _] => Some('T'),
+        [b'G', b'C', _] => Some('A'),
+        [b'T', b'A', b'T'] | [b'T', b'A', b'C'] => Some('Y'),
+        [b'T', b'A', b'A'] | [b'T', b'A', b'G'] => Some('*'),
+        [b'C', b'A', b'T'] | [b'C', b'A', b'C'] => Some('H'),
+        [b'C', b'A', b'A'] | [b'C', b'A', b'G'] => Some('Q'),
+        [b'A', b'A', b'T'] | [b'A', b'A', b'C'] => Some('N'),
+        [b'A', b'A', b'A'] | [b'A', b'A', b'G'] => Some('K'),
+        [b'G', b'A', b'T'] | [b'G', b'A', b'C'] => Some('D'),
+        [b'G', b'A', b'A'] | [b'G', b'A', b'G'] => Some('E'),
+        [b'T', b'G', b'T'] | [b'T', b'G', b'C'] => Some('C'),
+        [b'T', b'G', b'A'] => Some('*'),
+        [b'T', b'G', b'G'] => Some('W'),
+        [b'C', b'G', _] => Some('R'),
+        [b'A', b'G', b'T'] | [b'A', b'G', b'C'] => Some('S'),
+        [b'A', b'G', b'A'] | [b'A', b'G', b'G'] => Some('R'),
+        [b'G', b'G', _] => Some('G'),
+        _ => None,
+    }
+}
+
+/// Compute canonical CDS + peptide from the BAM-edited sequences and the
+/// list of `_rna_edit` attributes.
+///
+/// Returns `(canonical_cds, canonical_peptide)`. Either may be `None` if the
+/// input is missing or an edit cannot be reversed cleanly. The typical
+/// non-BAM-edited transcript has `edits.is_empty()` and both canonical values
+/// are returned unchanged (equal to the BAM-edited copies).
+fn derive_canonical_sequences(
+    edited_cds: Option<&str>,
+    edited_peptide: Option<&str>,
+    edits: &[RnaEdit],
+    cdna_coding_start: Option<i64>,
+    cdna_coding_end: Option<i64>,
+) -> (Option<String>, Option<String>) {
+    if edits.is_empty() {
+        // Non-BAM-edited transcript — canonical ≡ edited.
+        return (
+            edited_cds.map(|s| s.to_string()),
+            edited_peptide.map(|s| s.to_string()),
+        );
+    }
+    let (Some(cds), Some(coding_start), Some(coding_end)) =
+        (edited_cds, cdna_coding_start, cdna_coding_end)
+    else {
+        // Can't locate CDS within the cdna sequence — bail.
+        return (None, None);
+    };
+    let canonical_cds = undo_rna_edit_insertions(
+        cds,
+        edits,
+        coding_start - 1,
+        Some((coding_start, coding_end)),
+    );
+    let canonical_peptide = canonical_cds
+        .as_deref()
+        .and_then(translate_cds_table1)
+        .or_else(|| edited_peptide.map(|s| s.to_string()));
+    (canonical_cds, canonical_peptide)
 }
 
 fn unwrap_blessed_object(
@@ -1233,101 +1482,378 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // json_primary_seq_value / storable_primary_seq_value
+    // RnaEdit parsing + reversal + codon-table translation
     //
-    // Canonical (pre-BAM-edit) translation and CDS live in Perl fields that
-    // VEP stores in one of three shapes: plain string, blessed Bio::PrimarySeq
-    // with a `seq` slot, or a transcript-level object whose `primary_seq` slot
-    // itself wraps a Bio::PrimarySeq. These helpers normalize all three.
+    // These cover the canonical-sequence recovery path: parse `_rna_edit`
+    // attribute values, drop insertions back out of the BAM-edited CDS, and
+    // translate the recovered CDS with the standard codon table.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn json_primary_seq_value_plain_string() {
-        let v = serde_json::json!("MVFP");
-        assert_eq!(json_primary_seq_value(Some(&v)).as_deref(), Some("MVFP"));
+    fn rna_edit_parse_insertion_form() {
+        // The BAM-edited NM_002111.8 HTT polyQ edit has exactly this shape.
+        let edit = RnaEdit::parse("256 255 GCAGCA").expect("parse");
+        assert_eq!(edit.start, 256);
+        assert_eq!(edit.end, 255);
+        assert_eq!(edit.alt, "GCAGCA");
+        assert!(edit.is_pure_insertion());
     }
 
     #[test]
-    fn json_primary_seq_value_blessed_seq_slot() {
-        let v = serde_json::json!({
-            "__class": "Bio::PrimarySeq",
-            "__value": { "seq": "MVFPQA" }
-        });
-        assert_eq!(json_primary_seq_value(Some(&v)).as_deref(), Some("MVFPQA"));
+    fn rna_edit_parse_rejects_malformed() {
+        assert!(RnaEdit::parse("").is_none());
+        assert!(RnaEdit::parse("not a number").is_none());
+        assert!(RnaEdit::parse("256").is_none());
+        // Extra whitespace-separated tokens are tolerated (VEP stores exactly
+        // 3 but the parser shouldn't choke if the format loosens later).
+        let e = RnaEdit::parse("10 9 ACG trailing").expect("parse tolerant");
+        assert_eq!(e.start, 10);
+        assert_eq!(e.alt, "ACG");
     }
 
     #[test]
-    fn json_primary_seq_value_nested_primary_seq() {
-        let v = serde_json::json!({
-            "__class": "Bio::EnsEMBL::Translation",
-            "__value": {
-                "primary_seq": {
-                    "__class": "Bio::PrimarySeq",
-                    "__value": { "seq": "MVFPQAK" }
-                }
+    fn rna_edit_is_pure_insertion_requires_end_plus_one_equals_start() {
+        assert!(RnaEdit::parse("256 255 A").unwrap().is_pure_insertion());
+        // end == start → substitution, not a pure insertion.
+        assert!(!RnaEdit::parse("256 256 A").unwrap().is_pure_insertion());
+        // Empty alt (deletion) → not a pure insertion.
+        assert!(!RnaEdit::parse("256 255 ").unwrap().is_pure_insertion());
+    }
+
+    #[test]
+    fn parse_rna_edits_storable_filters_by_code_and_extracts_value() {
+        let mut e1 = std::collections::HashMap::new();
+        e1.insert(
+            "code".to_string(),
+            SValue::String(std::sync::Arc::from("_rna_edit")),
+        );
+        e1.insert(
+            "value".to_string(),
+            SValue::String(std::sync::Arc::from("256 255 GCAGCA")),
+        );
+        let mut e2 = std::collections::HashMap::new();
+        e2.insert(
+            "code".to_string(),
+            SValue::String(std::sync::Arc::from("MANE_Select")),
+        );
+        e2.insert(
+            "value".to_string(),
+            SValue::String(std::sync::Arc::from("NM_001388492.1")),
+        );
+        let attrs = SValue::Array(std::sync::Arc::new(vec![
+            SValue::Hash(std::sync::Arc::new(e1)),
+            SValue::Hash(std::sync::Arc::new(e2)),
+        ]));
+        let edits = parse_rna_edits_storable(Some(&attrs));
+        assert_eq!(edits.len(), 1, "MANE_Select attribute must be ignored");
+        assert_eq!(edits[0].alt, "GCAGCA");
+    }
+
+    #[test]
+    fn parse_rna_edits_json_handles_blessed_wrapper() {
+        let attrs = serde_json::json!([
+            {
+                "__class": "Bio::EnsEMBL::Attribute",
+                "__value": { "code": "_rna_edit", "value": "256 255 GCAGCA" }
+            },
+            {
+                "__class": "Bio::EnsEMBL::Attribute",
+                "__value": { "code": "TSL", "value": "tsl1" }
             }
-        });
-        assert_eq!(json_primary_seq_value(Some(&v)).as_deref(), Some("MVFPQAK"));
+        ]);
+        let edits = parse_rna_edits_json(Some(&attrs));
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].start, 256);
     }
 
     #[test]
-    fn json_primary_seq_value_none_and_missing_seq() {
-        assert!(json_primary_seq_value(None).is_none());
-        let empty_obj = serde_json::json!({ "other": "field" });
-        assert!(json_primary_seq_value(Some(&empty_obj)).is_none());
+    fn undo_rna_edit_removes_insertion_and_recovers_original_cds() {
+        // Synthetic: insert GCAGCA at cdna 111 (= mid-CDS with cdna offset 145).
+        // Edit value: start=111, end=110, alt=GCAGCA.
+        let edited_cds = "AAACCAGCAGGGG"; // "AAA"+"CC"+"AGCAG"+"GGG"+"G" — contrived.
+        // We want to simulate: pre-edit was "AAACCGGGG" (9 nt). Edit inserts
+        // "AGCAG" starting at cdna 6 (which in CDS space after offset=0 means
+        // position 6). Hmm let me re-plan this test.
+        let _ = edited_cds;
+        // Pre-edit CDS: "AAACCAGGG" (9 nt, codons AAA, CCA, GGG → K P G).
+        // Insert "CAG" at cdna 7 (between cdna 6 and 7) → "AAACCACAGGG"?
+        // Actually let's simulate the real HTT edit in miniature.
+        // Pre-edit CDS: "ATGCAGCAGCCCCCC" (5 codons M Q Q P P, 15 nt)
+        // Edit: insert "CAGCAG" (6 nt, 2 Q codons) between cdna 6 and 7
+        //   value = "7 6 CAGCAG"
+        // Post-edit CDS: "ATGCAG" + "CAGCAG" + "CAGCCCCCC"
+        //   = "ATGCAGCAGCAGCAGCCCCCC" (21 nt, 7 codons M Q Q Q Q P P)
+        let pre_edit = "ATGCAGCAGCCCCCC";
+        let post_edit = "ATGCAGCAGCAGCAGCCCCCC";
+        let edit = RnaEdit::parse("7 6 CAGCAG").unwrap();
+        let recovered = undo_rna_edit_insertions(post_edit, &[edit], 0, None)
+            .expect("insertion must reverse cleanly");
+        assert_eq!(recovered, pre_edit);
     }
 
     #[test]
-    fn storable_primary_seq_value_plain_string() {
-        let v = SValue::String(std::sync::Arc::from("MVFP"));
+    fn undo_rna_edit_multiple_insertions_applied_descending() {
+        // Simulate Ensembl applying edits in ascending-start order, each edit
+        // referencing the CURRENT (post-previous-edit) sequence.
+        //
+        //   pre              = "0123456789"                (10 chars)
+        //   edit 1 (s=5,e=4,alt=XX)  inserts before cdna 5 of pre
+        //     → "0123XX456789"                             (12 chars, = post_1)
+        //   edit 2 (s=10,e=9,alt=YY) inserts before cdna 10 of post_1
+        //     (cdna 10 of post_1 is 0-indexed 9 = char '7')
+        //     → "0123XX456YY789"                           (14 chars, = post_both)
+        //
+        // Undoing in descending start order — edit 2 then edit 1 — must take
+        // post_both back to pre exactly. Lower-position edit's bytes are not
+        // disturbed by the higher-position undo, so the second pass finds
+        // its alt at the expected coordinates.
+        let pre = "0123456789";
+        let post_both = "0123XX456YY789";
+        let edits = vec![
+            RnaEdit {
+                start: 5,
+                end: 4,
+                alt: "XX".to_string(),
+            },
+            RnaEdit {
+                start: 10,
+                end: 9,
+                alt: "YY".to_string(),
+            },
+        ];
+        let recovered =
+            undo_rna_edit_insertions(post_both, &edits, 0, None).expect("two-edit reverse");
+        assert_eq!(recovered, pre);
+    }
+
+    #[test]
+    fn undo_rna_edit_bails_on_non_insertion() {
+        // A substitution-shape edit (start == end, single alt char) can't be
+        // reversed without the original base → helper must return None.
+        let edits = vec![RnaEdit {
+            start: 5,
+            end: 5,
+            alt: "X".to_string(),
+        }];
+        assert!(undo_rna_edit_insertions("AAAAXAAAA", &edits, 0, None).is_none());
+    }
+
+    #[test]
+    fn undo_rna_edit_bails_on_coordinate_mismatch() {
+        // alt="XX" but the bytes at that position are "AA" → our coordinate /
+        // ordering model is wrong for this input; bail instead of corrupting.
+        let edits = vec![RnaEdit {
+            start: 3,
+            end: 2,
+            alt: "XX".to_string(),
+        }];
+        assert!(undo_rna_edit_insertions("AAAAAA", &edits, 0, None).is_none());
+    }
+
+    #[test]
+    fn undo_rna_edit_keep_range_skips_utr_edits() {
+        // Edit outside the CDS window — skipped silently so the CDS reversal
+        // still succeeds when a 3'UTR edit is part of the attribute list.
+        let cds = "ATGAAAGGGCCC"; // 12 nt, 4 codons M K G P
+        let edits = vec![RnaEdit {
+            start: 200, // well past the CDS end
+            end: 199,
+            alt: "TTT".to_string(),
+        }];
+        let recovered = undo_rna_edit_insertions(cds, &edits, 0, Some((1, 12))).expect("no-op");
+        assert_eq!(recovered, cds);
+    }
+
+    #[test]
+    fn translate_cds_table1_stops_at_first_stop() {
+        // ATG TTT TTA TAA AAA → M F L * (stop) — peptide = "MFL".
         assert_eq!(
-            storable_primary_seq_value(Some(&v)).as_deref(),
-            Some("MVFP")
+            translate_cds_table1("ATGTTTTTATAAAAA").as_deref(),
+            Some("MFL")
         );
     }
 
     #[test]
-    fn storable_primary_seq_value_seq_slot() {
-        let mut inner = std::collections::HashMap::new();
-        inner.insert(
-            "seq".to_string(),
-            SValue::String(std::sync::Arc::from("MVFPQA")),
+    fn translate_cds_table1_rejects_non_triplet_length() {
+        assert!(translate_cds_table1("ATGAA").is_none());
+    }
+
+    #[test]
+    fn translate_cds_table1_handles_lowercase_and_ambiguity() {
+        // Lowercase is folded; non-ACGT resolves to None.
+        assert_eq!(translate_cds_table1("atgggg").as_deref(), Some("MG"));
+        assert!(translate_cds_table1("ATGNNN").is_none());
+    }
+
+    #[test]
+    fn derive_canonical_sequences_is_identity_when_no_edits() {
+        let (cds, pep) =
+            derive_canonical_sequences(Some("ATGAAA"), Some("MK"), &[], Some(1), Some(6));
+        assert_eq!(cds.as_deref(), Some("ATGAAA"));
+        assert_eq!(pep.as_deref(), Some("MK"));
+    }
+
+    #[test]
+    fn derive_canonical_sequences_reverses_cds_and_retranslates() {
+        // Miniature HTT-style: pre-edit CDS encodes M Q P (9 nt).
+        // BAM edit inserts "CAG" (1 Q) between cdna 6 and 7 → edited encodes
+        // M Q Q P (12 nt). Canonical recovery drops the Q back to M Q P.
+        let edited_cds = "ATGCAGCAGCCC"; // 12 nt = MQQP
+        let edited_peptide = "MQQP";
+        let edits = vec![RnaEdit::parse("7 6 CAG").unwrap()];
+        let (cds, pep) = derive_canonical_sequences(
+            Some(edited_cds),
+            Some(edited_peptide),
+            &edits,
+            Some(1),
+            Some(12),
         );
-        let v = SValue::Hash(std::sync::Arc::new(inner));
+        assert_eq!(cds.as_deref(), Some("ATGCAGCCC"));
+        assert_eq!(pep.as_deref(), Some("MQP"));
+    }
+
+    #[test]
+    fn derive_canonical_sequences_returns_none_cds_when_edit_irreversible() {
+        // Substitution-shape edit → canonical CDS can't be recovered → None.
+        let edits = vec![RnaEdit {
+            start: 4,
+            end: 4,
+            alt: "X".to_string(),
+        }];
+        let (cds, pep) =
+            derive_canonical_sequences(Some("ATGXAA"), Some("MK"), &edits, Some(1), Some(6));
+        assert!(
+            cds.is_none(),
+            "canonical CDS must be None when unreversible"
+        );
+        // Peptide still falls back to the BAM-edited peptide rather than being
+        // left null — downstream HGVSp consumers can still render *something*.
+        assert_eq!(pep.as_deref(), Some("MK"));
+    }
+
+    // -----------------------------------------------------------------------
+    // HTT polyQ regression against a real VEP merged cache sample.
+    //
+    // Ignored by default because it reaches into an absolute path outside the
+    // repo. Run locally with:
+    //   cargo test --lib translation::tests::htt_canonical_from_real_merged_cache \
+    //     -- --ignored --nocapture
+    // -----------------------------------------------------------------------
+    #[test]
+    #[ignore = "requires /Users/mwiewior/workspace/data_vepyr/homo_sapiens_merged cache"]
+    fn htt_canonical_from_real_merged_cache() {
+        let path = std::path::Path::new(
+            "/Users/mwiewior/workspace/data_vepyr/homo_sapiens_merged/115_GRCh38/4/3000001-4000000.gz",
+        );
+        if !path.exists() {
+            println!("SKIP: cache not found at {}", path.display());
+            return;
+        }
+        let reader = open_binary_reader(path).expect("open reader");
+        let (alias_counts, entry_keys) =
+            collect_nstore_alias_counts_and_top_keys_from_reader(reader).expect("aliases");
+        let reader = open_binary_reader(path).expect("open reader 2");
+
+        let mut refseq_canonical: Option<String> = None;
+        let mut refseq_edited: Option<String> = None;
+        let mut ensembl_canonical: Option<String> = None;
+        let mut ensembl_edited: Option<String> = None;
+
+        stream_nstore_top_hash_array_items_keyed_with_alias_counts_from_reader(
+            reader,
+            alias_counts,
+            entry_keys,
+            |_region, item| {
+                let Some(obj) = item.as_hash() else {
+                    return Ok(true);
+                };
+                let stable_id = sv_str(obj.get("stable_id")).unwrap_or_default();
+                if !matches!(stable_id.as_str(), "NM_002111.8" | "ENST00000355072") {
+                    return Ok(true);
+                }
+                let vef_cache = obj
+                    .get("_variation_effect_feature_cache")
+                    .and_then(SValue::as_hash);
+                let edited_cds = vef_cache.and_then(|c| sv_str(c.get("translateable_seq")));
+                let edited_peptide = vef_cache.and_then(|c| sv_str(c.get("peptide")));
+                let edits = parse_rna_edits_storable(obj.get("attributes"));
+                let cdna_coding_start = sv_i64(obj.get("cdna_coding_start"));
+                let cdna_coding_end = sv_i64(obj.get("cdna_coding_end"));
+                let (cds_canon, pep_canon) = derive_canonical_sequences(
+                    edited_cds.as_deref(),
+                    edited_peptide.as_deref(),
+                    &edits,
+                    cdna_coding_start,
+                    cdna_coding_end,
+                );
+                match stable_id.as_str() {
+                    "NM_002111.8" => {
+                        refseq_edited = edited_peptide;
+                        refseq_canonical = pep_canon;
+                        println!(
+                            "NM_002111.8 edited_cds_len={:?} canonical_cds_len={:?}",
+                            edited_cds.as_ref().map(|s| s.len()),
+                            cds_canon.as_ref().map(|s| s.len()),
+                        );
+                    }
+                    "ENST00000355072" => {
+                        ensembl_edited = edited_peptide;
+                        ensembl_canonical = pep_canon;
+                    }
+                    _ => {}
+                }
+                Ok(true)
+            },
+        )
+        .expect("stream");
+
+        // Ensembl has no BAM edits → canonical must equal edited exactly.
+        let ensembl_edited = ensembl_edited.expect("Ensembl ENST00000355072 not found");
+        let ensembl_canonical = ensembl_canonical.expect("Ensembl canonical missing");
+        assert_eq!(ensembl_edited, ensembl_canonical);
         assert_eq!(
-            storable_primary_seq_value(Some(&v)).as_deref(),
-            Some("MVFPQA")
+            ensembl_edited.len(),
+            3142,
+            "Ensembl HTT peptide should be 3142 AA (21-Q canonical)"
         );
-    }
 
-    #[test]
-    fn storable_primary_seq_value_nested_primary_seq() {
-        let mut primary = std::collections::HashMap::new();
-        primary.insert(
-            "seq".to_string(),
-            SValue::String(std::sync::Arc::from("MVFPQAK")),
-        );
-        let mut outer = std::collections::HashMap::new();
-        outer.insert(
-            "primary_seq".to_string(),
-            SValue::Hash(std::sync::Arc::new(primary)),
-        );
-        let v = SValue::Hash(std::sync::Arc::new(outer));
+        // RefSeq NM_002111.8 has an _rna_edit that inserts 2 Qs. Edited = 3144,
+        // canonical = 3142 once we reverse the edit. And the two sequences must
+        // differ by exactly two Q insertions at the polyQ tract.
+        let refseq_edited = refseq_edited.expect("NM_002111.8 not found");
+        let refseq_canonical = refseq_canonical.expect("NM_002111.8 canonical missing");
         assert_eq!(
-            storable_primary_seq_value(Some(&v)).as_deref(),
-            Some("MVFPQAK")
+            refseq_edited.len(),
+            3144,
+            "BAM-edited NP_002102.4 = 3144 AA"
         );
-    }
+        assert_eq!(
+            refseq_canonical.len(),
+            3142,
+            "canonical NP_002102.4 (BAM edit reversed) = 3142 AA"
+        );
+        // Canonical NP_002102.4 should match Ensembl ENSP00000347184's peptide
+        // (both come from the same GRCh38-derived CDS).
+        assert_eq!(
+            refseq_canonical, ensembl_canonical,
+            "RefSeq canonical peptide must equal Ensembl's peptide at the same locus"
+        );
 
-    #[test]
-    fn storable_primary_seq_value_none_and_missing_seq() {
-        assert!(storable_primary_seq_value(None).is_none());
-        let mut empty = std::collections::HashMap::new();
-        empty.insert(
-            "other".to_string(),
-            SValue::String(std::sync::Arc::from("x")),
+        // Concrete polyQ check: canonical must have 21 Qs at positions 18-38
+        // and P at position 39 (this is what makes VEP's HGVSp say Pro39...).
+        let q_run: String = refseq_canonical[17..]
+            .chars()
+            .take_while(|c| *c == 'Q')
+            .collect();
+        assert_eq!(
+            q_run.len(),
+            21,
+            "canonical HTT polyQ tract should be 21 residues long"
         );
-        let v = SValue::Hash(std::sync::Arc::new(empty));
-        assert!(storable_primary_seq_value(Some(&v)).is_none());
+        assert_eq!(
+            refseq_canonical.as_bytes()[38],
+            b'P',
+            "canonical HTT position 39 (0-indexed 38) should be Pro"
+        );
     }
 }
