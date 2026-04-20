@@ -76,7 +76,7 @@ impl PluginSourceKind {
     pub fn select_query(self) -> &'static str {
         match self {
             Self::ClinVar => {
-                "SELECT chrom, CAST(start AS INTEGER) AS pos, ref AS ref, alt AS alt, array_to_string(\"CLNSIG\", '|') AS clnsig, array_to_string(\"CLNREVSTAT\", '|') AS clnrevstat, array_to_string(\"CLNDN\", '|') AS clndn, \"CLNVC\" AS clnvc, array_to_string(\"CLNVI\", '|') AS clnvi, CAST(\"AF_ESP\" AS FLOAT) AS af_esp, CAST(\"AF_EXAC\" AS FLOAT) AS af_exac, CAST(\"AF_TGP\" AS FLOAT) AS af_tgp FROM source"
+                "SELECT chrom, CAST(start AS INTEGER) AS pos, ref AS ref, alt AS alt, CAST(id AS VARCHAR) AS \"ClinVar\", array_to_string(\"CLNSIG\", '|') AS \"ClinVar_CLNSIG\", array_to_string(\"CLNREVSTAT\", '|') AS \"ClinVar_CLNREVSTAT\", array_to_string(\"CLNDN\", '|') AS \"ClinVar_CLNDN\", \"CLNVC\" AS \"ClinVar_CLNVC\", array_to_string(\"CLNVI\", '|') AS \"ClinVar_CLNVI\" FROM source"
             }
             Self::Cadd => {
                 "SELECT chrom AS chrom, CAST(pos AS INTEGER) AS pos, ref AS ref, alt AS alt, CAST(rawscore AS FLOAT) AS raw_score, CAST(phred AS FLOAT) AS phred_score FROM source"
@@ -97,7 +97,7 @@ impl PluginSourceKind {
     pub fn fjall_projection(self) -> &'static str {
         match self {
             Self::ClinVar => {
-                "chrom, CAST(pos AS BIGINT) AS start, CAST(pos AS BIGINT) AS end, concat(ref, '/', alt) AS allele_string, clnsig, clnrevstat, clndn, clnvc, clnvi, af_esp, af_exac, af_tgp"
+                "chrom, CAST(pos AS BIGINT) AS start, CAST(pos AS BIGINT) AS end, concat(ref, '/', alt) AS allele_string, \"ClinVar\", \"ClinVar_CLNSIG\", \"ClinVar_CLNREVSTAT\", \"ClinVar_CLNDN\", \"ClinVar_CLNVC\", \"ClinVar_CLNVI\""
             }
             Self::Cadd => {
                 "chrom, CAST(pos AS BIGINT) AS start, CAST(pos AS BIGINT) AS end, concat(ref, '/', alt) AS allele_string, raw_score, phred_score"
