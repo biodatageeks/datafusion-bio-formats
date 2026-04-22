@@ -166,7 +166,11 @@ pub(crate) fn transcript_schema(
         Field::new("gene_stable_id", DataType::Utf8, true),
         Field::new("gene_symbol", DataType::Utf8, true),
         Field::new("gene_symbol_source", DataType::Utf8, true),
+        // Cache export keeps both columns at the native VEP value so downstream
+        // annotators can preserve `_native` if they later overwrite
+        // `gene_hgnc_id` with buffer-scoped propagation results.
         Field::new("gene_hgnc_id", DataType::Utf8, true),
+        Field::new("gene_hgnc_id_native", DataType::Utf8, true),
         Field::new("refseq_id", DataType::Utf8, true),
         Field::new("cds_start", DataType::Int64, true),
         Field::new("cds_end", DataType::Int64, true),
@@ -197,6 +201,8 @@ pub(crate) fn transcript_schema(
         Field::new("ncrna_structure", DataType::Utf8, true),
         // Promoted VEP fields (issue #125)
         Field::new("translateable_seq", DataType::Utf8, true),
+        Field::new("three_prime_utr_seq", DataType::Utf8, true),
+        Field::new("five_prime_utr_seq", DataType::Utf8, true),
         Field::new(
             "cdna_mapper_segments",
             cdna_mapper_segment_list_data_type(),
@@ -300,6 +306,11 @@ pub(crate) fn translation_schema(
         Field::new("cds_len", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
+        // Canonical columns are pre-BAM-edit when `_rna_edit` reversal
+        // succeeds. If reversal fails, canonical CDS stays NULL and canonical
+        // peptide falls back to the BAM-edited peptide.
+        Field::new("translation_seq_canonical", DataType::Utf8, true),
+        Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
         Field::new("sift_predictions", prediction_list_data_type(), true),
         Field::new("polyphen_predictions", prediction_list_data_type(), true),
@@ -321,6 +332,11 @@ pub fn translation_core_schema(coordinate_system_zero_based: bool) -> SchemaRef 
         Field::new("protein_len", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
+        // Same semantics as `translation_schema`: canonical CDS is NULL when an
+        // edit cannot be reversed, while canonical peptide falls back to the
+        // edited peptide.
+        Field::new("translation_seq_canonical", DataType::Utf8, true),
+        Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
     ];
     new_schema(fields, coordinate_system_zero_based)
@@ -530,6 +546,9 @@ mod tests {
         assert!(schema.column_with_name("gene_stable_id").is_some());
         assert!(schema.column_with_name("exons").is_some());
         assert!(schema.column_with_name("cdna_seq").is_some());
+        assert!(schema.column_with_name("translateable_seq").is_some());
+        assert!(schema.column_with_name("three_prime_utr_seq").is_some());
+        assert!(schema.column_with_name("five_prime_utr_seq").is_some());
         assert!(schema.column_with_name("tsl").is_some());
         assert!(schema.column_with_name("mane_select").is_some());
         assert!(schema.column_with_name("raw_object_json").is_some());
@@ -592,6 +611,22 @@ mod tests {
         assert!(schema.column_with_name("transcript_id").is_some());
         assert!(schema.column_with_name("translation_seq").is_some());
         assert!(schema.column_with_name("cds_sequence").is_some());
+        assert!(
+            schema
+                .column_with_name("translation_seq_canonical")
+                .is_some()
+        );
+        assert!(schema.column_with_name("cds_sequence_canonical").is_some());
+        for col in [
+            "translation_seq",
+            "cds_sequence",
+            "translation_seq_canonical",
+            "cds_sequence_canonical",
+        ] {
+            let f = schema.field_with_name(col).unwrap();
+            assert_eq!(f.data_type(), &DataType::Utf8);
+            assert!(f.is_nullable());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -607,12 +642,29 @@ mod tests {
         assert!(schema.column_with_name("protein_len").is_some());
         assert!(schema.column_with_name("translation_seq").is_some());
         assert!(schema.column_with_name("cds_sequence").is_some());
+        assert!(
+            schema
+                .column_with_name("translation_seq_canonical")
+                .is_some()
+        );
+        assert!(schema.column_with_name("cds_sequence_canonical").is_some());
         assert!(schema.column_with_name("protein_features").is_some());
         // Should NOT contain position or sift/polyphen columns
         assert!(schema.column_with_name("chrom").is_none());
         assert!(schema.column_with_name("start").is_none());
         assert!(schema.column_with_name("sift_predictions").is_none());
         assert!(schema.column_with_name("polyphen_predictions").is_none());
+
+        for col in [
+            "translation_seq",
+            "cds_sequence",
+            "translation_seq_canonical",
+            "cds_sequence_canonical",
+        ] {
+            let f = schema.field_with_name(col).unwrap();
+            assert_eq!(f.data_type(), &DataType::Utf8);
+            assert!(f.is_nullable());
+        }
     }
 
     #[test]

@@ -1,10 +1,11 @@
 use crate::entity::EnsemblEntityKind;
 use datafusion::arrow::datatypes::Schema;
 
-/// VEP cache region size used for region-local feature merging.
+/// VEP cache region size used for source-file preference during deduplication.
 ///
-/// Ensembl VEP loads transcript features in 1 Mb cache regions. The transcript
-/// export query mirrors that locality when propagating `gene_hgnc_id`.
+/// Ensembl VEP stores transcript features in 1 Mb cache regions. The export
+/// query uses this to prefer the copy from the region containing the transcript
+/// start when deduplicating cross-boundary entries.
 pub const VEP_CACHE_REGION_SIZE_BP: i64 = 1_000_000;
 
 fn transcript_region_start_expr(start_col: &str) -> String {
@@ -22,24 +23,10 @@ fn source_region_preference_expr(start_col: &str, source_file_col: &str) -> Stri
 }
 
 fn transcript_select_list(schema: &Schema) -> String {
-    let region_expr = format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
     schema
         .fields()
         .iter()
-        .map(|f| {
-            if f.name() == "gene_hgnc_id" {
-                format!(
-                    "COALESCE(gene_hgnc_id, \
-                         CASE WHEN gene_symbol IS NOT NULL \
-                              THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
-                                   OVER (PARTITION BY chrom, gene_symbol, {region_expr} \
-                                         ORDER BY gene_hgnc_id NULLS LAST) \
-                              ELSE NULL END) AS gene_hgnc_id"
-                )
-            } else {
-                format!("\"{}\"", f.name())
-            }
-        })
+        .map(|f| format!("\"{}\"", f.name()))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -154,8 +141,8 @@ pub fn build_translation_dedup_query_multi_chrom(table_name: &str, chroms: &[&st
 #[cfg(test)]
 mod tests {
     use super::{
-        VEP_CACHE_REGION_SIZE_BP, build_export_query, build_export_query_multi_chrom,
-        build_translation_dedup_query, build_translation_dedup_query_multi_chrom,
+        build_export_query, build_export_query_multi_chrom, build_translation_dedup_query,
+        build_translation_dedup_query_multi_chrom,
     };
     use crate::entity::EnsemblEntityKind;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -169,6 +156,7 @@ mod tests {
             Field::new("cds_start", DataType::Int64, true),
             Field::new("gene_symbol", DataType::Utf8, true),
             Field::new("gene_hgnc_id", DataType::Utf8, true),
+            Field::new("gene_hgnc_id_native", DataType::Utf8, true),
         ])
     }
 
@@ -205,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn build_export_query_transcript_hgnc_propagation_is_local() {
+    fn build_export_query_transcript_no_hgnc_propagation() {
         let schema = test_transcript_schema();
         let q = build_export_query(
             EnsemblEntityKind::Transcript,
@@ -213,12 +201,19 @@ mod tests {
             Some("9"),
             Some(&schema),
         );
-        assert!(q.contains("COALESCE(gene_hgnc_id"));
-        assert!(q.contains("FIRST_VALUE(gene_hgnc_id) IGNORE NULLS"));
-        assert!(q.contains("PARTITION BY chrom, gene_symbol"));
-        assert!(q.contains(&format!(
-            "CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)"
-        )));
+        // gene_hgnc_id should pass through without propagation
+        assert!(
+            !q.contains("COALESCE(gene_hgnc_id"),
+            "gene_hgnc_id should not be propagated"
+        );
+        assert!(
+            !q.contains("FIRST_VALUE(gene_hgnc_id)"),
+            "no window-based HGNC fill"
+        );
+        // Both columns should appear as plain quoted names
+        assert!(q.contains("\"gene_hgnc_id\""));
+        assert!(q.contains("\"gene_hgnc_id_native\""));
+        // Still uses explicit column list (not SELECT *)
         assert!(!q.starts_with("SELECT *"));
     }
 
@@ -253,7 +248,7 @@ mod tests {
         assert!(q.contains("WHERE chrom IN ('1', '2')"));
         assert!(q.contains("ROW_NUMBER()"));
         assert!(q.contains("WHERE _rn = 1"));
-        assert!(q.contains("PARTITION BY chrom, gene_symbol"));
+        assert!(q.contains("PARTITION BY stable_id"));
         assert!(q.contains("source_file LIKE CONCAT('%/'"));
     }
 

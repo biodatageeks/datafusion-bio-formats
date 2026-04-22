@@ -12,7 +12,9 @@ use datafusion_bio_format_ensembl_cache::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, ExonTableProvider,
     MotifFeatureTableProvider, RegulatoryFeatureTableProvider, TranscriptTableProvider,
     TranslationTableProvider, VEP_CHROMOSOMES_METADATA_KEY, VariationTableProvider,
+    build_export_query,
 };
+use serde_json::Value;
 use std::sync::Arc;
 
 fn fixture_path(name: &str) -> String {
@@ -2872,6 +2874,88 @@ async fn transcript_object_hash_stable_text() -> datafusion::common::Result<()> 
             );
         }
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_export_hgnc_matches_raw_object_json_text() -> datafusion::common::Result<()> {
+    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
+        "transcript_storable",
+    )))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let schema = Arc::new(ctx.table("tx").await?.schema().as_arrow().clone());
+    let export_query = build_export_query(EnsemblEntityKind::Transcript, "tx", None, Some(&schema));
+    let query = format!(
+        "WITH exported AS ({export_query}) \
+         SELECT stable_id, gene_hgnc_id, raw_object_json FROM exported"
+    );
+
+    let batches = ctx.sql(&query).await?.collect().await?;
+    let mut checked_rows = 0usize;
+    let mut mismatches = Vec::new();
+
+    for batch in &batches {
+        let stable_ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("expected stable_id StringArray");
+        let gene_hgnc_ids = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("expected gene_hgnc_id StringArray");
+        let raw_jsons = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("expected raw_object_json StringArray");
+
+        for i in 0..batch.num_rows() {
+            checked_rows += 1;
+
+            let promoted = if gene_hgnc_ids.is_null(i) {
+                None
+            } else {
+                Some(gene_hgnc_ids.value(i))
+            };
+
+            let raw: Value = serde_json::from_str(raw_jsons.value(i))
+                .expect("raw_object_json should contain valid JSON");
+            let raw_native = match raw
+                .as_object()
+                .and_then(|obj| obj.get("_gene_hgnc_id").or_else(|| obj.get("gene_hgnc_id")))
+            {
+                Some(Value::String(value)) => Some(value.as_str()),
+                Some(Value::Null) | None => None,
+                Some(other) => panic!("unexpected HGNC value in raw_object_json: {other}"),
+            };
+
+            if promoted != raw_native {
+                mismatches.push(format!(
+                    "{}: promoted={promoted:?}, raw_native={raw_native:?}",
+                    stable_ids.value(i)
+                ));
+            }
+        }
+    }
+
+    assert!(checked_rows > 0, "expected exported transcript rows");
+    assert!(
+        mismatches.is_empty(),
+        "exported gene_hgnc_id disagrees with raw_object_json for {} rows: {}",
+        mismatches.len(),
+        mismatches
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
 
     Ok(())
 }

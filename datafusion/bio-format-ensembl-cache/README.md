@@ -98,7 +98,8 @@ of transcripts that would otherwise have no exon entries.
 | `gene_stable_id` | Utf8 | yes | Parent gene ID (ENSG...) |
 | `gene_symbol` | Utf8 | yes | Gene symbol (e.g. BRCA1) |
 | `gene_symbol_source` | Utf8 | yes | Gene symbol source (e.g. HGNC) |
-| `gene_hgnc_id` | Utf8 | yes | HGNC ID |
+| `gene_hgnc_id` | Utf8 | yes | HGNC ID parsed from the raw VEP object, with no export-time propagation/backfill |
+| `gene_hgnc_id_native` | Utf8 | yes | Stable copy of the native raw-object HGNC ID. In exported cache files it is identical to `gene_hgnc_id`; downstream annotation engines can preserve it if they later overwrite `gene_hgnc_id` |
 | `refseq_id` | Utf8 | yes | RefSeq transcript ID |
 | `cds_start` | Int64 | yes | CDS genomic start |
 | `cds_end` | Int64 | yes | CDS genomic end |
@@ -171,8 +172,10 @@ Standalone translation table — one row per coding transcript.
 | `cdna_coding_start` | Int64 | yes | cDNA coding start offset |
 | `cdna_coding_end` | Int64 | yes | cDNA coding end offset |
 | `cds_len` | Int64 | yes | CDS length (derived: `cdna_coding_end - cdna_coding_start + 1`) |
-| `translation_seq` | Utf8 | yes | Protein/peptide sequence |
-| `cds_sequence` | Utf8 | yes | Translatable CDS nucleotide sequence |
+| `translation_seq` | Utf8 | yes | Protein/peptide sequence (BAM-edited for RefSeq transcripts with `bam_edit_status=ok`; sourced from `_variation_effect_feature_cache.peptide`) |
+| `cds_sequence` | Utf8 | yes | Translatable CDS nucleotide sequence (BAM-edited counterpart; sourced from `_variation_effect_feature_cache.translateable_seq`) |
+| `translation_seq_canonical` | Utf8 | yes | Canonical (pre-BAM-edit) protein sequence reconstructed by reversing `_rna_edit` insertions on the edited CDS and retranslating. If reversal fails, this column falls back to the BAM-edited `translation_seq` so HGVSp-style consumers still have a peptide string |
+| `cds_sequence_canonical` | Utf8 | yes | Canonical (pre-BAM-edit) CDS reconstructed by reversing `_rna_edit` insertions on the edited CDS. Left NULL when the edits are missing or cannot be reversed cleanly |
 | `protein_features` | `List<Struct<analysis:Utf8, hseqname:Utf8, start:Int64, end:Int64>>` | yes | Protein domain/feature annotations (see below) |
 | `sift_predictions` | `List<Struct<position:Int32, amino_acid:Utf8, prediction:Utf8, score:Float32>>` | yes | SIFT pathogenicity predictions (see below) |
 | `polyphen_predictions` | `List<Struct<position:Int32, amino_acid:Utf8, prediction:Utf8, score:Float32>>` | yes | PolyPhen-2 pathogenicity predictions (see below) |
@@ -299,6 +302,7 @@ All entity schemas also include **provenance columns**: `species`, `assembly`, `
 Transcript, exon, and translation schemas support projection pushdown. When VEP-related
 columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `mature_mirna_regions`,
 `cdna_mapper_segments`, `spliced_seq`, `translation_seq`, `cds_sequence`,
+`translation_seq_canonical`, `cds_sequence_canonical`,
 `protein_features`, `sift_predictions`, `polyphen_predictions`) are not
 selected in a query, the parser skips extracting those fields, significantly
 reducing parse overhead.
