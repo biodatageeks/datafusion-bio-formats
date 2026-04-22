@@ -166,6 +166,9 @@ pub(crate) fn transcript_schema(
         Field::new("gene_stable_id", DataType::Utf8, true),
         Field::new("gene_symbol", DataType::Utf8, true),
         Field::new("gene_symbol_source", DataType::Utf8, true),
+        // Cache export keeps both columns at the native VEP value so downstream
+        // annotators can preserve `_native` if they later overwrite
+        // `gene_hgnc_id` with buffer-scoped propagation results.
         Field::new("gene_hgnc_id", DataType::Utf8, true),
         Field::new("gene_hgnc_id_native", DataType::Utf8, true),
         Field::new("refseq_id", DataType::Utf8, true),
@@ -303,6 +306,9 @@ pub(crate) fn translation_schema(
         Field::new("cds_len", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
+        // Canonical columns are pre-BAM-edit when `_rna_edit` reversal
+        // succeeds. If reversal fails, canonical CDS stays NULL and canonical
+        // peptide falls back to the BAM-edited peptide.
         Field::new("translation_seq_canonical", DataType::Utf8, true),
         Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
@@ -326,6 +332,9 @@ pub fn translation_core_schema(coordinate_system_zero_based: bool) -> SchemaRef 
         Field::new("protein_len", DataType::Int64, true),
         Field::new("translation_seq", DataType::Utf8, true),
         Field::new("cds_sequence", DataType::Utf8, true),
+        // Same semantics as `translation_schema`: canonical CDS is NULL when an
+        // edit cannot be reversed, while canonical peptide falls back to the
+        // edited peptide.
         Field::new("translation_seq_canonical", DataType::Utf8, true),
         Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),

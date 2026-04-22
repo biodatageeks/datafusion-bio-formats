@@ -1019,8 +1019,10 @@ fn undo_rna_edit_insertions(
             return None;
         }
         // Sanity check: the bytes we're about to remove must equal the edit's
-        // alt payload. If they don't, our coordinate / ordering assumption is
-        // wrong and we should bail instead of silently corrupting the result.
+        // alt payload. This assumes the cache stores `_rna_edit` alt values in
+        // the same case as the edited CDS. If they don't, our coordinate /
+        // ordering model is wrong and we should bail instead of silently
+        // corrupting the result.
         if &seq[start_idx..end_idx] != edit.alt.as_bytes() {
             return None;
         }
@@ -1093,8 +1095,10 @@ fn codon_table1(codon: [u8; 3]) -> Option<char> {
 /// Compute canonical CDS + peptide from the BAM-edited sequences and the
 /// list of `_rna_edit` attributes.
 ///
-/// Returns `(canonical_cds, canonical_peptide)`. Either may be `None` if the
-/// input is missing or an edit cannot be reversed cleanly. The typical
+/// Returns `(canonical_cds, canonical_peptide)`. `canonical_cds` is `None` if
+/// the input is missing or an edit cannot be reversed cleanly. In that case,
+/// `canonical_peptide` falls back to the BAM-edited peptide when available so
+/// downstream HGVSp-style consumers still have a peptide string. The typical
 /// non-BAM-edited transcript has `edits.is_empty()` and both canonical values
 /// are returned unchanged (equal to the BAM-edited copies).
 fn derive_canonical_sequences(
@@ -1568,16 +1572,6 @@ mod tests {
 
     #[test]
     fn undo_rna_edit_removes_insertion_and_recovers_original_cds() {
-        // Synthetic: insert GCAGCA at cdna 111 (= mid-CDS with cdna offset 145).
-        // Edit value: start=111, end=110, alt=GCAGCA.
-        let edited_cds = "AAACCAGCAGGGG"; // "AAA"+"CC"+"AGCAG"+"GGG"+"G" — contrived.
-        // We want to simulate: pre-edit was "AAACCGGGG" (9 nt). Edit inserts
-        // "AGCAG" starting at cdna 6 (which in CDS space after offset=0 means
-        // position 6). Hmm let me re-plan this test.
-        let _ = edited_cds;
-        // Pre-edit CDS: "AAACCAGGG" (9 nt, codons AAA, CCA, GGG → K P G).
-        // Insert "CAG" at cdna 7 (between cdna 6 and 7) → "AAACCACAGGG"?
-        // Actually let's simulate the real HTT edit in miniature.
         // Pre-edit CDS: "ATGCAGCAGCCCCCC" (5 codons M Q Q P P, 15 nt)
         // Edit: insert "CAGCAG" (6 nt, 2 Q codons) between cdna 6 and 7
         //   value = "7 6 CAGCAG"
@@ -1734,25 +1728,29 @@ mod tests {
     // -----------------------------------------------------------------------
     // HTT polyQ regression against a real VEP merged cache sample.
     //
-    // Ignored by default because it reaches into an absolute path outside the
-    // repo. Run locally with:
+    // Ignored by default because it needs a real merged-cache file outside the
+    // repo. Set `VEP_MERGED_CACHE_PATH` to the `.gz` region file, then run:
     //   cargo test --lib translation::tests::htt_canonical_from_real_merged_cache \
     //     -- --ignored --nocapture
     // -----------------------------------------------------------------------
     #[test]
-    #[ignore = "requires /Users/mwiewior/workspace/data_vepyr/homo_sapiens_merged cache"]
+    #[ignore = "requires VEP_MERGED_CACHE_PATH pointing at a merged-cache .gz file"]
     fn htt_canonical_from_real_merged_cache() {
-        let path = std::path::Path::new(
-            "/Users/mwiewior/workspace/data_vepyr/homo_sapiens_merged/115_GRCh38/4/3000001-4000000.gz",
-        );
+        let path = match std::env::var("VEP_MERGED_CACHE_PATH") {
+            Ok(path) => std::path::PathBuf::from(path),
+            Err(_) => {
+                println!("SKIP: set VEP_MERGED_CACHE_PATH to a merged-cache .gz file");
+                return;
+            }
+        };
         if !path.exists() {
             println!("SKIP: cache not found at {}", path.display());
             return;
         }
-        let reader = open_binary_reader(path).expect("open reader");
+        let reader = open_binary_reader(&path).expect("open reader");
         let (alias_counts, entry_keys) =
             collect_nstore_alias_counts_and_top_keys_from_reader(reader).expect("aliases");
-        let reader = open_binary_reader(path).expect("open reader 2");
+        let reader = open_binary_reader(&path).expect("open reader 2");
 
         let mut refseq_canonical: Option<String> = None;
         let mut refseq_edited: Option<String> = None;
