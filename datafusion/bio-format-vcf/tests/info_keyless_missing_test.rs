@@ -42,6 +42,21 @@ const VCF_WITH_INVALID_FLAG_VALUE: &str = r#"##fileformat=VCFv4.3
 chr1	100	rs1	A	T	60	PASS	H3=unexpected_payload
 "#;
 
+/// Real-data regression: row 4,032,720 of `HG00096.hg38.wgs.vcf.bgz`
+/// (1000 Genomes high-coverage WGS), chrX:1946351 `<DEL>`, where the bare
+/// INFO key `EVIDENCE` (declared `Number=.,Type=String`) appears at the
+/// end of the INFO column with no `=value` separator. Without the fix at
+/// `physical_exec.rs` L483 this row crashes the entire batch with
+/// `InvalidArgumentError("Error reading INFO field: missing value")`.
+const VCF_REALDATA_CHRX_EVIDENCE: &str = r#"##fileformat=VCFv4.2
+##contig=<ID=chrX,length=156040895>
+##INFO=<ID=AC,Number=A,Type=Integer,Description="Allele count for each ALT allele">
+##INFO=<ID=AF,Number=A,Type=Float,Description="Allele frequency for each ALT allele">
+##INFO=<ID=EVIDENCE,Number=.,Type=String,Description="Classes of random forest support">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chrX	1946351	HGSV_249298	A	<DEL>	.	.	AC=2;AF=0.998595;EVIDENCE
+"#;
+
 fn create_object_storage_options() -> ObjectStorageOptions {
     ObjectStorageOptions {
         allow_anonymous: true,
@@ -127,6 +142,54 @@ async fn test_info_bare_keys_become_null() -> Result<(), Box<dyn std::error::Err
     assert!(
         allele_id.is_null(3),
         "ALLELE_ID must be null when key has no value"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_info_bare_key_chrx_evidence_realdata() -> Result<(), Box<dyn std::error::Error>> {
+    // Real-data regression: HG00096.hg38.wgs.vcf.bgz row 4,032,720, chrX:1946351,
+    // bare INFO key EVIDENCE (Number=.,Type=String). See module-level docstring
+    // and VCF_REALDATA_CHRX_EVIDENCE for context.
+    let temp_file = "/tmp/test_info_bare_key_chrx_evidence.vcf";
+    fs::write(temp_file, VCF_REALDATA_CHRX_EVIDENCE).await?;
+
+    let table = VcfTableProvider::new(
+        temp_file.to_string(),
+        Some(vec![
+            "AC".to_string(),
+            "AF".to_string(),
+            "EVIDENCE".to_string(),
+        ]),
+        None,
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("test_vcf", Arc::new(table))?;
+
+    let df = ctx
+        .sql("SELECT chrom, pos, `AC`, `AF`, `EVIDENCE` FROM test_vcf")
+        .await?;
+    let results = df.collect().await?;
+
+    let total_rows: usize = results.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 1,
+        "Expected 1 row, got {total_rows}: bare EVIDENCE key must not abort the batch"
+    );
+
+    let batch = &results[0];
+    let evidence = batch
+        .column(4)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(
+        evidence.is_null(0),
+        "EVIDENCE must be null when the key has no =value (real-data chrX:1946351 case)"
     );
 
     Ok(())
