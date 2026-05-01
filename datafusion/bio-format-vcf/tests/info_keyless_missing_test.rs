@@ -171,7 +171,7 @@ async fn test_info_bare_key_chrx_evidence_realdata() -> Result<(), Box<dyn std::
     ctx.register_table("test_vcf", Arc::new(table))?;
 
     let df = ctx
-        .sql("SELECT chrom, pos, `AC`, `AF`, `EVIDENCE` FROM test_vcf")
+        .sql("SELECT chrom, `AC`, `AF`, `EVIDENCE` FROM test_vcf")
         .await?;
     let results = df.collect().await?;
 
@@ -183,7 +183,7 @@ async fn test_info_bare_key_chrx_evidence_realdata() -> Result<(), Box<dyn std::
 
     let batch = &results[0];
     let evidence = batch
-        .column(4)
+        .column(3)
         .as_any()
         .downcast_ref::<ListArray>()
         .unwrap();
