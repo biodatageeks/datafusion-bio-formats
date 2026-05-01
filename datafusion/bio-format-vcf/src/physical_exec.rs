@@ -469,11 +469,24 @@ fn load_infos_single_pass(
 
     let info = record.info();
     for result in info.iter(header) {
-        let (key, value) = result.map_err(|e| {
-            datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
-                "Error reading INFO field: {e}"
-            ))
-        })?;
+        // noodles raises `io::Error("missing value")` (kind: InvalidData) when a
+        // non-Flag INFO key appears with no `=value`, e.g. `DP;AF=0.5` for an
+        // Integer-typed DP. Per the VCF 4.3 spec the "." placeholder is the
+        // canonical way to spell "missing", but real-world VCFs (notably
+        // gnomAD slices) sometimes drop the `=.` for non-Flag fields. Treat
+        // those occurrences as null rather than aborting the whole batch:
+        // the per-record backfill below appends `append_null` for any field
+        // that did not populate an entry on this row. Other parse errors
+        // (e.g. "invalid flag", "invalid character") still propagate.
+        let (key, value) = match result {
+            Ok(parsed) => parsed,
+            Err(ref e) if e.to_string() == "missing value" => continue,
+            Err(e) => {
+                return Err(datafusion::arrow::error::ArrowError::InvalidArgumentError(
+                    format!("Error reading INFO field: {e}"),
+                ));
+            }
+        };
 
         if let Some(&idx) = info_name_to_index.get(key) {
             info_populated[idx] = true;
