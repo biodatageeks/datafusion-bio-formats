@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::TableType;
@@ -10,15 +10,16 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::metadata::VcfZarrMetadata;
+use super::schema::build_logical_schema;
 
 /// Options controlling how VCF Zarr data is exposed through DataFusion.
 #[derive(Clone, Debug, Default)]
 pub struct VcfZarrReadOptions {
-    /// Optional list of INFO fields to include. `None` means include all fields.
+    /// Optional list of INFO fields to include. `None` does not infer fields yet.
     pub info_fields: Option<Vec<String>>,
-    /// Optional list of FORMAT fields to include. `None` means include all fields.
+    /// Optional list of FORMAT fields to include. `None` does not infer fields yet.
     pub format_fields: Option<Vec<String>>,
-    /// Optional list of sample names to include. `None` means include all samples.
+    /// Optional list of sample names to include once sample discovery/subsetting is implemented.
     pub samples: Option<Vec<String>>,
     /// If true, expose positions as zero-based coordinates.
     pub coordinate_system_zero_based: bool,
@@ -37,15 +38,7 @@ impl VcfZarrTableProvider {
     /// Creates a new VCF Zarr table provider from a local store path.
     pub fn new(path: String, options: VcfZarrReadOptions) -> Result<Self> {
         let metadata = VcfZarrMetadata::open_local(&path)?;
-        let schema = Arc::new(Schema::new_with_metadata(
-            Vec::<Field>::new(),
-            [(
-                "bio.vcf.zarr.version".to_string(),
-                metadata.vcf_zarr_version.clone(),
-            )]
-            .into_iter()
-            .collect(),
-        ));
+        let schema = build_logical_schema(&metadata, &options)?;
 
         Ok(Self {
             path,

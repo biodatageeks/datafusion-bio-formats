@@ -5,6 +5,8 @@
 
 /// Metadata loading and validation for VCF Zarr stores.
 pub mod metadata;
+/// Logical Arrow schema construction for VCF Zarr stores.
+pub mod schema;
 /// DataFusion table provider for VCF Zarr stores.
 pub mod table_provider;
 
