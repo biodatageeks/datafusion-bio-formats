@@ -1,3 +1,4 @@
+use datafusion::catalog::TableProvider;
 use datafusion_bio_format_vcf::zarr::{VcfZarrReadOptions, VcfZarrTableProvider};
 
 #[test]
@@ -27,4 +28,14 @@ fn vcf_zarr_requires_version_0_4() {
         message.contains("unsupported vcf_zarr_version") && message.contains("0.4"),
         "unexpected error: {message}"
     );
+}
+
+#[test]
+#[ignore = "requires VCF Zarr metadata parsing"]
+fn vcf_zarr_accepts_version_0_4_fixture() {
+    let fixture = "tests/data/vcf_zarr/multi_chrom.vcz";
+    let provider = VcfZarrTableProvider::new(fixture.to_string(), VcfZarrReadOptions::default())
+        .expect("supported fixture should open");
+
+    assert_eq!(provider.schema().fields().len(), 0);
 }
