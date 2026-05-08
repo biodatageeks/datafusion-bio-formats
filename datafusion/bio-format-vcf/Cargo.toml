@@ -10,6 +10,8 @@ edition.workspace = true
 readme = "README.md"
 
 [dependencies]
+zarrs = { version = "0.23.10", default-features = true }
+ndarray = "0.17"
 datafusion.workspace = true
 datafusion-execution.workspace = true
 async-trait.workspace = true
