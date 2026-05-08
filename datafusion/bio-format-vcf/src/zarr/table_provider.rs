@@ -3,13 +3,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::{Field, Schema};
 use datafusion::catalog::{Session, TableProvider};
-use datafusion::common::{DataFusionError, Result};
+use datafusion::common::Result;
 use datafusion::datasource::TableType;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::metadata::VcfZarrMetadata;
+use super::physical_exec::VcfZarrExec;
+use super::planning::ProjectionPlan;
 use super::schema::build_logical_schema;
 
 /// Options controlling how VCF Zarr data is exposed through DataFusion.
@@ -28,7 +31,6 @@ pub struct VcfZarrReadOptions {
 /// A DataFusion table provider for local VCF Zarr stores.
 #[derive(Debug)]
 pub struct VcfZarrTableProvider {
-    path: String,
     options: VcfZarrReadOptions,
     metadata: VcfZarrMetadata,
     schema: SchemaRef,
@@ -41,7 +43,6 @@ impl VcfZarrTableProvider {
         let schema = build_logical_schema(&metadata, &options)?;
 
         Ok(Self {
-            path,
             options,
             metadata,
             schema,
@@ -73,14 +74,35 @@ impl TableProvider for VcfZarrTableProvider {
     async fn scan(
         &self,
         _state: &dyn Session,
-        _projection: Option<&Vec<usize>>,
+        projection: Option<&Vec<usize>>,
         _filters: &[Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let _ = (&self.path, &self.options, &self.metadata);
+        let _projection_plan = ProjectionPlan::from_projection(&self.schema, projection);
+        let schema = project_schema(&self.schema, projection);
 
-        Err(DataFusionError::NotImplemented(
-            "VCF Zarr execution plan is not implemented yet".to_string(),
-        ))
+        Ok(Arc::new(VcfZarrExec::new(
+            schema,
+            self.metadata.clone(),
+            self.options.clone(),
+            limit,
+        )))
+    }
+}
+
+fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
+    match projection {
+        Some(indices) if indices.is_empty() => Arc::new(Schema::new_with_metadata(
+            Vec::<Field>::new(),
+            schema.metadata().clone(),
+        )),
+        Some(indices) => Arc::new(Schema::new_with_metadata(
+            indices
+                .iter()
+                .map(|index| schema.field(*index).clone())
+                .collect::<Vec<_>>(),
+            schema.metadata().clone(),
+        )),
+        None => schema.clone(),
     }
 }

@@ -35,6 +35,7 @@ pub fn build_logical_schema(
 
     if let Some(info_fields) = &options.info_fields {
         for name in info_fields {
+            validate_info_array(metadata, name)?;
             fields.push(
                 Field::new(name, DataType::Utf8, true).with_metadata(
                     [
@@ -55,7 +56,8 @@ pub fn build_logical_schema(
         let genotype_children = format_fields
             .iter()
             .map(|name| {
-                Field::new(
+                validate_format_array(metadata, name)?;
+                Ok(Field::new(
                     name,
                     DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
                     true,
@@ -69,9 +71,9 @@ pub fn build_logical_schema(
                     ]
                     .into_iter()
                     .collect(),
-                )
+                ))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
 
         fields.push(Field::new(
             "genotypes",
@@ -105,13 +107,33 @@ fn validate_required_arrays(metadata: &VcfZarrMetadata) -> Result<()> {
         "contig_id",
         "variant_allele",
     ] {
-        if !metadata.array_exists(required) {
-            return Err(DataFusionError::Execution(format!(
-                "VCF Zarr store is missing required array '{required}'"
-            )));
-        }
+        metadata.open_array(required).map_err(|error| {
+            DataFusionError::Execution(format!(
+                "VCF Zarr store is missing required array '{required}' or its metadata is unreadable: {error}"
+            ))
+        })?;
     }
 
+    Ok(())
+}
+
+fn validate_info_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<()> {
+    let raw_array = format!("variant_{field_id}");
+    metadata.open_array(&raw_array).map_err(|error| {
+        DataFusionError::Execution(format!(
+            "Requested VCF Zarr INFO field '{field_id}' requires readable raw array '{raw_array}': {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn validate_format_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<()> {
+    let raw_array = format!("call_{field_id}");
+    metadata.open_array(&raw_array).map_err(|error| {
+        DataFusionError::Execution(format!(
+            "Requested VCF Zarr FORMAT field '{field_id}' requires readable raw array '{raw_array}': {error}"
+        ))
+    })?;
     Ok(())
 }
 

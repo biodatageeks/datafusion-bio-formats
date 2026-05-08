@@ -1,11 +1,15 @@
+use std::sync::Arc;
+
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::catalog::TableProvider;
+use datafusion::prelude::SessionContext;
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
     VCF_FILE_FORMAT_KEY, VCF_SAMPLE_NAMES_KEY, from_json_string,
 };
 use datafusion_bio_format_vcf::zarr::metadata::VcfZarrMetadata;
+use datafusion_bio_format_vcf::zarr::planning::ProjectionPlan;
 use datafusion_bio_format_vcf::zarr::{
     VcfZarrReadOptions, VcfZarrTableProvider, metadata::SUPPORTED_VCF_ZARR_VERSION,
 };
@@ -20,7 +24,21 @@ fn write_v2_root_metadata(root: &std::path::Path, attributes: &str) {
 fn write_zarray_metadata(root: &std::path::Path, array_name: &str) {
     let array_path = root.join(array_name);
     std::fs::create_dir_all(&array_path).expect("array directory should be created");
-    std::fs::write(array_path.join(".zarray"), "{}").expect("array metadata should be written");
+    std::fs::write(
+        array_path.join(".zarray"),
+        r#"{
+  "shape": [0],
+  "chunks": [1],
+  "dtype": "<i4",
+  "fill_value": 0,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}"#,
+    )
+    .expect("array metadata should be written");
 }
 
 fn write_required_zarray_metadata(root: &std::path::Path) {
@@ -272,11 +290,65 @@ fn vcf_zarr_schema_exposes_requested_info_fields() {
 }
 
 #[test]
-fn vcf_zarr_schema_exposes_requested_format_fields() {
-    let provider = open_multi_chrom_provider(VcfZarrReadOptions {
-        format_fields: Some(vec!["GT".to_string(), "DP".to_string()]),
-        ..Default::default()
-    });
+fn vcf_zarr_schema_rejects_missing_requested_info_field() {
+    let result = VcfZarrTableProvider::new(
+        "tests/data/vcf_zarr/multi_chrom.vcz".to_string(),
+        VcfZarrReadOptions {
+            info_fields: Some(vec!["MISSING".to_string()]),
+            ..Default::default()
+        },
+    );
+
+    let message = result
+        .expect_err("missing requested INFO array should fail")
+        .to_string();
+    assert!(
+        message.contains("INFO field 'MISSING'") && message.contains("variant_MISSING"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn vcf_zarr_schema_rejects_missing_requested_format_fields() {
+    let result = VcfZarrTableProvider::new(
+        "tests/data/vcf_zarr/multi_chrom.vcz".to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["GT".to_string(), "DP".to_string()]),
+            ..Default::default()
+        },
+    );
+
+    let message = result
+        .expect_err("missing requested FORMAT arrays should fail")
+        .to_string();
+    assert!(
+        message.contains("FORMAT field 'GT'") && message.contains("call_GT"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn vcf_zarr_schema_exposes_requested_format_fields_when_arrays_exist() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("format_arrays.vcz");
+    write_v2_root_metadata(
+        &root,
+        &format!("{{\"vcf_zarr_version\":\"{SUPPORTED_VCF_ZARR_VERSION}\"}}"),
+    );
+    write_required_zarray_metadata(&root);
+    write_zarray_metadata(&root, "call_GT");
+    write_zarray_metadata(&root, "call_DP");
+
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["GT".to_string(), "DP".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("store with requested FORMAT arrays should open");
 
     let schema = provider.schema();
     let genotypes = schema.field(
@@ -381,6 +453,23 @@ fn vcf_zarr_schema_metadata_uses_zarr_and_vcf_metadata() {
 }
 
 #[test]
+fn vcf_zarr_schema_metadata_uses_explicit_coordinate_option() {
+    let options = VcfZarrReadOptions {
+        coordinate_system_zero_based: true,
+        ..Default::default()
+    };
+    let provider = open_multi_chrom_provider(options);
+    assert_eq!(
+        provider
+            .schema()
+            .metadata()
+            .get(COORDINATE_SYSTEM_METADATA_KEY)
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
 fn vcf_zarr_schema_metadata_prefers_root_fileformat_over_fallback() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let root = temp_dir.path().join("fileformat_4_2.vcz");
@@ -408,6 +497,84 @@ fn vcf_zarr_schema_metadata_prefers_root_fileformat_over_fallback() {
             .map(String::as_str),
         Some("VCFv4.2")
     );
+}
+
+#[test]
+fn vcf_zarr_projection_plan_prunes_unneeded_arrays() {
+    let provider = open_multi_chrom_provider(VcfZarrReadOptions::default());
+
+    let schema = provider.schema();
+    let chrom = schema.index_of("chrom").unwrap();
+    let start = schema.index_of("start").unwrap();
+    let plan = ProjectionPlan::from_projection(&schema, Some(&vec![chrom, start]));
+
+    assert!(plan.raw_arrays.contains("variant_contig"));
+    assert!(plan.raw_arrays.contains("contig_id"));
+    assert!(plan.raw_arrays.contains("variant_position"));
+    assert!(!plan.raw_arrays.contains("variant_allele"));
+    assert!(!plan.raw_arrays.iter().any(|name| name.starts_with("call_")));
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_projected_core_columns() {
+    let ctx = SessionContext::new();
+    let provider = open_multi_chrom_provider(VcfZarrReadOptions::default());
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT chrom, start FROM vcz LIMIT 5")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 5);
+    assert_eq!(batches[0].schema().field(0).name(), "chrom");
+    assert_eq!(batches[0].schema().field(1).name(), "start");
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_all_core_columns() {
+    let ctx = SessionContext::new();
+    let provider = open_multi_chrom_provider(VcfZarrReadOptions::default());
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT chrom, start, \"end\", id, ref, alt, qual, filter FROM vcz LIMIT 3")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3
+    );
+    assert_eq!(batches[0].num_columns(), 8);
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_requested_info_field() {
+    let ctx = SessionContext::new();
+    let provider = open_multi_chrom_provider(VcfZarrReadOptions {
+        info_fields: Some(vec!["DP".to_string()]),
+        ..Default::default()
+    });
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT chrom, start, \"DP\" FROM vcz LIMIT 2")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(batches[0].num_rows(), 2);
+    assert_eq!(batches[0].schema().field(2).name(), "DP");
 }
 
 #[test]

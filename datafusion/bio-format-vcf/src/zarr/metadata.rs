@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use datafusion::common::{DataFusionError, Result};
 use serde_json::Value;
+use zarrs::array::Array;
 use zarrs::config::MetadataRetrieveVersion;
+use zarrs::filesystem::FilesystemStore;
 
 /// VCF Zarr version supported by this provider.
 pub const SUPPORTED_VCF_ZARR_VERSION: &str = "0.4";
@@ -36,14 +38,7 @@ impl VcfZarrMetadata {
             )));
         }
 
-        let store = Arc::new(zarrs::filesystem::FilesystemStore::new(&root_path).map_err(
-            |error| {
-                DataFusionError::Execution(format!(
-                    "Failed to read VCF Zarr root metadata at {}: {error}",
-                    root_path.display()
-                ))
-            },
-        )?);
+        let store = Self::open_store(&root_path)?;
         let group = zarrs::group::Group::open_opt(store, "/", &MetadataRetrieveVersion::V2)
             .map_err(|error| {
                 DataFusionError::Execution(format!(
@@ -83,16 +78,54 @@ impl VcfZarrMetadata {
 
     /// Returns true when the named array has a `.zarray` metadata file.
     pub fn array_exists(&self, name: &str) -> bool {
+        self.open_array(name).is_ok()
+    }
+
+    /// Opens a local array with zarrs V2 metadata retrieval.
+    pub fn open_array(&self, name: &str) -> Result<Array<FilesystemStore>> {
+        let array_path = self.array_node_path(name)?;
+        let store = Self::open_store(&self.root_path)?;
+
+        Array::open_opt(store, &array_path, &MetadataRetrieveVersion::V2).map_err(|error| {
+            DataFusionError::Execution(format!(
+                "Failed to read VCF Zarr array metadata for '{name}' at {}: {error}",
+                self.root_path.display()
+            ))
+        })
+    }
+
+    fn open_store(root_path: &Path) -> Result<Arc<FilesystemStore>> {
+        Ok(Arc::new(FilesystemStore::new(root_path).map_err(
+            |error| {
+                DataFusionError::Execution(format!(
+                    "Failed to read VCF Zarr root metadata at {}: {error}",
+                    root_path.display()
+                ))
+            },
+        )?))
+    }
+
+    fn array_node_path(&self, name: &str) -> Result<String> {
         let array_path = Path::new(name);
         let mut has_component = false;
 
         for component in array_path.components() {
             match component {
                 Component::Normal(_) => has_component = true,
-                _ => return false,
+                _ => {
+                    return Err(DataFusionError::Execution(format!(
+                        "Invalid VCF Zarr array path '{name}'; array names must be store-relative"
+                    )));
+                }
             }
         }
 
-        has_component && self.root_path.join(array_path).join(".zarray").is_file()
+        if !has_component {
+            return Err(DataFusionError::Execution(
+                "Invalid empty VCF Zarr array path".to_string(),
+            ));
+        }
+
+        Ok(format!("/{name}"))
     }
 }
