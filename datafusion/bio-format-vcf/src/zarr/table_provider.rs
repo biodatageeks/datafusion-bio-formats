@@ -2,7 +2,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::TableType;
@@ -37,7 +37,15 @@ impl VcfZarrTableProvider {
     /// Creates a new VCF Zarr table provider from a local store path.
     pub fn new(path: String, options: VcfZarrReadOptions) -> Result<Self> {
         let metadata = VcfZarrMetadata::open_local(&path)?;
-        let schema = Arc::new(Schema::empty());
+        let schema = Arc::new(Schema::new_with_metadata(
+            Vec::<Field>::new(),
+            [(
+                "bio.vcf.zarr.version".to_string(),
+                metadata.vcf_zarr_version.clone(),
+            )]
+            .into_iter()
+            .collect(),
+        ));
 
         Ok(Self {
             path,
