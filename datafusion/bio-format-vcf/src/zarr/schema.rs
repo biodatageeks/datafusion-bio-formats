@@ -6,11 +6,12 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
-    VCF_FILE_FORMAT_KEY, VCF_SAMPLE_NAMES_KEY, to_json_string,
+    VCF_FILE_FORMAT_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, to_json_string,
 };
 use serde_json::Value;
 
 use super::metadata::VcfZarrMetadata;
+use super::samples::{format_array_name, resolve_sample_selection};
 use super::table_provider::VcfZarrReadOptions;
 
 const VCF_ZARR_VERSION_METADATA_KEY: &str = "bio.vcf.zarr.version";
@@ -21,6 +22,7 @@ pub fn build_logical_schema(
     options: &VcfZarrReadOptions,
 ) -> Result<SchemaRef> {
     validate_required_arrays(metadata)?;
+    let sample_selection = resolve_sample_selection(metadata, options)?;
 
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -75,11 +77,21 @@ pub fn build_logical_schema(
             })
             .collect::<Result<Vec<_>>>()?;
 
-        fields.push(Field::new(
-            "genotypes",
-            DataType::Struct(genotype_children.into()),
-            true,
-        ));
+        fields.push(
+            Field::new(
+                "genotypes",
+                DataType::Struct(genotype_children.into()),
+                true,
+            )
+            .with_metadata(
+                [(
+                    VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
+                    to_json_string(&sample_selection.selected_names),
+                )]
+                .into_iter()
+                .collect(),
+            ),
+        );
     }
 
     let mut schema_metadata = HashMap::new();
@@ -94,7 +106,7 @@ pub fn build_logical_schema(
     schema_metadata.insert(VCF_FILE_FORMAT_KEY.to_string(), vcf_file_format(metadata));
     schema_metadata.insert(
         VCF_SAMPLE_NAMES_KEY.to_string(),
-        to_json_string(&Vec::<String>::new()),
+        to_json_string(&sample_selection.selected_names),
     );
 
     Ok(Arc::new(Schema::new_with_metadata(fields, schema_metadata)))
@@ -128,7 +140,7 @@ fn validate_info_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<()>
 }
 
 fn validate_format_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<()> {
-    let raw_array = format!("call_{field_id}");
+    let raw_array = format_array_name(metadata, field_id)?;
     metadata.open_array(&raw_array).map_err(|error| {
         DataFusionError::Execution(format!(
             "Requested VCF Zarr FORMAT field '{field_id}' requires readable raw array '{raw_array}': {error}"

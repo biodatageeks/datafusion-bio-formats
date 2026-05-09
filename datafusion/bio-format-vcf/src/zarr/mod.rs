@@ -11,8 +11,12 @@ pub mod metadata;
 pub mod physical_exec;
 /// Logical-to-physical array projection planning.
 pub mod planning;
+/// Predicate-derived row pruning for VCF Zarr scans.
+pub mod pruning;
 /// Record batch construction helpers.
 pub mod record_batch;
+/// Sample and FORMAT field resolution helpers.
+pub mod samples;
 /// Logical Arrow schema construction for VCF Zarr stores.
 pub mod schema;
 /// DataFusion table provider for VCF Zarr stores.

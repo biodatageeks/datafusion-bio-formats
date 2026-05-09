@@ -13,6 +13,7 @@ use futures::stream;
 
 use super::arrays::read_projected_arrays;
 use super::metadata::VcfZarrMetadata;
+use super::planning::{ProjectionPlan, PruningMethod, RowSelection};
 use super::record_batch::build_record_batch;
 use super::table_provider::VcfZarrReadOptions;
 
@@ -20,7 +21,9 @@ pub(crate) struct VcfZarrExec {
     schema: SchemaRef,
     metadata: VcfZarrMetadata,
     options: VcfZarrReadOptions,
-    limit: Option<usize>,
+    projection_plan: ProjectionPlan,
+    row_selection: RowSelection,
+    pruning_method: PruningMethod,
     cache: PlanProperties,
 }
 
@@ -29,7 +32,9 @@ impl VcfZarrExec {
         schema: SchemaRef,
         metadata: VcfZarrMetadata,
         options: VcfZarrReadOptions,
-        limit: Option<usize>,
+        projection_plan: ProjectionPlan,
+        row_selection: RowSelection,
+        pruning_method: PruningMethod,
     ) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -42,7 +47,9 @@ impl VcfZarrExec {
             schema,
             metadata,
             options,
-            limit,
+            projection_plan,
+            row_selection,
+            pruning_method,
             cache,
         }
     }
@@ -63,7 +70,20 @@ impl DisplayAs for VcfZarrExec {
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        write!(f, "VcfZarrExec: projection=[{columns}]")
+        let raw_arrays = self
+            .projection_plan
+            .raw_arrays
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "VcfZarrExec: projection=[{columns}], raw_arrays=[{raw_arrays}], pruning={}, row_ranges=[{}], rows={}",
+            self.pruning_method.as_str(),
+            self.row_selection.display_ranges(),
+            self.row_selection.row_count()
+        )
     }
 }
 
@@ -96,8 +116,12 @@ impl ExecutionPlan for VcfZarrExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let arrays =
-            read_projected_arrays(&self.metadata, &self.schema, &self.options, self.limit)?;
+        let arrays = read_projected_arrays(
+            &self.metadata,
+            &self.schema,
+            &self.options,
+            &self.row_selection,
+        )?;
         let batch = build_record_batch(self.schema.clone(), arrays)?;
         let stream = stream::iter(vec![Ok(batch)]);
         Ok(Box::pin(RecordBatchStreamAdapter::new(

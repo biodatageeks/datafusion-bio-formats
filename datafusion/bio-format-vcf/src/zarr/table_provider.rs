@@ -12,7 +12,8 @@ use datafusion::physical_plan::ExecutionPlan;
 
 use super::metadata::VcfZarrMetadata;
 use super::physical_exec::VcfZarrExec;
-use super::planning::ProjectionPlan;
+use super::planning::{ProjectionPlan, PruningMethod};
+use super::pruning::build_row_pruning;
 use super::schema::build_logical_schema;
 
 /// Options controlling how VCF Zarr data is exposed through DataFusion.
@@ -75,17 +76,26 @@ impl TableProvider for VcfZarrTableProvider {
         &self,
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let _projection_plan = ProjectionPlan::from_projection(&self.schema, projection);
+        let mut projection_plan =
+            ProjectionPlan::from_projection_and_filters(&self.schema, projection, filters);
+        let row_pruning = build_row_pruning(&self.metadata, &self.options, filters, limit)?;
+        if row_pruning.method == PruningMethod::RegionIndex {
+            projection_plan
+                .raw_arrays
+                .insert("region_index".to_string());
+        }
         let schema = project_schema(&self.schema, projection);
 
         Ok(Arc::new(VcfZarrExec::new(
             schema,
             self.metadata.clone(),
             self.options.clone(),
-            limit,
+            projection_plan,
+            row_pruning.selection,
+            row_pruning.method,
         )))
     }
 }
