@@ -1,4 +1,5 @@
 use datafusion::common::{DataFusionError, Result};
+use zarrs::array::CodecOptions;
 
 use super::arrays::read_strings_1d_for_pruning;
 use super::metadata::VcfZarrMetadata;
@@ -17,7 +18,16 @@ pub(crate) fn resolve_sample_selection(
     metadata: &VcfZarrMetadata,
     options: &VcfZarrReadOptions,
 ) -> Result<SampleSelection> {
-    let source_names = read_source_sample_names(metadata, options)?;
+    let codec_options = CodecOptions::default();
+    resolve_sample_selection_with_options(metadata, options, &codec_options)
+}
+
+pub(crate) fn resolve_sample_selection_with_options(
+    metadata: &VcfZarrMetadata,
+    options: &VcfZarrReadOptions,
+    codec_options: &CodecOptions,
+) -> Result<SampleSelection> {
+    let source_names = read_source_sample_names(metadata, options, codec_options)?;
 
     let (selected_names, selected_indices) = match &options.samples {
         Some(requested) => {
@@ -67,6 +77,7 @@ pub(crate) fn format_array_name(metadata: &VcfZarrMetadata, field_id: &str) -> R
 fn read_source_sample_names(
     metadata: &VcfZarrMetadata,
     options: &VcfZarrReadOptions,
+    codec_options: &CodecOptions,
 ) -> Result<Vec<String>> {
     if metadata.array_exists("sample_id") {
         let sample_id = metadata.open_array("sample_id")?;
@@ -79,7 +90,12 @@ fn read_source_sample_names(
         let row_count = usize::try_from(sample_id.shape()[0]).map_err(|_| {
             DataFusionError::Execution("sample_id length exceeds platform size".to_string())
         })?;
-        return read_strings_1d_for_pruning(metadata, "sample_id", &RowSelection::all(row_count));
+        return read_strings_1d_for_pruning(
+            metadata,
+            "sample_id",
+            &RowSelection::all(row_count),
+            codec_options,
+        );
     }
 
     if options.samples.is_some() {

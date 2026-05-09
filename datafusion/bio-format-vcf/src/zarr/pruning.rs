@@ -7,7 +7,7 @@ use super::arrays::{read_i64_1d, read_i64_2d, variant_count};
 use super::metadata::VcfZarrMetadata;
 use super::planning::{
     DeferredPositionPruning, PredicateConstraints, PruningMethod, RowPruning, RowSelection,
-    predicate_constraints,
+    predicate_constraints, zarr_read_options,
 };
 use super::table_provider::VcfZarrReadOptions;
 
@@ -25,12 +25,19 @@ pub(crate) fn build_row_pruning(
             deferred_pruning: None,
         });
     };
+    let codec_options = zarr_read_options();
 
     if let Some(candidate_rows) =
-        region_index_candidate_rows(metadata, options, &constraints, total_rows)?
+        region_index_candidate_rows(metadata, options, &constraints, total_rows, &codec_options)?
     {
-        let selection =
-            apply_position_array_pruning(metadata, options, &candidate_rows, &constraints, limit)?;
+        let selection = apply_position_array_pruning(
+            metadata,
+            options,
+            &candidate_rows,
+            &constraints,
+            limit,
+            &codec_options,
+        )?;
         return Ok(RowPruning {
             selection,
             method: PruningMethod::RegionIndex,
@@ -51,24 +58,40 @@ pub(crate) fn apply_position_array_pruning(
     candidate_rows: &RowSelection,
     constraints: &PredicateConstraints,
     limit: Option<usize>,
+    codec_options: &zarrs::array::CodecOptions,
 ) -> Result<RowSelection> {
     let positions = if !constraints.start.is_empty() || !constraints.end.is_empty() {
-        Some(read_i64_1d(metadata, "variant_position", candidate_rows)?)
+        Some(read_i64_1d(
+            metadata,
+            "variant_position",
+            candidate_rows,
+            codec_options,
+        )?)
     } else {
         None
     };
     let lengths = if !constraints.end.is_empty() && metadata.array_exists("variant_length") {
-        Some(read_i64_1d(metadata, "variant_length", candidate_rows)?)
+        Some(read_i64_1d(
+            metadata,
+            "variant_length",
+            candidate_rows,
+            codec_options,
+        )?)
     } else {
         None
     };
     let contig_indices = if constraints.chrom_values.is_some() {
-        Some(read_i64_1d(metadata, "variant_contig", candidate_rows)?)
+        Some(read_i64_1d(
+            metadata,
+            "variant_contig",
+            candidate_rows,
+            codec_options,
+        )?)
     } else {
         None
     };
     let contig_ids = if constraints.chrom_values.is_some() {
-        Some(read_contig_ids(metadata)?)
+        Some(read_contig_ids(metadata, codec_options)?)
     } else {
         None
     };
@@ -123,6 +146,7 @@ fn region_index_candidate_rows(
     options: &VcfZarrReadOptions,
     constraints: &PredicateConstraints,
     total_rows: usize,
+    codec_options: &zarrs::array::CodecOptions,
 ) -> Result<Option<RowSelection>> {
     if !metadata.array_exists("region_index")
         || (constraints.chrom_values.is_none()
@@ -151,8 +175,9 @@ fn region_index_candidate_rows(
         "region_index",
         &RowSelection::all(row_count),
         width,
+        codec_options,
     )?;
-    let allowed_contigs = allowed_contig_indices(metadata, constraints)?;
+    let allowed_contigs = allowed_contig_indices(metadata, constraints, codec_options)?;
     if allowed_contigs.as_ref().is_some_and(BTreeSet::is_empty) {
         return Ok(Some(RowSelection { ranges: Vec::new() }));
     }
@@ -209,12 +234,13 @@ fn region_index_candidate_rows(
 fn allowed_contig_indices(
     metadata: &VcfZarrMetadata,
     constraints: &PredicateConstraints,
+    codec_options: &zarrs::array::CodecOptions,
 ) -> Result<Option<BTreeSet<i64>>> {
     let Some(chrom_values) = &constraints.chrom_values else {
         return Ok(None);
     };
 
-    let contig_ids = read_contig_ids(metadata)?;
+    let contig_ids = read_contig_ids(metadata, codec_options)?;
     Ok(Some(
         contig_ids
             .iter()
@@ -277,7 +303,10 @@ fn range_intersects(bounds: &super::planning::NumericBounds, min: i64, max: i64)
     bounds.min().is_none_or(|bound| bound <= max) && bounds.max().is_none_or(|bound| bound >= min)
 }
 
-fn read_contig_ids(metadata: &VcfZarrMetadata) -> Result<Vec<String>> {
+fn read_contig_ids(
+    metadata: &VcfZarrMetadata,
+    codec_options: &zarrs::array::CodecOptions,
+) -> Result<Vec<String>> {
     let row_count = {
         let array = metadata.open_array("contig_id")?;
         usize::try_from(*array.shape().first().ok_or_else(|| {
@@ -288,7 +317,7 @@ fn read_contig_ids(metadata: &VcfZarrMetadata) -> Result<Vec<String>> {
         })?
     };
     let selection = RowSelection::all(row_count);
-    super::arrays::read_strings_1d_for_pruning(metadata, "contig_id", &selection)
+    super::arrays::read_strings_1d_for_pruning(metadata, "contig_id", &selection, codec_options)
 }
 
 fn logical_start(position: i64, zero_based: bool) -> Result<i64> {

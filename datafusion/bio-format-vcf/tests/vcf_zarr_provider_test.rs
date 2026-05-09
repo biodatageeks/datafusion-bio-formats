@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
+use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray, UInt32Array};
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::{col, lit};
@@ -317,22 +317,73 @@ fn copy_multi_chrom_with_variant_position_chunk_size(chunk_size: usize) -> tempf
         std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
         &root,
     );
-
-    let zarray_path = root.join("variant_position/.zarray");
-    let zarray = std::fs::read_to_string(&zarray_path)
-        .expect("variant_position metadata should be readable");
-    let updated_zarray = zarray.replace(
-        "\"chunks\": [\n    1000\n  ]",
-        &format!("\"chunks\": [\n    {chunk_size}\n  ]"),
-    );
-    assert_ne!(
-        zarray, updated_zarray,
-        "test fixture should contain the expected variant_position chunk metadata"
-    );
-    std::fs::write(zarray_path, updated_zarray)
-        .expect("variant_position chunk metadata should be updated");
+    rewrite_variant_position_chunks(&root, chunk_size);
 
     temp_dir
+}
+
+fn copy_multi_chrom_without_region_index_with_variant_position_chunk_size(
+    chunk_size: usize,
+) -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("no_region_index_chunked.vcz");
+    copy_dir(
+        std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
+        &root,
+    );
+    std::fs::remove_dir_all(root.join("region_index"))
+        .expect("region_index directory should be removed");
+    rewrite_variant_position_chunks(&root, chunk_size);
+
+    temp_dir
+}
+
+fn rewrite_variant_position_chunks(root: &std::path::Path, chunk_size: usize) {
+    assert!(chunk_size > 0, "test chunk size must be nonzero");
+    let metadata = VcfZarrMetadata::open_local(root.to_str().expect("temp path should be UTF-8"))
+        .expect("copied fixture should open before rechunking");
+    let variant_position = metadata
+        .open_array("variant_position")
+        .expect("variant_position should open before rechunking");
+    let row_count = variant_position.shape()[0];
+    let row_range = std::iter::once(0..row_count).collect::<Vec<_>>();
+    let values: Vec<i32> = variant_position
+        .retrieve_array_subset(&zarrs::array::ArraySubset::new_with_ranges(&row_range))
+        .expect("variant_position values should be readable before rechunking");
+
+    let variant_position_path = root.join("variant_position");
+    let zarray_path = root.join("variant_position/.zarray");
+    std::fs::write(
+        zarray_path,
+        format!(
+            r#"{{
+  "shape": [
+    {}
+  ],
+  "chunks": [
+    {chunk_size}
+  ],
+  "dtype": "<i4",
+  "fill_value": 0,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}}"#,
+            values.len()
+        ),
+    )
+    .expect("variant_position chunk metadata should be updated");
+
+    for (chunk_index, chunk) in values.chunks(chunk_size).enumerate() {
+        let mut bytes = Vec::with_capacity(std::mem::size_of_val(chunk));
+        for value in chunk {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(variant_position_path.join(chunk_index.to_string()), bytes)
+            .expect("variant_position raw chunk should be written");
+    }
 }
 
 fn assert_field(field: &Field, name: &str, data_type: &DataType, nullable: bool) {
@@ -342,6 +393,97 @@ fn assert_field(field: &Field, name: &str, data_type: &DataType, nullable: bool)
         field.is_nullable(),
         nullable,
         "{name} nullability should be {nullable}"
+    );
+}
+
+async fn collect_chrom_start_rows(
+    root: &std::path::Path,
+    target_partitions: usize,
+    sql: &str,
+) -> Vec<(String, u32)> {
+    let ctx = SessionContext::new_with_config(
+        SessionConfig::new().with_target_partitions(target_partitions),
+    );
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("fixture should open");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx.sql(sql).await.unwrap().collect().await.unwrap();
+
+    let mut rows = Vec::new();
+    for batch in batches {
+        let chrom = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("chrom column should be a StringArray");
+        let start = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .expect("start column should be a UInt32Array");
+        for row in 0..batch.num_rows() {
+            rows.push((chrom.value(row).to_string(), start.value(row)));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+#[tokio::test]
+async fn vcf_zarr_parallel_partitions_match_single_partition_projected_rows() {
+    let temp_dir = copy_multi_chrom_with_variant_position_chunk_size(100);
+    let root = temp_dir.path().join("chunked.vcz");
+    let sql = "SELECT chrom, start FROM vcz";
+
+    let single_partition = collect_chrom_start_rows(&root, 1, sql).await;
+    let parallel_partitions = collect_chrom_start_rows(&root, 4, sql).await;
+
+    assert_eq!(single_partition.len(), 1000);
+    assert_eq!(parallel_partitions, single_partition);
+}
+
+#[tokio::test]
+async fn vcf_zarr_parallel_fallback_pruning_matches_single_partition_without_region_index() {
+    let temp_dir = copy_multi_chrom_without_region_index_with_variant_position_chunk_size(100);
+    let root = temp_dir.path().join("no_region_index_chunked.vcz");
+    let sql = "SELECT chrom, start FROM vcz WHERE start >= 5000200 AND start <= 5000800";
+
+    let single_partition = collect_chrom_start_rows(&root, 1, sql).await;
+    let parallel_partitions = collect_chrom_start_rows(&root, 4, sql).await;
+
+    assert!(!single_partition.is_empty());
+    assert_eq!(parallel_partitions, single_partition);
+}
+
+#[tokio::test]
+async fn vcf_zarr_scan_displays_single_zarr_concurrency_per_partition() {
+    let temp_dir = copy_multi_chrom_with_variant_position_chunk_size(100);
+    let root = temp_dir.path().join("chunked.vcz");
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let state = ctx.state();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("chunked fixture should open");
+
+    let exec = provider
+        .scan(&state, None, &[], None)
+        .await
+        .expect("scan should build execution plan");
+    let plan = displayable(exec.as_ref()).indent(false).to_string();
+
+    assert!(
+        plan.contains("partition_count=4") && plan.contains("zarr_concurrency=1"),
+        "execution plan should document that zarrs uses one worker per DataFusion partition: {plan}"
     );
 }
 

@@ -10,11 +10,13 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::stream;
+use zarrs::array::CodecOptions;
 
 use super::arrays::read_projected_arrays;
 use super::metadata::VcfZarrMetadata;
 use super::planning::{
-    DeferredPositionPruning, PartitionRowSelection, PartitioningMode, ProjectionPlan, PruningMethod,
+    DeferredPositionPruning, PartitionRowSelection, PartitioningMode, ProjectionPlan,
+    PruningMethod, zarr_read_options,
 };
 use super::pruning::apply_position_array_pruning;
 use super::record_batch::build_record_batch;
@@ -28,6 +30,7 @@ pub(crate) struct VcfZarrExec {
     partition_selections: Vec<PartitionRowSelection>,
     pruning_method: PruningMethod,
     deferred_pruning: Option<DeferredPositionPruning>,
+    codec_options: CodecOptions,
     cache: PlanProperties,
 }
 
@@ -42,6 +45,7 @@ impl VcfZarrExec {
         deferred_pruning: Option<DeferredPositionPruning>,
     ) -> Self {
         let partition_count = partition_selections.len();
+        let codec_options = zarr_read_options();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(partition_count),
@@ -57,6 +61,7 @@ impl VcfZarrExec {
             partition_selections,
             pruning_method,
             deferred_pruning,
+            codec_options,
             cache,
         }
     }
@@ -111,9 +116,10 @@ impl DisplayAs for VcfZarrExec {
             .join(", ");
         write!(
             f,
-            "VcfZarrExec: projection=[{columns}], raw_arrays=[{raw_arrays}], pruning={}, partition_count={}, partition_ranges=[{}], row_ranges=[{}], rows={}",
+            "VcfZarrExec: projection=[{columns}], raw_arrays=[{raw_arrays}], pruning={}, partition_count={}, zarr_concurrency={}, partition_ranges=[{}], row_ranges=[{}], rows={}",
             self.pruning_method.as_str(),
             self.partition_selections.len(),
+            self.codec_options.concurrent_target(),
             self.display_partition_ranges(),
             self.display_row_ranges(),
             self.row_count()
@@ -159,18 +165,29 @@ impl ExecutionPlan for VcfZarrExec {
         let row_selection = if let (Some(deferred), PartitioningMode::ChunkCandidates) =
             (&self.deferred_pruning, partition_selection.mode)
         {
+            let limit = if self.partition_selections.len() == 1 {
+                deferred.limit
+            } else {
+                None
+            };
             apply_position_array_pruning(
                 &self.metadata,
                 &self.options,
                 &partition_selection.selection,
                 &deferred.constraints,
-                deferred.limit,
+                limit,
+                &self.codec_options,
             )?
         } else {
             partition_selection.selection.clone()
         };
-        let arrays =
-            read_projected_arrays(&self.metadata, &self.schema, &self.options, &row_selection)?;
+        let arrays = read_projected_arrays(
+            &self.metadata,
+            &self.schema,
+            &self.options,
+            &row_selection,
+            &self.codec_options,
+        )?;
         let batch = build_record_batch(self.schema.clone(), arrays)?;
         let stream = stream::iter(vec![Ok(batch)]);
         Ok(Box::pin(RecordBatchStreamAdapter::new(
