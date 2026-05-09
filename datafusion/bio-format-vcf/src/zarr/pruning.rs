@@ -6,7 +6,8 @@ use datafusion::logical_expr::Expr;
 use super::arrays::{read_i64_1d, read_i64_2d, variant_count};
 use super::metadata::VcfZarrMetadata;
 use super::planning::{
-    PredicateConstraints, PruningMethod, RowPruning, RowSelection, predicate_constraints,
+    DeferredPositionPruning, PredicateConstraints, PruningMethod, RowPruning, RowSelection,
+    predicate_constraints,
 };
 use super::table_provider::VcfZarrReadOptions;
 
@@ -21,27 +22,48 @@ pub(crate) fn build_row_pruning(
         return Ok(RowPruning {
             selection: RowSelection::all(total_rows).limit(limit),
             method: PruningMethod::None,
+            deferred_pruning: None,
         });
     };
 
-    let (candidate_rows, method) =
-        region_index_candidate_rows(metadata, options, &constraints, total_rows)?.map_or_else(
-            || (RowSelection::all(total_rows), PruningMethod::PositionArrays),
-            |rows| (rows, PruningMethod::RegionIndex),
-        );
+    if let Some(candidate_rows) =
+        region_index_candidate_rows(metadata, options, &constraints, total_rows)?
+    {
+        let selection =
+            apply_position_array_pruning(metadata, options, &candidate_rows, &constraints, limit)?;
+        return Ok(RowPruning {
+            selection,
+            method: PruningMethod::RegionIndex,
+            deferred_pruning: None,
+        });
+    }
 
+    Ok(RowPruning {
+        selection: RowSelection::all(total_rows),
+        method: PruningMethod::PositionArrays,
+        deferred_pruning: Some(DeferredPositionPruning { constraints, limit }),
+    })
+}
+
+pub(crate) fn apply_position_array_pruning(
+    metadata: &VcfZarrMetadata,
+    options: &VcfZarrReadOptions,
+    candidate_rows: &RowSelection,
+    constraints: &PredicateConstraints,
+    limit: Option<usize>,
+) -> Result<RowSelection> {
     let positions = if !constraints.start.is_empty() || !constraints.end.is_empty() {
-        Some(read_i64_1d(metadata, "variant_position", &candidate_rows)?)
+        Some(read_i64_1d(metadata, "variant_position", candidate_rows)?)
     } else {
         None
     };
     let lengths = if !constraints.end.is_empty() && metadata.array_exists("variant_length") {
-        Some(read_i64_1d(metadata, "variant_length", &candidate_rows)?)
+        Some(read_i64_1d(metadata, "variant_length", candidate_rows)?)
     } else {
         None
     };
     let contig_indices = if constraints.chrom_values.is_some() {
-        Some(read_i64_1d(metadata, "variant_contig", &candidate_rows)?)
+        Some(read_i64_1d(metadata, "variant_contig", candidate_rows)?)
     } else {
         None
     };
@@ -93,10 +115,7 @@ pub(crate) fn build_row_pruning(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(RowPruning {
-        selection: candidate_rows.filter_mask(&mask).limit(limit),
-        method,
-    })
+    Ok(candidate_rows.filter_mask(&mask).limit(limit))
 }
 
 fn region_index_candidate_rows(

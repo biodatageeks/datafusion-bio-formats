@@ -13,7 +13,8 @@ use futures::stream;
 
 use super::arrays::read_projected_arrays;
 use super::metadata::VcfZarrMetadata;
-use super::planning::{ProjectionPlan, PruningMethod, RowSelection};
+use super::planning::{DeferredPositionPruning, ProjectionPlan, PruningMethod, RowSelection};
+use super::pruning::apply_position_array_pruning;
 use super::record_batch::build_record_batch;
 use super::table_provider::VcfZarrReadOptions;
 
@@ -24,6 +25,7 @@ pub(crate) struct VcfZarrExec {
     projection_plan: ProjectionPlan,
     row_selection: RowSelection,
     pruning_method: PruningMethod,
+    deferred_pruning: Option<DeferredPositionPruning>,
     cache: PlanProperties,
 }
 
@@ -35,6 +37,7 @@ impl VcfZarrExec {
         projection_plan: ProjectionPlan,
         row_selection: RowSelection,
         pruning_method: PruningMethod,
+        deferred_pruning: Option<DeferredPositionPruning>,
     ) -> Self {
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -50,6 +53,7 @@ impl VcfZarrExec {
             projection_plan,
             row_selection,
             pruning_method,
+            deferred_pruning,
             cache,
         }
     }
@@ -116,12 +120,19 @@ impl ExecutionPlan for VcfZarrExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let arrays = read_projected_arrays(
-            &self.metadata,
-            &self.schema,
-            &self.options,
-            &self.row_selection,
-        )?;
+        let row_selection = if let Some(deferred) = &self.deferred_pruning {
+            apply_position_array_pruning(
+                &self.metadata,
+                &self.options,
+                &self.row_selection,
+                &deferred.constraints,
+                deferred.limit,
+            )?
+        } else {
+            self.row_selection.clone()
+        };
+        let arrays =
+            read_projected_arrays(&self.metadata, &self.schema, &self.options, &row_selection)?;
         let batch = build_record_batch(self.schema.clone(), arrays)?;
         let stream = stream::iter(vec![Ok(batch)]);
         Ok(Box::pin(RecordBatchStreamAdapter::new(

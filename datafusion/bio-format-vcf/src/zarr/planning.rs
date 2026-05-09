@@ -326,14 +326,23 @@ impl PruningMethod {
 
 /// Result of pruning a scan to store-relative rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RowPruning {
+pub(crate) struct RowPruning {
     /// Store-relative rows selected by pruning.
     pub selection: RowSelection,
     /// Pruning strategy used to produce the selection.
     pub method: PruningMethod,
+    /// Exact fallback pruning to run during physical execution.
+    pub deferred_pruning: Option<DeferredPositionPruning>,
 }
 
-#[derive(Clone, Debug, Default)]
+/// Predicate context needed to apply fallback position-array pruning during execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeferredPositionPruning {
+    pub constraints: PredicateConstraints,
+    pub limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PredicateConstraints {
     pub chrom_values: Option<BTreeSet<String>>,
     pub start: NumericBounds,
@@ -346,7 +355,7 @@ impl PredicateConstraints {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct NumericBounds {
     min: Option<i64>,
     max: Option<i64>,

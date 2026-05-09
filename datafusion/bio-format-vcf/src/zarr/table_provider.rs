@@ -97,6 +97,7 @@ impl TableProvider for VcfZarrTableProvider {
             projection_plan,
             row_pruning.selection,
             row_pruning.method,
+            row_pruning.deferred_pruning,
         )))
     }
 }

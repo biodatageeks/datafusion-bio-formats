@@ -298,6 +298,18 @@ fn open_multi_chrom_provider(options: VcfZarrReadOptions) -> VcfZarrTableProvide
         .expect("fixture should open")
 }
 
+fn copy_multi_chrom_without_region_index() -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("no_region_index.vcz");
+    copy_dir(
+        std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
+        &root,
+    );
+    std::fs::remove_dir_all(root.join("region_index"))
+        .expect("region_index directory should be removed");
+    temp_dir
+}
+
 fn assert_field(field: &Field, name: &str, data_type: &DataType, nullable: bool) {
     assert_eq!(field.name(), name);
     assert_eq!(field.data_type(), data_type);
@@ -961,14 +973,8 @@ async fn vcf_zarr_scan_plan_includes_filter_column_raw_arrays() {
 
 #[tokio::test]
 async fn vcf_zarr_scan_without_region_index_uses_position_array_pruning() {
-    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let temp_dir = copy_multi_chrom_without_region_index();
     let root = temp_dir.path().join("no_region_index.vcz");
-    copy_dir(
-        std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
-        &root,
-    );
-    std::fs::remove_dir_all(root.join("region_index"))
-        .expect("region_index directory should be removed");
 
     let ctx = SessionContext::new();
     let state = ctx.state();
@@ -994,10 +1000,44 @@ async fn vcf_zarr_scan_without_region_index_uses_position_array_pruning() {
 
     assert!(
         plan.contains("pruning=position_arrays")
-            && plan.contains("row_ranges=[1..3]")
+            && plan.contains("row_ranges=[0..1000]")
             && !plan.contains("region_index"),
-        "execution plan should fall back to position-array pruning: {plan}"
+        "execution plan should defer exact fallback pruning to execution: {plan}"
     );
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_fallback_pruned_limit_without_region_index() {
+    let temp_dir = copy_multi_chrom_without_region_index();
+    let root = temp_dir.path().join("no_region_index.vcz");
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("fixture without region_index should open");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql(
+            "SELECT chrom, start FROM vcz \
+             WHERE start >= 5000200 AND start <= 5000400 \
+             LIMIT 1",
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+    assert_eq!(batches[0].schema().field(0).name(), "chrom");
+    assert_eq!(batches[0].schema().field(1).name(), "start");
 }
 
 #[tokio::test]
