@@ -8,8 +8,12 @@ VCF Zarr scans currently execute as a single DataFusion physical partition even 
 
 - Add chunk-aligned partition planning for VCF Zarr row selections.
 - Make `VcfZarrExec` expose multiple DataFusion partitions bounded by `SessionConfig::target_partitions()`.
+- Make VCF Zarr output batches honor the DataFusion session batch size.
 - Keep compact `region_index` pruning in scan planning, but defer exact fallback position-array pruning to partition execution.
 - Use per-operation zarrs `CodecOptions` for partition reads so DataFusion owns scan parallelism without changing process-global zarrs configuration.
+- Reuse the local zarrs filesystem store across array opens in a provider instance.
+- Offload blocking zarrs reads from Tokio worker threads during execution.
+- Batch contiguous selected sample reads for FORMAT arrays instead of reading every selected sample separately.
 - Preserve existing projection pruning, genomic predicate pruning, sample selection, and logical schema behavior.
 - Document that parallel VCF Zarr scans do not guarantee global row order.
 - Document that this change does not split inside a selected Zarr variant chunk.

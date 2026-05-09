@@ -138,7 +138,7 @@ pub(crate) fn apply_position_array_pruning(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(candidate_rows.filter_mask(&mask).limit(limit))
+    Ok(candidate_rows.filter_mask(&mask)?.limit(limit))
 }
 
 fn region_index_candidate_rows(
@@ -211,6 +211,9 @@ fn region_index_candidate_rows(
             continue;
         }
 
+        // VCF Zarr region_index max_end is already comparable to the exposed
+        // end coordinate: one-based inclusive in one-based mode, and equal to
+        // the zero-based half-open end after start conversion.
         let logical_region_max_end = region_max_end;
         if !range_intersects(
             &constraints.end,

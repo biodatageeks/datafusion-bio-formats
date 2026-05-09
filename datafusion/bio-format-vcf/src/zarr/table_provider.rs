@@ -17,6 +17,9 @@ use super::pruning::{build_row_pruning, variant_chunk_size};
 use super::schema::{build_logical_schema, normalize_read_options};
 
 /// Options controlling how VCF Zarr data is exposed through DataFusion.
+///
+/// VCF Zarr support currently reads local filesystem stores only. Cloud and
+/// object-store URIs are not supported by this provider yet.
 #[derive(Clone, Debug, Default)]
 pub struct VcfZarrReadOptions {
     /// Optional list of INFO fields to include. `None` discovers all local INFO arrays.
@@ -39,6 +42,8 @@ pub struct VcfZarrTableProvider {
 
 impl VcfZarrTableProvider {
     /// Creates a new VCF Zarr table provider from a local store path.
+    ///
+    /// `path` must reference a local filesystem directory store.
     pub fn new(path: String, options: VcfZarrReadOptions) -> Result<Self> {
         let metadata = VcfZarrMetadata::open_local(&path)?;
         let options = normalize_read_options(&metadata, &options)?;

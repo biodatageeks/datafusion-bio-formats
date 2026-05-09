@@ -73,6 +73,15 @@ The system SHALL use scoped per-operation single-concurrency zarrs codec options
 - **THEN** documentation states that target partitions control DataFusion physical scan parallelism
 - **AND** documentation states that scoped zarrs options prevent requested zarrs parallelism but do not guarantee OS-thread affinity beyond zarrs/rayon behavior.
 
+### Requirement: Session Batch Sized VCF Zarr Output
+
+The system SHALL cap VCF Zarr output RecordBatch row counts using the DataFusion session batch size.
+
+#### Scenario: Batch-sized partition output
+- **WHEN** a VCF Zarr scan executes a physical partition whose final selected row count exceeds `SessionConfig::batch_size()`
+- **THEN** the partition emits multiple RecordBatches
+- **AND** each emitted RecordBatch contains no more than the configured session batch size.
+
 ### Requirement: Pruning And Projection Compatibility
 
 The system SHALL preserve existing VCF Zarr projection pruning, genomic predicate pruning, sample selection, and logical schema behavior when scans use multiple physical partitions.

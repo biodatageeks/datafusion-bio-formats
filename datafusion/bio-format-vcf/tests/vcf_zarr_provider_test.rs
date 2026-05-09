@@ -16,6 +16,7 @@ use datafusion_bio_format_vcf::zarr::planning::ProjectionPlan;
 use datafusion_bio_format_vcf::zarr::{
     VcfZarrReadOptions, VcfZarrTableProvider, metadata::SUPPORTED_VCF_ZARR_VERSION,
 };
+use futures::TryStreamExt;
 
 fn write_v2_root_metadata(root: &std::path::Path, attributes: &str) {
     std::fs::create_dir_all(root).expect("store root should be created");
@@ -484,6 +485,56 @@ async fn vcf_zarr_scan_displays_single_zarr_concurrency_per_partition() {
     assert!(
         plan.contains("partition_count=4") && plan.contains("zarr_concurrency=1"),
         "execution plan should document that zarrs uses one worker per DataFusion partition: {plan}"
+    );
+}
+
+#[tokio::test]
+async fn vcf_zarr_scan_uses_session_batch_size_for_output_batches() {
+    let temp_dir = copy_multi_chrom_with_variant_position_chunk_size(100);
+    let root = temp_dir.path().join("chunked.vcz");
+    let ctx = SessionContext::new_with_config(
+        SessionConfig::new()
+            .with_target_partitions(1)
+            .with_batch_size(128),
+    );
+    let state = ctx.state();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("chunked fixture should open");
+    let schema = provider.schema();
+    let chrom = schema.index_of("chrom").unwrap();
+    let start = schema.index_of("start").unwrap();
+
+    let exec = provider
+        .scan(&state, Some(&vec![chrom, start]), &[], None)
+        .await
+        .expect("scan should build execution plan");
+    let batches = exec
+        .execute(0, ctx.task_ctx())
+        .expect("partition should execute")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("stream should collect");
+
+    assert!(
+        batches.len() > 1,
+        "batch size should split one physical partition into multiple output batches"
+    );
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1000
+    );
+    assert!(
+        batches.iter().all(|batch| batch.num_rows() <= 128),
+        "all output batches should honor DataFusion session batch size: {:?}",
+        batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .collect::<Vec<_>>()
     );
 }
 

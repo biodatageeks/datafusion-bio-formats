@@ -31,3 +31,12 @@
 - [x] 4.1 Run `cargo test -p datafusion-bio-format-vcf vcf_zarr`.
 - [x] 4.2 Run `cargo fmt --all -- --check`.
 - [x] 4.3 Run `openspec validate add-vcf-zarr-parallel-partitions --strict`.
+
+## 5. Review Performance Follow-Up
+
+- [x] 5.1 Reuse a shared local `FilesystemStore` for VCF Zarr array opens.
+- [x] 5.2 Offload blocking zarrs reads from Tokio worker threads in `VcfZarrExec::execute`.
+- [x] 5.3 Split partition output into RecordBatches capped by the DataFusion session batch size.
+- [x] 5.4 Group contiguous selected FORMAT sample indexes into wider zarrs subset reads.
+- [x] 5.5 Add unit tests for row-selection batch splitting and contiguous sample-span grouping.
+- [x] 5.6 Add an integration test for session batch-sized VCF Zarr output.

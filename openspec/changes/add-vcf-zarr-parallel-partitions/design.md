@@ -37,6 +37,10 @@ The plain VCF provider already uses DataFusion session `target_partitions` to dr
 - Do not call `zarrs::config::global_config_mut()` or otherwise mutate process-global zarrs configuration.
 - Use `CodecOptions::default().with_concurrent_target(1).with_chunk_concurrent_minimum(1)` for partition reads so zarrs is not asked to add chunk or codec parallelism inside each DataFusion stream.
 - Prefer serial one-chunk or one-chunk-subset zarrs calls inside each partition instead of multi-chunk zarrs array reads, so zarrs does not route partition-local chunk iteration through its internal parallel read path.
+- Split each physical partition's final exact row selection into output batches capped by `TaskContext::session_config().batch_size()`.
+- Run partition pruning and output-batch reads through `tokio::task::spawn_blocking` so blocking zarrs filesystem I/O does not occupy Tokio worker threads while the stream is polled.
+- Keep one local `Arc<FilesystemStore>` in `VcfZarrMetadata` and clone that handle for array opens, instead of constructing a new filesystem store for every array metadata read.
+- Group contiguous selected FORMAT sample indexes into wider zarrs subset reads, preserving requested output order while reducing per-sample read calls for common contiguous selections.
 - Do not increase zarrs concurrency when the effective partition count is lower than `target_partitions`; unused target capacity remains unused rather than creating empty DataFusion streams or inner zarrs parallelism.
 - Document that parallel output order is not guaranteed.
 - Document that the single-concurrency zarrs options are the intended no-extra-zarrs-parallelism setting, but same-OS-thread execution cannot be guaranteed beyond what zarrs/rayon and individual codecs provide.
@@ -71,5 +75,7 @@ Rejected because it can split inside Zarr chunks and cause repeated chunk decomp
 - Integration-test fallback pruning without `region_index` to confirm equivalent results when exact pruning runs partition-locally.
 - Inspect plan metadata or downcast the exec to confirm partition count changes.
 - Unit-test or inspect the array-read path to confirm partition reads use scoped single-concurrency `CodecOptions`, avoid zarrs multi-chunk read paths where practical, and do not mutate the zarrs global config.
+- Unit-test row-selection batch splitting and contiguous sample-span grouping.
+- Integration-test that VCF Zarr output batches honor the DataFusion session batch size.
 - Run `cargo test -p datafusion-bio-format-vcf vcf_zarr`.
 - Run `openspec validate add-vcf-zarr-parallel-partitions --strict`.

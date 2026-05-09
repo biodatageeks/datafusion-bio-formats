@@ -991,6 +991,46 @@ fn is_dtype(actual: &str, zarrs_name: &str, v2_name: &str) -> bool {
         || actual.ends_with(&format!("/ {v2_name}"))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SampleSpan {
+    source_start: usize,
+    output_start: usize,
+    len: usize,
+}
+
+fn contiguous_sample_spans(sample_indices: &[usize]) -> Vec<SampleSpan> {
+    if sample_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut source_start = sample_indices[0];
+    let mut output_start = 0;
+    let mut len = 1;
+
+    for (sample_out, sample_index) in sample_indices.iter().copied().enumerate().skip(1) {
+        if sample_index == source_start + len {
+            len += 1;
+        } else {
+            spans.push(SampleSpan {
+                source_start,
+                output_start,
+                len,
+            });
+            source_start = sample_index;
+            output_start = sample_out;
+            len = 1;
+        }
+    }
+
+    spans.push(SampleSpan {
+        source_start,
+        output_start,
+        len,
+    });
+    spans
+}
+
 fn read_vec_1d<T>(
     array: &Array<FilesystemStore>,
     row_selection: &RowSelection,
@@ -1077,6 +1117,8 @@ where
     let mut values = vec![T::default(); row_count.saturating_mul(sample_count)];
     let mut row_offset = 0;
 
+    let sample_spans = contiguous_sample_spans(sample_indices);
+
     for range in &row_selection.ranges {
         let row_start = u64::try_from(range.start)
             .map_err(|_| DataFusionError::Execution("row range start exceeds u64".to_string()))?;
@@ -1084,11 +1126,13 @@ where
             .map_err(|_| DataFusionError::Execution("row range end exceeds u64".to_string()))?;
         let rows = range.end.saturating_sub(range.start);
 
-        for (sample_out, sample_index) in sample_indices.iter().copied().enumerate() {
-            let sample_start = u64::try_from(sample_index)
+        for span in &sample_spans {
+            let sample_start = u64::try_from(span.source_start)
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let sample_end = u64::try_from(span.source_start.saturating_add(span.len))
                 .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
             let subset =
-                ArraySubset::new_with_ranges(&[row_start..row_end, sample_start..sample_start + 1]);
+                ArraySubset::new_with_ranges(&[row_start..row_end, sample_start..sample_end]);
             let chunk = array
                 .retrieve_array_subset_opt::<Vec<T>>(&subset, codec_options)
                 .map_err(|error| {
@@ -1097,8 +1141,13 @@ where
                         array.path()
                     ))
                 })?;
-            for (row, value) in chunk.into_iter().enumerate() {
-                values[(row_offset + row) * sample_count + sample_out] = value;
+            for row in 0..rows {
+                for sample_delta in 0..span.len {
+                    let sample_out = span.output_start + sample_delta;
+                    let value_index = row * span.len + sample_delta;
+                    values[(row_offset + row) * sample_count + sample_out] =
+                        chunk[value_index].clone();
+                }
             }
         }
 
@@ -1132,6 +1181,8 @@ where
     let width_u64 = u64::try_from(width)
         .map_err(|_| DataFusionError::Execution("array width exceeds u64".to_string()))?;
 
+    let sample_spans = contiguous_sample_spans(sample_indices);
+
     for range in &row_selection.ranges {
         let row_start = u64::try_from(range.start)
             .map_err(|_| DataFusionError::Execution("row range start exceeds u64".to_string()))?;
@@ -1139,12 +1190,14 @@ where
             .map_err(|_| DataFusionError::Execution("row range end exceeds u64".to_string()))?;
         let rows = range.end.saturating_sub(range.start);
 
-        for (sample_out, sample_index) in sample_indices.iter().copied().enumerate() {
-            let sample_start = u64::try_from(sample_index)
+        for span in &sample_spans {
+            let sample_start = u64::try_from(span.source_start)
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let sample_end = u64::try_from(span.source_start.saturating_add(span.len))
                 .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
             let subset = ArraySubset::new_with_ranges(&[
                 row_start..row_end,
-                sample_start..sample_start + 1,
+                sample_start..sample_end,
                 0..width_u64,
             ]);
             let chunk = array
@@ -1156,10 +1209,13 @@ where
                     ))
                 })?;
             for row in 0..rows {
-                let value_start = row * width;
-                let value_end = value_start + width;
-                values[(row_offset + row) * sample_count + sample_out] =
-                    collapse(row_offset + row, sample_out, &chunk[value_start..value_end]);
+                for sample_delta in 0..span.len {
+                    let sample_out = span.output_start + sample_delta;
+                    let value_start = (row * span.len + sample_delta) * width;
+                    let value_end = value_start + width;
+                    values[(row_offset + row) * sample_count + sample_out] =
+                        collapse(row_offset + row, sample_out, &chunk[value_start..value_end]);
+                }
             }
         }
 
@@ -1289,5 +1345,36 @@ fn join_values(values: impl Iterator<Item = String>) -> String {
         ".".to_string()
     } else {
         joined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::contiguous_sample_spans;
+
+    #[test]
+    fn contiguous_sample_spans_groups_adjacent_requested_samples() {
+        let spans = contiguous_sample_spans(&[0, 1, 2, 4, 7, 8]);
+
+        assert_eq!(
+            spans
+                .into_iter()
+                .map(|span| (span.source_start, span.output_start, span.len))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 3), (4, 3, 1), (7, 4, 2)]
+        );
+    }
+
+    #[test]
+    fn contiguous_sample_spans_preserves_requested_order_for_non_monotonic_samples() {
+        let spans = contiguous_sample_spans(&[2, 0, 1]);
+
+        assert_eq!(
+            spans
+                .into_iter()
+                .map(|span| (span.source_start, span.output_start, span.len))
+                .collect::<Vec<_>>(),
+            vec![(2, 0, 1), (0, 1, 2)]
+        );
     }
 }

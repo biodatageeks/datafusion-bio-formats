@@ -16,6 +16,8 @@ pub const SUPPORTED_VCF_ZARR_VERSION: &str = "0.4";
 pub struct VcfZarrMetadata {
     /// Root directory of the local VCF Zarr store.
     pub root_path: PathBuf,
+    /// Shared local filesystem store used when opening arrays.
+    store: Arc<FilesystemStore>,
     /// The `vcf_zarr_version` declared by the store metadata.
     pub vcf_zarr_version: String,
     /// Root-level attributes parsed from the store `.zattrs` file.
@@ -39,7 +41,7 @@ impl VcfZarrMetadata {
         }
 
         let store = Self::open_store(&root_path)?;
-        let group = zarrs::group::Group::open_opt(store, "/", &MetadataRetrieveVersion::V2)
+        let group = zarrs::group::Group::open_opt(store.clone(), "/", &MetadataRetrieveVersion::V2)
             .map_err(|error| {
                 DataFusionError::Execution(format!(
                     "Failed to read VCF Zarr root metadata at {}: {error}",
@@ -71,6 +73,7 @@ impl VcfZarrMetadata {
 
         Ok(Self {
             root_path,
+            store,
             vcf_zarr_version: version,
             root_attributes,
         })
@@ -84,9 +87,13 @@ impl VcfZarrMetadata {
     /// Opens a local array with zarrs V2 metadata retrieval.
     pub fn open_array(&self, name: &str) -> Result<Array<FilesystemStore>> {
         let array_path = self.array_node_path(name)?;
-        let store = Self::open_store(&self.root_path)?;
 
-        Array::open_opt(store, &array_path, &MetadataRetrieveVersion::V2).map_err(|error| {
+        Array::open_opt(
+            self.store.clone(),
+            &array_path,
+            &MetadataRetrieveVersion::V2,
+        )
+        .map_err(|error| {
             DataFusionError::Execution(format!(
                 "Failed to read VCF Zarr array metadata for '{name}' at {}: {error}",
                 self.root_path.display()

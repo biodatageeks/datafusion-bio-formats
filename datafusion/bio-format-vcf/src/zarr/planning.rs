@@ -89,7 +89,6 @@ pub struct RowSelection {
 }
 
 /// Partitioning mode attached to a VCF Zarr physical partition.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PartitioningMode {
     /// Partition ranges are exact rows to return.
@@ -99,7 +98,6 @@ pub(crate) enum PartitioningMode {
 }
 
 /// Row selection assigned to one DataFusion physical partition.
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PartitionRowSelection {
     /// Store-relative half-open variant row ranges owned by this partition.
@@ -144,8 +142,14 @@ impl RowSelection {
     }
 
     /// Filters this selection with a mask ordered over the currently selected rows.
-    pub fn filter_mask(&self, mask: &[bool]) -> Self {
-        debug_assert_eq!(mask.len(), self.row_count());
+    pub fn filter_mask(&self, mask: &[bool]) -> Result<Self> {
+        let row_count = self.row_count();
+        if mask.len() != row_count {
+            return Err(DataFusionError::Execution(format!(
+                "VCF Zarr filter mask length {} does not match selected row count {row_count}",
+                mask.len()
+            )));
+        }
 
         let mut ranges = Vec::new();
         let mut current_start = None;
@@ -153,7 +157,7 @@ impl RowSelection {
 
         for range in &self.ranges {
             for row in range.clone() {
-                let selected = mask.get(mask_index).copied().unwrap_or(false);
+                let selected = mask[mask_index];
                 match (current_start, selected) {
                     (None, true) => current_start = Some(row),
                     (Some(start), false) => {
@@ -169,7 +173,7 @@ impl RowSelection {
             }
         }
 
-        Self { ranges }
+        Ok(Self { ranges })
     }
 
     /// Returns the total number of selected rows.
@@ -178,6 +182,44 @@ impl RowSelection {
             .iter()
             .map(|range| range.end.saturating_sub(range.start))
             .sum()
+    }
+
+    /// Splits this selection into ordered selections with at most `batch_size` rows each.
+    pub(crate) fn split_by_row_count(&self, batch_size: usize) -> Vec<Self> {
+        if self.ranges.is_empty() {
+            return vec![Self { ranges: Vec::new() }];
+        }
+
+        let batch_size = batch_size.max(1);
+        let mut batches = Vec::new();
+        let mut current_ranges = Vec::new();
+        let mut remaining = batch_size;
+
+        for range in &self.ranges {
+            let mut start = range.start;
+            while start < range.end {
+                let take = range.end.saturating_sub(start).min(remaining);
+                let end = start + take;
+                push_merged_range(&mut current_ranges, start..end);
+                start = end;
+                remaining -= take;
+
+                if remaining == 0 {
+                    batches.push(Self {
+                        ranges: std::mem::take(&mut current_ranges),
+                    });
+                    remaining = batch_size;
+                }
+            }
+        }
+
+        if !current_ranges.is_empty() {
+            batches.push(Self {
+                ranges: current_ranges,
+            });
+        }
+
+        batches
     }
 
     /// Applies a row limit while preserving range order.
@@ -278,7 +320,6 @@ impl RowSelection {
 }
 
 /// zarrs read options for work already scheduled as a DataFusion partition.
-#[allow(dead_code)]
 pub(crate) fn zarr_read_options() -> CodecOptions {
     CodecOptions::default()
         .with_concurrent_target(1)
@@ -560,7 +601,11 @@ fn collect_in_list(
         return false;
     };
 
-    let values: BTreeSet<String> = in_list.list.iter().filter_map(scalar_string).collect();
+    let Some(values): Option<BTreeSet<String>> = in_list.list.iter().map(scalar_string).collect()
+    else {
+        return false;
+    };
+
     if values.is_empty() {
         return false;
     }
@@ -669,7 +714,11 @@ fn scalar_value(expr: &Expr) -> Option<ScalarValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PartitioningMode, RowSelection, zarr_read_options};
+    use std::collections::BTreeSet;
+
+    use datafusion::logical_expr::{col, lit};
+
+    use super::{PartitioningMode, RowSelection, predicate_constraints, zarr_read_options};
 
     fn partition_ranges(
         selection: RowSelection,
@@ -692,6 +741,78 @@ mod tests {
 
     fn range(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
         std::iter::once(start..end).collect()
+    }
+
+    #[test]
+    fn filter_mask_rejects_mask_length_mismatch() {
+        let message = RowSelection {
+            ranges: ranges([0..2, 4..6]),
+        }
+        .filter_mask(&[true, false])
+        .expect_err("mask length mismatch must fail")
+        .to_string();
+
+        assert!(
+            message.contains("filter mask length") && message.contains("selected row count"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn filter_mask_applies_mask_over_selected_rows() {
+        let filtered = RowSelection {
+            ranges: ranges([2..4, 7..10]),
+        }
+        .filter_mask(&[true, false, false, true, true])
+        .expect("matching mask length should filter rows");
+
+        assert_eq!(filtered.ranges, ranges([2..3, 8..10]));
+    }
+
+    #[test]
+    fn split_by_row_count_preserves_ranges_and_caps_batch_rows() {
+        let batches = RowSelection {
+            ranges: ranges([2..5, 10..14]),
+        }
+        .split_by_row_count(3);
+
+        let batch_ranges = batches
+            .into_iter()
+            .map(|selection| selection.ranges)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            batch_ranges,
+            vec![range(2, 5), range(10, 13), range(13, 14)]
+        );
+    }
+
+    #[test]
+    fn split_by_row_count_keeps_one_empty_selection() {
+        let batches = RowSelection { ranges: Vec::new() }.split_by_row_count(128);
+
+        assert_eq!(batches, vec![RowSelection { ranges: Vec::new() }]);
+    }
+
+    #[test]
+    fn predicate_constraints_collect_chrom_in_list_when_all_values_are_literals() {
+        let constraints =
+            predicate_constraints(&[col("chrom").in_list(vec![lit("chr1"), lit("chr2")], false)])
+                .expect("literal chrom IN list should produce pruning constraints");
+
+        assert_eq!(
+            constraints.chrom_values,
+            Some(BTreeSet::from(["chr1".to_string(), "chr2".to_string()]))
+        );
+    }
+
+    #[test]
+    fn predicate_constraints_ignore_chrom_in_list_with_non_literal_terms() {
+        let constraints = predicate_constraints(&[
+            col("chrom").in_list(vec![lit("chr1"), col("other_chrom")], false)
+        ]);
+
+        assert_eq!(constraints, None);
     }
 
     #[test]

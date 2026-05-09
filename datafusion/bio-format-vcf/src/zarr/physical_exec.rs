@@ -3,20 +3,20 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
-use futures::stream;
 use zarrs::array::CodecOptions;
 
 use super::arrays::read_projected_arrays;
 use super::metadata::VcfZarrMetadata;
 use super::planning::{
     DeferredPositionPruning, PartitionRowSelection, PartitioningMode, ProjectionPlan,
-    PruningMethod, zarr_read_options,
+    PruningMethod, RowSelection, zarr_read_options,
 };
 use super::pruning::apply_position_array_pruning;
 use super::record_batch::build_record_batch;
@@ -154,7 +154,7 @@ impl ExecutionPlan for VcfZarrExec {
     fn execute(
         &self,
         partition: usize,
-        _context: Arc<TaskContext>,
+        context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         let Some(partition_selection) = self.partition_selections.get(partition) else {
             return Err(DataFusionError::Execution(format!(
@@ -162,37 +162,81 @@ impl ExecutionPlan for VcfZarrExec {
                 self.partition_selections.len()
             )));
         };
-        let row_selection = if let (Some(deferred), PartitioningMode::ChunkCandidates) =
-            (&self.deferred_pruning, partition_selection.mode)
-        {
-            let limit = if self.partition_selections.len() == 1 {
-                deferred.limit
-            } else {
-                None
-            };
-            apply_position_array_pruning(
-                &self.metadata,
-                &self.options,
-                &partition_selection.selection,
-                &deferred.constraints,
-                limit,
-                &self.codec_options,
-            )?
-        } else {
-            partition_selection.selection.clone()
+
+        let batch_size = context.session_config().batch_size().max(1);
+        let partition_selection = partition_selection.clone();
+        let partition_count = self.partition_selections.len();
+        let metadata = self.metadata.clone();
+        let options = self.options.clone();
+        let schema = self.schema.clone();
+        let stream_schema = self.schema.clone();
+        let codec_options = self.codec_options;
+        let deferred_pruning = self.deferred_pruning.clone();
+
+        let stream = async_stream::try_stream! {
+            let pruning_metadata = metadata.clone();
+            let pruning_options = options.clone();
+            let pruning_codec_options = codec_options;
+            let batch_selections = tokio::task::spawn_blocking(move || -> Result<Vec<RowSelection>> {
+                let row_selection =
+                    if let (Some(deferred), PartitioningMode::ChunkCandidates) =
+                        (&deferred_pruning, partition_selection.mode)
+                    {
+                        let limit = if partition_count == 1 {
+                            deferred.limit
+                        } else {
+                            // A partition-local limit would be incorrect here because each
+                            // partition owns only chunk candidates, not globally ordered
+                            // exact matches. DataFusion's outer LIMIT applies after all
+                            // partitions emit their pruned rows.
+                            None
+                        };
+                        apply_position_array_pruning(
+                            &pruning_metadata,
+                            &pruning_options,
+                            &partition_selection.selection,
+                            &deferred.constraints,
+                            limit,
+                            &pruning_codec_options,
+                        )?
+                    } else {
+                        partition_selection.selection.clone()
+                    };
+
+                Ok(row_selection.split_by_row_count(batch_size))
+            })
+            .await
+            .map_err(join_blocking_error)??;
+
+            for row_selection in batch_selections {
+                let batch_metadata = metadata.clone();
+                let batch_options = options.clone();
+                let batch_schema = schema.clone();
+                let batch_codec_options = codec_options;
+                let batch = tokio::task::spawn_blocking(move || -> Result<RecordBatch> {
+                    let arrays = read_projected_arrays(
+                        &batch_metadata,
+                        &batch_schema,
+                        &batch_options,
+                        &row_selection,
+                        &batch_codec_options,
+                    )?;
+                    build_record_batch(batch_schema, arrays)
+                })
+                .await
+                .map_err(join_blocking_error)??;
+
+                yield batch;
+            }
         };
-        let arrays = read_projected_arrays(
-            &self.metadata,
-            &self.schema,
-            &self.options,
-            &row_selection,
-            &self.codec_options,
-        )?;
-        let batch = build_record_batch(self.schema.clone(), arrays)?;
-        let stream = stream::iter(vec![Ok(batch)]);
+
         Ok(Box::pin(RecordBatchStreamAdapter::new(
-            self.schema.clone(),
+            stream_schema,
             stream,
         )))
     }
+}
+
+fn join_blocking_error(error: tokio::task::JoinError) -> DataFusionError {
+    DataFusionError::Execution(format!("VCF Zarr blocking read task failed: {error}"))
 }
