@@ -213,7 +213,6 @@ impl RowSelection {
     }
 
     /// Splits selected rows into chunk-aligned DataFusion partition selections.
-    #[allow(dead_code)]
     pub(crate) fn chunk_aligned_partitions(
         &self,
         chunk_size: usize,
@@ -286,7 +285,6 @@ pub(crate) fn zarr_read_options() -> CodecOptions {
         .with_chunk_concurrent_minimum(1)
 }
 
-#[allow(dead_code)]
 fn push_merged_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
     if range.start >= range.end {
         return;

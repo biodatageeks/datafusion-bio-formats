@@ -12,8 +12,8 @@ use datafusion::physical_plan::ExecutionPlan;
 
 use super::metadata::VcfZarrMetadata;
 use super::physical_exec::VcfZarrExec;
-use super::planning::{ProjectionPlan, PruningMethod};
-use super::pruning::build_row_pruning;
+use super::planning::{PartitioningMode, ProjectionPlan, PruningMethod};
+use super::pruning::{build_row_pruning, variant_chunk_size};
 use super::schema::{build_logical_schema, normalize_read_options};
 
 /// Options controlling how VCF Zarr data is exposed through DataFusion.
@@ -75,7 +75,7 @@ impl TableProvider for VcfZarrTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         limit: Option<usize>,
@@ -89,13 +89,23 @@ impl TableProvider for VcfZarrTableProvider {
                 .insert("region_index".to_string());
         }
         let schema = project_schema(&self.schema, projection);
+        let partitioning_mode = if row_pruning.deferred_pruning.is_some() {
+            PartitioningMode::ChunkCandidates
+        } else {
+            PartitioningMode::ExactRows
+        };
+        let partition_selections = row_pruning.selection.chunk_aligned_partitions(
+            variant_chunk_size(&self.metadata)?,
+            state.config().target_partitions(),
+            partitioning_mode,
+        )?;
 
         Ok(Arc::new(VcfZarrExec::new(
             schema,
             self.metadata.clone(),
             self.options.clone(),
             projection_plan,
-            row_pruning.selection,
+            partition_selections,
             row_pruning.method,
             row_pruning.deferred_pruning,
         )))

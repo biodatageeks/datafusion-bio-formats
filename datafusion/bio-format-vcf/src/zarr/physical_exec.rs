@@ -3,7 +3,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::common::Result;
+use datafusion::common::{DataFusionError, Result};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -13,7 +13,9 @@ use futures::stream;
 
 use super::arrays::read_projected_arrays;
 use super::metadata::VcfZarrMetadata;
-use super::planning::{DeferredPositionPruning, ProjectionPlan, PruningMethod, RowSelection};
+use super::planning::{
+    DeferredPositionPruning, PartitionRowSelection, PartitioningMode, ProjectionPlan, PruningMethod,
+};
 use super::pruning::apply_position_array_pruning;
 use super::record_batch::build_record_batch;
 use super::table_provider::VcfZarrReadOptions;
@@ -23,7 +25,7 @@ pub(crate) struct VcfZarrExec {
     metadata: VcfZarrMetadata,
     options: VcfZarrReadOptions,
     projection_plan: ProjectionPlan,
-    row_selection: RowSelection,
+    partition_selections: Vec<PartitionRowSelection>,
     pruning_method: PruningMethod,
     deferred_pruning: Option<DeferredPositionPruning>,
     cache: PlanProperties,
@@ -35,13 +37,14 @@ impl VcfZarrExec {
         metadata: VcfZarrMetadata,
         options: VcfZarrReadOptions,
         projection_plan: ProjectionPlan,
-        row_selection: RowSelection,
+        partition_selections: Vec<PartitionRowSelection>,
         pruning_method: PruningMethod,
         deferred_pruning: Option<DeferredPositionPruning>,
     ) -> Self {
+        let partition_count = partition_selections.len();
         let cache = PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(partition_count),
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
@@ -51,11 +54,36 @@ impl VcfZarrExec {
             metadata,
             options,
             projection_plan,
-            row_selection,
+            partition_selections,
             pruning_method,
             deferred_pruning,
             cache,
         }
+    }
+
+    fn display_row_ranges(&self) -> String {
+        self.partition_selections
+            .iter()
+            .map(|partition| partition.selection.display_ranges())
+            .filter(|ranges| !ranges.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn display_partition_ranges(&self) -> String {
+        self.partition_selections
+            .iter()
+            .enumerate()
+            .map(|(index, partition)| format!("{index}:[{}]", partition.selection.display_ranges()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn row_count(&self) -> usize {
+        self.partition_selections
+            .iter()
+            .map(|partition| partition.selection.row_count())
+            .sum()
     }
 }
 
@@ -83,10 +111,12 @@ impl DisplayAs for VcfZarrExec {
             .join(", ");
         write!(
             f,
-            "VcfZarrExec: projection=[{columns}], raw_arrays=[{raw_arrays}], pruning={}, row_ranges=[{}], rows={}",
+            "VcfZarrExec: projection=[{columns}], raw_arrays=[{raw_arrays}], pruning={}, partition_count={}, partition_ranges=[{}], row_ranges=[{}], rows={}",
             self.pruning_method.as_str(),
-            self.row_selection.display_ranges(),
-            self.row_selection.row_count()
+            self.partition_selections.len(),
+            self.display_partition_ranges(),
+            self.display_row_ranges(),
+            self.row_count()
         )
     }
 }
@@ -117,19 +147,27 @@ impl ExecutionPlan for VcfZarrExec {
 
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let row_selection = if let Some(deferred) = &self.deferred_pruning {
+        let Some(partition_selection) = self.partition_selections.get(partition) else {
+            return Err(DataFusionError::Execution(format!(
+                "VCF Zarr partition {partition} is out of range; partition count is {}",
+                self.partition_selections.len()
+            )));
+        };
+        let row_selection = if let (Some(deferred), PartitioningMode::ChunkCandidates) =
+            (&self.deferred_pruning, partition_selection.mode)
+        {
             apply_position_array_pruning(
                 &self.metadata,
                 &self.options,
-                &self.row_selection,
+                &partition_selection.selection,
                 &deferred.constraints,
                 deferred.limit,
             )?
         } else {
-            self.row_selection.clone()
+            partition_selection.selection.clone()
         };
         let arrays =
             read_projected_arrays(&self.metadata, &self.schema, &self.options, &row_selection)?;

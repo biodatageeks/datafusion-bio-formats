@@ -4,8 +4,8 @@ use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray};
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::{col, lit};
-use datafusion::physical_plan::displayable;
-use datafusion::prelude::SessionContext;
+use datafusion::physical_plan::{ExecutionPlanProperties, displayable};
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
@@ -310,6 +310,31 @@ fn copy_multi_chrom_without_region_index() -> tempfile::TempDir {
     temp_dir
 }
 
+fn copy_multi_chrom_with_variant_position_chunk_size(chunk_size: usize) -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("chunked.vcz");
+    copy_dir(
+        std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
+        &root,
+    );
+
+    let zarray_path = root.join("variant_position/.zarray");
+    let zarray = std::fs::read_to_string(&zarray_path)
+        .expect("variant_position metadata should be readable");
+    let updated_zarray = zarray.replace(
+        "\"chunks\": [\n    1000\n  ]",
+        &format!("\"chunks\": [\n    {chunk_size}\n  ]"),
+    );
+    assert_ne!(
+        zarray, updated_zarray,
+        "test fixture should contain the expected variant_position chunk metadata"
+    );
+    std::fs::write(zarray_path, updated_zarray)
+        .expect("variant_position chunk metadata should be updated");
+
+    temp_dir
+}
+
 fn assert_field(field: &Field, name: &str, data_type: &DataType, nullable: bool) {
     assert_eq!(field.name(), name);
     assert_eq!(field.data_type(), data_type);
@@ -317,6 +342,63 @@ fn assert_field(field: &Field, name: &str, data_type: &DataType, nullable: bool)
         field.is_nullable(),
         nullable,
         "{name} nullability should be {nullable}"
+    );
+}
+
+#[tokio::test]
+async fn vcf_zarr_scan_target_partitions_are_capped_by_selected_chunks() {
+    let temp_dir = copy_multi_chrom_with_variant_position_chunk_size(100);
+    let root = temp_dir.path().join("chunked.vcz");
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(8));
+    let state = ctx.state();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("chunked fixture should open");
+
+    let exec = provider
+        .scan(&state, None, &[], None)
+        .await
+        .expect("scan should build execution plan");
+    let plan = displayable(exec.as_ref()).indent(false).to_string();
+
+    assert_eq!(exec.output_partitioning().partition_count(), 8);
+    assert!(
+        plan.contains("partition_count=8")
+            && plan.contains("partition_ranges=[0:[0..200], 1:[200..400]"),
+        "execution plan should expose eight non-empty chunk-bounded partitions: {plan}"
+    );
+}
+
+#[tokio::test]
+async fn vcf_zarr_scan_avoids_empty_partitions_when_selected_chunks_are_fewer_than_target() {
+    let temp_dir = copy_multi_chrom_with_variant_position_chunk_size(100);
+    let root = temp_dir.path().join("chunked.vcz");
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(8));
+    let state = ctx.state();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("chunked fixture should open");
+
+    let exec = provider
+        .scan(&state, None, &[], Some(500))
+        .await
+        .expect("scan should build execution plan");
+    let plan = displayable(exec.as_ref()).indent(false).to_string();
+
+    assert_eq!(exec.output_partitioning().partition_count(), 5);
+    assert!(
+        plan.contains("partition_count=5")
+            && plan.contains("partition_ranges=[0:[0..100], 1:[100..200]")
+            && !plan.contains("5:["),
+        "execution plan should avoid empty partitions when target slots exceed selected chunks: {plan}"
     );
 }
 
