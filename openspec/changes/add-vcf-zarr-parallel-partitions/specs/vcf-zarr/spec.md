@@ -43,6 +43,25 @@ The system SHALL document that VCF Zarr scans with multiple effective physical p
 - **THEN** emitted rows are complete and correct
 - **AND** callers are not promised original store order unless they add an explicit sort.
 
+### Requirement: Scoped Zarrs Concurrency Control
+
+The system SHALL use scoped per-operation zarrs codec options for VCF Zarr partition reads rather than process-global zarrs configuration.
+
+#### Scenario: Parallel partition read concurrency
+- **WHEN** a VCF Zarr scan executes with more than one effective DataFusion physical partition
+- **THEN** each partition read uses explicit zarrs `CodecOptions`
+- **AND** zarrs inner codec concurrency is reduced inside each DataFusion partition to avoid nested all-core parallelism.
+
+#### Scenario: Global zarrs configuration is unchanged
+- **WHEN** a VCF Zarr scan is planned or executed
+- **THEN** the scan does not mutate process-global zarrs configuration
+- **AND** concurrent unrelated zarrs users in the same process are not affected by this scan's concurrency settings.
+
+#### Scenario: Thread-count limitation is documented
+- **WHEN** users configure DataFusion target partitions for VCF Zarr scans
+- **THEN** documentation states that target partitions control DataFusion physical scan parallelism
+- **AND** zarrs codec concurrency is managed as a per-operation target/limit, not as an exact process-wide thread-count guarantee.
+
 ### Requirement: Pruning And Projection Compatibility
 
 The system SHALL preserve existing VCF Zarr projection pruning, genomic predicate pruning, sample selection, and logical schema behavior when scans use multiple physical partitions.
