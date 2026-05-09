@@ -6,6 +6,8 @@ use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Expr, Operator};
 use datafusion_bio_format_core::metadata::{VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY};
 
+use super::schema::VCF_ZARR_RAW_ARRAY_METADATA_KEY;
+
 /// Logical projection converted into the raw VCF Zarr arrays needed to satisfy it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProjectionPlan {
@@ -316,12 +318,16 @@ fn add_field_dependencies(
         "genotypes" => {
             if let DataType::Struct(children) = data_type {
                 for child in children {
-                    let id = child
-                        .metadata()
-                        .get(VCF_FIELD_FORMAT_ID_KEY)
-                        .map(String::as_str)
-                        .unwrap_or_else(|| child.name().as_str());
-                    raw_arrays.insert(format!("call_{id}"));
+                    if let Some(raw_array) = child.metadata().get(VCF_ZARR_RAW_ARRAY_METADATA_KEY) {
+                        raw_arrays.insert(raw_array.clone());
+                    } else {
+                        let id = child
+                            .metadata()
+                            .get(VCF_FIELD_FORMAT_ID_KEY)
+                            .map(String::as_str)
+                            .unwrap_or_else(|| child.name().as_str());
+                        raw_arrays.insert(format!("call_{id}"));
+                    }
                 }
             }
         }
@@ -330,7 +336,11 @@ fn add_field_dependencies(
                 .get(VCF_FIELD_FIELD_TYPE_KEY)
                 .is_some_and(|field_type| field_type == "INFO")
             {
-                raw_arrays.insert(format!("variant_{other}"));
+                let raw_array = metadata
+                    .get(VCF_ZARR_RAW_ARRAY_METADATA_KEY)
+                    .cloned()
+                    .unwrap_or_else(|| format!("variant_{other}"));
+                raw_arrays.insert(raw_array);
             }
         }
     }

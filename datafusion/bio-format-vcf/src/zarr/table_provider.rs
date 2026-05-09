@@ -14,14 +14,14 @@ use super::metadata::VcfZarrMetadata;
 use super::physical_exec::VcfZarrExec;
 use super::planning::{ProjectionPlan, PruningMethod};
 use super::pruning::build_row_pruning;
-use super::schema::build_logical_schema;
+use super::schema::{build_logical_schema, normalize_read_options};
 
 /// Options controlling how VCF Zarr data is exposed through DataFusion.
 #[derive(Clone, Debug, Default)]
 pub struct VcfZarrReadOptions {
-    /// Optional list of INFO fields to include. `None` does not infer fields yet.
+    /// Optional list of INFO fields to include. `None` discovers all local INFO arrays.
     pub info_fields: Option<Vec<String>>,
-    /// Optional list of FORMAT fields to include. `None` does not infer fields yet.
+    /// Optional list of FORMAT fields to include. `None` discovers all local FORMAT arrays.
     pub format_fields: Option<Vec<String>>,
     /// Optional list of sample names to include once sample discovery/subsetting is implemented.
     pub samples: Option<Vec<String>>,
@@ -41,6 +41,7 @@ impl VcfZarrTableProvider {
     /// Creates a new VCF Zarr table provider from a local store path.
     pub fn new(path: String, options: VcfZarrReadOptions) -> Result<Self> {
         let metadata = VcfZarrMetadata::open_local(&path)?;
+        let options = normalize_read_options(&metadata, &options)?;
         let schema = build_logical_schema(&metadata, &options)?;
 
         Ok(Self {

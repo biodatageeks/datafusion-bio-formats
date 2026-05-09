@@ -270,6 +270,16 @@ fn write_malformed_sample_id_metadata(root: &std::path::Path) {
     .expect("sample_id metadata should be written");
 }
 
+fn write_malformed_array_metadata(root: &std::path::Path, array_name: &str) {
+    let array_path = root.join(array_name);
+    if array_path.exists() {
+        std::fs::remove_dir_all(&array_path).expect("array directory should be removed");
+    }
+    std::fs::create_dir_all(&array_path).expect("array directory should be created");
+    std::fs::write(array_path.join(".zarray"), "{not valid json")
+        .expect("malformed array metadata should be written");
+}
+
 fn sampled_format_store() -> tempfile::TempDir {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let root = temp_dir.path().join("sampled.vcz");
@@ -487,10 +497,32 @@ fn vcf_zarr_schema_exposes_logical_vcf_columns() {
         ("filter", DataType::Utf8, true),
     ];
 
-    assert_eq!(schema.fields().len(), expected.len());
     for (index, (name, data_type, nullable)) in expected.iter().enumerate() {
         assert_field(schema.field(index), name, data_type, *nullable);
     }
+    assert_field(
+        schema.field(schema.index_of("AF").expect("AF should be auto-discovered")),
+        "AF",
+        &DataType::Utf8,
+        true,
+    );
+    assert_field(
+        schema.field(schema.index_of("DB").expect("DB should be auto-discovered")),
+        "DB",
+        &DataType::Utf8,
+        true,
+    );
+    assert_field(
+        schema.field(schema.index_of("DP").expect("DP should be auto-discovered")),
+        "DP",
+        &DataType::Utf8,
+        true,
+    );
+    assert!(
+        schema.index_of("id_mask").is_err(),
+        "auxiliary mask arrays should not be exposed as INFO fields"
+    );
+    assert_eq!(schema.fields().len(), expected.len() + 3);
 }
 
 #[test]
@@ -518,6 +550,39 @@ fn vcf_zarr_schema_exposes_requested_info_fields() {
         dp.metadata().get(VCF_FIELD_NUMBER_KEY).map(String::as_str),
         Some(".")
     );
+}
+
+#[test]
+fn vcf_zarr_schema_auto_discovers_format_fields() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("sampled FORMAT store should open");
+
+    let schema = provider.schema();
+    let genotypes = schema.field(
+        schema
+            .index_of("genotypes")
+            .expect("genotypes should be auto-discovered"),
+    );
+    let DataType::Struct(children) = genotypes.data_type() else {
+        panic!(
+            "genotypes should be Struct, got {:?}",
+            genotypes.data_type()
+        );
+    };
+
+    let child_names = children
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(child_names, vec!["GT", "DP"]);
 }
 
 #[test]
@@ -845,6 +910,33 @@ fn vcf_zarr_projection_plan_prunes_unrequested_format_arrays() {
     assert!(!plan.raw_arrays.contains("call_GT"));
 }
 
+#[test]
+fn vcf_zarr_projection_plan_uses_resolved_gt_raw_array_name() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("genotype.vcz");
+    copy_multi_chrom_with_samples(&root);
+    write_i32_3d_array(&root, "call_genotype", 1000, 2, 2, |_, _, _| 0);
+
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["GT".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("spec genotype FORMAT store should open");
+
+    let schema = provider.schema();
+    let genotypes = schema.index_of("genotypes").unwrap();
+    let plan = ProjectionPlan::from_projection(&schema, Some(&vec![genotypes]));
+
+    assert_eq!(plan.raw_arrays.len(), 1);
+    assert!(plan.raw_arrays.contains("call_genotype"));
+    assert!(!plan.raw_arrays.contains("call_GT"));
+}
+
 #[tokio::test]
 async fn vcf_zarr_scan_plan_includes_filter_column_raw_arrays() {
     let ctx = SessionContext::new();
@@ -1076,6 +1168,59 @@ async fn vcf_zarr_collects_requested_info_field() {
 }
 
 #[tokio::test]
+async fn vcf_zarr_collects_auto_discovered_info_field() {
+    let ctx = SessionContext::new();
+    let provider = open_multi_chrom_provider(VcfZarrReadOptions::default());
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT chrom, start, \"DP\" FROM vcz LIMIT 2")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(batches[0].num_rows(), 2);
+    assert_eq!(batches[0].schema().field(2).name(), "DP");
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_requested_info_field_without_opening_unrequested_info_arrays() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("info_pruned.vcz");
+    copy_dir(
+        std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
+        &root,
+    );
+    write_malformed_array_metadata(&root, "variant_UNREADABLE");
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            info_fields: Some(vec!["DP".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("explicit INFO schema should ignore unrequested arrays");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT \"DP\" FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(batches[0].num_rows(), 1);
+    assert_eq!(batches[0].schema().field(0).name(), "DP");
+}
+
+#[tokio::test]
 async fn vcf_zarr_collects_zero_based_coordinates_with_region_pruning() {
     let ctx = SessionContext::new();
     let provider = open_multi_chrom_provider(VcfZarrReadOptions {
@@ -1164,6 +1309,92 @@ async fn vcf_zarr_collects_format_genotypes_with_sample_pruning() {
     assert_eq!(dp_values.len(), 2);
     assert_eq!(dp_values.value(0), "2000");
     assert_eq!(dp_values.value(1), "1000");
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_auto_discovered_format_genotypes() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            samples: Some(vec!["22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("sampled FORMAT store should open");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT genotypes FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("genotypes should be a struct array");
+    assert!(genotypes.column_by_name("GT").is_some());
+    assert!(genotypes.column_by_name("DP").is_some());
+    assert_eq!(genotypes.columns().len(), 2);
+
+    let gt_list = genotypes
+        .column_by_name("GT")
+        .expect("GT list should exist")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("GT should be a list array");
+    let gt_row = gt_list.value(0);
+    let gt_values = gt_row
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("GT values should be strings");
+    assert_eq!(gt_values.len(), 1);
+    assert_eq!(gt_values.value(0), "20000");
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_requested_format_field_without_opening_unrequested_format_arrays() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+    write_malformed_array_metadata(&root, "call_GT");
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["DP".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("explicit FORMAT schema should ignore unrequested arrays");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT genotypes FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("genotypes should be a struct array");
+    assert!(genotypes.column_by_name("GT").is_none());
+    assert!(genotypes.column_by_name("DP").is_some());
 }
 
 #[tokio::test]

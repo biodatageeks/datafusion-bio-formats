@@ -15,14 +15,45 @@ use super::samples::{format_array_name, resolve_sample_selection};
 use super::table_provider::VcfZarrReadOptions;
 
 const VCF_ZARR_VERSION_METADATA_KEY: &str = "bio.vcf.zarr.version";
+pub(crate) const VCF_ZARR_RAW_ARRAY_METADATA_KEY: &str = "bio.vcf.zarr.raw_array";
+
+const INFO_DISCOVERY_EXCLUDED_RAW_ARRAYS: &[&str] = &[
+    "variant_contig",
+    "variant_position",
+    "variant_allele",
+    "variant_id",
+    "variant_length",
+    "variant_quality",
+    "variant_filter",
+];
+const FORMAT_DISCOVERY_EXCLUDED_RAW_ARRAYS: &[&str] = &["call_genotype_phased"];
+
+pub(crate) fn normalize_read_options(
+    metadata: &VcfZarrMetadata,
+    options: &VcfZarrReadOptions,
+) -> Result<VcfZarrReadOptions> {
+    Ok(VcfZarrReadOptions {
+        info_fields: match &options.info_fields {
+            Some(fields) => Some(fields.clone()),
+            None => Some(discover_info_fields(metadata)?),
+        },
+        format_fields: match &options.format_fields {
+            Some(fields) => Some(fields.clone()),
+            None => Some(discover_format_fields(metadata)?),
+        },
+        samples: options.samples.clone(),
+        coordinate_system_zero_based: options.coordinate_system_zero_based,
+    })
+}
 
 /// Builds the logical Arrow schema exposed by the VCF Zarr table provider.
 pub fn build_logical_schema(
     metadata: &VcfZarrMetadata,
     options: &VcfZarrReadOptions,
 ) -> Result<SchemaRef> {
+    let options = normalize_read_options(metadata, options)?;
     validate_required_arrays(metadata)?;
-    let sample_selection = resolve_sample_selection(metadata, options)?;
+    let sample_selection = resolve_sample_selection(metadata, &options)?;
 
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -35,21 +66,20 @@ pub fn build_logical_schema(
         Field::new("filter", DataType::Utf8, true),
     ];
 
-    if let Some(info_fields) = &options.info_fields {
-        for name in info_fields {
-            validate_info_array(metadata, name)?;
-            fields.push(
-                Field::new(name, DataType::Utf8, true).with_metadata(
-                    [
-                        (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string()),
-                        (VCF_FIELD_TYPE_KEY.to_string(), "String".to_string()),
-                        (VCF_FIELD_NUMBER_KEY.to_string(), ".".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-            );
-        }
+    for name in options.info_fields.as_deref().unwrap_or(&[]) {
+        let raw_array = validate_info_array(metadata, name)?;
+        fields.push(
+            Field::new(name, DataType::Utf8, true).with_metadata(
+                [
+                    (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string()),
+                    (VCF_FIELD_TYPE_KEY.to_string(), "String".to_string()),
+                    (VCF_FIELD_NUMBER_KEY.to_string(), ".".to_string()),
+                    (VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(), raw_array),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        );
     }
 
     if let Some(format_fields) = &options.format_fields
@@ -58,7 +88,7 @@ pub fn build_logical_schema(
         let genotype_children = format_fields
             .iter()
             .map(|name| {
-                validate_format_array(metadata, name)?;
+                let raw_array = validate_format_array(metadata, name)?;
                 Ok(Field::new(
                     name,
                     DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
@@ -70,6 +100,7 @@ pub fn build_logical_schema(
                         (VCF_FIELD_FORMAT_ID_KEY.to_string(), name.clone()),
                         (VCF_FIELD_TYPE_KEY.to_string(), "String".to_string()),
                         (VCF_FIELD_NUMBER_KEY.to_string(), ".".to_string()),
+                        (VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(), raw_array),
                     ]
                     .into_iter()
                     .collect(),
@@ -129,24 +160,100 @@ fn validate_required_arrays(metadata: &VcfZarrMetadata) -> Result<()> {
     Ok(())
 }
 
-fn validate_info_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<()> {
+fn validate_info_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<String> {
     let raw_array = format!("variant_{field_id}");
     metadata.open_array(&raw_array).map_err(|error| {
         DataFusionError::Execution(format!(
             "Requested VCF Zarr INFO field '{field_id}' requires readable raw array '{raw_array}': {error}"
         ))
     })?;
-    Ok(())
+    Ok(raw_array)
 }
 
-fn validate_format_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<()> {
+fn validate_format_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<String> {
     let raw_array = format_array_name(metadata, field_id)?;
     metadata.open_array(&raw_array).map_err(|error| {
         DataFusionError::Execution(format!(
             "Requested VCF Zarr FORMAT field '{field_id}' requires readable raw array '{raw_array}': {error}"
         ))
     })?;
-    Ok(())
+    Ok(raw_array)
+}
+
+fn discover_info_fields(metadata: &VcfZarrMetadata) -> Result<Vec<String>> {
+    let mut fields = Vec::new();
+    for raw_array in direct_array_names(metadata)? {
+        if !raw_array.starts_with("variant_")
+            || raw_array.ends_with("_mask")
+            || INFO_DISCOVERY_EXCLUDED_RAW_ARRAYS.contains(&raw_array.as_str())
+        {
+            continue;
+        }
+        fields.push(raw_array.trim_start_matches("variant_").to_string());
+    }
+    fields.sort();
+    fields.dedup();
+    Ok(fields)
+}
+
+fn discover_format_fields(metadata: &VcfZarrMetadata) -> Result<Vec<String>> {
+    let mut fields = Vec::new();
+    for raw_array in direct_array_names(metadata)? {
+        if !raw_array.starts_with("call_")
+            || raw_array.ends_with("_mask")
+            || FORMAT_DISCOVERY_EXCLUDED_RAW_ARRAYS.contains(&raw_array.as_str())
+        {
+            continue;
+        }
+
+        let field_id = if raw_array == "call_genotype" {
+            "GT"
+        } else {
+            raw_array.trim_start_matches("call_")
+        };
+        fields.push(field_id.to_string());
+    }
+    fields.sort_by(|left, right| match (left.as_str(), right.as_str()) {
+        ("GT", "GT") => std::cmp::Ordering::Equal,
+        ("GT", _) => std::cmp::Ordering::Less,
+        (_, "GT") => std::cmp::Ordering::Greater,
+        _ => left.cmp(right),
+    });
+    fields.dedup();
+    Ok(fields)
+}
+
+fn direct_array_names(metadata: &VcfZarrMetadata) -> Result<Vec<String>> {
+    let entries = std::fs::read_dir(&metadata.root_path).map_err(|error| {
+        DataFusionError::Execution(format!(
+            "Failed to list VCF Zarr store at {}: {error}",
+            metadata.root_path.display()
+        ))
+    })?;
+
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            DataFusionError::Execution(format!(
+                "Failed to list VCF Zarr store at {}: {error}",
+                metadata.root_path.display()
+            ))
+        })?;
+        let path = entry.path();
+        if !path.is_dir() || !path.join(".zarray").is_file() {
+            continue;
+        }
+
+        let name = entry.file_name().into_string().map_err(|_| {
+            DataFusionError::Execution(format!(
+                "VCF Zarr array path under {} is not valid UTF-8",
+                metadata.root_path.display()
+            ))
+        })?;
+        names.push(name);
+    }
+    names.sort();
+    Ok(names)
 }
 
 fn vcf_file_format(metadata: &VcfZarrMetadata) -> String {
