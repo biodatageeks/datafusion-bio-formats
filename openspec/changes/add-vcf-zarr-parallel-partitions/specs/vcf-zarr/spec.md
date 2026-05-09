@@ -45,12 +45,23 @@ The system SHALL document that VCF Zarr scans with multiple effective physical p
 
 ### Requirement: Scoped Zarrs Concurrency Control
 
-The system SHALL use scoped per-operation zarrs codec options for VCF Zarr partition reads rather than process-global zarrs configuration.
+The system SHALL use scoped per-operation single-concurrency zarrs codec options for VCF Zarr partition reads rather than process-global zarrs configuration.
 
 #### Scenario: Parallel partition read concurrency
 - **WHEN** a VCF Zarr scan executes with more than one effective DataFusion physical partition
 - **THEN** each partition read uses explicit zarrs `CodecOptions`
-- **AND** zarrs inner codec concurrency is reduced inside each DataFusion partition to avoid nested all-core parallelism.
+- **AND** zarrs inner chunk and codec concurrency are configured to one inside each DataFusion partition.
+
+#### Scenario: Serial zarrs reads inside a partition
+- **WHEN** a DataFusion VCF Zarr partition owns multiple Zarr variant chunks
+- **THEN** the partition reads those chunks through serial one-chunk or one-chunk-subset zarrs calls where practical
+- **AND** the implementation does not rely on zarrs multi-chunk read parallelism for partition-local work.
+
+#### Scenario: Fewer chunks than target partitions
+- **WHEN** a VCF Zarr scan is configured with `target_partitions = 8`
+- **AND** the selected data spans 5 Zarr variant chunks
+- **THEN** the execution plan exposes 5 DataFusion physical partitions
+- **AND** the remaining target partition capacity is not passed to zarrs as inner concurrency.
 
 #### Scenario: Global zarrs configuration is unchanged
 - **WHEN** a VCF Zarr scan is planned or executed
@@ -60,7 +71,7 @@ The system SHALL use scoped per-operation zarrs codec options for VCF Zarr parti
 #### Scenario: Thread-count limitation is documented
 - **WHEN** users configure DataFusion target partitions for VCF Zarr scans
 - **THEN** documentation states that target partitions control DataFusion physical scan parallelism
-- **AND** zarrs codec concurrency is managed as a per-operation target/limit, not as an exact process-wide thread-count guarantee.
+- **AND** documentation states that scoped zarrs options prevent requested zarrs parallelism but do not guarantee OS-thread affinity beyond zarrs/rayon behavior.
 
 ### Requirement: Pruning And Projection Compatibility
 

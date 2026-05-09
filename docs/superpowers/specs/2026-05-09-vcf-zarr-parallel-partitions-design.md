@@ -13,10 +13,10 @@ The plain VCF provider already uses DataFusion session `target_partitions` to ex
 - Preserve Zarr variant chunk boundaries; do not split inside a selected variant chunk in this change.
 - Keep existing projection pruning, predicate pruning, sample selection, schema, and error behavior.
 - Avoid making fallback position-array pruning a single-threaded scan-planning bottleneck.
-- Avoid nested all-core zarrs reads inside each DataFusion partition by using scoped per-operation zarrs codec options.
+- Avoid nested zarrs parallelism inside each DataFusion partition by using scoped per-operation single-concurrency zarrs codec options.
 - Keep the implementation scoped to `datafusion-bio-format-vcf`.
 - Document that parallel scans do not guarantee global row order.
-- Document that zarrs concurrency is controlled as a target/limit, not as an exact process-wide thread-count guarantee.
+- Document that unused `target_partitions` capacity is not passed to zarrs and that strict OS-thread affinity is limited by zarrs/rayon internals.
 
 ## Non-Goals
 
@@ -28,6 +28,7 @@ The plain VCF provider already uses DataFusion session `target_partitions` to ex
 - No public user-facing option for zarrs inner codec concurrency in this change.
 - No mutation of process-global zarrs configuration.
 - No exact thread-count guarantee.
+- No handoff of unused DataFusion target partition capacity to zarrs.
 
 ## Recommended Approach
 
@@ -42,11 +43,15 @@ Pruning has two execution modes:
 
 `VcfZarrExec` will store `partition_selections: Vec<RowSelection>`, report `Partitioning::UnknownPartitioning(partition_selections.len())`, and have `execute(partition)` read only the row ranges for that partition.
 
-Partition reads should use zarrs `_opt` APIs with scoped `CodecOptions`. For multi-partition scans, the first implementation should reduce zarrs inner codec concurrency within each DataFusion partition, initially with `CodecOptions::default().with_concurrent_target(1)`, so DataFusion owns coarse scan parallelism and zarrs does not start all-core work inside every partition. Single-effective-partition scans may keep the current default zarrs behavior unless implementation testing shows a need to apply the same scoped target uniformly.
+Partition reads should use zarrs `_opt` APIs with scoped `CodecOptions`. The first implementation should use `CodecOptions::default().with_concurrent_target(1).with_chunk_concurrent_minimum(1)` for partition reads, so DataFusion is the only intended parallelism layer and zarrs is not asked to add chunk or codec parallelism inside each stream.
+
+Where practical, partition-local array reads should call zarrs serially for one chunk or one chunk subset at a time instead of using zarrs multi-chunk array reads. This avoids relying on zarrs internal chunk-parallel read paths for work already assigned to a DataFusion stream.
+
+If `target_partitions = 8` and the selected data spans 5 variant chunks, the exec should expose 5 DataFusion streams. The remaining 3 target slots must not create empty partitions and must not be converted into zarrs inner concurrency.
 
 The implementation must not call `zarrs::config::global_config_mut()` for this feature. `datafusion-bio-formats` is a library, and mutating zarrs global configuration would affect unrelated scans or concurrent zarrs users in the same process.
 
-This matches the plain VCF provider's session-controlled partition model while keeping the VCF Zarr implementation simple, chunk-aware, and explicit about nested concurrency.
+This matches the plain VCF provider's session-controlled partition model while keeping the VCF Zarr implementation simple, chunk-aware, and explicit that DataFusion streams own concurrency.
 
 ## Components
 
@@ -98,6 +103,8 @@ Replace the single `row_selection` field with `partition_selections` plus enough
 
 Thread scoped zarrs codec options through the VCF Zarr array-read helpers. Replace direct calls to `retrieve_array_subset` with `retrieve_array_subset_opt` so reads performed by `execute(partition)` use the partition's explicit `CodecOptions`.
 
+For partition execution, avoid using zarrs multi-chunk read APIs as the source of parallelism. The helper may still assemble a partition's output across several owned chunks, but it should do that loop itself in the DataFusion stream and invoke zarrs with one chunk or one chunk subset at a time where practical.
+
 ## Data Flow
 
 1. DataFusion calls `VcfZarrTableProvider::scan`.
@@ -122,12 +129,13 @@ Tests for parallel output should compare sorted or set-equivalent results unless
 DataFusion `target_partitions` controls the number of physical VCF Zarr scan partitions exposed to the query engine. zarrs also has internal chunk/codec concurrency for individual array read operations. This design keeps those layers explicit:
 
 - DataFusion owns outer scan parallelism through physical partitions.
-- zarrs inner concurrency is controlled per read operation with `CodecOptions`.
-- multi-partition scans should use a low zarrs inner concurrent target per partition to avoid oversubscription;
+- zarrs inner concurrency is disabled per read operation with `CodecOptions::default().with_concurrent_target(1).with_chunk_concurrent_minimum(1)`;
+- partition-local reads avoid zarrs multi-chunk read parallelism where practical by iterating owned chunks in the DataFusion stream;
+- unused DataFusion target capacity is not passed down to zarrs;
 - process-global zarrs config must not be modified;
-- the configured zarrs concurrent target is not a hard guarantee for the total number of OS threads used by the full query.
+- the configured zarrs options prevent requested zarrs chunk/codec parallelism, but they are not a strict OS-thread-affinity guarantee.
 
-This is intentionally similar to zarrs guidance for concurrent external tasks: when many tasks are executing, reduce the codec concurrent target inside each task.
+This intentionally prioritizes predictable DataFusion scheduling over maximizing zarrs internal throughput when the effective partition count is lower than `target_partitions`.
 
 ## Edge Cases
 
@@ -138,6 +146,7 @@ This is intentionally similar to zarrs guidance for concurrent external tasks: w
 - invalid `variant_position` chunk metadata: fail with a clear `DataFusionError::Execution`.
 - no `region_index`: fallback pruning should not scan all candidate rows in `scan`; exact filtering runs per partition.
 - concurrent unrelated zarrs scans in the same process: must not inherit VCF Zarr scan-specific codec settings.
+- fewer selected chunks than `target_partitions`: do not advertise empty partitions and do not use the remaining target capacity for zarrs inner parallelism.
 
 ## Alternatives Considered
 
@@ -148,6 +157,10 @@ Rejected for the first implementation. It would hide concurrency from DataFusion
 ### Process-global zarrs concurrency configuration
 
 Rejected. It would be easy to set `zarrs::config::global_config_mut().set_codec_concurrent_target(...)`, but that is process-wide state and would leak this scan's concurrency policy into unrelated zarrs work. Per-operation `CodecOptions` keeps concurrency local to the DataFusion scan.
+
+### Passing unused DataFusion slots to zarrs
+
+Rejected. For example, if `target_partitions = 8` and 5 variant chunks are selected, the scan should expose 5 DataFusion streams and leave the remaining capacity unused. Passing those slots into zarrs would create a second concurrency layer, which is explicitly out of scope for this change.
 
 ### Exact row-balanced partitioning
 
@@ -171,8 +184,8 @@ Add integration tests in `vcf_zarr_provider_test.rs`:
 - physical plan or exec downcast reports the expected chunk-bounded partition count,
 - projection and predicate pruning still work in parallel mode.
 - fallback pruning without `region_index` returns equivalent rows and does not require a full planning-time position-array pass.
-- array reads use scoped zarrs `CodecOptions` and do not mutate zarrs global config.
-- documentation describes the zarrs thread-count limitation without promising exact thread counts.
+- array reads use scoped single-concurrency zarrs `CodecOptions` and do not mutate zarrs global config.
+- documentation states that zarrs is not asked to spawn additional parallel work, partition-local reads avoid zarrs multi-chunk parallel APIs where practical, and strict same-OS-thread execution is not promised because zarrs/rayon does not provide that as a public contract.
 
 Verification before implementation completion:
 
