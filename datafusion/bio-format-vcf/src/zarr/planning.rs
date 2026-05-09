@@ -1,10 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::common::ScalarValue;
+use datafusion::common::{DataFusionError, Result, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator};
 use datafusion_bio_format_core::metadata::{VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY};
+use zarrs::array::CodecOptions;
 
 use super::schema::VCF_ZARR_RAW_ARRAY_METADATA_KEY;
 
@@ -85,6 +86,26 @@ impl ProjectionPlan {
 pub struct RowSelection {
     /// Store-relative half-open variant row ranges to read.
     pub ranges: Vec<Range<usize>>,
+}
+
+/// Partitioning mode attached to a VCF Zarr physical partition.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PartitioningMode {
+    /// Partition ranges are exact rows to return.
+    ExactRows,
+    /// Partition ranges are chunk candidates that need partition-local exact pruning.
+    ChunkCandidates,
+}
+
+/// Row selection assigned to one DataFusion physical partition.
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PartitionRowSelection {
+    /// Store-relative half-open variant row ranges owned by this partition.
+    pub selection: RowSelection,
+    /// Whether the selected ranges are exact rows or pruning candidates.
+    pub mode: PartitioningMode,
 }
 
 impl RowSelection {
@@ -190,6 +211,95 @@ impl RowSelection {
             .collect::<Vec<_>>()
             .join(", ")
     }
+
+    /// Splits selected rows into chunk-aligned DataFusion partition selections.
+    #[allow(dead_code)]
+    pub(crate) fn chunk_aligned_partitions(
+        &self,
+        chunk_size: usize,
+        target_partitions: usize,
+        mode: PartitioningMode,
+    ) -> Result<Vec<PartitionRowSelection>> {
+        if chunk_size == 0 {
+            return Err(DataFusionError::Execution(
+                "variant_position chunk size must be greater than zero".to_string(),
+            ));
+        }
+
+        let mut chunk_ranges: BTreeMap<usize, Vec<Range<usize>>> = BTreeMap::new();
+        for range in &self.ranges {
+            if range.start >= range.end {
+                continue;
+            }
+
+            let start_chunk = range.start / chunk_size;
+            let end_chunk = (range.end - 1) / chunk_size;
+            for chunk in start_chunk..=end_chunk {
+                let chunk_start = chunk.saturating_mul(chunk_size);
+                let chunk_end = chunk_start.saturating_add(chunk_size);
+                let start = range.start.max(chunk_start);
+                let end = range.end.min(chunk_end);
+                if start < end {
+                    push_merged_range(chunk_ranges.entry(chunk).or_default(), start..end);
+                }
+            }
+        }
+
+        if chunk_ranges.is_empty() {
+            return Ok(vec![PartitionRowSelection {
+                selection: RowSelection { ranges: Vec::new() },
+                mode,
+            }]);
+        }
+
+        let chunks = chunk_ranges.into_iter().collect::<Vec<_>>();
+        let partition_count = target_partitions.max(1).min(chunks.len());
+        let base_chunks_per_partition = chunks.len() / partition_count;
+        let remainder = chunks.len() % partition_count;
+
+        let mut partitions = Vec::with_capacity(partition_count);
+        let mut chunk_offset = 0;
+        for partition_index in 0..partition_count {
+            let take = base_chunks_per_partition + usize::from(partition_index < remainder);
+            let mut ranges = Vec::new();
+            for (_, chunk_selection) in &chunks[chunk_offset..chunk_offset + take] {
+                for range in chunk_selection {
+                    push_merged_range(&mut ranges, range.clone());
+                }
+            }
+            partitions.push(PartitionRowSelection {
+                selection: RowSelection { ranges },
+                mode,
+            });
+            chunk_offset += take;
+        }
+
+        Ok(partitions)
+    }
+}
+
+/// zarrs read options for work already scheduled as a DataFusion partition.
+#[allow(dead_code)]
+pub(crate) fn zarr_read_options() -> CodecOptions {
+    CodecOptions::default()
+        .with_concurrent_target(1)
+        .with_chunk_concurrent_minimum(1)
+}
+
+#[allow(dead_code)]
+fn push_merged_range(ranges: &mut Vec<Range<usize>>, range: Range<usize>) {
+    if range.start >= range.end {
+        return;
+    }
+
+    if let Some(last) = ranges.last_mut()
+        && last.end == range.start
+    {
+        last.end = range.end;
+        return;
+    }
+
+    ranges.push(range);
 }
 
 /// Source of row pruning for execution-plan display and diagnostics.
@@ -547,5 +657,131 @@ fn scalar_value(expr: &Expr) -> Option<ScalarValue> {
         Expr::Cast(cast) => scalar_value(&cast.expr),
         Expr::TryCast(cast) => scalar_value(&cast.expr),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PartitioningMode, RowSelection, zarr_read_options};
+
+    fn partition_ranges(
+        selection: RowSelection,
+        chunk_size: usize,
+        target_partitions: usize,
+    ) -> Vec<Vec<std::ops::Range<usize>>> {
+        selection
+            .chunk_aligned_partitions(chunk_size, target_partitions, PartitioningMode::ExactRows)
+            .expect("partitioning should succeed")
+            .into_iter()
+            .map(|partition| partition.selection.ranges)
+            .collect()
+    }
+
+    fn ranges(
+        ranges: impl IntoIterator<Item = std::ops::Range<usize>>,
+    ) -> Vec<std::ops::Range<usize>> {
+        ranges.into_iter().collect()
+    }
+
+    fn range(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
+        std::iter::once(start..end).collect()
+    }
+
+    #[test]
+    fn partitions_preserve_chunks_and_cap_at_selected_chunk_count() {
+        let partitions = partition_ranges(
+            RowSelection {
+                ranges: range(0, 30),
+            },
+            10,
+            8,
+        );
+
+        assert_eq!(partitions, vec![vec![0..10], vec![10..20], vec![20..30]]);
+    }
+
+    #[test]
+    fn partitions_group_adjacent_chunks_when_selected_chunks_exceed_target() {
+        let partitions = partition_ranges(
+            RowSelection {
+                ranges: range(0, 50),
+            },
+            10,
+            2,
+        );
+
+        assert_eq!(partitions, vec![vec![0..30], vec![30..50]]);
+    }
+
+    #[test]
+    fn partitions_keep_sparse_rows_inside_their_chunk() {
+        let partitions = partition_ranges(
+            RowSelection {
+                ranges: ranges([2..4, 7..9, 17..19]),
+            },
+            10,
+            8,
+        );
+
+        assert_eq!(partitions, vec![vec![2..4, 7..9], vec![17..19]]);
+    }
+
+    #[test]
+    fn partitions_return_one_empty_partition_for_empty_selection() {
+        let partitions = partition_ranges(RowSelection { ranges: Vec::new() }, 10, 8);
+
+        assert_eq!(partitions, vec![Vec::<std::ops::Range<usize>>::new()]);
+    }
+
+    #[test]
+    fn partitions_treat_zero_target_as_one_partition() {
+        let partitions = partition_ranges(
+            RowSelection {
+                ranges: range(0, 30),
+            },
+            10,
+            0,
+        );
+
+        assert_eq!(partitions, vec![vec![0..30]]);
+    }
+
+    #[test]
+    fn partitions_reject_zero_chunk_size() {
+        let message = RowSelection {
+            ranges: range(0, 30),
+        }
+        .chunk_aligned_partitions(0, 8, PartitioningMode::ExactRows)
+        .expect_err("zero chunk size must fail")
+        .to_string();
+
+        assert!(
+            message.contains("variant_position") && message.contains("chunk size"),
+            "unexpected error: {message}"
+        );
+    }
+
+    #[test]
+    fn partition_keeps_mode_on_each_partition() {
+        let partitions = RowSelection {
+            ranges: range(0, 20),
+        }
+        .chunk_aligned_partitions(10, 4, PartitioningMode::ChunkCandidates)
+        .expect("partitioning should succeed");
+
+        assert_eq!(partitions.len(), 2);
+        assert!(
+            partitions
+                .iter()
+                .all(|partition| partition.mode == PartitioningMode::ChunkCandidates)
+        );
+    }
+
+    #[test]
+    fn zarr_read_options_disable_inner_chunk_and_codec_parallelism() {
+        let options = zarr_read_options();
+
+        assert_eq!(options.concurrent_target(), 1);
+        assert_eq!(options.chunk_concurrent_minimum(), 1);
     }
 }

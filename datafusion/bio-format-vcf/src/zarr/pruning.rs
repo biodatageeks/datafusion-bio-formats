@@ -210,7 +210,7 @@ fn allowed_contig_indices(
     ))
 }
 
-fn variant_chunk_size(metadata: &VcfZarrMetadata) -> Result<usize> {
+pub(crate) fn variant_chunk_size(metadata: &VcfZarrMetadata) -> Result<usize> {
     let variant_position = metadata.open_array("variant_position")?;
     let chunk_shape = variant_position.chunk_shape(&[0]).map_err(|error| {
         DataFusionError::Execution(format!(
