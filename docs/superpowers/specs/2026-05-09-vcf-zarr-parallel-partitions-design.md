@@ -12,6 +12,7 @@ The plain VCF provider already uses DataFusion session `target_partitions` to ex
 - Control effective partition count with `SessionConfig::target_partitions()`.
 - Preserve Zarr variant chunk boundaries; do not split inside a selected variant chunk in this change.
 - Keep existing projection pruning, predicate pruning, sample selection, schema, and error behavior.
+- Avoid making fallback position-array pruning a single-threaded scan-planning bottleneck.
 - Keep the implementation scoped to `datafusion-bio-format-vcf`.
 - Document that parallel scans do not guarantee global row order.
 
@@ -27,7 +28,12 @@ The plain VCF provider already uses DataFusion session `target_partitions` to ex
 
 Use chunk-aligned DataFusion execution partitions.
 
-`VcfZarrTableProvider::scan` will continue to build the projection plan and row pruning first. After pruning, it will read `state.config().target_partitions()` and convert the selected `RowSelection` into per-partition `RowSelection`s. The split will be aligned to the first dimension chunk shape of `variant_position`.
+`VcfZarrTableProvider::scan` will continue to build the projection plan first. It will then read `state.config().target_partitions()` and create chunk-aligned partition selections using the first dimension chunk shape of `variant_position`.
+
+Pruning has two execution modes:
+
+- `region_index` pruning may run during `scan` because it reads compact chunk metadata and can cheaply narrow candidate chunks before partition planning.
+- fallback position-array pruning must not perform a full exact row-pruning pass during `scan`; instead, it should partition candidate chunks first and apply exact `variant_contig`, `variant_position`, and `variant_length` filtering inside each partition's `execute(partition)`.
 
 `VcfZarrExec` will store `partition_selections: Vec<RowSelection>`, report `Partitioning::UnknownPartitioning(partition_selections.len())`, and have `execute(partition)` read only the row ranges for that partition.
 
@@ -40,7 +46,8 @@ This matches the plain VCF provider's session-controlled partition model while k
 Add a partition-planning helper, either as methods on `RowSelection` or as a small dedicated type. It should:
 
 - take `chunk_size` and `target_partitions`,
-- preserve selected rows exactly,
+- preserve selected rows exactly when it receives exact selected rows,
+- also support chunk candidate selections that will be filtered exactly during partition execution,
 - assign every selected Zarr variant chunk to at most one partition,
 - group chunks when selected chunk count exceeds `target_partitions`,
 - avoid empty partitions,
@@ -52,32 +59,40 @@ The helper should not split a selected chunk even when `target_partitions` is la
 
 The existing private `variant_chunk_size()` helper should be made reusable or moved so scan planning can use it. Errors should name `variant_position` because that array defines variant chunk boundaries for this feature.
 
+Pruning should be split into planning-time and execution-time responsibilities:
+
+- planning-time `region_index` pruning returns chunk-aligned candidate rows or chunks;
+- fallback planning without `region_index` returns chunk-aligned candidates without scanning all position arrays;
+- partition execution applies exact predicate pruning for its assigned candidate rows by reading only that partition's lightweight arrays before reading heavy projected arrays.
+
 ### `table_provider.rs`
 
-After `build_row_pruning`, call the chunk-size and partition-planning helpers. Pass the resulting partition selections into `VcfZarrExec::new`.
+Call the chunk-size and partition-planning helpers after projection planning. If `region_index` can narrow candidates, use it before partitioning. If not, partition the relevant chunk candidates and defer exact position-array pruning to `execute(partition)`. Pass the resulting partition selections and pruning mode into `VcfZarrExec::new`.
 
 When `row_pruning.method == PruningMethod::RegionIndex`, continue adding `region_index` to the projection plan raw arrays as today.
 
 ### `physical_exec.rs`
 
-Replace the single `row_selection` field with `partition_selections`. The exec should:
+Replace the single `row_selection` field with `partition_selections` plus enough pruning context to apply deferred fallback pruning. The exec should:
 
 - set `UnknownPartitioning(partition_count)`,
 - display partition count and selected row ranges in the plan string,
 - bounds-check `execute(partition)`,
-- read projected arrays using only the partition's `RowSelection`,
+- for deferred fallback pruning, read lightweight arrays for the partition, build an exact partition-local selection, then read projected arrays for that exact selection,
+- read projected arrays using only the partition's exact `RowSelection`,
 - return a valid empty stream for empty selections.
 
 ## Data Flow
 
 1. DataFusion calls `VcfZarrTableProvider::scan`.
 2. The provider builds projection dependencies from the requested columns and filters.
-3. The provider builds exact selected row ranges from genomic pruning.
+3. The provider identifies planning-time chunk candidates. With `region_index`, this can use region-index metadata; without `region_index`, this should avoid scanning all position arrays during planning.
 4. The provider obtains the `variant_position` chunk size.
-5. The provider splits selected rows into chunk-aligned partition selections bounded by `target_partitions`.
+5. The provider splits candidate rows or chunks into chunk-aligned partition selections bounded by `target_partitions`.
 6. The exec advertises that effective partition count.
 7. DataFusion schedules `execute(partition)` for each partition.
-8. Each partition reads only its selected row ranges and emits normal projected Arrow batches.
+8. Each partition applies any deferred exact fallback pruning locally.
+9. Each partition reads only its exact selected row ranges and emits normal projected Arrow batches.
 
 ## Ordering
 
@@ -92,6 +107,7 @@ Tests for parallel output should compare sorted or set-equivalent results unless
 - selected rows are sparse within a chunk: preserve the exact row ranges but keep that chunk assigned to one partition.
 - empty selection: return one valid empty partition with the projected schema.
 - invalid `variant_position` chunk metadata: fail with a clear `DataFusionError::Execution`.
+- no `region_index`: fallback pruning should not scan all candidate rows in `scan`; exact filtering runs per partition.
 
 ## Alternatives Considered
 
@@ -120,6 +136,7 @@ Add integration tests in `vcf_zarr_provider_test.rs`:
 - same query with `target_partitions=1` and `target_partitions=4` returns equivalent rows after sorting,
 - physical plan or exec downcast reports the expected chunk-bounded partition count,
 - projection and predicate pruning still work in parallel mode.
+- fallback pruning without `region_index` returns equivalent rows and does not require a full planning-time position-array pass.
 
 Verification before implementation completion:
 

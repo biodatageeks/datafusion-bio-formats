@@ -9,6 +9,7 @@ The plain VCF provider already uses DataFusion session `target_partitions` to dr
 - Expose VCF Zarr scans as multiple DataFusion physical partitions when useful.
 - Bound effective partition count by `SessionConfig::target_partitions()`.
 - Preserve Zarr variant chunk boundaries.
+- Avoid planning-time full scans of fallback position arrays before partitions exist.
 - Preserve current logical schema, projection pruning, predicate pruning, sample selection, and read options.
 - Keep the change local to `datafusion-bio-format-vcf`.
 
@@ -21,7 +22,9 @@ The plain VCF provider already uses DataFusion session `target_partitions` to dr
 
 ## Decisions
 
-- Partition after row pruning. This keeps full scans, region-index scans, and position-array pruned scans on the same execution path.
+- Partition after projection planning and planning-time candidate selection.
+- Keep `region_index` candidate pruning in `scan`, because it reads compact chunk metadata.
+- Do not run a full exact fallback position-array pruning pass in `scan`; when `region_index` is absent, partition chunk candidates first and apply exact position filtering inside `execute(partition)`.
 - Use the first dimension chunk shape from `variant_position` as the variant chunk size.
 - Assign each selected variant chunk to at most one execution partition.
 - Group selected chunks when there are more selected chunks than target partitions.
@@ -43,11 +46,13 @@ Rejected because it can split inside Zarr chunks and cause repeated chunk decomp
 - Stores with fewer selected chunks than `target_partitions` will use fewer partitions. This is intentional and should be documented.
 - Parallel execution may emit rows in a different global order. Tests and documentation must not imply stable row order.
 - Sparse selected rows inside the same chunk can make partition sizes uneven. This avoids intra-chunk splitting and keeps I/O chunk-aware.
+- Fallback pruning may read lightweight arrays in each partition before heavy projected arrays. This is intentional so the expensive fallback path benefits from DataFusion partition scheduling.
 
 ## Validation
 
 - Unit-test partition planning for chunk preservation, capping, grouping, sparse selections, and empty selections.
 - Integration-test equivalent results for `target_partitions=1` and `target_partitions>1`.
+- Integration-test fallback pruning without `region_index` to confirm equivalent results when exact pruning runs partition-locally.
 - Inspect plan metadata or downcast the exec to confirm partition count changes.
 - Run `cargo test -p datafusion-bio-format-vcf vcf_zarr`.
 - Run `openspec validate add-vcf-zarr-parallel-partitions --strict`.

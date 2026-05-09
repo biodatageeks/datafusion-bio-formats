@@ -54,7 +54,14 @@ The system SHALL preserve existing VCF Zarr projection pruning, genomic predicat
 
 #### Scenario: Genomic predicate pruning with parallel partitions
 - **WHEN** a parallel VCF Zarr scan uses genomic predicates on `chrom`, `start`, or `end`
-- **THEN** row pruning is applied before partition planning
+- **AND** the store contains `region_index`
+- **THEN** compact region-index candidate pruning is applied before partition planning
+- **AND** the results match the equivalent single-partition scan.
+
+#### Scenario: Fallback predicate pruning with parallel partitions
+- **WHEN** a parallel VCF Zarr scan uses genomic predicates on `chrom`, `start`, or `end`
+- **AND** the store does not contain `region_index`
+- **THEN** exact fallback pruning from lightweight position arrays is applied inside each execution partition
 - **AND** the results match the equivalent single-partition scan.
 
 #### Scenario: Empty pruned selection
