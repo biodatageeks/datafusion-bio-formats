@@ -130,6 +130,49 @@ fn write_i32_2d_array<F>(
     std::fs::write(array_path.join("0.0"), bytes).expect("array chunk should be written");
 }
 
+fn write_u64_2d_array<F>(
+    root: &std::path::Path,
+    array_name: &str,
+    rows: usize,
+    width: usize,
+    value: F,
+) where
+    F: Fn(usize, usize) -> u64,
+{
+    let array_path = root.join(array_name);
+    std::fs::create_dir_all(&array_path).expect("array directory should be created");
+    std::fs::write(
+        array_path.join(".zarray"),
+        format!(
+            r#"{{
+  "shape": [{rows}, {width}],
+  "chunks": [{rows}, {width}],
+  "dtype": "<u8",
+  "fill_value": 0,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}}"#
+        ),
+    )
+    .expect("array metadata should be written");
+    std::fs::write(
+        array_path.join(".zattrs"),
+        r#"{"_ARRAY_DIMENSIONS":["variants","values"]}"#,
+    )
+    .expect("array attrs should be written");
+
+    let mut bytes = Vec::with_capacity(rows * width * std::mem::size_of::<u64>());
+    for row in 0..rows {
+        for item in 0..width {
+            bytes.extend_from_slice(&value(row, item).to_le_bytes());
+        }
+    }
+    std::fs::write(array_path.join("0.0"), bytes).expect("array chunk should be written");
+}
+
 fn write_i32_3d_array<F>(
     root: &std::path::Path,
     array_name: &str,
@@ -1046,6 +1089,10 @@ fn vcf_zarr_schema_rejects_malformed_sample_id_shape() {
         std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
         &root,
     );
+    if root.join("sample_id").exists() {
+        std::fs::remove_dir_all(root.join("sample_id"))
+            .expect("sample_id fixture directory should be removed");
+    }
     write_i32_2d_array(&root, "call_DP", 1000, 2, |row, sample| {
         ((sample + 1) * 1_000 + row) as i32
     });
@@ -1065,6 +1112,41 @@ fn vcf_zarr_schema_rejects_malformed_sample_id_shape() {
 
     assert!(
         message.contains("sample_id") && message.contains("1-dimensional"),
+        "unexpected error: {message}"
+    );
+}
+
+#[test]
+fn vcf_zarr_schema_rejects_requested_samples_without_sample_id() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("missing_sample_id.vcz");
+    copy_dir(
+        std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
+        &root,
+    );
+    if root.join("sample_id").exists() {
+        std::fs::remove_dir_all(root.join("sample_id"))
+            .expect("sample_id fixture directory should be removed");
+    }
+    write_i32_2d_array(&root, "call_DP", 1000, 2, |row, sample| {
+        ((sample + 1) * 1_000 + row) as i32
+    });
+
+    let message = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["DP".to_string()]),
+            samples: Some(vec!["sample_0".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect_err("requested sample names require sample_id")
+    .to_string();
+
+    assert!(
+        message.contains("sample_id") && message.contains("requested sample"),
         "unexpected error: {message}"
     );
 }
@@ -1536,6 +1618,51 @@ async fn vcf_zarr_collects_requested_info_field_without_opening_unrequested_info
 }
 
 #[tokio::test]
+async fn vcf_zarr_collects_uint64_2d_info_field() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("uint64_info.vcz");
+    copy_dir(
+        std::path::Path::new("tests/data/vcf_zarr/multi_chrom.vcz"),
+        &root,
+    );
+    write_u64_2d_array(&root, "variant_BIG", 1000, 2, |row, item| {
+        if row == 0 {
+            u64::MAX - 1 + item as u64
+        } else {
+            (row * 10 + item) as u64
+        }
+    });
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            info_fields: Some(vec!["BIG".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("store with uint64 INFO should open");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT \"BIG\" FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let values = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("BIG should be a string array");
+    assert_eq!(values.value(0), format!("{},{}", u64::MAX - 1, u64::MAX));
+}
+
+#[tokio::test]
 async fn vcf_zarr_collects_zero_based_coordinates_with_region_pruning() {
     let ctx = SessionContext::new();
     let provider = open_multi_chrom_provider(VcfZarrReadOptions {
@@ -1803,6 +1930,63 @@ async fn vcf_zarr_collects_empty_format_lists_when_all_requested_samples_are_mis
         .expect("DP values should be strings");
 
     assert_eq!(dp_values.len(), 0);
+}
+
+#[tokio::test]
+async fn vcf_zarr_preserves_negative_scalar_format_values_for_non_gt_fields() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("negative_format.vcz");
+    copy_multi_chrom_with_samples(&root);
+    write_i32_2d_array(&root, "call_DP", 1000, 2, |row, sample| {
+        if row == 0 {
+            [-1, -2][sample]
+        } else {
+            ((sample + 1) * 1_000 + row) as i32
+        }
+    });
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["DP".to_string()]),
+            samples: Some(vec!["21".to_string(), "22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("sampled FORMAT store should open");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT genotypes FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("genotypes should be a struct array");
+    let dp_list = genotypes
+        .column_by_name("DP")
+        .expect("DP list should exist")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("DP should be a list array");
+    let dp_row = dp_list.value(0);
+    let dp_values = dp_row
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("DP values should be strings");
+
+    assert_eq!(dp_values.len(), 2);
+    assert_eq!(dp_values.value(0), "-1");
+    assert_eq!(dp_values.value(1), "-2");
 }
 
 #[tokio::test]

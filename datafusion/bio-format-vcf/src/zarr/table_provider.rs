@@ -11,10 +11,11 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
 
 use super::metadata::VcfZarrMetadata;
-use super::physical_exec::VcfZarrExec;
+use super::physical_exec::{VcfZarrExec, VcfZarrExecConfig};
 use super::planning::{PartitioningMode, ProjectionPlan, PruningMethod};
-use super::pruning::{build_row_pruning, variant_chunk_size};
-use super::schema::{build_logical_schema, normalize_read_options};
+use super::pruning::{build_row_pruning, variant_position_layout};
+use super::samples::{SampleSelection, resolve_sample_selection};
+use super::schema::{build_logical_schema_with_sample_selection, normalize_read_options};
 
 /// Options controlling how VCF Zarr data is exposed through DataFusion.
 ///
@@ -26,7 +27,7 @@ pub struct VcfZarrReadOptions {
     pub info_fields: Option<Vec<String>>,
     /// Optional list of FORMAT fields to include. `None` discovers all local FORMAT arrays.
     pub format_fields: Option<Vec<String>>,
-    /// Optional list of sample names to include once sample discovery/subsetting is implemented.
+    /// Optional list of sample names to include. Named selection requires a `sample_id` array.
     pub samples: Option<Vec<String>>,
     /// If true, expose positions as zero-based coordinates.
     pub coordinate_system_zero_based: bool,
@@ -37,6 +38,7 @@ pub struct VcfZarrReadOptions {
 pub struct VcfZarrTableProvider {
     options: VcfZarrReadOptions,
     metadata: VcfZarrMetadata,
+    sample_selection: SampleSelection,
     schema: SchemaRef,
 }
 
@@ -47,11 +49,14 @@ impl VcfZarrTableProvider {
     pub fn new(path: String, options: VcfZarrReadOptions) -> Result<Self> {
         let metadata = VcfZarrMetadata::open_local(&path)?;
         let options = normalize_read_options(&metadata, &options)?;
-        let schema = build_logical_schema(&metadata, &options)?;
+        let sample_selection = resolve_sample_selection(&metadata, &options)?;
+        let schema =
+            build_logical_schema_with_sample_selection(&metadata, &options, &sample_selection)?;
 
         Ok(Self {
             options,
             metadata,
+            sample_selection,
             schema,
         })
     }
@@ -87,7 +92,14 @@ impl TableProvider for VcfZarrTableProvider {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let mut projection_plan =
             ProjectionPlan::from_projection_and_filters(&self.schema, projection, filters);
-        let row_pruning = build_row_pruning(&self.metadata, &self.options, filters, limit)?;
+        let variant_position = variant_position_layout(&self.metadata)?;
+        let row_pruning = build_row_pruning(
+            &self.metadata,
+            &self.options,
+            filters,
+            limit,
+            variant_position,
+        )?;
         if row_pruning.method == PruningMethod::RegionIndex {
             projection_plan
                 .raw_arrays
@@ -100,20 +112,21 @@ impl TableProvider for VcfZarrTableProvider {
             PartitioningMode::ExactRows
         };
         let partition_selections = row_pruning.selection.chunk_aligned_partitions(
-            variant_chunk_size(&self.metadata)?,
+            variant_position.chunk_size,
             state.config().target_partitions(),
             partitioning_mode,
         )?;
 
-        Ok(Arc::new(VcfZarrExec::new(
+        Ok(Arc::new(VcfZarrExec::new(VcfZarrExecConfig {
             schema,
-            self.metadata.clone(),
-            self.options.clone(),
+            metadata: self.metadata.clone(),
+            options: self.options.clone(),
+            sample_selection: self.sample_selection.clone(),
             projection_plan,
             partition_selections,
-            row_pruning.method,
-            row_pruning.deferred_pruning,
-        )))
+            pruning_method: row_pruning.method,
+            deferred_pruning: row_pruning.deferred_pruning,
+        })))
     }
 }
 

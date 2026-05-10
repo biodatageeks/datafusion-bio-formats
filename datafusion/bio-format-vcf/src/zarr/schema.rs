@@ -11,7 +11,7 @@ use datafusion_bio_format_core::metadata::{
 use serde_json::Value;
 
 use super::metadata::VcfZarrMetadata;
-use super::samples::{format_array_name, resolve_sample_selection};
+use super::samples::{SampleSelection, format_array_name};
 use super::table_provider::VcfZarrReadOptions;
 
 const VCF_ZARR_VERSION_METADATA_KEY: &str = "bio.vcf.zarr.version";
@@ -46,15 +46,12 @@ pub(crate) fn normalize_read_options(
     })
 }
 
-/// Builds the logical Arrow schema exposed by the VCF Zarr table provider.
-pub fn build_logical_schema(
+pub(crate) fn build_logical_schema_with_sample_selection(
     metadata: &VcfZarrMetadata,
     options: &VcfZarrReadOptions,
+    sample_selection: &SampleSelection,
 ) -> Result<SchemaRef> {
-    let options = normalize_read_options(metadata, options)?;
     validate_required_arrays(metadata)?;
-    let sample_selection = resolve_sample_selection(metadata, &options)?;
-
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt32, false),

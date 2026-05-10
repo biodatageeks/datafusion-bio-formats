@@ -99,7 +99,9 @@ fn read_source_sample_names(
     }
 
     if options.samples.is_some() {
-        return Ok(Vec::new());
+        return Err(DataFusionError::Execution(
+            "VCF Zarr sample selection requested sample names, but the store does not contain a sample_id array".to_string(),
+        ));
     }
 
     infer_anonymous_sample_names(metadata, options)

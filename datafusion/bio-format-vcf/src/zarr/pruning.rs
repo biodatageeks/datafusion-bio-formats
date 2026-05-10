@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
 
-use super::arrays::{read_i64_1d, read_i64_2d, variant_count};
+use super::arrays::{read_i64_1d, read_i64_2d};
 use super::metadata::VcfZarrMetadata;
 use super::planning::{
     DeferredPositionPruning, PredicateConstraints, PruningMethod, RowPruning, RowSelection,
@@ -11,13 +11,53 @@ use super::planning::{
 };
 use super::table_provider::VcfZarrReadOptions;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VariantPositionLayout {
+    pub row_count: usize,
+    pub chunk_size: usize,
+}
+
+pub(crate) fn variant_position_layout(metadata: &VcfZarrMetadata) -> Result<VariantPositionLayout> {
+    let variant_position = metadata.open_array("variant_position")?;
+    if variant_position.shape().len() != 1 {
+        return Err(DataFusionError::Execution(format!(
+            "variant_position is not 1-dimensional: {:?}",
+            variant_position.shape()
+        )));
+    }
+
+    let row_count = usize::try_from(variant_position.shape()[0]).map_err(|_| {
+        DataFusionError::Execution("variant count exceeds platform size".to_string())
+    })?;
+    let chunk_shape = variant_position.chunk_shape(&[0]).map_err(|error| {
+        DataFusionError::Execution(format!(
+            "Failed to read variant_position chunk shape for VCF Zarr pruning: {error}"
+        ))
+    })?;
+    let chunk_size = chunk_shape
+        .first()
+        .ok_or_else(|| {
+            DataFusionError::Execution("variant_position has empty chunk shape".to_string())
+        })?
+        .get();
+    let chunk_size = usize::try_from(chunk_size).map_err(|_| {
+        DataFusionError::Execution("variant_position chunk size exceeds platform size".to_string())
+    })?;
+
+    Ok(VariantPositionLayout {
+        row_count,
+        chunk_size,
+    })
+}
+
 pub(crate) fn build_row_pruning(
     metadata: &VcfZarrMetadata,
     options: &VcfZarrReadOptions,
     filters: &[Expr],
     limit: Option<usize>,
+    variant_position: VariantPositionLayout,
 ) -> Result<RowPruning> {
-    let total_rows = variant_count(metadata)?;
+    let total_rows = variant_position.row_count;
     let Some(constraints) = predicate_constraints(filters) else {
         return Ok(RowPruning {
             selection: RowSelection::all(total_rows).limit(limit),
@@ -27,9 +67,14 @@ pub(crate) fn build_row_pruning(
     };
     let codec_options = zarr_read_options();
 
-    if let Some(candidate_rows) =
-        region_index_candidate_rows(metadata, options, &constraints, total_rows, &codec_options)?
-    {
+    if let Some(candidate_rows) = region_index_candidate_rows(
+        metadata,
+        options,
+        &constraints,
+        total_rows,
+        variant_position.chunk_size,
+        &codec_options,
+    )? {
         let selection = apply_position_array_pruning(
             metadata,
             options,
@@ -146,6 +191,7 @@ fn region_index_candidate_rows(
     options: &VcfZarrReadOptions,
     constraints: &PredicateConstraints,
     total_rows: usize,
+    chunk_size: usize,
     codec_options: &zarrs::array::CodecOptions,
 ) -> Result<Option<RowSelection>> {
     if !metadata.array_exists("region_index")
@@ -182,7 +228,6 @@ fn region_index_candidate_rows(
         return Ok(Some(RowSelection { ranges: Vec::new() }));
     }
 
-    let chunk_size = variant_chunk_size(metadata)?;
     let mut chunks = BTreeSet::new();
 
     for row in 0..row_count {
@@ -256,24 +301,6 @@ fn allowed_contig_indices(
             })
             .collect(),
     ))
-}
-
-pub(crate) fn variant_chunk_size(metadata: &VcfZarrMetadata) -> Result<usize> {
-    let variant_position = metadata.open_array("variant_position")?;
-    let chunk_shape = variant_position.chunk_shape(&[0]).map_err(|error| {
-        DataFusionError::Execution(format!(
-            "Failed to read variant_position chunk shape for VCF Zarr pruning: {error}"
-        ))
-    })?;
-    let chunk_size = chunk_shape
-        .first()
-        .ok_or_else(|| {
-            DataFusionError::Execution("variant_position has empty chunk shape".to_string())
-        })?
-        .get();
-    usize::try_from(chunk_size).map_err(|_| {
-        DataFusionError::Execution("variant_position chunk size exceeds platform size".to_string())
-    })
 }
 
 fn row_selection_from_chunks(

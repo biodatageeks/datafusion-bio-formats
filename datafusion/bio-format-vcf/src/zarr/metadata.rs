@@ -81,7 +81,8 @@ impl VcfZarrMetadata {
 
     /// Returns true when the named array has a `.zarray` metadata file.
     pub fn array_exists(&self, name: &str) -> bool {
-        self.open_array(name).is_ok()
+        self.array_metadata_path(name)
+            .is_ok_and(|path| path.is_file())
     }
 
     /// Opens a local array with zarrs V2 metadata retrieval.
@@ -113,26 +114,36 @@ impl VcfZarrMetadata {
     }
 
     fn array_node_path(&self, name: &str) -> Result<String> {
-        let array_path = Path::new(name);
-        let mut has_component = false;
-
-        for component in array_path.components() {
-            match component {
-                Component::Normal(_) => has_component = true,
-                _ => {
-                    return Err(DataFusionError::Execution(format!(
-                        "Invalid VCF Zarr array path '{name}'; array names must be store-relative"
-                    )));
-                }
-            }
-        }
-
-        if !has_component {
-            return Err(DataFusionError::Execution(
-                "Invalid empty VCF Zarr array path".to_string(),
-            ));
-        }
-
+        validate_array_name(name)?;
         Ok(format!("/{name}"))
     }
+
+    fn array_metadata_path(&self, name: &str) -> Result<PathBuf> {
+        validate_array_name(name)?;
+        Ok(self.root_path.join(name).join(".zarray"))
+    }
+}
+
+fn validate_array_name(name: &str) -> Result<()> {
+    let array_path = Path::new(name);
+    let mut has_component = false;
+
+    for component in array_path.components() {
+        match component {
+            Component::Normal(_) => has_component = true,
+            _ => {
+                return Err(DataFusionError::Execution(format!(
+                    "Invalid VCF Zarr array path '{name}'; array names must be store-relative"
+                )));
+            }
+        }
+    }
+
+    if !has_component {
+        return Err(DataFusionError::Execution(
+            "Invalid empty VCF Zarr array path".to_string(),
+        ));
+    }
+
+    Ok(())
 }

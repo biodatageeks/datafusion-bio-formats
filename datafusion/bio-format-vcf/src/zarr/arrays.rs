@@ -11,13 +11,14 @@ use zarrs::filesystem::FilesystemStore;
 
 use super::metadata::VcfZarrMetadata;
 use super::planning::RowSelection;
-use super::samples::{format_array_name, resolve_sample_selection_with_options};
+use super::samples::{SampleSelection, format_array_name};
 use super::table_provider::VcfZarrReadOptions;
 
 pub(crate) fn read_projected_arrays(
     metadata: &VcfZarrMetadata,
     schema: &SchemaRef,
     options: &VcfZarrReadOptions,
+    sample_selection: &SampleSelection,
     row_selection: &RowSelection,
     codec_options: &CodecOptions,
 ) -> Result<Vec<ArrayRef>> {
@@ -42,7 +43,7 @@ pub(crate) fn read_projected_arrays(
             "genotypes" => read_genotypes(
                 metadata,
                 field.data_type(),
-                options,
+                sample_selection,
                 row_selection,
                 codec_options,
             )?,
@@ -69,15 +70,6 @@ pub(crate) fn read_projected_arrays(
     }
 
     Ok(arrays)
-}
-
-pub(crate) fn variant_count(metadata: &VcfZarrMetadata) -> Result<usize> {
-    let variant_position = metadata.open_array("variant_position")?;
-    let variants = usize::try_from(*variant_position.shape().first().ok_or_else(|| {
-        DataFusionError::Execution("variant_position is not 1-dimensional".to_string())
-    })?)
-    .map_err(|_| DataFusionError::Execution("variant count exceeds platform size".to_string()))?;
-    Ok(variants)
 }
 
 struct ArrayCache<'a> {
@@ -407,7 +399,7 @@ fn read_info_values(
 fn read_genotypes(
     metadata: &VcfZarrMetadata,
     data_type: &DataType,
-    options: &VcfZarrReadOptions,
+    sample_selection: &SampleSelection,
     row_selection: &RowSelection,
     codec_options: &CodecOptions,
 ) -> Result<ArrayRef> {
@@ -417,7 +409,6 @@ fn read_genotypes(
         )));
     };
 
-    let sample_selection = resolve_sample_selection_with_options(metadata, options, codec_options)?;
     let mut child_arrays = Vec::with_capacity(children.len());
 
     for child in children {
@@ -935,6 +926,9 @@ fn read_any_1d_as_strings(
     } else if is_dtype(&data_type, "uint32", "<u4") {
         read_vec_1d::<u32>(&array, row_selection, codec_options)
             .map(|v| v.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_vec_1d::<u64>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(|value| value.to_string()).collect())
     } else if is_dtype(&data_type, "float32", "<f4") {
         read_vec_1d::<f32>(&array, row_selection, codec_options)
             .map(|v| v.into_iter().map(|value| value.to_string()).collect())
@@ -970,6 +964,21 @@ fn read_any_2d_as_strings(
             .map(|v| v.into_iter().map(|value| value.to_string()).collect())
     } else if is_dtype(&data_type, "int32", "<i4") {
         read_vec_2d::<i32>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_vec_2d::<i64>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_vec_2d::<u8>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_vec_2d::<u16>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_vec_2d::<u32>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_vec_2d::<u64>(&array, row_selection, width, codec_options)
             .map(|v| v.into_iter().map(|value| value.to_string()).collect())
     } else if is_dtype(&data_type, "float32", "<f4") {
         read_vec_2d::<f32>(&array, row_selection, width, codec_options)
@@ -1266,12 +1275,7 @@ fn format_integer_scalar<T>(value: T) -> String
 where
     T: Into<i64>,
 {
-    let value = value.into();
-    if value == -1 || value == -2 {
-        ".".to_string()
-    } else {
-        value.to_string()
-    }
+    value.into().to_string()
 }
 
 fn format_float_scalar<T>(value: T) -> String

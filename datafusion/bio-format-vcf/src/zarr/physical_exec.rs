@@ -20,12 +20,14 @@ use super::planning::{
 };
 use super::pruning::apply_position_array_pruning;
 use super::record_batch::build_record_batch;
+use super::samples::SampleSelection;
 use super::table_provider::VcfZarrReadOptions;
 
 pub(crate) struct VcfZarrExec {
     schema: SchemaRef,
     metadata: VcfZarrMetadata,
     options: VcfZarrReadOptions,
+    sample_selection: SampleSelection,
     projection_plan: ProjectionPlan,
     partition_selections: Vec<PartitionRowSelection>,
     pruning_method: PruningMethod,
@@ -34,16 +36,29 @@ pub(crate) struct VcfZarrExec {
     cache: PlanProperties,
 }
 
+pub(crate) struct VcfZarrExecConfig {
+    pub schema: SchemaRef,
+    pub metadata: VcfZarrMetadata,
+    pub options: VcfZarrReadOptions,
+    pub sample_selection: SampleSelection,
+    pub projection_plan: ProjectionPlan,
+    pub partition_selections: Vec<PartitionRowSelection>,
+    pub pruning_method: PruningMethod,
+    pub deferred_pruning: Option<DeferredPositionPruning>,
+}
+
 impl VcfZarrExec {
-    pub(crate) fn new(
-        schema: SchemaRef,
-        metadata: VcfZarrMetadata,
-        options: VcfZarrReadOptions,
-        projection_plan: ProjectionPlan,
-        partition_selections: Vec<PartitionRowSelection>,
-        pruning_method: PruningMethod,
-        deferred_pruning: Option<DeferredPositionPruning>,
-    ) -> Self {
+    pub(crate) fn new(config: VcfZarrExecConfig) -> Self {
+        let VcfZarrExecConfig {
+            schema,
+            metadata,
+            options,
+            sample_selection,
+            projection_plan,
+            partition_selections,
+            pruning_method,
+            deferred_pruning,
+        } = config;
         let partition_count = partition_selections.len();
         let codec_options = zarr_read_options();
         let cache = PlanProperties::new(
@@ -57,6 +72,7 @@ impl VcfZarrExec {
             schema,
             metadata,
             options,
+            sample_selection,
             projection_plan,
             partition_selections,
             pruning_method,
@@ -168,6 +184,7 @@ impl ExecutionPlan for VcfZarrExec {
         let partition_count = self.partition_selections.len();
         let metadata = self.metadata.clone();
         let options = self.options.clone();
+        let sample_selection = self.sample_selection.clone();
         let schema = self.schema.clone();
         let stream_schema = self.schema.clone();
         let codec_options = self.codec_options;
@@ -211,6 +228,7 @@ impl ExecutionPlan for VcfZarrExec {
             for row_selection in batch_selections {
                 let batch_metadata = metadata.clone();
                 let batch_options = options.clone();
+                let batch_sample_selection = sample_selection.clone();
                 let batch_schema = schema.clone();
                 let batch_codec_options = codec_options;
                 let batch = tokio::task::spawn_blocking(move || -> Result<RecordBatch> {
@@ -218,6 +236,7 @@ impl ExecutionPlan for VcfZarrExec {
                         &batch_metadata,
                         &batch_schema,
                         &batch_options,
+                        &batch_sample_selection,
                         &row_selection,
                         &batch_codec_options,
                     )?;
