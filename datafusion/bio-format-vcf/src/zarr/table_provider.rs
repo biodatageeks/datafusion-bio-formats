@@ -21,7 +21,7 @@ use super::schema::{build_logical_schema_with_sample_selection, normalize_read_o
 ///
 /// VCF Zarr support currently reads local filesystem stores only. Cloud and
 /// object-store URIs are not supported by this provider yet.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct VcfZarrReadOptions {
     /// Optional list of INFO fields to include. `None` discovers all local INFO arrays.
     pub info_fields: Option<Vec<String>>,
@@ -31,6 +31,20 @@ pub struct VcfZarrReadOptions {
     pub samples: Option<Vec<String>>,
     /// If true, expose positions as zero-based coordinates.
     pub coordinate_system_zero_based: bool,
+    /// If true, expose GT as raw typed allele calls instead of VCF-style strings.
+    pub genotype_encoding_raw: bool,
+}
+
+impl Default for VcfZarrReadOptions {
+    fn default() -> Self {
+        Self {
+            info_fields: None,
+            format_fields: None,
+            samples: None,
+            coordinate_system_zero_based: false,
+            genotype_encoding_raw: true,
+        }
+    }
 }
 
 /// A DataFusion table provider for local VCF Zarr stores.

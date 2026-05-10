@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, Int64Array, ListArray, StringArray, StructArray, UInt32Array,
+    Array, BooleanArray, Float32Array, Int8Array, Int32Array, Int64Array, ListArray, StringArray,
+    StructArray, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::catalog::TableProvider;
@@ -345,6 +346,42 @@ fn sampled_format_store() -> tempfile::TempDir {
         ((sample + 1) * 1_000 + row) as i32
     });
     temp_dir
+}
+
+fn assert_i32_list_values(list: &ListArray, row: usize, expected: &[i32]) {
+    let row_values = list.value(row);
+    let values = row_values
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("list values should be Int32");
+    assert_eq!(values.len(), expected.len());
+    for (index, expected_value) in expected.iter().enumerate() {
+        assert_eq!(values.value(index), *expected_value);
+    }
+}
+
+fn assert_bool_list_values(list: &ListArray, row: usize, expected: &[bool]) {
+    let row_values = list.value(row);
+    let values = row_values
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("list values should be Boolean");
+    assert_eq!(values.len(), expected.len());
+    for (index, expected_value) in expected.iter().enumerate() {
+        assert_eq!(values.value(index), *expected_value);
+    }
+}
+
+fn assert_nested_i32_list_values(list: &ListArray, row: usize, expected: &[&[i32]]) {
+    let row_values = list.value(row);
+    let sample_lists = row_values
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("row values should be nested List<Int32>");
+    assert_eq!(sample_lists.len(), expected.len());
+    for (sample, expected_values) in expected.iter().enumerate() {
+        assert_i32_list_values(sample_lists, sample, expected_values);
+    }
 }
 
 fn open_multi_chrom_provider(options: VcfZarrReadOptions) -> VcfZarrTableProvider {
@@ -843,19 +880,19 @@ fn vcf_zarr_schema_exposes_logical_vcf_columns() {
     assert_field(
         schema.field(schema.index_of("AF").expect("AF should be auto-discovered")),
         "AF",
-        &DataType::Utf8,
+        &DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
         true,
     );
     assert_field(
         schema.field(schema.index_of("DB").expect("DB should be auto-discovered")),
         "DB",
-        &DataType::Utf8,
+        &DataType::Boolean,
         true,
     );
     assert_field(
         schema.field(schema.index_of("DP").expect("DP should be auto-discovered")),
         "DP",
-        &DataType::Utf8,
+        &DataType::Int8,
         true,
     );
     assert!(
@@ -875,7 +912,7 @@ fn vcf_zarr_schema_exposes_requested_info_fields() {
     let schema = provider.schema();
     let dp = schema.field(schema.index_of("DP").expect("DP field should exist"));
 
-    assert_field(dp, "DP", &DataType::Utf8, true);
+    assert_field(dp, "DP", &DataType::Int8, true);
     assert_eq!(
         dp.metadata()
             .get(VCF_FIELD_FIELD_TYPE_KEY)
@@ -884,7 +921,7 @@ fn vcf_zarr_schema_exposes_requested_info_fields() {
     );
     assert_eq!(
         dp.metadata().get(VCF_FIELD_TYPE_KEY).map(String::as_str),
-        Some("String")
+        Some("Integer")
     );
     assert_eq!(
         dp.metadata().get(VCF_FIELD_NUMBER_KEY).map(String::as_str),
@@ -965,15 +1002,8 @@ fn vcf_zarr_schema_rejects_missing_requested_format_fields() {
 
 #[test]
 fn vcf_zarr_schema_exposes_requested_format_fields_when_arrays_exist() {
-    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-    let root = temp_dir.path().join("format_arrays.vcz");
-    write_v2_root_metadata(
-        &root,
-        &format!("{{\"vcf_zarr_version\":\"{SUPPORTED_VCF_ZARR_VERSION}\"}}"),
-    );
-    write_required_zarray_metadata(&root);
-    write_zarray_metadata(&root, "call_GT");
-    write_zarray_metadata(&root, "call_DP");
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
 
     let provider = VcfZarrTableProvider::new(
         root.to_str()
@@ -1009,11 +1039,11 @@ fn vcf_zarr_schema_exposes_requested_format_fields_when_arrays_exist() {
 
         let DataType::List(item) = child.data_type() else {
             panic!(
-                "{expected_name} should be List<Utf8>, got {:?}",
+                "{expected_name} should be List<Int32>, got {:?}",
                 child.data_type()
             );
         };
-        assert_eq!(item.data_type(), &DataType::Utf8);
+        assert_eq!(item.data_type(), &DataType::Int32);
         assert!(
             item.is_nullable(),
             "{expected_name} item should be nullable"
@@ -1035,7 +1065,7 @@ fn vcf_zarr_schema_exposes_requested_format_fields_when_arrays_exist() {
         );
         assert_eq!(
             child.metadata().get(VCF_FIELD_TYPE_KEY).map(String::as_str),
-            Some("String")
+            Some("Integer")
         );
         assert_eq!(
             child
@@ -1045,6 +1075,107 @@ fn vcf_zarr_schema_exposes_requested_format_fields_when_arrays_exist() {
             Some(".")
         );
     }
+}
+
+#[test]
+fn vcf_zarr_schema_defaults_spec_gt_to_raw_nested_lists_with_phasing() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("raw_gt_schema.vcz");
+    copy_multi_chrom_with_samples(&root);
+    write_i32_3d_array(&root, "call_genotype", 1000, 2, 2, |_, _, _| 0);
+    write_bool_2d_array(&root, "call_genotype_phased", 1000, 2, |_, sample| {
+        sample == 1
+    });
+
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["GT".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("spec GT store should open");
+
+    let schema = provider.schema();
+    let genotypes = schema.field(
+        schema
+            .index_of("genotypes")
+            .expect("genotypes field should exist"),
+    );
+    let DataType::Struct(children) = genotypes.data_type() else {
+        panic!(
+            "genotypes should be Struct, got {:?}",
+            genotypes.data_type()
+        );
+    };
+
+    assert_eq!(
+        children
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        vec!["GT", "GT_phased"]
+    );
+
+    let DataType::List(samples) = children[0].data_type() else {
+        panic!("GT should be List<List<Int32>>");
+    };
+    let DataType::List(ploidy) = samples.data_type() else {
+        panic!("GT sample item should be List<Int32>");
+    };
+    assert_eq!(ploidy.data_type(), &DataType::Int32);
+
+    let DataType::List(phased_item) = children[1].data_type() else {
+        panic!("GT_phased should be List<Boolean>");
+    };
+    assert_eq!(phased_item.data_type(), &DataType::Boolean);
+}
+
+#[test]
+fn vcf_zarr_schema_can_request_string_gt_encoding() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("string_gt_schema.vcz");
+    copy_multi_chrom_with_samples(&root);
+    write_i32_3d_array(&root, "call_genotype", 1000, 2, 2, |_, _, _| 0);
+    write_bool_2d_array(&root, "call_genotype_phased", 1000, 2, |_, sample| {
+        sample == 1
+    });
+
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["GT".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            genotype_encoding_raw: false,
+            ..Default::default()
+        },
+    )
+    .expect("spec GT store should open");
+
+    let schema = provider.schema();
+    let genotypes = schema.field(
+        schema
+            .index_of("genotypes")
+            .expect("genotypes field should exist"),
+    );
+    let DataType::Struct(children) = genotypes.data_type() else {
+        panic!(
+            "genotypes should be Struct, got {:?}",
+            genotypes.data_type()
+        );
+    };
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].name(), "GT");
+
+    let DataType::List(item) = children[0].data_type() else {
+        panic!("GT should be List<Utf8>");
+    };
+    assert_eq!(item.data_type(), &DataType::Utf8);
 }
 
 #[test]
@@ -1572,6 +1703,13 @@ async fn vcf_zarr_collects_requested_info_field() {
 
     assert_eq!(batches[0].num_rows(), 2);
     assert_eq!(batches[0].schema().field(2).name(), "DP");
+    assert_eq!(batches[0].schema().field(2).data_type(), &DataType::Int8);
+    let dp = batches[0]
+        .column(2)
+        .as_any()
+        .downcast_ref::<Int8Array>()
+        .expect("DP should be an Int8 array");
+    assert_eq!(dp.len(), 2);
 }
 
 #[tokio::test]
@@ -1590,6 +1728,41 @@ async fn vcf_zarr_collects_auto_discovered_info_field() {
 
     assert_eq!(batches[0].num_rows(), 2);
     assert_eq!(batches[0].schema().field(2).name(), "DP");
+    assert_eq!(batches[0].schema().field(2).data_type(), &DataType::Int8);
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_list_valued_float_info_as_typed_lists() {
+    let ctx = SessionContext::new();
+    let provider = open_multi_chrom_provider(VcfZarrReadOptions {
+        info_fields: Some(vec!["AF".to_string()]),
+        ..Default::default()
+    });
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT \"AF\" FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        batches[0].schema().field(0).data_type(),
+        &DataType::List(Arc::new(Field::new("item", DataType::Float32, true)))
+    );
+    let af = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("AF should be a List<Float32>");
+    let row = af.value(0);
+    let values = row
+        .as_any()
+        .downcast_ref::<Float32Array>()
+        .expect("AF list values should be Float32");
+    assert_eq!(values.len(), 1);
 }
 
 #[tokio::test]
@@ -1815,9 +1988,16 @@ async fn vcf_zarr_collects_uint64_2d_info_field() {
     let values = batches[0]
         .column(0)
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("BIG should be a string array");
-    assert_eq!(values.value(0), format!("{},{}", u64::MAX - 1, u64::MAX));
+        .downcast_ref::<ListArray>()
+        .expect("BIG should be a List<UInt64> array");
+    let row = values.value(0);
+    let row_values = row
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("BIG values should be UInt64");
+    assert_eq!(row_values.len(), 2);
+    assert_eq!(row_values.value(0), u64::MAX - 1);
+    assert_eq!(row_values.value(1), u64::MAX);
 }
 
 #[tokio::test]
@@ -1895,20 +2075,20 @@ async fn vcf_zarr_collects_format_genotypes_with_sample_pruning() {
     let gt_row = gt_list.value(0);
     let gt_values = gt_row
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("GT values should be strings");
+        .downcast_ref::<Int32Array>()
+        .expect("GT values should be Int32");
     assert_eq!(gt_values.len(), 2);
-    assert_eq!(gt_values.value(0), "20000");
-    assert_eq!(gt_values.value(1), "10000");
+    assert_eq!(gt_values.value(0), 20000);
+    assert_eq!(gt_values.value(1), 10000);
 
     let dp_row = dp_list.value(0);
     let dp_values = dp_row
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("DP values should be strings");
+        .downcast_ref::<Int32Array>()
+        .expect("DP values should be Int32");
     assert_eq!(dp_values.len(), 2);
-    assert_eq!(dp_values.value(0), "2000");
-    assert_eq!(dp_values.value(1), "1000");
+    assert_eq!(dp_values.value(0), 2000);
+    assert_eq!(dp_values.value(1), 1000);
 }
 
 #[tokio::test]
@@ -1954,10 +2134,10 @@ async fn vcf_zarr_collects_auto_discovered_format_genotypes() {
     let gt_row = gt_list.value(0);
     let gt_values = gt_row
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("GT values should be strings");
+        .downcast_ref::<Int32Array>()
+        .expect("GT values should be Int32");
     assert_eq!(gt_values.len(), 1);
-    assert_eq!(gt_values.value(0), "20000");
+    assert_eq!(gt_values.value(0), 20000);
 }
 
 #[tokio::test]
@@ -2036,12 +2216,12 @@ async fn vcf_zarr_collects_all_samples_when_samples_are_not_requested() {
     let dp_row = dp_list.value(0);
     let dp_values = dp_row
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("DP values should be strings");
+        .downcast_ref::<Int32Array>()
+        .expect("DP values should be Int32");
 
     assert_eq!(dp_values.len(), 2);
-    assert_eq!(dp_values.value(0), "1000");
-    assert_eq!(dp_values.value(1), "2000");
+    assert_eq!(dp_values.value(0), 1000);
+    assert_eq!(dp_values.value(1), 2000);
 }
 
 #[tokio::test]
@@ -2084,8 +2264,8 @@ async fn vcf_zarr_collects_empty_format_lists_when_all_requested_samples_are_mis
     let dp_row = dp_list.value(0);
     let dp_values = dp_row
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("DP values should be strings");
+        .downcast_ref::<Int32Array>()
+        .expect("DP values should be Int32");
 
     assert_eq!(dp_values.len(), 0);
 }
@@ -2139,16 +2319,16 @@ async fn vcf_zarr_preserves_negative_scalar_format_values_for_non_gt_fields() {
     let dp_row = dp_list.value(0);
     let dp_values = dp_row
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("DP values should be strings");
+        .downcast_ref::<Int32Array>()
+        .expect("DP values should be Int32");
 
     assert_eq!(dp_values.len(), 2);
-    assert_eq!(dp_values.value(0), "-1");
-    assert_eq!(dp_values.value(1), "-2");
+    assert_eq!(dp_values.value(0), -1);
+    assert_eq!(dp_values.value(1), -2);
 }
 
 #[tokio::test]
-async fn vcf_zarr_collects_spec_genotype_array_as_gt_strings() {
+async fn vcf_zarr_collects_spec_genotype_array_as_raw_gt_by_default() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let root = temp_dir.path().join("genotype.vcz");
     copy_multi_chrom_with_samples(&root);
@@ -2203,6 +2383,75 @@ async fn vcf_zarr_collects_spec_genotype_array_as_gt_strings() {
         .as_any()
         .downcast_ref::<ListArray>()
         .expect("GT should be a list array");
+    assert_nested_i32_list_values(gt_list, 0, &[&[1, 0]]);
+
+    let phased_list = genotypes
+        .column_by_name("GT_phased")
+        .expect("GT_phased should exist in raw GT mode")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("GT_phased should be a list array");
+    assert_bool_list_values(phased_list, 0, &[true]);
+}
+
+#[tokio::test]
+async fn vcf_zarr_collects_spec_genotype_array_as_strings_when_requested() {
+    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+    let root = temp_dir.path().join("genotype_string.vcz");
+    copy_multi_chrom_with_samples(&root);
+    write_i32_3d_array(
+        &root,
+        "call_genotype",
+        1000,
+        2,
+        2,
+        |_, sample, ploidy| match (sample, ploidy) {
+            (0, 0) => 0,
+            (0, 1) => 1,
+            (1, 0) => 1,
+            (1, 1) => 0,
+            _ => -2,
+        },
+    );
+    write_bool_2d_array(&root, "call_genotype_phased", 1000, 2, |_, sample| {
+        sample == 1
+    });
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            format_fields: Some(vec!["GT".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            genotype_encoding_raw: false,
+            ..Default::default()
+        },
+    )
+    .expect("genotype FORMAT store should open");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT genotypes FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("genotypes should be a struct array");
+    assert!(genotypes.column_by_name("GT_phased").is_none());
+    let gt_list = genotypes
+        .column_by_name("GT")
+        .expect("GT list should exist")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("GT should be a list array");
     let gt_row = gt_list.value(0);
     let gt_values = gt_row
         .as_any()
@@ -2213,7 +2462,7 @@ async fn vcf_zarr_collects_spec_genotype_array_as_gt_strings() {
 }
 
 #[tokio::test]
-async fn vcf_zarr_collects_3d_non_gt_format_as_collapsed_strings() {
+async fn vcf_zarr_collects_3d_non_gt_format_as_typed_nested_lists() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let root = temp_dir.path().join("format_3d.vcz");
     copy_multi_chrom_with_samples(&root);
@@ -2255,13 +2504,13 @@ async fn vcf_zarr_collects_3d_non_gt_format_as_collapsed_strings() {
         .downcast_ref::<ListArray>()
         .expect("PL should be a list array");
     let pl_row = pl_list.value(0);
-    let pl_values = pl_row
+    let sample_lists = pl_row
         .as_any()
-        .downcast_ref::<StringArray>()
-        .expect("PL values should be strings");
+        .downcast_ref::<ListArray>()
+        .expect("PL should contain per-sample value lists");
 
-    assert_eq!(pl_values.len(), 1);
-    assert_eq!(pl_values.value(0), "11,12,13");
+    assert_eq!(sample_lists.len(), 1);
+    assert_i32_list_values(sample_lists, 0, &[11, 12, 13]);
 }
 
 #[test]

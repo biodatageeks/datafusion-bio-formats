@@ -9,6 +9,8 @@ use datafusion_bio_format_core::metadata::{
     VCF_FILE_FORMAT_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, to_json_string,
 };
 use serde_json::Value;
+use zarrs::array::Array;
+use zarrs::filesystem::FilesystemStore;
 
 use super::metadata::VcfZarrMetadata;
 use super::samples::{SampleSelection, format_array_name};
@@ -43,6 +45,7 @@ pub(crate) fn normalize_read_options(
         },
         samples: options.samples.clone(),
         coordinate_system_zero_based: options.coordinate_system_zero_based,
+        genotype_encoding_raw: options.genotype_encoding_raw,
     })
 }
 
@@ -65,11 +68,13 @@ pub(crate) fn build_logical_schema_with_sample_selection(
 
     for name in options.info_fields.as_deref().unwrap_or(&[]) {
         let raw_array = validate_info_array(metadata, name)?;
+        let data_type = logical_info_data_type(metadata, &raw_array)?;
+        let vcf_field_type = vcf_field_type_for_data_type(&data_type);
         fields.push(
-            Field::new(name, DataType::Utf8, true).with_metadata(
+            Field::new(name, data_type, true).with_metadata(
                 [
                     (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string()),
-                    (VCF_FIELD_TYPE_KEY.to_string(), "String".to_string()),
+                    (VCF_FIELD_TYPE_KEY.to_string(), vcf_field_type.to_string()),
                     (VCF_FIELD_NUMBER_KEY.to_string(), ".".to_string()),
                     (VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(), raw_array),
                 ]
@@ -82,28 +87,85 @@ pub(crate) fn build_logical_schema_with_sample_selection(
     if let Some(format_fields) = &options.format_fields
         && !format_fields.is_empty()
     {
-        let genotype_children = format_fields
-            .iter()
-            .map(|name| {
-                let raw_array = validate_format_array(metadata, name)?;
-                Ok(Field::new(
-                    name,
-                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
-                    true,
-                )
-                .with_metadata(
+        let mut genotype_children = Vec::new();
+        for name in format_fields {
+            let raw_array = validate_format_array(metadata, name)?;
+            let data_type = logical_format_data_type(
+                metadata,
+                name,
+                &raw_array,
+                options.genotype_encoding_raw,
+            )?;
+            let vcf_field_type = if is_gt_field(name, &raw_array) && !options.genotype_encoding_raw
+            {
+                "String"
+            } else {
+                vcf_field_type_for_data_type(&data_type)
+            };
+            genotype_children.push(
+                Field::new(name, data_type, true).with_metadata(
                     [
                         (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string()),
                         (VCF_FIELD_FORMAT_ID_KEY.to_string(), name.clone()),
-                        (VCF_FIELD_TYPE_KEY.to_string(), "String".to_string()),
+                        (VCF_FIELD_TYPE_KEY.to_string(), vcf_field_type.to_string()),
                         (VCF_FIELD_NUMBER_KEY.to_string(), ".".to_string()),
-                        (VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(), raw_array),
+                        (
+                            VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(),
+                            raw_array.clone(),
+                        ),
                     ]
                     .into_iter()
                     .collect(),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
+                ),
+            );
+
+            if options.genotype_encoding_raw && raw_array == "call_genotype" {
+                if metadata.array_exists("call_genotype_phased") {
+                    let data_type = logical_format_data_type(
+                        metadata,
+                        "GT_phased",
+                        "call_genotype_phased",
+                        true,
+                    )?;
+                    genotype_children.push(
+                        Field::new("GT_phased", data_type, true).with_metadata(
+                            [
+                                (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string()),
+                                (VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT_phased".to_string()),
+                                (VCF_FIELD_TYPE_KEY.to_string(), "Flag".to_string()),
+                                (VCF_FIELD_NUMBER_KEY.to_string(), ".".to_string()),
+                                (
+                                    VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(),
+                                    "call_genotype_phased".to_string(),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    );
+                }
+                if metadata.array_exists("call_genotype_mask") {
+                    let data_type =
+                        logical_format_data_type(metadata, "GT_mask", "call_genotype_mask", true)?;
+                    genotype_children.push(
+                        Field::new("GT_mask", data_type, true).with_metadata(
+                            [
+                                (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string()),
+                                (VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT_mask".to_string()),
+                                (VCF_FIELD_TYPE_KEY.to_string(), "Flag".to_string()),
+                                (VCF_FIELD_NUMBER_KEY.to_string(), ".".to_string()),
+                                (
+                                    VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(),
+                                    "call_genotype_mask".to_string(),
+                                ),
+                            ]
+                            .into_iter()
+                            .collect(),
+                        ),
+                    );
+                }
+            }
+        }
 
         fields.push(
             Field::new(
@@ -175,6 +237,108 @@ fn validate_format_array(metadata: &VcfZarrMetadata, field_id: &str) -> Result<S
         ))
     })?;
     Ok(raw_array)
+}
+
+fn logical_info_data_type(metadata: &VcfZarrMetadata, raw_array: &str) -> Result<DataType> {
+    let array = metadata.open_array(raw_array)?;
+    let primitive = zarr_primitive_arrow_type(&array, raw_array)?;
+    match array.shape().len() {
+        1 => Ok(primitive),
+        2 => Ok(list_type(primitive)),
+        _ => Err(DataFusionError::Execution(format!(
+            "VCF Zarr INFO array '{raw_array}' has unsupported shape {:?}",
+            array.shape()
+        ))),
+    }
+}
+
+fn logical_format_data_type(
+    metadata: &VcfZarrMetadata,
+    field_id: &str,
+    raw_array: &str,
+    genotype_encoding_raw: bool,
+) -> Result<DataType> {
+    let array = metadata.open_array(raw_array)?;
+    if is_gt_field(field_id, raw_array) && !genotype_encoding_raw {
+        return Ok(list_type(DataType::Utf8));
+    }
+
+    let primitive = zarr_primitive_arrow_type(&array, raw_array)?;
+    match array.shape().len() {
+        2 => Ok(list_type(primitive)),
+        3 => Ok(list_type(list_type(primitive))),
+        _ => Err(DataFusionError::Execution(format!(
+            "VCF Zarr FORMAT array '{raw_array}' has unsupported shape {:?}",
+            array.shape()
+        ))),
+    }
+}
+
+fn list_type(item_type: DataType) -> DataType {
+    DataType::List(Arc::new(Field::new("item", item_type, true)))
+}
+
+fn zarr_primitive_arrow_type(array: &Array<FilesystemStore>, name: &str) -> Result<DataType> {
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "string", "|O") {
+        Ok(DataType::Utf8)
+    } else if is_dtype(&data_type, "bool", "|b1") {
+        Ok(DataType::Boolean)
+    } else if is_dtype(&data_type, "int8", "|i1") {
+        Ok(DataType::Int8)
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        Ok(DataType::Int16)
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        Ok(DataType::Int32)
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        Ok(DataType::Int64)
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        Ok(DataType::UInt8)
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        Ok(DataType::UInt16)
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        Ok(DataType::UInt32)
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        Ok(DataType::UInt64)
+    } else if is_dtype(&data_type, "float32", "<f4") {
+        Ok(DataType::Float32)
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        Ok(DataType::Float64)
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported data type {data_type}"
+        )))
+    }
+}
+
+fn vcf_field_type_for_data_type(data_type: &DataType) -> &'static str {
+    match data_type {
+        DataType::Boolean => "Flag",
+        DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64 => "Integer",
+        DataType::Float16 | DataType::Float32 | DataType::Float64 => "Float",
+        DataType::List(field) | DataType::LargeList(field) => {
+            vcf_field_type_for_data_type(field.data_type())
+        }
+        _ => "String",
+    }
+}
+
+fn is_gt_field(field_id: &str, raw_array: &str) -> bool {
+    field_id == "GT" || raw_array == "call_genotype"
+}
+
+fn is_dtype(actual: &str, zarrs_name: &str, v2_name: &str) -> bool {
+    actual == zarrs_name
+        || actual == v2_name
+        || actual.starts_with(&format!("{zarrs_name} /"))
+        || actual.ends_with(&format!("/ {v2_name}"))
 }
 
 fn discover_info_fields(metadata: &VcfZarrMetadata) -> Result<Vec<String>> {
