@@ -192,8 +192,9 @@ fn collect_genomic_constraints(
                                         *start_lower = Some(
                                             start_lower.map_or(val_1based, |v| v.max(val_1based)),
                                         );
-                                        // For equality on start, also set end if not already set more tightly
-                                        // (The actual end position depends on record length, so this is approximate)
+                                        *end_upper = Some(
+                                            end_upper.map_or(val_1based, |v| v.min(val_1based)),
+                                        );
                                     }
                                     Operator::Gt => {
                                         *start_lower = Some(
@@ -379,6 +380,28 @@ mod tests {
         assert_eq!(analysis.regions.len(), 1);
         assert_eq!(analysis.regions[0].start, Some(1000));
         assert_eq!(analysis.regions[0].end, Some(2000));
+    }
+
+    #[test]
+    fn test_extract_chrom_with_exact_start_bounds_region_zero_based() {
+        let filters = vec![col("chrom").eq(lit("chr1")), col("start").eq(lit(999u32))];
+        let analysis = extract_genomic_regions(&filters, true);
+        assert_eq!(analysis.regions.len(), 1);
+        assert_eq!(analysis.regions[0].chrom, "chr1");
+        assert_eq!(analysis.regions[0].start, Some(1000));
+        assert_eq!(analysis.regions[0].end, Some(1000));
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_chrom_with_exact_start_bounds_region_one_based() {
+        let filters = vec![col("chrom").eq(lit("chr1")), col("start").eq(lit(1000u32))];
+        let analysis = extract_genomic_regions(&filters, false);
+        assert_eq!(analysis.regions.len(), 1);
+        assert_eq!(analysis.regions[0].chrom, "chr1");
+        assert_eq!(analysis.regions[0].start, Some(1000));
+        assert_eq!(analysis.regions[0].end, Some(1000));
+        assert!(analysis.residual_filters.is_empty());
     }
 
     #[test]
