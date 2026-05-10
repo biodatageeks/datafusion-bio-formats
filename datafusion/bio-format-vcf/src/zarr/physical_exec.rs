@@ -232,6 +232,7 @@ impl ExecutionPlan for VcfZarrExec {
                 let batch_schema = schema.clone();
                 let batch_codec_options = codec_options;
                 let batch = tokio::task::spawn_blocking(move || -> Result<RecordBatch> {
+                    let row_count = row_selection.row_count();
                     let arrays = read_projected_arrays(
                         &batch_metadata,
                         &batch_schema,
@@ -240,7 +241,7 @@ impl ExecutionPlan for VcfZarrExec {
                         &row_selection,
                         &batch_codec_options,
                     )?;
-                    build_record_batch(batch_schema, arrays)
+                    build_record_batch(batch_schema, arrays, row_count)
                 })
                 .await
                 .map_err(join_blocking_error)??;

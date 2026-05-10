@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, ListArray, StringArray, StructArray, UInt32Array};
+use datafusion::arrow::array::{
+    Array, Int64Array, ListArray, StringArray, StructArray, UInt32Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field};
 use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::{col, lit};
@@ -322,6 +324,14 @@ fn write_malformed_array_metadata(root: &std::path::Path, array_name: &str) {
     std::fs::create_dir_all(&array_path).expect("array directory should be created");
     std::fs::write(array_path.join(".zarray"), "{not valid json")
         .expect("malformed array metadata should be written");
+}
+
+fn write_corrupt_chunk(root: &std::path::Path, array_name: &str, chunk_name: &str) {
+    std::fs::write(
+        root.join(array_name).join(chunk_name),
+        b"not a valid zarr chunk",
+    )
+    .expect("corrupt chunk should be written");
 }
 
 fn sampled_format_store() -> tempfile::TempDir {
@@ -1580,6 +1590,154 @@ async fn vcf_zarr_collects_auto_discovered_info_field() {
 
     assert_eq!(batches[0].num_rows(), 2);
     assert_eq!(batches[0].schema().field(2).name(), "DP");
+}
+
+#[tokio::test]
+async fn vcf_zarr_info_projection_does_not_read_unprojected_format_chunks() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            info_fields: Some(vec!["DP".to_string()]),
+            format_fields: Some(vec!["DP".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("schema should open before corrupting unprojected FORMAT chunks");
+
+    write_corrupt_chunk(&root, "call_DP", "0.0");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT \"DP\" FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(batches[0].num_rows(), 1);
+    assert_eq!(batches[0].schema().field(0).name(), "DP");
+}
+
+#[tokio::test]
+async fn vcf_zarr_format_projection_does_not_read_unprojected_info_chunks() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            info_fields: Some(vec!["DP".to_string()]),
+            format_fields: Some(vec!["DP".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("schema should open before corrupting unprojected INFO chunks");
+
+    write_corrupt_chunk(&root, "variant_DP", "0");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT genotypes FROM vcz WHERE start = 5000100")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("genotypes should be a struct array");
+    assert!(genotypes.column_by_name("DP").is_some());
+}
+
+#[tokio::test]
+async fn vcf_zarr_core_projection_does_not_read_info_or_format_chunks() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            info_fields: Some(vec!["DP".to_string()]),
+            format_fields: Some(vec!["DP".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("schema should open before corrupting unprojected chunks");
+
+    write_corrupt_chunk(&root, "variant_DP", "0");
+    write_corrupt_chunk(&root, "call_DP", "0.0");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT chrom, start FROM vcz LIMIT 2")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(batches[0].num_rows(), 2);
+    assert_eq!(batches[0].num_columns(), 2);
+    assert_eq!(batches[0].schema().field(0).name(), "chrom");
+    assert_eq!(batches[0].schema().field(1).name(), "start");
+}
+
+#[tokio::test]
+async fn vcf_zarr_count_star_uses_empty_projection_with_row_count() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+
+    let ctx = SessionContext::new();
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions {
+            info_fields: Some(vec!["DP".to_string()]),
+            format_fields: Some(vec!["DP".to_string()]),
+            samples: Some(vec!["22".to_string()]),
+            ..Default::default()
+        },
+    )
+    .expect("schema should open before corrupting chunks unused by COUNT(*)");
+
+    write_corrupt_chunk(&root, "variant_DP", "0");
+    write_corrupt_chunk(&root, "call_DP", "0.0");
+
+    ctx.register_table("vcz", Arc::new(provider)).unwrap();
+    let batches = ctx
+        .sql("SELECT COUNT(*) AS n FROM vcz")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("COUNT(*) should be Int64");
+    assert_eq!(count.value(0), 1000);
 }
 
 #[tokio::test]
