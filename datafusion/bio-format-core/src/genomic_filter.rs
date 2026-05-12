@@ -68,7 +68,12 @@ pub fn extract_genomic_regions(
     chroms.sort();
     chroms.dedup();
 
-    let regions = if chroms.is_empty() {
+    let has_valid_bounds = match (start_lower, end_upper) {
+        (Some(start), Some(end)) => start <= end,
+        _ => true,
+    };
+
+    let regions = if chroms.is_empty() || !has_valid_bounds {
         Vec::new()
     } else {
         chroms
@@ -401,6 +406,19 @@ mod tests {
         assert_eq!(analysis.regions[0].chrom, "chr1");
         assert_eq!(analysis.regions[0].start, Some(1000));
         assert_eq!(analysis.regions[0].end, Some(1000));
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_chrom_with_contradictory_start_bounds_skips_invalid_region() {
+        let filters = vec![
+            col("chrom").eq(lit("chr1")),
+            col("start").eq(lit(1000u32)),
+            col("start").gt(lit(1000u32)),
+        ];
+        let analysis = extract_genomic_regions(&filters, false);
+
+        assert!(analysis.regions.is_empty());
         assert!(analysis.residual_filters.is_empty());
     }
 

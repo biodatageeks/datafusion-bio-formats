@@ -88,7 +88,7 @@ async fn setup_vcf_ctx_without_info_fields() -> datafusion::error::Result<Sessio
         Some(Vec::new()),
         None,
         None,
-        false,
+        false, // 1-based coordinates: matches VCF POS directly.
     )?;
     ctx.register_table("vcf_no_info", Arc::new(provider))?;
     Ok(ctx)
@@ -222,6 +222,7 @@ async fn test_vcf_region_with_positions() -> datafusion::error::Result<()> {
 async fn test_vcf_exact_start_count_with_no_info_fields() -> datafusion::error::Result<()> {
     let ctx = setup_vcf_ctx_without_info_fields().await?;
 
+    // multi_chrom.vcf.gz has one generated variant at 21:5000100.
     let count = count_value(
         &ctx,
         "SELECT COUNT(*) FROM vcf_no_info WHERE chrom = '21' AND start = 5000100",
@@ -229,6 +230,26 @@ async fn test_vcf_exact_start_count_with_no_info_fields() -> datafusion::error::
     .await;
 
     assert_eq!(count, 1, "Expected exactly one variant at 21:5000100");
+
+    Ok(())
+}
+
+/// Test: contradictory start predicates return no rows instead of producing an invalid region.
+#[tokio::test]
+async fn test_vcf_contradictory_exact_start_count_with_no_info_fields()
+-> datafusion::error::Result<()> {
+    let ctx = setup_vcf_ctx_without_info_fields().await?;
+
+    let count = count_value(
+        &ctx,
+        "SELECT COUNT(*) FROM vcf_no_info WHERE chrom = '21' AND start = 5000100 AND start > 5000100",
+    )
+    .await;
+
+    assert_eq!(
+        count, 0,
+        "Contradictory start predicates should match no variants"
+    );
 
     Ok(())
 }
