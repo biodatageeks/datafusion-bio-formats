@@ -118,29 +118,6 @@ impl RowSelection {
         }
     }
 
-    /// Builds contiguous selected ranges from a boolean row mask.
-    pub fn from_mask(mask: &[bool]) -> Self {
-        let mut ranges = Vec::new();
-        let mut start = None;
-
-        for (index, selected) in mask.iter().copied().enumerate() {
-            match (start, selected) {
-                (None, true) => start = Some(index),
-                (Some(range_start), false) => {
-                    ranges.push(range_start..index);
-                    start = None;
-                }
-                _ => {}
-            }
-        }
-
-        if let Some(range_start) = start {
-            ranges.push(range_start..mask.len());
-        }
-
-        Self { ranges }
-    }
-
     /// Filters this selection with a mask ordered over the currently selected rows.
     pub fn filter_mask(&self, mask: &[bool]) -> Result<Self> {
         let row_count = self.row_count();
@@ -187,7 +164,7 @@ impl RowSelection {
     /// Splits this selection into ordered selections with at most `batch_size` rows each.
     pub(crate) fn split_by_row_count(&self, batch_size: usize) -> Vec<Self> {
         if self.ranges.is_empty() {
-            return vec![Self { ranges: Vec::new() }];
+            return Vec::new();
         }
 
         let batch_size = batch_size.max(1);
@@ -715,10 +692,16 @@ fn scalar_value(expr: &Expr) -> Option<ScalarValue> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::Arc;
 
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::logical_expr::{col, lit};
+    use datafusion_bio_format_core::metadata::{VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY};
 
-    use super::{PartitioningMode, RowSelection, predicate_constraints, zarr_read_options};
+    use super::{
+        PartitioningMode, ProjectionPlan, RowSelection, predicate_constraints, zarr_read_options,
+    };
+    use crate::zarr::schema::VCF_ZARR_RAW_ARRAY_METADATA_KEY;
 
     fn partition_ranges(
         selection: RowSelection,
@@ -741,6 +724,25 @@ mod tests {
 
     fn range(start: usize, end: usize) -> Vec<std::ops::Range<usize>> {
         std::iter::once(start..end).collect()
+    }
+
+    fn schema_ref(fields: Vec<Field>) -> Arc<Schema> {
+        Arc::new(Schema::new(fields))
+    }
+
+    fn format_child(name: &str, raw_array: &str) -> Field {
+        Field::new(name, DataType::Int32, true).with_metadata(
+            [
+                (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "FORMAT".to_string()),
+                (VCF_FIELD_FORMAT_ID_KEY.to_string(), name.to_string()),
+                (
+                    VCF_ZARR_RAW_ARRAY_METADATA_KEY.to_string(),
+                    raw_array.to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        )
     }
 
     #[test]
@@ -770,6 +772,57 @@ mod tests {
     }
 
     #[test]
+    fn projection_plan_prunes_unneeded_arrays() {
+        let schema = schema_ref(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("ref", DataType::Utf8, false),
+        ]);
+        let chrom = schema.index_of("chrom").unwrap();
+        let start = schema.index_of("start").unwrap();
+
+        let plan = ProjectionPlan::from_projection(&schema, Some(&vec![chrom, start]));
+
+        assert!(plan.raw_arrays.contains("variant_contig"));
+        assert!(plan.raw_arrays.contains("contig_id"));
+        assert!(plan.raw_arrays.contains("variant_position"));
+        assert!(!plan.raw_arrays.contains("variant_allele"));
+        assert!(!plan.raw_arrays.iter().any(|name| name.starts_with("call_")));
+    }
+
+    #[test]
+    fn projection_plan_prunes_unrequested_format_arrays() {
+        let schema = schema_ref(vec![Field::new(
+            "genotypes",
+            DataType::Struct(vec![format_child("DP", "call_DP")].into()),
+            true,
+        )]);
+        let genotypes = schema.index_of("genotypes").unwrap();
+
+        let plan = ProjectionPlan::from_projection(&schema, Some(&vec![genotypes]));
+
+        assert_eq!(plan.raw_arrays.len(), 1);
+        assert!(plan.raw_arrays.contains("call_DP"));
+        assert!(!plan.raw_arrays.contains("call_GT"));
+    }
+
+    #[test]
+    fn projection_plan_uses_resolved_gt_raw_array_name() {
+        let schema = schema_ref(vec![Field::new(
+            "genotypes",
+            DataType::Struct(vec![format_child("GT", "call_genotype")].into()),
+            true,
+        )]);
+        let genotypes = schema.index_of("genotypes").unwrap();
+
+        let plan = ProjectionPlan::from_projection(&schema, Some(&vec![genotypes]));
+
+        assert_eq!(plan.raw_arrays.len(), 1);
+        assert!(plan.raw_arrays.contains("call_genotype"));
+        assert!(!plan.raw_arrays.contains("call_GT"));
+    }
+
+    #[test]
     fn split_by_row_count_preserves_ranges_and_caps_batch_rows() {
         let batches = RowSelection {
             ranges: ranges([2..5, 10..14]),
@@ -788,10 +841,10 @@ mod tests {
     }
 
     #[test]
-    fn split_by_row_count_keeps_one_empty_selection() {
+    fn split_by_row_count_returns_no_batches_for_empty_selection() {
         let batches = RowSelection { ranges: Vec::new() }.split_by_row_count(128);
 
-        assert_eq!(batches, vec![RowSelection { ranges: Vec::new() }]);
+        assert!(batches.is_empty());
     }
 
     #[test]

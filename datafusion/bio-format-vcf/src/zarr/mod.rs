@@ -6,11 +6,11 @@
 /// Zarr-backed Arrow array readers.
 pub(crate) mod arrays;
 /// Metadata loading and validation for VCF Zarr stores.
-pub mod metadata;
+pub(crate) mod metadata;
 /// Physical execution plan for VCF Zarr scans.
 pub(crate) mod physical_exec;
 /// Logical-to-physical array projection planning.
-pub mod planning;
+pub(crate) mod planning;
 /// Predicate-derived row pruning for VCF Zarr scans.
 pub(crate) mod pruning;
 /// Record batch construction helpers.
@@ -22,4 +22,5 @@ pub(crate) mod schema;
 /// DataFusion table provider for VCF Zarr stores.
 pub mod table_provider;
 
+pub use metadata::SUPPORTED_VCF_ZARR_VERSION;
 pub use table_provider::{VcfZarrReadOptions, VcfZarrTableProvider};

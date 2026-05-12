@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
 
-use super::arrays::{read_i64_1d, read_i64_2d};
+use super::arrays::{read_i64_1d, read_i64_2d, read_strings_1d_array_for_pruning};
 use super::metadata::VcfZarrMetadata;
 use super::planning::{
     DeferredPositionPruning, PredicateConstraints, PruningMethod, RowPruning, RowSelection,
@@ -337,17 +337,16 @@ fn read_contig_ids(
     metadata: &VcfZarrMetadata,
     codec_options: &zarrs::array::CodecOptions,
 ) -> Result<Vec<String>> {
-    let row_count = {
-        let array = metadata.open_array("contig_id")?;
+    let array = metadata.open_array("contig_id")?;
+    let row_count =
         usize::try_from(*array.shape().first().ok_or_else(|| {
             DataFusionError::Execution("contig_id is not 1-dimensional".to_string())
         })?)
         .map_err(|_| {
             DataFusionError::Execution("contig_id length exceeds platform size".to_string())
-        })?
-    };
+        })?;
     let selection = RowSelection::all(row_count);
-    super::arrays::read_strings_1d_for_pruning(metadata, "contig_id", &selection, codec_options)
+    read_strings_1d_array_for_pruning(&array, &selection, codec_options)
 }
 
 fn logical_start(position: i64, zero_based: bool) -> Result<i64> {

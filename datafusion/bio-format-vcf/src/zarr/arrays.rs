@@ -989,6 +989,42 @@ fn read_any_3d_selected_as_strings(
             codec_options,
             |_, _, values| collapse_integers(values),
         )
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_selected_3d_collapsed_strings::<u8, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_selected_3d_collapsed_strings::<u16, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_selected_3d_collapsed_strings::<u32, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_selected_3d_collapsed_strings::<u64, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
     } else if is_dtype(&data_type, "float32", "<f4") {
         read_selected_3d_collapsed_strings::<f32, _>(
             array,
@@ -1227,7 +1263,15 @@ pub(crate) fn read_strings_1d_for_pruning(
     codec_options: &CodecOptions,
 ) -> Result<Vec<String>> {
     let array = metadata.open_array(name)?;
-    read_vec_1d::<String>(&array, row_selection, codec_options)
+    read_strings_1d_array_for_pruning(&array, row_selection, codec_options)
+}
+
+pub(crate) fn read_strings_1d_array_for_pruning(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    read_vec_1d::<String>(array, row_selection, codec_options)
 }
 
 fn read_strings_2d(
@@ -1798,16 +1842,9 @@ fn collapse_strings(values: &[String]) -> String {
 
 fn collapse_integers<T>(values: &[T]) -> String
 where
-    T: Copy + Into<i64>,
+    T: std::fmt::Display,
 {
-    join_values(values.iter().filter_map(|value| {
-        let value = (*value).into();
-        match value {
-            -2 => None,
-            -1 => Some(".".to_string()),
-            value => Some(value.to_string()),
-        }
-    }))
+    join_values(values.iter().map(|value| value.to_string()))
 }
 
 fn collapse_floats<T>(values: &[T]) -> String
@@ -1844,7 +1881,14 @@ fn join_values(values: impl Iterator<Item = String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::contiguous_sample_spans;
+    use std::sync::Arc;
+
+    use zarrs::array::Array;
+    use zarrs::config::MetadataRetrieveVersion;
+    use zarrs::filesystem::FilesystemStore;
+
+    use super::{collapse_integers, contiguous_sample_spans, read_any_3d_selected_as_strings};
+    use crate::zarr::planning::RowSelection;
 
     #[test]
     fn contiguous_sample_spans_groups_adjacent_requested_samples() {
@@ -1870,5 +1914,55 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(2, 0, 1), (0, 1, 2)]
         );
+    }
+
+    #[test]
+    fn collapse_integers_preserves_negative_non_gt_values() {
+        assert_eq!(collapse_integers(&[-1_i32, -2, 3]), "-1,-2,3");
+    }
+
+    #[test]
+    fn read_any_3d_selected_as_strings_supports_uint64_arrays() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let array_path = temp_dir.path().join("call_U64");
+        std::fs::create_dir_all(&array_path).expect("array directory should be created");
+        std::fs::write(
+            array_path.join(".zarray"),
+            r#"{
+  "shape": [2, 2, 3],
+  "chunks": [2, 2, 3],
+  "dtype": "<u8",
+  "fill_value": 0,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}"#,
+        )
+        .expect("array metadata should be written");
+
+        let mut bytes = Vec::new();
+        for value in 1_u64..=12 {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(array_path.join("0.0.0"), bytes).expect("array chunk should be written");
+
+        let store =
+            Arc::new(FilesystemStore::new(temp_dir.path()).expect("filesystem store should open"));
+        let array = Array::open_opt(store, "/call_U64", &MetadataRetrieveVersion::V2)
+            .expect("test array should open");
+        let values = read_any_3d_selected_as_strings(
+            &array,
+            "call_U64",
+            &RowSelection {
+                ranges: std::iter::once(0..2).collect(),
+            },
+            &[1],
+            &Default::default(),
+        )
+        .expect("uint64 3D FORMAT values should read as strings");
+
+        assert_eq!(values, vec!["4,5,6".to_string(), "10,11,12".to_string()]);
     }
 }

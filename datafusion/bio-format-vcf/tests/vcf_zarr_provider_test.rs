@@ -14,12 +14,13 @@ use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
     VCF_FILE_FORMAT_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, from_json_string,
 };
-use datafusion_bio_format_vcf::zarr::metadata::VcfZarrMetadata;
-use datafusion_bio_format_vcf::zarr::planning::ProjectionPlan;
 use datafusion_bio_format_vcf::zarr::{
-    VcfZarrReadOptions, VcfZarrTableProvider, metadata::SUPPORTED_VCF_ZARR_VERSION,
+    SUPPORTED_VCF_ZARR_VERSION, VcfZarrReadOptions, VcfZarrTableProvider,
 };
 use futures::TryStreamExt;
+use zarrs::array::Array as ZarrArray;
+use zarrs::config::MetadataRetrieveVersion;
+use zarrs::filesystem::FilesystemStore;
 
 fn write_v2_root_metadata(root: &std::path::Path, attributes: &str) {
     std::fs::create_dir_all(root).expect("store root should be created");
@@ -431,11 +432,10 @@ fn copy_multi_chrom_without_region_index_with_variant_position_chunk_size(
 
 fn rewrite_variant_position_chunks(root: &std::path::Path, chunk_size: usize) {
     assert!(chunk_size > 0, "test chunk size must be nonzero");
-    let metadata = VcfZarrMetadata::open_local(root.to_str().expect("temp path should be UTF-8"))
-        .expect("copied fixture should open before rechunking");
-    let variant_position = metadata
-        .open_array("variant_position")
-        .expect("variant_position should open before rechunking");
+    let store = Arc::new(FilesystemStore::new(root).expect("copied fixture store should open"));
+    let variant_position =
+        ZarrArray::open_opt(store, "/variant_position", &MetadataRetrieveVersion::V2)
+            .expect("variant_position should open before rechunking");
     let row_count = variant_position.shape()[0];
     let row_range = std::iter::once(0..row_count).collect::<Vec<_>>();
     let values: Vec<i32> = variant_position
@@ -730,39 +730,6 @@ fn vcf_zarr_accepts_version_0_4_fixture() {
 }
 
 #[test]
-fn vcf_zarr_array_exists_checks_store_relative_array_paths() {
-    let fixture = "tests/data/vcf_zarr/multi_chrom.vcz";
-    let metadata = VcfZarrMetadata::open_local(fixture).expect("fixture should open");
-    let absolute_array_path = std::fs::canonicalize(format!("{fixture}/variant_position"))
-        .expect("fixture array should canonicalize");
-
-    assert!(metadata.array_exists("variant_position"));
-    assert!(!metadata.array_exists("missing_array"));
-    assert!(!metadata.array_exists(""));
-    assert!(!metadata.array_exists("."));
-    assert!(!metadata.array_exists("../multi_chrom.vcz/variant_position"));
-    assert!(!metadata.array_exists(&absolute_array_path.to_string_lossy()));
-}
-
-#[test]
-fn vcf_zarr_array_exists_requires_zarray_file() {
-    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-    let root = temp_dir.path().join("store.vcz");
-    let array = root.join("array");
-
-    std::fs::create_dir_all(array.join(".zarray")).expect("array metadata dir should be created");
-    write_v2_root_metadata(
-        &root,
-        &format!("{{\"vcf_zarr_version\":\"{SUPPORTED_VCF_ZARR_VERSION}\"}}"),
-    );
-
-    let metadata = VcfZarrMetadata::open_local(root.to_str().expect("temp path should be UTF-8"))
-        .expect("temp store should open");
-
-    assert!(!metadata.array_exists("array"));
-}
-
-#[test]
 fn vcf_zarr_reports_malformed_root_metadata() {
     let temp_dir = tempfile::tempdir().expect("temp dir should be created");
     let root = temp_dir.path().join("malformed.vcz");
@@ -771,7 +738,12 @@ fn vcf_zarr_reports_malformed_root_metadata() {
     std::fs::write(root.join(".zattrs"), "{not json")
         .expect("malformed root attributes should be written");
 
-    let result = VcfZarrMetadata::open_local(root.to_str().expect("temp path should be UTF-8"));
+    let result = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    );
     let message = result
         .expect_err("malformed root metadata must fail")
         .to_string();
@@ -797,16 +769,22 @@ fn vcf_zarr_v2_root_attributes_are_authoritative() {
         r#"{"zarr_format":3,"node_type":"group","attributes":{"vcf_zarr_version":"999.0"}}"#,
     )
     .expect("conflicting v3 group metadata should be written");
+    write_required_zarray_metadata(&root);
 
-    let metadata = VcfZarrMetadata::open_local(root.to_str().expect("temp path should be UTF-8"))
-        .expect("temp store should open from v2 metadata");
+    let provider = VcfZarrTableProvider::new(
+        root.to_str()
+            .expect("temp path should be UTF-8")
+            .to_string(),
+        VcfZarrReadOptions::default(),
+    )
+    .expect("temp store should open from v2 metadata");
 
-    assert_eq!(metadata.vcf_zarr_version, SUPPORTED_VCF_ZARR_VERSION);
     assert_eq!(
-        metadata
-            .root_attributes
-            .get("vcf_zarr_version")
-            .and_then(|value| value.as_str()),
+        provider
+            .schema()
+            .metadata()
+            .get("bio.vcf.zarr.version")
+            .map(String::as_str),
         Some(SUPPORTED_VCF_ZARR_VERSION)
     );
 }
@@ -818,10 +796,14 @@ fn vcf_zarr_requires_string_vcf_zarr_version_attribute() {
         let root = temp_dir.path().join("bad_version.vcz");
         write_v2_root_metadata(&root, attributes);
 
-        let message =
-            VcfZarrMetadata::open_local(root.to_str().expect("temp path should be UTF-8"))
-                .expect_err("missing or non-string version must fail")
-                .to_string();
+        let message = VcfZarrTableProvider::new(
+            root.to_str()
+                .expect("temp path should be UTF-8")
+                .to_string(),
+            VcfZarrReadOptions::default(),
+        )
+        .expect_err("missing or non-string version must fail")
+        .to_string();
 
         assert!(
             message.contains("vcf_zarr_version") && message.contains("missing or not a string"),
@@ -1378,73 +1360,6 @@ fn vcf_zarr_schema_metadata_prefers_root_fileformat_over_fallback() {
             .map(String::as_str),
         Some("VCFv4.2")
     );
-}
-
-#[test]
-fn vcf_zarr_projection_plan_prunes_unneeded_arrays() {
-    let provider = open_multi_chrom_provider(VcfZarrReadOptions::default());
-
-    let schema = provider.schema();
-    let chrom = schema.index_of("chrom").unwrap();
-    let start = schema.index_of("start").unwrap();
-    let plan = ProjectionPlan::from_projection(&schema, Some(&vec![chrom, start]));
-
-    assert!(plan.raw_arrays.contains("variant_contig"));
-    assert!(plan.raw_arrays.contains("contig_id"));
-    assert!(plan.raw_arrays.contains("variant_position"));
-    assert!(!plan.raw_arrays.contains("variant_allele"));
-    assert!(!plan.raw_arrays.iter().any(|name| name.starts_with("call_")));
-}
-
-#[test]
-fn vcf_zarr_projection_plan_prunes_unrequested_format_arrays() {
-    let temp_dir = sampled_format_store();
-    let root = temp_dir.path().join("sampled.vcz");
-    let provider = VcfZarrTableProvider::new(
-        root.to_str()
-            .expect("temp path should be UTF-8")
-            .to_string(),
-        VcfZarrReadOptions {
-            format_fields: Some(vec!["DP".to_string()]),
-            ..Default::default()
-        },
-    )
-    .expect("sampled FORMAT store should open");
-
-    let schema = provider.schema();
-    let genotypes = schema.index_of("genotypes").unwrap();
-    let plan = ProjectionPlan::from_projection(&schema, Some(&vec![genotypes]));
-
-    assert_eq!(plan.raw_arrays.len(), 1);
-    assert!(plan.raw_arrays.contains("call_DP"));
-    assert!(!plan.raw_arrays.contains("call_GT"));
-}
-
-#[test]
-fn vcf_zarr_projection_plan_uses_resolved_gt_raw_array_name() {
-    let temp_dir = tempfile::tempdir().expect("temp dir should be created");
-    let root = temp_dir.path().join("genotype.vcz");
-    copy_multi_chrom_with_samples(&root);
-    write_i32_3d_array(&root, "call_genotype", 1000, 2, 2, |_, _, _| 0);
-
-    let provider = VcfZarrTableProvider::new(
-        root.to_str()
-            .expect("temp path should be UTF-8")
-            .to_string(),
-        VcfZarrReadOptions {
-            format_fields: Some(vec!["GT".to_string()]),
-            ..Default::default()
-        },
-    )
-    .expect("spec genotype FORMAT store should open");
-
-    let schema = provider.schema();
-    let genotypes = schema.index_of("genotypes").unwrap();
-    let plan = ProjectionPlan::from_projection(&schema, Some(&vec![genotypes]));
-
-    assert_eq!(plan.raw_arrays.len(), 1);
-    assert!(plan.raw_arrays.contains("call_genotype"));
-    assert!(!plan.raw_arrays.contains("call_GT"));
 }
 
 #[tokio::test]

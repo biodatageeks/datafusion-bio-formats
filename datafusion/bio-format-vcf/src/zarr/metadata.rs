@@ -147,3 +147,51 @@ fn validate_array_name(name: &str) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{SUPPORTED_VCF_ZARR_VERSION, VcfZarrMetadata};
+
+    fn write_v2_root_metadata(root: &std::path::Path, attributes: &str) {
+        std::fs::create_dir_all(root).expect("store root should be created");
+        std::fs::write(root.join(".zgroup"), "{\"zarr_format\":2}")
+            .expect("root group metadata should be written");
+        std::fs::write(root.join(".zattrs"), attributes)
+            .expect("root attributes should be written");
+    }
+
+    #[test]
+    fn array_exists_checks_store_relative_array_paths() {
+        let fixture = "tests/data/vcf_zarr/multi_chrom.vcz";
+        let metadata = VcfZarrMetadata::open_local(fixture).expect("fixture should open");
+        let absolute_array_path = std::fs::canonicalize(format!("{fixture}/variant_position"))
+            .expect("fixture array should canonicalize");
+
+        assert!(metadata.array_exists("variant_position"));
+        assert!(!metadata.array_exists("missing_array"));
+        assert!(!metadata.array_exists(""));
+        assert!(!metadata.array_exists("."));
+        assert!(!metadata.array_exists("../multi_chrom.vcz/variant_position"));
+        assert!(!metadata.array_exists(&absolute_array_path.to_string_lossy()));
+    }
+
+    #[test]
+    fn array_exists_requires_zarray_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let root = temp_dir.path().join("store.vcz");
+        let array = root.join("array");
+
+        std::fs::create_dir_all(array.join(".zarray"))
+            .expect("array metadata dir should be created");
+        write_v2_root_metadata(
+            &root,
+            &format!("{{\"vcf_zarr_version\":\"{SUPPORTED_VCF_ZARR_VERSION}\"}}"),
+        );
+
+        let metadata =
+            VcfZarrMetadata::open_local(root.to_str().expect("temp path should be UTF-8"))
+                .expect("temp store should open");
+
+        assert!(!metadata.array_exists("array"));
+    }
+}
