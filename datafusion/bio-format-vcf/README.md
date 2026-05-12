@@ -316,3 +316,17 @@ WHERE a.sample_id = 'NA12878' AND b.sample_id = 'NA12891'
 ## License
 
 Licensed under Apache-2.0
+
+## VCF Zarr Test Fixtures
+
+VCF Zarr fixtures in `tests/data/vcf_zarr/` are generated from the small indexed VCF fixtures in this crate.
+
+Example regeneration command:
+
+```bash
+python -m pip install "bio2zarr[vcf]"
+mkdir -p tests/data/vcf_zarr
+python -m bio2zarr vcf2zarr explode tests/multi_chrom.vcf.gz tests/data/vcf_zarr/multi_chrom.icf -p0
+python -m bio2zarr vcf2zarr encode tests/data/vcf_zarr/multi_chrom.icf tests/data/vcf_zarr/multi_chrom.vcz -p0
+rm -rf tests/data/vcf_zarr/multi_chrom.icf
+```

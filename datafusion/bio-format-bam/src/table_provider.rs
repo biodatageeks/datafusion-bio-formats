@@ -1001,6 +1001,14 @@ impl TableProvider for BamTableProvider {
         // Determine regions and partitioning when index is available
         if let Some(ref index_path) = self.index_path {
             let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
+
+            if analysis.unsatisfiable {
+                debug!("BAM scan: genomic filters are unsatisfiable, returning empty scan");
+                return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                    schema,
+                )));
+            }
+
             let is_full_scan = analysis.regions.is_empty();
 
             let regions = if !analysis.regions.is_empty() {

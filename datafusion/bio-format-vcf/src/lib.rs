@@ -94,6 +94,8 @@ pub mod views;
 mod write_exec;
 /// Writer for VCF files with compression support.
 pub mod writer;
+/// VCF Zarr table provider implementation.
+pub mod zarr;
 
 pub use udfs::register_vcf_udfs;
 pub use views::{auto_register_vcf_long_view, register_vcf_long_view};
