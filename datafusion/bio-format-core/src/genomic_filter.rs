@@ -38,7 +38,9 @@ pub struct GenomicFilterAnalysis {
 ///
 /// Supports SQL patterns:
 /// - `chrom = 'chr1'`
+/// - `chrom = 'chr1' AND start = 1000`
 /// - `chrom = 'chr1' AND start >= 1000 AND end <= 2000`
+/// - `chrom = 'chr1' AND start >= 1000 AND start <= 2000`
 /// - `chrom IN ('chr1', 'chr2')`
 /// - `chrom = 'chr1' AND start BETWEEN 1000 AND 2000`
 ///
@@ -213,6 +215,16 @@ fn collect_genomic_constraints(
                                     Operator::GtEq => {
                                         *start_lower = Some(
                                             start_lower.map_or(val_1based, |v| v.max(val_1based)),
+                                        );
+                                    }
+                                    Operator::Lt => {
+                                        let upper = val_1based.saturating_sub(1);
+                                        *end_upper =
+                                            Some(end_upper.map_or(upper, |v| v.min(upper)));
+                                    }
+                                    Operator::LtEq => {
+                                        *end_upper = Some(
+                                            end_upper.map_or(val_1based, |v| v.min(val_1based)),
                                         );
                                     }
                                     _ => {
@@ -423,6 +435,51 @@ mod tests {
 
         assert!(analysis.unsatisfiable);
         assert!(analysis.regions.is_empty());
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_chrom_with_start_upper_bound_one_based() {
+        let filters = vec![
+            col("chrom").eq(lit("chr1")),
+            col("start").gt_eq(lit(1000u32)),
+            col("start").lt_eq(lit(2000u32)),
+        ];
+        let analysis = extract_genomic_regions(&filters, false);
+        assert_eq!(analysis.regions.len(), 1);
+        assert_eq!(analysis.regions[0].chrom, "chr1");
+        assert_eq!(analysis.regions[0].start, Some(1000));
+        assert_eq!(analysis.regions[0].end, Some(2000));
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_chrom_with_start_upper_bound_zero_based() {
+        let filters = vec![
+            col("chrom").eq(lit("chr1")),
+            col("start").gt_eq(lit(999u32)),
+            col("start").lt_eq(lit(1999u32)),
+        ];
+        let analysis = extract_genomic_regions(&filters, true);
+        assert_eq!(analysis.regions.len(), 1);
+        assert_eq!(analysis.regions[0].chrom, "chr1");
+        assert_eq!(analysis.regions[0].start, Some(1000));
+        assert_eq!(analysis.regions[0].end, Some(2000));
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_chrom_with_start_exclusive_upper_bound_one_based() {
+        let filters = vec![
+            col("chrom").eq(lit("chr1")),
+            col("start").gt_eq(lit(1000u32)),
+            col("start").lt(lit(2000u32)),
+        ];
+        let analysis = extract_genomic_regions(&filters, false);
+        assert_eq!(analysis.regions.len(), 1);
+        assert_eq!(analysis.regions[0].chrom, "chr1");
+        assert_eq!(analysis.regions[0].start, Some(1000));
+        assert_eq!(analysis.regions[0].end, Some(1999));
         assert!(analysis.residual_filters.is_empty());
     }
 
