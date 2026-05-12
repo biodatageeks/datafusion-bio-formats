@@ -811,6 +811,13 @@ impl TableProvider for CramTableProvider {
         if let Some(ref index_path) = self.index_path {
             let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
 
+            if analysis.unsatisfiable {
+                debug!("CRAM scan: genomic filters are unsatisfiable, returning empty scan");
+                return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                    schema,
+                )));
+            }
+
             let regions = if !analysis.regions.is_empty() {
                 debug!(
                     "CRAM scan: using {} filter-derived region(s)",

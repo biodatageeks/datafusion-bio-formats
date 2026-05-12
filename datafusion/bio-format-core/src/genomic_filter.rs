@@ -26,6 +26,8 @@ pub struct GenomicRegion {
 pub struct GenomicFilterAnalysis {
     /// Regions that can be queried via index (e.g., BAI, CRAI, TBI)
     pub regions: Vec<GenomicRegion>,
+    /// True when genomic coordinate predicates are mutually contradictory.
+    pub unsatisfiable: bool,
     /// Filters that are NOT genomic coordinate filters and should be applied post-read
     pub residual_filters: Vec<Expr>,
     /// All original filters — since index queries are inexact, DataFusion must re-evaluate
@@ -68,7 +70,12 @@ pub fn extract_genomic_regions(
     chroms.sort();
     chroms.dedup();
 
-    let regions = if chroms.is_empty() {
+    let unsatisfiable = match (start_lower, end_upper) {
+        (Some(start), Some(end)) => start > end,
+        _ => false,
+    };
+
+    let regions = if chroms.is_empty() || unsatisfiable {
         Vec::new()
     } else {
         chroms
@@ -84,6 +91,7 @@ pub fn extract_genomic_regions(
 
     GenomicFilterAnalysis {
         regions,
+        unsatisfiable,
         residual_filters,
         all_filters: filters.to_vec(),
     }
@@ -192,8 +200,9 @@ fn collect_genomic_constraints(
                                         *start_lower = Some(
                                             start_lower.map_or(val_1based, |v| v.max(val_1based)),
                                         );
-                                        // For equality on start, also set end if not already set more tightly
-                                        // (The actual end position depends on record length, so this is approximate)
+                                        *end_upper = Some(
+                                            end_upper.map_or(val_1based, |v| v.min(val_1based)),
+                                        );
                                     }
                                     Operator::Gt => {
                                         *start_lower = Some(
@@ -382,6 +391,42 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_chrom_with_exact_start_bounds_region_zero_based() {
+        let filters = vec![col("chrom").eq(lit("chr1")), col("start").eq(lit(999u32))];
+        let analysis = extract_genomic_regions(&filters, true);
+        assert_eq!(analysis.regions.len(), 1);
+        assert_eq!(analysis.regions[0].chrom, "chr1");
+        assert_eq!(analysis.regions[0].start, Some(1000));
+        assert_eq!(analysis.regions[0].end, Some(1000));
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_chrom_with_exact_start_bounds_region_one_based() {
+        let filters = vec![col("chrom").eq(lit("chr1")), col("start").eq(lit(1000u32))];
+        let analysis = extract_genomic_regions(&filters, false);
+        assert_eq!(analysis.regions.len(), 1);
+        assert_eq!(analysis.regions[0].chrom, "chr1");
+        assert_eq!(analysis.regions[0].start, Some(1000));
+        assert_eq!(analysis.regions[0].end, Some(1000));
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
+    fn test_extract_chrom_with_contradictory_start_bounds_skips_invalid_region() {
+        let filters = vec![
+            col("chrom").eq(lit("chr1")),
+            col("start").eq(lit(1000u32)),
+            col("start").gt(lit(1000u32)),
+        ];
+        let analysis = extract_genomic_regions(&filters, false);
+
+        assert!(analysis.unsatisfiable);
+        assert!(analysis.regions.is_empty());
+        assert!(analysis.residual_filters.is_empty());
+    }
+
+    #[test]
     fn test_non_genomic_filter_becomes_residual() {
         let filters = vec![
             col("chrom").eq(lit("chr1")),
@@ -397,6 +442,7 @@ mod tests {
         let filters = vec![col("mapping_quality").gt_eq(lit(30u32))];
         let analysis = extract_genomic_regions(&filters, true);
         assert!(analysis.regions.is_empty());
+        assert!(!analysis.unsatisfiable);
         assert_eq!(analysis.residual_filters.len(), 1);
     }
 
