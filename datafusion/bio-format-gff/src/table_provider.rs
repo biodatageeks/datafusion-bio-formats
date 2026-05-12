@@ -281,6 +281,13 @@ impl TableProvider for GffTableProvider {
         if let Some(ref index_path) = self.index_path {
             let analysis = extract_genomic_regions(filters, self.coordinate_system_zero_based);
 
+            if analysis.unsatisfiable {
+                debug!("GFF scan: genomic filters are unsatisfiable, returning empty scan");
+                return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                    projected_schema,
+                )));
+            }
+
             let regions = if !analysis.regions.is_empty() {
                 debug!(
                     "GFF scan: using {} filter-derived region(s)",

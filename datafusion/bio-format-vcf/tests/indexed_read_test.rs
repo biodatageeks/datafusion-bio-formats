@@ -254,6 +254,35 @@ async fn test_vcf_contradictory_exact_start_count_with_no_info_fields()
     Ok(())
 }
 
+/// Test: contradictory genomic bounds use an empty plan, not a full indexed scan.
+#[tokio::test]
+async fn test_vcf_contradictory_bounds_use_empty_plan() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    let provider = VcfTableProvider::new(
+        "tests/multi_chrom.vcf.gz".to_string(),
+        Some(Vec::new()),
+        None,
+        None,
+        false,
+    )?;
+    let filters = vec![
+        col("chrom").eq(lit("21")),
+        col("start").eq(lit(5000100u32)),
+        col("start").gt(lit(5000100u32)),
+    ];
+
+    let plan = provider.scan(&state, None, &filters, None).await?;
+
+    assert!(
+        plan.as_any()
+            .is::<datafusion::physical_plan::empty::EmptyExec>(),
+        "contradictory genomic bounds should produce an empty plan instead of a full indexed scan"
+    );
+
+    Ok(())
+}
+
 /// Test: correctness of indexed vs full scan results.
 #[tokio::test]
 async fn test_vcf_indexed_correctness() -> datafusion::error::Result<()> {

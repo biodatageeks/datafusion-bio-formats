@@ -26,6 +26,8 @@ pub struct GenomicRegion {
 pub struct GenomicFilterAnalysis {
     /// Regions that can be queried via index (e.g., BAI, CRAI, TBI)
     pub regions: Vec<GenomicRegion>,
+    /// True when genomic coordinate predicates are mutually contradictory.
+    pub unsatisfiable: bool,
     /// Filters that are NOT genomic coordinate filters and should be applied post-read
     pub residual_filters: Vec<Expr>,
     /// All original filters — since index queries are inexact, DataFusion must re-evaluate
@@ -68,12 +70,12 @@ pub fn extract_genomic_regions(
     chroms.sort();
     chroms.dedup();
 
-    let has_valid_bounds = match (start_lower, end_upper) {
-        (Some(start), Some(end)) => start <= end,
-        _ => true,
+    let unsatisfiable = match (start_lower, end_upper) {
+        (Some(start), Some(end)) => start > end,
+        _ => false,
     };
 
-    let regions = if chroms.is_empty() || !has_valid_bounds {
+    let regions = if chroms.is_empty() || unsatisfiable {
         Vec::new()
     } else {
         chroms
@@ -89,6 +91,7 @@ pub fn extract_genomic_regions(
 
     GenomicFilterAnalysis {
         regions,
+        unsatisfiable,
         residual_filters,
         all_filters: filters.to_vec(),
     }
@@ -418,6 +421,7 @@ mod tests {
         ];
         let analysis = extract_genomic_regions(&filters, false);
 
+        assert!(analysis.unsatisfiable);
         assert!(analysis.regions.is_empty());
         assert!(analysis.residual_filters.is_empty());
     }
@@ -438,6 +442,7 @@ mod tests {
         let filters = vec![col("mapping_quality").gt_eq(lit(30u32))];
         let analysis = extract_genomic_regions(&filters, true);
         assert!(analysis.regions.is_empty());
+        assert!(!analysis.unsatisfiable);
         assert_eq!(analysis.residual_filters.len(), 1);
     }
 
