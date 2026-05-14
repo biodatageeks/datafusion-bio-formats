@@ -469,11 +469,15 @@ fn load_infos_single_pass(
 
     let info = record.info();
     for result in info.iter(header) {
-        let (key, value) = result.map_err(|e| {
-            datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
-                "Error reading INFO field: {e}"
-            ))
-        })?;
+        let (key, value) = match result {
+            Ok(parsed) => parsed,
+            Err(e) if is_missing_info_value_error(&e) => continue,
+            Err(e) => {
+                return Err(datafusion::arrow::error::ArrowError::InvalidArgumentError(
+                    format!("Error reading INFO field: {e}"),
+                ));
+            }
+        };
 
         if let Some(&idx) = info_name_to_index.get(key) {
             info_populated[idx] = true;
@@ -537,6 +541,10 @@ fn load_infos_single_pass(
     }
 
     Ok(())
+}
+
+fn is_missing_info_value_error(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::InvalidData && error.to_string() == "missing value"
 }
 
 fn get_variant_end(record: &dyn Record, header: &Header) -> u32 {
