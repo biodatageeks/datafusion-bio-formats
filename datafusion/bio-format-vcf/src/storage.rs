@@ -371,15 +371,15 @@ impl VcfRemoteReader {
         match self {
             VcfRemoteReader::BGZF(reader) => {
                 let header = reader.read_header().await?;
-                Ok(get_info_fields(&header).await)
+                Ok(get_vcf_fields(&header).await)
             }
             VcfRemoteReader::GZIP(reader) => {
                 let header = reader.read_header().await?;
-                Ok(get_info_fields(&header).await)
+                Ok(get_vcf_fields(&header).await)
             }
             VcfRemoteReader::PLAIN(reader) => {
                 let header = reader.read_header().await?;
-                Ok(get_info_fields(&header).await)
+                Ok(get_vcf_fields(&header).await)
             }
         }
     }
@@ -491,15 +491,15 @@ impl VcfLocalReader {
         match self {
             VcfLocalReader::BGZF(reader) => {
                 let header = reader.read_header()?;
-                Ok(get_info_fields(&header).await)
+                Ok(get_vcf_fields(&header).await)
             }
             VcfLocalReader::GZIP(reader) => {
                 let header = reader.read_header().await?;
-                Ok(get_info_fields(&header).await)
+                Ok(get_vcf_fields(&header).await)
             }
             VcfLocalReader::PLAIN(reader) => {
                 let header = reader.read_header().await?;
-                Ok(get_info_fields(&header).await)
+                Ok(get_vcf_fields(&header).await)
             }
         }
     }
@@ -558,32 +558,44 @@ pub fn open_local_vcf_sync(
     Ok((reader, header))
 }
 
-/// Extracts INFO field metadata from a VCF header into a RecordBatch.
+/// Extracts INFO and FORMAT field metadata from a VCF header into a RecordBatch.
 ///
 /// # Arguments
 ///
-/// * `header` - The VCF header to extract INFO fields from
+/// * `header` - The VCF header to extract INFO and FORMAT fields from
 ///
 /// # Returns
 ///
-/// A RecordBatch with columns: name (String), type (String), description (String)
-pub async fn get_info_fields(header: &Header) -> arrow::array::RecordBatch {
-    let info_fields = header.infos();
+/// A RecordBatch with columns: name, field_type, data_type, description.
+pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
     let mut field_names = StringBuilder::new();
     let mut field_types = StringBuilder::new();
+    let mut data_types = StringBuilder::new();
     let mut field_descriptions = StringBuilder::new();
-    for (field_name, field) in info_fields {
+
+    for (field_name, field) in header.infos() {
         field_names.append_value(field_name);
-        field_types.append_value(field.ty());
+        field_types.append_value("INFO");
+        data_types.append_value(field.ty());
         field_descriptions.append_value(field.description());
     }
+
+    for (field_name, field) in header.formats() {
+        field_names.append_value(field_name);
+        field_types.append_value("FORMAT");
+        data_types.append_value(field.ty());
+        field_descriptions.append_value(field.description());
+    }
+
     // build RecordBatch
     let field_names = field_names.finish();
     let field_types = field_types.finish();
+    let data_types = data_types.finish();
     let field_descriptions = field_descriptions.finish();
     let schema = arrow::datatypes::Schema::new(vec![
         arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
-        arrow::datatypes::Field::new("type", arrow::datatypes::DataType::Utf8, false),
+        arrow::datatypes::Field::new("field_type", arrow::datatypes::DataType::Utf8, false),
+        arrow::datatypes::Field::new("data_type", arrow::datatypes::DataType::Utf8, false),
         arrow::datatypes::Field::new("description", arrow::datatypes::DataType::Utf8, false),
     ]);
     arrow::record_batch::RecordBatch::try_new(
@@ -591,6 +603,7 @@ pub async fn get_info_fields(header: &Header) -> arrow::array::RecordBatch {
         vec![
             Arc::new(field_names),
             Arc::new(field_types),
+            Arc::new(data_types),
             Arc::new(field_descriptions),
         ],
     )
