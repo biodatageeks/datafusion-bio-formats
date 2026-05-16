@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use datafusion::arrow;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
@@ -47,6 +48,63 @@ pub(crate) fn normalize_read_options(
         coordinate_system_zero_based: options.coordinate_system_zero_based,
         genotype_encoding_raw: options.genotype_encoding_raw,
     })
+}
+
+/// Describes discoverable VCF Zarr INFO and FORMAT fields.
+pub fn describe_fields(path: String) -> Result<arrow::array::RecordBatch> {
+    let metadata = VcfZarrMetadata::open_local(&path)?;
+    let options = normalize_read_options(&metadata, &VcfZarrReadOptions::default())?;
+    let info_fields = options.info_fields.unwrap_or_default();
+    let format_fields = options.format_fields.unwrap_or_default();
+
+    let mut names = arrow::array::StringBuilder::new();
+    let mut field_types = arrow::array::StringBuilder::new();
+    let mut data_types = arrow::array::StringBuilder::new();
+    let mut descriptions = arrow::array::StringBuilder::new();
+
+    for name in info_fields {
+        let raw_array = validate_info_array(&metadata, &name)?;
+        let data_type = logical_info_data_type(&metadata, &raw_array)?;
+        names.append_value(name);
+        field_types.append_value("INFO");
+        data_types.append_value(vcf_field_type_for_data_type(&data_type));
+        descriptions.append_value("");
+    }
+
+    for name in &format_fields {
+        let raw_array = validate_format_array(&metadata, name)?;
+        let _ = logical_format_data_type(
+            &metadata,
+            name,
+            &raw_array,
+            VcfZarrReadOptions::default().genotype_encoding_raw,
+        )?;
+    }
+
+    if !format_fields.is_empty() {
+        names.append_value("genotypes");
+        field_types.append_value("FORMAT");
+        data_types.append_value("Struct");
+        descriptions.append_value(format!("FORMAT fields: {}", format_fields.join(", ")));
+    }
+
+    let schema = Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("field_type", DataType::Utf8, false),
+        Field::new("data_type", DataType::Utf8, false),
+        Field::new("description", DataType::Utf8, false),
+    ]);
+
+    arrow::record_batch::RecordBatch::try_new(
+        Arc::new(schema),
+        vec![
+            Arc::new(names.finish()),
+            Arc::new(field_types.finish()),
+            Arc::new(data_types.finish()),
+            Arc::new(descriptions.finish()),
+        ],
+    )
+    .map_err(DataFusionError::from)
 }
 
 pub(crate) fn build_logical_schema_with_sample_selection(

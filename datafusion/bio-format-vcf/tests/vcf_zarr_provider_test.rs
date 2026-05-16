@@ -15,7 +15,7 @@ use datafusion_bio_format_core::metadata::{
     VCF_FILE_FORMAT_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, from_json_string,
 };
 use datafusion_bio_format_vcf::zarr::{
-    SUPPORTED_VCF_ZARR_VERSION, VcfZarrReadOptions, VcfZarrTableProvider,
+    SUPPORTED_VCF_ZARR_VERSION, VcfZarrReadOptions, VcfZarrTableProvider, describe_fields,
 };
 use futures::TryStreamExt;
 use zarrs::array::Array as ZarrArray;
@@ -347,6 +347,51 @@ fn sampled_format_store() -> tempfile::TempDir {
         ((sample + 1) * 1_000 + row) as i32
     });
     temp_dir
+}
+
+#[test]
+fn vcf_zarr_describe_fields_matches_vcf_describe_shape() {
+    let temp_dir = sampled_format_store();
+    let root = temp_dir.path().join("sampled.vcz");
+    let batch =
+        describe_fields(root.to_string_lossy().into_owned()).expect("fixture should describe");
+
+    assert_eq!(batch.schema().field(0).name(), "name");
+    assert_eq!(batch.schema().field(1).name(), "field_type");
+    assert_eq!(batch.schema().field(2).name(), "data_type");
+    assert_eq!(batch.schema().field(3).name(), "description");
+    assert_eq!(batch.num_columns(), 4);
+    assert!(batch.num_rows() >= 3);
+
+    let names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("name should be Utf8");
+    let field_types = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("field_type should be Utf8");
+    let data_types = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("data_type should be Utf8");
+    let rows = (0..batch.num_rows())
+        .map(|index| {
+            (
+                field_types.value(index),
+                names.value(index),
+                data_types.value(index),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert!(rows.contains(&("INFO", "DP", "Integer")));
+    assert!(rows.contains(&("FORMAT", "genotypes", "Struct")));
+    assert!(!rows.iter().any(|row| row.0 == "FORMAT" && row.1 == "DP"));
+    assert!(!rows.iter().any(|row| row.0 == "FORMAT" && row.1 == "GT"));
 }
 
 fn assert_i32_list_values(list: &ListArray, row: usize, expected: &[i32]) {

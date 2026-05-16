@@ -23,4 +23,5 @@ pub(crate) mod schema;
 pub mod table_provider;
 
 pub use metadata::SUPPORTED_VCF_ZARR_VERSION;
+pub use schema::describe_fields;
 pub use table_provider::{VcfZarrReadOptions, VcfZarrTableProvider};
