@@ -3,6 +3,7 @@ use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
+use datafusion_bio_format_vcf::storage::VcfReader;
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use std::sync::Arc;
 use tokio::fs;
@@ -44,6 +45,76 @@ fn create_object_storage_options() -> ObjectStorageOptions {
         concurrent_fetches: Some(8),
         compression_type: Some(CompressionType::NONE),
     }
+}
+
+fn describe_rows(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+) -> Vec<(String, String, String)> {
+    let names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("name should be Utf8");
+    let field_types = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("field_type should be Utf8");
+    let data_types = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("data_type should be Utf8");
+
+    (0..batch.num_rows())
+        .map(|index| {
+            (
+                field_types.value(index).to_string(),
+                names.value(index).to_string(),
+                data_types.value(index).to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn test_describe_multisample_format_matches_nested_genotypes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file("multi_describe", SAMPLE_VCF_MULTI).await?;
+    let mut reader = VcfReader::new(file_path, Some(create_object_storage_options())).await;
+    let batch = reader.describe().await?;
+    let rows = describe_rows(&batch);
+
+    assert!(rows.contains(&("INFO".to_string(), "DP".to_string(), "Integer".to_string())));
+    assert!(rows.contains(&(
+        "FORMAT".to_string(),
+        "genotypes".to_string(),
+        "Struct".to_string()
+    )));
+    assert!(!rows.iter().any(|row| row.0 == "FORMAT" && row.1 == "GT"));
+    assert!(!rows.iter().any(|row| row.0 == "FORMAT" && row.1 == "DP"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_describe_single_sample_format_uses_collision_column_names()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file_path =
+        create_test_vcf_file("single_collision_describe", SAMPLE_VCF_SINGLE_COLLISION).await?;
+    let mut reader = VcfReader::new(file_path, Some(create_object_storage_options())).await;
+    let batch = reader.describe().await?;
+    let rows = describe_rows(&batch);
+
+    assert!(rows.contains(&("FORMAT".to_string(), "GT".to_string(), "String".to_string())));
+    assert!(rows.contains(&(
+        "FORMAT".to_string(),
+        "fmt_DP".to_string(),
+        "Integer".to_string()
+    )));
+    assert!(!rows.iter().any(|row| row.0 == "FORMAT" && row.1 == "DP"));
+
+    Ok(())
 }
 
 #[tokio::test]

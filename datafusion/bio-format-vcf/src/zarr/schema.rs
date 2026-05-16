@@ -71,18 +71,21 @@ pub fn describe_fields(path: String) -> Result<arrow::array::RecordBatch> {
         descriptions.append_value("");
     }
 
-    for name in format_fields {
-        let raw_array = validate_format_array(&metadata, &name)?;
-        let data_type = logical_format_data_type(
+    for name in &format_fields {
+        let raw_array = validate_format_array(&metadata, name)?;
+        let _ = logical_format_data_type(
             &metadata,
-            &name,
+            name,
             &raw_array,
             VcfZarrReadOptions::default().genotype_encoding_raw,
         )?;
-        names.append_value(name);
+    }
+
+    if !format_fields.is_empty() {
+        names.append_value("genotypes");
         field_types.append_value("FORMAT");
-        data_types.append_value(vcf_field_type_for_data_type(&data_type));
-        descriptions.append_value("");
+        data_types.append_value("Struct");
+        descriptions.append_value(format!("FORMAT fields: {}", format_fields.join(", ")));
     }
 
     let schema = Schema::new(vec![

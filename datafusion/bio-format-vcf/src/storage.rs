@@ -580,11 +580,47 @@ pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
         field_descriptions.append_value(field.description());
     }
 
-    for (field_name, field) in header.formats() {
-        field_names.append_value(field_name);
+    let sample_count = header.sample_names().len();
+    if sample_count == 1 {
+        let mut used_names: std::collections::HashSet<String> = [
+            "chrom", "start", "end", "id", "ref", "alt", "qual", "filter",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        used_names.extend(header.infos().keys().map(|name| name.to_string()));
+
+        for (field_name, field) in header.formats() {
+            let column_name = if used_names.contains(field_name.as_str()) {
+                let candidate = format!("fmt_{field_name}");
+                if used_names.contains(&candidate) {
+                    format!("format_{field_name}")
+                } else {
+                    candidate
+                }
+            } else {
+                field_name.to_string()
+            };
+            used_names.insert(column_name.clone());
+
+            field_names.append_value(column_name);
+            field_types.append_value("FORMAT");
+            data_types.append_value(field.ty());
+            field_descriptions.append_value(field.description());
+        }
+    } else if sample_count > 1 && !header.formats().is_empty() {
+        field_names.append_value("genotypes");
         field_types.append_value("FORMAT");
-        data_types.append_value(field.ty());
-        field_descriptions.append_value(field.description());
+        data_types.append_value("Struct");
+        field_descriptions.append_value(format!(
+            "FORMAT fields: {}",
+            header
+                .formats()
+                .keys()
+                .map(|field_name| field_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
 
     // build RecordBatch

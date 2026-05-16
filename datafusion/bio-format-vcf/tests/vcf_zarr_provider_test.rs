@@ -373,13 +373,25 @@ fn vcf_zarr_describe_fields_matches_vcf_describe_shape() {
         .as_any()
         .downcast_ref::<StringArray>()
         .expect("field_type should be Utf8");
+    let data_types = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("data_type should be Utf8");
     let rows = (0..batch.num_rows())
-        .map(|index| (field_types.value(index), names.value(index)))
+        .map(|index| {
+            (
+                field_types.value(index),
+                names.value(index),
+                data_types.value(index),
+            )
+        })
         .collect::<Vec<_>>();
 
-    assert!(rows.contains(&("INFO", "DP")));
-    assert!(rows.contains(&("FORMAT", "DP")));
-    assert!(rows.contains(&("FORMAT", "GT")));
+    assert!(rows.contains(&("INFO", "DP", "Integer")));
+    assert!(rows.contains(&("FORMAT", "genotypes", "Struct")));
+    assert!(!rows.iter().any(|row| row.0 == "FORMAT" && row.1 == "DP"));
+    assert!(!rows.iter().any(|row| row.0 == "FORMAT" && row.1 == "GT"));
 }
 
 fn assert_i32_list_values(list: &ListArray, row: usize, expected: &[i32]) {
