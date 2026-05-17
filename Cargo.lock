@@ -1137,9 +1137,9 @@ dependencies = [
  "hex",
  "log",
  "noodles-bam 0.82.0",
- "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
  "noodles-sam 0.78.0",
  "opendal",
  "serde",
@@ -1184,7 +1184,7 @@ dependencies = [
  "log",
  "noodles 0.93.0",
  "noodles-bgzf 0.36.0",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
  "noodles-sam 0.78.0",
  "opendal",
  "serde",
@@ -1210,7 +1210,7 @@ dependencies = [
  "hex",
  "log",
  "noodles-bgzf 0.36.0",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
  "noodles-cram 0.85.0",
  "noodles-fasta 0.55.0",
  "noodles-sam 0.78.0",
@@ -3213,6 +3213,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lzma-rust2"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47bb1e988e6fb779cf720ad431242d3f03167c1b3f2b1aae7f1a94b2495b36ae"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "lzma-sys"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3415,15 +3424,15 @@ dependencies = [
 [[package]]
 name = "noodles-bam"
 version = "0.82.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b#da905fff4909ada93e407c780456332fe113858b"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db#e2b53501afd9d327735355db68dfb33d3e6ce9db"
 dependencies = [
  "bstr",
  "futures",
  "indexmap",
  "memchr",
- "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
  "noodles-sam 0.78.0",
  "pin-project-lite",
  "tokio",
@@ -3509,7 +3518,7 @@ dependencies = [
 [[package]]
 name = "noodles-bgzf"
 version = "0.42.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b#da905fff4909ada93e407c780456332fe113858b"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db#e2b53501afd9d327735355db68dfb33d3e6ce9db"
 dependencies = [
  "bytes",
  "crossbeam-channel",
@@ -3550,7 +3559,7 @@ dependencies = [
 [[package]]
 name = "noodles-core"
 version = "0.18.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b#da905fff4909ada93e407c780456332fe113858b"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db#e2b53501afd9d327735355db68dfb33d3e6ce9db"
 dependencies = [
  "bstr",
 ]
@@ -3582,7 +3591,7 @@ dependencies = [
 [[package]]
 name = "noodles-cram"
 version = "0.85.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b#da905fff4909ada93e407c780456332fe113858b"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db#e2b53501afd9d327735355db68dfb33d3e6ce9db"
 dependencies = [
  "async-compression",
  "bitflags",
@@ -3591,14 +3600,14 @@ dependencies = [
  "flate2",
  "futures",
  "indexmap",
+ "lzma-rust2",
  "md-5",
  "noodles-bam 0.82.0",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
  "noodles-fasta 0.55.0",
  "noodles-sam 0.78.0",
  "pin-project-lite",
  "tokio",
- "xz2",
 ]
 
 [[package]]
@@ -3645,13 +3654,13 @@ dependencies = [
 [[package]]
 name = "noodles-csi"
 version = "0.50.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b#da905fff4909ada93e407c780456332fe113858b"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db#e2b53501afd9d327735355db68dfb33d3e6ce9db"
 dependencies = [
  "bit-vec",
  "bstr",
  "indexmap",
- "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
 ]
 
 [[package]]
@@ -3671,14 +3680,14 @@ dependencies = [
 [[package]]
 name = "noodles-fasta"
 version = "0.55.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b#da905fff4909ada93e407c780456332fe113858b"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db#e2b53501afd9d327735355db68dfb33d3e6ce9db"
 dependencies = [
  "bstr",
  "bytes",
  "futures",
  "memchr",
- "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
  "tokio",
 ]
 
@@ -3761,16 +3770,16 @@ dependencies = [
 [[package]]
 name = "noodles-sam"
 version = "0.78.0"
-source = "git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b#da905fff4909ada93e407c780456332fe113858b"
+source = "git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db#e2b53501afd9d327735355db68dfb33d3e6ce9db"
 dependencies = [
  "bitflags",
  "bstr",
  "indexmap",
  "lexical-core",
  "memchr",
- "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
- "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=da905fff4909ada93e407c780456332fe113858b)",
+ "noodles-bgzf 0.42.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-core 0.18.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
+ "noodles-csi 0.50.0 (git+https://github.com/biodatageeks/noodles.git?rev=e2b53501afd9d327735355db68dfb33d3e6ce9db)",
 ]
 
 [[package]]
