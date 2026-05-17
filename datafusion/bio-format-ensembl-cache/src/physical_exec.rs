@@ -61,7 +61,7 @@ pub(crate) struct EnsemblCacheExec {
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) num_partitions: usize,
     pub(crate) bgzf_partitions: Option<Vec<(PathBuf, crate::tabix_reader::BgzfPartition)>>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
 }
 
 pub(crate) struct EnsemblCacheExecConfig {
@@ -213,12 +213,12 @@ impl EnsemblCacheExec {
             EquivalenceProperties::new(config.schema.clone())
         };
 
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             eq_props,
             Partitioning::UnknownPartitioning(num_partitions),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             kind: config.kind,
@@ -376,7 +376,7 @@ impl ExecutionPlan for EnsemblCacheExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -391,7 +391,10 @@ impl ExecutionPlan for EnsemblCacheExec {
         Ok(self)
     }
 
-    fn statistics(&self) -> DFResult<datafusion::physical_plan::Statistics> {
+    fn partition_statistics(
+        &self,
+        _partition: Option<usize>,
+    ) -> DFResult<datafusion::physical_plan::Statistics> {
         // Estimate row count from total compressed file sizes.
         // Rough heuristic: ~50 bytes per row in compressed VEP cache files.
         let total_bytes: u64 = if let Some(ref bp) = self.bgzf_partitions {
@@ -411,11 +414,15 @@ impl ExecutionPlan for EnsemblCacheExec {
                 .sum()
         };
         let estimated_rows = total_bytes / 50;
-        Ok(datafusion::physical_plan::Statistics {
-            num_rows: datafusion::common::stats::Precision::Inexact(estimated_rows as usize),
-            total_byte_size: datafusion::common::stats::Precision::Inexact(total_bytes as usize),
-            column_statistics: vec![],
-        })
+        Ok(
+            datafusion::physical_plan::Statistics::new_unknown(self.schema.as_ref())
+                .with_num_rows(datafusion::common::stats::Precision::Inexact(
+                    estimated_rows as usize,
+                ))
+                .with_total_byte_size(datafusion::common::stats::Precision::Inexact(
+                    total_bytes as usize,
+                )),
+        )
     }
 
     fn execute(

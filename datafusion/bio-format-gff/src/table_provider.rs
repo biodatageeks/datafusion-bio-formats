@@ -336,12 +336,12 @@ impl TableProvider for GffTableProvider {
                 );
 
                 return Ok(Arc::new(GffExec {
-                    cache: PlanProperties::new(
+                    cache: Arc::new(PlanProperties::new(
                         EquivalenceProperties::new(projected_schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
                         EmissionType::Final,
                         Boundedness::Bounded,
-                    ),
+                    )),
                     file_path: self.file_path.clone(),
                     attr_fields: self.attr_fields.clone(),
                     schema: projected_schema.clone(),
@@ -359,12 +359,12 @@ impl TableProvider for GffTableProvider {
 
         // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(GffExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             attr_fields: self.attr_fields.clone(),
             schema: projected_schema.clone(),

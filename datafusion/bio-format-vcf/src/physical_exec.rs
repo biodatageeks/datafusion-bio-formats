@@ -2441,7 +2441,7 @@ pub struct VcfExec {
     pub(crate) sample_names: Vec<String>,
     /// All sample names from source VCF header.
     pub(crate) source_sample_names: Vec<String>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) limit: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -2489,7 +2489,7 @@ impl ExecutionPlan for VcfExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

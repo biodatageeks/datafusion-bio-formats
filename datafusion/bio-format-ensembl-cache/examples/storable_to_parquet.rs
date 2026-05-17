@@ -19,8 +19,8 @@
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
+use datafusion::parquet::file::metadata::SortingColumn;
 use datafusion::parquet::file::properties::WriterProperties;
-use datafusion::parquet::format::SortingColumn;
 use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
@@ -112,9 +112,11 @@ fn sorting_columns_for(schema: &SchemaRef, sort_columns: &[&str]) -> Option<Vec<
     let cols: Vec<SortingColumn> = sort_columns
         .iter()
         .filter_map(|name| {
-            schema
-                .column_with_name(name)
-                .map(|(idx, _)| SortingColumn::new(idx as i32, false, false))
+            schema.column_with_name(name).map(|(idx, _)| SortingColumn {
+                column_idx: idx as i32,
+                descending: false,
+                nulls_first: false,
+            })
         })
         .collect();
     if cols.len() == sort_columns.len() {
@@ -145,7 +147,7 @@ fn writer_properties(
 
     let mut builder = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
-        .set_max_row_group_size(rg_size)
+        .set_max_row_group_row_count(Some(rg_size))
         .set_sorting_columns(sorting);
 
     // Bloom filter on transcript_id for translation and exon tables

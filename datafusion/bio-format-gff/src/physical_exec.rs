@@ -33,7 +33,7 @@ pub struct GffExec {
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) filters: Vec<Expr>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) limit: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -81,7 +81,7 @@ impl ExecutionPlan for GffExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

@@ -132,12 +132,12 @@ impl TableProvider for FastaTableProvider {
         let schema = project_schema(&self.schema, projection);
 
         Ok(Arc::new(FastaExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             schema: schema.clone(),
             projection: projection.cloned(),

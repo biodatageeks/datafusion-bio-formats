@@ -52,7 +52,7 @@ pub struct BamWriteExec {
     /// Whether to sort records by coordinate before writing
     sort_on_write: bool,
     /// Cached plan properties
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl BamWriteExec {
@@ -88,12 +88,12 @@ impl BamWriteExec {
             false,
         )]));
 
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             input,
@@ -154,7 +154,7 @@ impl ExecutionPlan for BamWriteExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

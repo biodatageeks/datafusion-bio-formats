@@ -33,7 +33,7 @@ pub struct PairsExec {
     /// Column names from the Pairs header
     pub(crate) columns: Vec<String>,
     pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) limit: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     pub(crate) coordinate_system_zero_based: bool,
@@ -80,7 +80,7 @@ impl ExecutionPlan for PairsExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
