@@ -6,7 +6,7 @@ use datafusion_bio_format_core::object_storage::{
 };
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
-use noodles::bgzf;
+use noodles_bgzf as bgzf;
 use noodles_gff as gff;
 use noodles_gff::feature::RecordBuf;
 use noodles_gff::feature::record_buf::Attributes;
@@ -169,7 +169,7 @@ use tokio_util::io::StreamReader;
 ///
 /// # Performance Comparison
 /// - `Standard`: Original noodles-gff parser (~2305 ns/record)
-/// - `Fast`: Optimized parser with ~3.2x speedup (~720 ns/record)  
+/// - `Fast`: Optimized parser with ~3.2x speedup (~720 ns/record)
 /// - `Simd`: SIMD-optimized parser with ~3.3x speedup (~703 ns/record)
 ///
 /// # Attribute Parsing

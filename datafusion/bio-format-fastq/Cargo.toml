@@ -12,7 +12,6 @@ readme = "README.md"
 [dependencies]
 datafusion.workspace = true
 opendal.workspace = true
-noodles.workspace = true
 noodles-bgzf.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true

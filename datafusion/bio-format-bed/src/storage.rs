@@ -9,9 +9,9 @@ use datafusion_bio_format_core::object_storage::{
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use log::{debug, error, info};
-use noodles::bgzf;
 use noodles_bed;
 use noodles_bed::Record;
+use noodles_bgzf as bgzf;
 use noodles_bgzf::Reader as BgzfReader;
 use opendal::FuturesBytesStream;
 use std::fs::File;

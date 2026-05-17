@@ -23,7 +23,7 @@ async-trait = "0.1.85"
 opendal = { git = "https://github.com/apache/opendal.git", rev = "1755db1da44e0aad050cb1d62aebbb0b64266037", features = ["services-gcs", "services-s3", "blocking", "services-azblob", "services-http"] }
 noodles = { version = "0.93.0",  features = ["bam", "vcf", "bgzf", "async"]}
 
-noodles-bgzf = { version = "0.36.0",features = ["libdeflate"] }
+noodles-bgzf = { version = "0.36.0",features = ["libdeflate", "async"] }
 noodles-cram  = { git = "https://github.com/biodatageeks/noodles.git",rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db", features = ["async"] }
 noodles-sam = { git = "https://github.com/biodatageeks/noodles.git",rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db" }
 noodles-fasta = { git = "https://github.com/biodatageeks/noodles.git",rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db", features = ["async"] }
