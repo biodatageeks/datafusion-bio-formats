@@ -1,0 +1,23 @@
+[package]
+name = "datafusion-bio-format-bbi"
+version = "1.6.0"
+description = "BigWig and BigBed file format support for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[dependencies]
+datafusion.workspace = true
+async-trait.workspace = true
+datafusion-bio-format-core = { path = "../bio-format-core" }
+bigtools = { git = "https://github.com/biodatageeks/bigtools.git", rev = "c18d9a386bdb80583bfea50ae95aa234ce5f320c", default-features = false, features = ["read"] }
+futures-util.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+bigtools = { git = "https://github.com/biodatageeks/bigtools.git", rev = "c18d9a386bdb80583bfea50ae95aa234ce5f320c", default-features = false, features = ["read", "write"] }
+tempfile = "3"
+tokio.workspace = true
