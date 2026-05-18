@@ -144,21 +144,67 @@ let vtx = VortexTableProvider::open("/path/to/transcripts.vtx")?;
 ctx.register_table("vep_transcript", Arc::new(vtx))?;
 
 // Option C: Native Ensembl cache
-let tp = TranscriptTableProvider::new(EnsemblCacheOptions::new(cache_root))?;
+let tp = TranscriptTableProvider::new(
+    EnsemblCacheOptions::new(cache_root)
+        .with_cache_source_type(CacheSourceType::RefSeq),
+)?;
 ctx.register_table("vep_transcript", Arc::new(tp))?;
 
 // VEP annotation — format-agnostic
 SELECT * FROM annotate_variants('my_vcf', 'vep_transcript')
 ```
 
+### Explicit Cache Source Mode
+
+Every VEP cache table must declare its source mode explicitly:
+
+```
+cache_source_type: "ensembl" | "merged" | "refseq"
+```
+
+For native Ensembl cache providers, the value is provided through
+`EnsemblCacheOptions` or the export command and written to Arrow schema metadata:
+
+```
+bio.vep.cache_source_type = ensembl | merged | refseq
+```
+
+For Parquet, Vortex, or other pluggable formats, the same metadata key is the
+portable contract consumed by `bio-function-vep`.
+
+Deliberate constraints:
+- No path-based inference. A directory such as `homo_sapiens_refseq` does not
+  imply `cache_source_type = "refseq"`.
+- No legacy boolean compatibility. `merged = true` is rejected; callers must use
+  `cache_source_type = "merged"`.
+- Missing or invalid source mode is a registration/export/validation error.
+
+Source-mode behavior:
+
+| Source mode | Transcript inclusion | `SOURCE` output |
+|---|---|---|
+| `ensembl` | Ensembl transcript IDs such as `ENST...` | Empty |
+| `refseq` | RefSeq IDs such as `NM_...`, `NR_...`, `XM_...`, `XR_...`, plus RefSeq mitochondrial IDs accepted by Ensembl VEP | Empty |
+| `merged` | Ensembl rows plus RefSeq rows according to VEP merged-cache rules | Populated from cache row source |
+
+The native cache provider does not use `cache_source_type` to discover files.
+File discovery remains layout-based; source mode controls schema metadata and
+downstream annotation semantics only.
+
 ### Schema Contracts
 
-The VEP crate depends only on column names and types:
+The VEP crate depends on column names, types, and the explicit source-mode
+metadata:
+
+**Required schema metadata:**
+```
+bio.vep.cache_source_type: Utf8 enum value ("ensembl", "merged", or "refseq")
+```
 
 **Transcript table contract:**
 ```
 chrom: Utf8, start: Int64, end: Int64, strand: Int8,
-stable_id: Utf8, gene_symbol: Utf8, biotype: Utf8,
+stable_id: Utf8, db_id: Int64, gene_symbol: Utf8, biotype: Utf8,
 is_canonical: Boolean,
 coding_region_start: Int64, coding_region_end: Int64,
 exons: List<Struct<start:Int64, end:Int64, phase:Int8>>,
@@ -325,6 +371,7 @@ transcription_factors Utf8 (nullable, motif schema)
 ### Parser changes
 
 In `parse_transcript_line_into()` and `parse_transcript_storable_file()`:
+- Parse `dbID` -> `db_id`
 - Parse `_trans_exon_array` -> `List<Struct<start, end, phase>>`
 - Parse `_variation_effect_feature_cache.translateable_seq` -> `cdna_seq`
 - Parse `_variation_effect_feature_cache.peptide` -> `peptide_seq`
@@ -340,6 +387,8 @@ In `parse_regulatory_line_into()` and `parse_regulatory_storable_file_into()`:
 Notes:
 - `raw_object_json` remains available for provenance and deferred payloads
   such as SIFT, PolyPhen, and DOMAINS.
+- `db_id` is nullable because not every cache payload or pluggable table format
+  can provide the original Ensembl Storable `dbID`.
 - `mature_mirna_regions` should only be parsed for `biotype = 'miRNA'`.
 - Promoting `cds_start_nf` and `cds_end_nf` removes the common-case
   dependency on `annotate_provider.rs:parse_transcript_flags()` in

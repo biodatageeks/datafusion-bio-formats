@@ -1,5 +1,6 @@
 use crate::errors::{Result, exec_err};
 use crate::info::CacheInfo;
+use crate::source_type::{CacheSourceType, VEP_CACHE_SOURCE_TYPE_METADATA_KEY};
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use std::collections::{HashMap, HashSet};
@@ -96,6 +97,7 @@ const CANONICAL_OPTIONAL_VARIATION_COLUMNS: [&str; 10] = [
 pub(crate) fn variation_schema(
     cache_info: &CacheInfo,
     coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
 ) -> Result<SchemaRef> {
     if cache_info.variation_cols.is_empty() {
         return Err(exec_err(
@@ -146,12 +148,17 @@ pub(crate) fn variation_schema(
 
     fields.extend(provenance_fields(cache_info));
 
-    Ok(new_schema(fields, coordinate_system_zero_based))
+    Ok(new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+    ))
 }
 
 pub(crate) fn transcript_schema(
     cache_info: &CacheInfo,
     coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
 ) -> SchemaRef {
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -159,6 +166,7 @@ pub(crate) fn transcript_schema(
         Field::new("end", DataType::Int64, false),
         Field::new("strand", DataType::Int8, false),
         Field::new("stable_id", DataType::Utf8, false),
+        Field::new("db_id", DataType::Int64, true),
         Field::new("version", DataType::Int32, true),
         Field::new("biotype", DataType::Utf8, true),
         Field::new("source", DataType::Utf8, true),
@@ -216,12 +224,13 @@ pub(crate) fn transcript_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based)
+    new_schema(fields, coordinate_system_zero_based, cache_source_type)
 }
 
 pub(crate) fn regulatory_feature_schema(
     cache_info: &CacheInfo,
     coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
 ) -> SchemaRef {
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -238,12 +247,13 @@ pub(crate) fn regulatory_feature_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based)
+    new_schema(fields, coordinate_system_zero_based, cache_source_type)
 }
 
 pub(crate) fn motif_feature_schema(
     cache_info: &CacheInfo,
     coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
 ) -> SchemaRef {
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -261,10 +271,14 @@ pub(crate) fn motif_feature_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based)
+    new_schema(fields, coordinate_system_zero_based, cache_source_type)
 }
 
-pub(crate) fn exon_schema(cache_info: &CacheInfo, coordinate_system_zero_based: bool) -> SchemaRef {
+pub(crate) fn exon_schema(
+    cache_info: &CacheInfo,
+    coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
+) -> SchemaRef {
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
@@ -283,12 +297,13 @@ pub(crate) fn exon_schema(cache_info: &CacheInfo, coordinate_system_zero_based: 
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based)
+    new_schema(fields, coordinate_system_zero_based, cache_source_type)
 }
 
 pub(crate) fn translation_schema(
     cache_info: &CacheInfo,
     coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
 ) -> SchemaRef {
     let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
@@ -318,12 +333,15 @@ pub(crate) fn translation_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based)
+    new_schema(fields, coordinate_system_zero_based, cache_source_type)
 }
 
 /// Schema for the `translation_core` split file: identity, sequence, and protein features.
 /// Sorted by `(transcript_id)` to enable RG pruning for `WHERE transcript_id IN (...)`.
-pub fn translation_core_schema(coordinate_system_zero_based: bool) -> SchemaRef {
+pub fn translation_core_schema(
+    coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
+) -> SchemaRef {
     let fields = vec![
         Field::new("transcript_id", DataType::Utf8, false),
         Field::new("stable_id", DataType::Utf8, true),
@@ -339,12 +357,15 @@ pub fn translation_core_schema(coordinate_system_zero_based: bool) -> SchemaRef 
         Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
     ];
-    new_schema(fields, coordinate_system_zero_based)
+    new_schema(fields, coordinate_system_zero_based, cache_source_type)
 }
 
 /// Schema for the `translation_sift` split file: position-range sift/polyphen data.
 /// Sorted by `(chrom, start)` to enable RG pruning for windowed sift/polyphen loading.
-pub fn translation_sift_schema(coordinate_system_zero_based: bool) -> SchemaRef {
+pub fn translation_sift_schema(
+    coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
+) -> SchemaRef {
     let fields = vec![
         Field::new("transcript_id", DataType::Utf8, false),
         Field::new("chrom", DataType::Utf8, false),
@@ -353,7 +374,7 @@ pub fn translation_sift_schema(coordinate_system_zero_based: bool) -> SchemaRef 
         Field::new("sift_predictions", prediction_list_data_type(), true),
         Field::new("polyphen_predictions", prediction_list_data_type(), true),
     ];
-    new_schema(fields, coordinate_system_zero_based)
+    new_schema(fields, coordinate_system_zero_based, cache_source_type)
 }
 
 fn provenance_fields(cache_info: &CacheInfo) -> Vec<Field> {
@@ -373,11 +394,19 @@ fn provenance_fields(cache_info: &CacheInfo) -> Vec<Field> {
     fields
 }
 
-fn new_schema(fields: Vec<Field>, coordinate_system_zero_based: bool) -> SchemaRef {
+fn new_schema(
+    fields: Vec<Field>,
+    coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
+) -> SchemaRef {
     let mut metadata = HashMap::new();
     metadata.insert(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
+    );
+    metadata.insert(
+        VEP_CACHE_SOURCE_TYPE_METADATA_KEY.to_string(),
+        cache_source_type.as_str().to_string(),
     );
     Arc::new(Schema::new_with_metadata(fields, metadata))
 }
@@ -386,6 +415,7 @@ fn new_schema(fields: Vec<Field>, coordinate_system_zero_based: bool) -> SchemaR
 mod tests {
     use super::*;
     use crate::info::{CacheInfo, SourceDescriptor};
+    use crate::source_type::{CacheSourceType, VEP_CACHE_SOURCE_TYPE_METADATA_KEY};
     use std::path::PathBuf;
 
     fn test_cache_info() -> CacheInfo {
@@ -463,7 +493,7 @@ mod tests {
     #[test]
     fn variation_schema_required_fields() {
         let info = test_cache_info();
-        let schema = variation_schema(&info, false).unwrap();
+        let schema = variation_schema(&info, false, CacheSourceType::Ensembl).unwrap();
         assert!(schema.column_with_name("chrom").is_some());
         assert!(schema.column_with_name("start").is_some());
         assert!(schema.column_with_name("end").is_some());
@@ -475,7 +505,7 @@ mod tests {
     #[test]
     fn variation_schema_optional_fields() {
         let info = test_cache_info();
-        let schema = variation_schema(&info, false).unwrap();
+        let schema = variation_schema(&info, false, CacheSourceType::Ensembl).unwrap();
         assert!(schema.column_with_name("failed").is_some());
         assert!(schema.column_with_name("clin_sig").is_some());
         assert!(schema.column_with_name("var_synonyms").is_some());
@@ -484,7 +514,7 @@ mod tests {
     #[test]
     fn variation_schema_provenance_fields() {
         let info = test_cache_info();
-        let schema = variation_schema(&info, false).unwrap();
+        let schema = variation_schema(&info, false, CacheSourceType::Ensembl).unwrap();
         assert!(schema.column_with_name("species").is_some());
         assert!(schema.column_with_name("assembly").is_some());
         assert!(schema.column_with_name("cache_version").is_some());
@@ -494,7 +524,7 @@ mod tests {
     #[test]
     fn variation_schema_with_sources() {
         let info = test_cache_info_with_sources();
-        let schema = variation_schema(&info, false).unwrap();
+        let schema = variation_schema(&info, false, CacheSourceType::Ensembl).unwrap();
         assert!(schema.column_with_name("dbsnp_ids").is_some());
         assert!(schema.column_with_name("source_dbsnp").is_some());
     }
@@ -503,7 +533,7 @@ mod tests {
     fn variation_schema_empty_cols_errors() {
         let mut info = test_cache_info();
         info.variation_cols.clear();
-        assert!(variation_schema(&info, false).is_err());
+        assert!(variation_schema(&info, false, CacheSourceType::Ensembl).is_err());
     }
 
     #[test]
@@ -511,7 +541,7 @@ mod tests {
         let mut info = test_cache_info();
         info.variation_cols.push("AFR".to_string());
         info.variation_cols.push("AF".to_string());
-        let schema = variation_schema(&info, false).unwrap();
+        let schema = variation_schema(&info, false, CacheSourceType::Ensembl).unwrap();
         assert!(schema.column_with_name("AFR").is_some());
         assert!(schema.column_with_name("AF").is_some());
     }
@@ -519,16 +549,28 @@ mod tests {
     #[test]
     fn variation_schema_coordinate_metadata() {
         let info = test_cache_info();
-        let schema_1based = variation_schema(&info, false).unwrap();
+        let schema_1based = variation_schema(&info, false, CacheSourceType::Ensembl).unwrap();
         assert_eq!(
             schema_1based.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
             Some(&"false".to_string())
         );
+        assert_eq!(
+            schema_1based
+                .metadata()
+                .get(VEP_CACHE_SOURCE_TYPE_METADATA_KEY),
+            Some(&"ensembl".to_string())
+        );
 
-        let schema_0based = variation_schema(&info, true).unwrap();
+        let schema_0based = variation_schema(&info, true, CacheSourceType::RefSeq).unwrap();
         assert_eq!(
             schema_0based.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
             Some(&"true".to_string())
+        );
+        assert_eq!(
+            schema_0based
+                .metadata()
+                .get(VEP_CACHE_SOURCE_TYPE_METADATA_KEY),
+            Some(&"refseq".to_string())
         );
     }
 
@@ -539,9 +581,10 @@ mod tests {
     #[test]
     fn transcript_schema_has_expected_fields() {
         let info = test_cache_info();
-        let schema = transcript_schema(&info, false);
+        let schema = transcript_schema(&info, false, CacheSourceType::Ensembl);
         assert!(schema.column_with_name("chrom").is_some());
         assert!(schema.column_with_name("stable_id").is_some());
+        assert!(schema.column_with_name("db_id").is_some());
         assert!(schema.column_with_name("biotype").is_some());
         assert!(schema.column_with_name("gene_stable_id").is_some());
         assert!(schema.column_with_name("exons").is_some());
@@ -558,7 +601,7 @@ mod tests {
     #[test]
     fn transcript_schema_exons_type() {
         let info = test_cache_info();
-        let schema = transcript_schema(&info, false);
+        let schema = transcript_schema(&info, false, CacheSourceType::Ensembl);
         let (_, field) = schema.column_with_name("exons").unwrap();
         assert_eq!(field.data_type(), &exon_list_data_type());
     }
@@ -570,7 +613,7 @@ mod tests {
     #[test]
     fn regulatory_schema_fields() {
         let info = test_cache_info();
-        let schema = regulatory_feature_schema(&info, false);
+        let schema = regulatory_feature_schema(&info, false, CacheSourceType::Ensembl);
         assert!(schema.column_with_name("chrom").is_some());
         assert!(schema.column_with_name("stable_id").is_some());
         assert!(schema.column_with_name("feature_type").is_some());
@@ -580,7 +623,7 @@ mod tests {
     #[test]
     fn motif_schema_fields() {
         let info = test_cache_info();
-        let schema = motif_feature_schema(&info, false);
+        let schema = motif_feature_schema(&info, false, CacheSourceType::Ensembl);
         assert!(schema.column_with_name("motif_id").is_some());
         assert!(schema.column_with_name("score").is_some());
         assert!(schema.column_with_name("binding_matrix").is_some());
@@ -594,7 +637,7 @@ mod tests {
     #[test]
     fn exon_schema_fields() {
         let info = test_cache_info();
-        let schema = exon_schema(&info, false);
+        let schema = exon_schema(&info, false, CacheSourceType::Ensembl);
         assert!(schema.column_with_name("chrom").is_some());
         assert!(schema.column_with_name("phase").is_some());
         assert!(schema.column_with_name("end_phase").is_some());
@@ -605,7 +648,7 @@ mod tests {
     #[test]
     fn translation_schema_fields() {
         let info = test_cache_info();
-        let schema = translation_schema(&info, false);
+        let schema = translation_schema(&info, false, CacheSourceType::Ensembl);
         assert!(schema.column_with_name("stable_id").is_some());
         assert!(schema.column_with_name("protein_len").is_some());
         assert!(schema.column_with_name("transcript_id").is_some());
@@ -635,7 +678,7 @@ mod tests {
 
     #[test]
     fn translation_core_schema_fields() {
-        let schema = translation_core_schema(false);
+        let schema = translation_core_schema(false, CacheSourceType::Ensembl);
         assert!(schema.column_with_name("transcript_id").is_some());
         assert!(schema.column_with_name("stable_id").is_some());
         assert!(schema.column_with_name("cds_len").is_some());
@@ -669,7 +712,7 @@ mod tests {
 
     #[test]
     fn translation_sift_schema_fields() {
-        let schema = translation_sift_schema(false);
+        let schema = translation_sift_schema(false, CacheSourceType::Ensembl);
         assert!(schema.column_with_name("transcript_id").is_some());
         assert!(schema.column_with_name("chrom").is_some());
         assert!(schema.column_with_name("start").is_some());
@@ -683,15 +726,30 @@ mod tests {
 
     #[test]
     fn translation_split_schemas_coordinate_metadata() {
-        let core_0 = translation_core_schema(true);
+        let core_0 = translation_core_schema(true, CacheSourceType::Ensembl);
         assert_eq!(
             core_0.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
             Some(&"true".to_string())
         );
-        let sift_1 = translation_sift_schema(false);
+        let sift_1 = translation_sift_schema(false, CacheSourceType::Ensembl);
         assert_eq!(
             sift_1.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
             Some(&"false".to_string())
+        );
+    }
+
+    #[test]
+    fn translation_split_schemas_accept_explicit_cache_source_metadata() {
+        let core = translation_core_schema(false, CacheSourceType::RefSeq);
+        assert_eq!(
+            core.metadata().get(VEP_CACHE_SOURCE_TYPE_METADATA_KEY),
+            Some(&"refseq".to_string())
+        );
+
+        let sift = translation_sift_schema(false, CacheSourceType::Merged);
+        assert_eq!(
+            sift.metadata().get(VEP_CACHE_SOURCE_TYPE_METADATA_KEY),
+            Some(&"merged".to_string())
         );
     }
 

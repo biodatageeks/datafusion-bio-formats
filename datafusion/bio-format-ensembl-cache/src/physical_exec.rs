@@ -291,7 +291,29 @@ pub(crate) fn file_matches_chrom_predicate(
         return true; // can't determine chrom → don't prune
     };
 
-    file_chrom == *pred_chrom
+    if file_chrom != *pred_chrom {
+        return false;
+    }
+
+    let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+        return true;
+    };
+    let Some((file_start, file_end)) = parse_region_file_range(file_name) else {
+        return true;
+    };
+
+    if let Some(start_min) = predicate.start_min
+        && file_end < start_min
+    {
+        return false;
+    }
+    if let Some(end_max) = predicate.end_max
+        && file_start > end_max
+    {
+        return false;
+    }
+
+    true
 }
 
 /// Parses `{chrom}_{start}-{end}_var.gz` → (chrom, start, end)
@@ -313,6 +335,27 @@ pub(crate) fn parse_file_chrom_region(name: &str) -> Option<(&str, i64, i64)> {
     let start = start_raw.parse::<i64>().ok()?;
     let end = end_raw.parse::<i64>().ok()?;
     Some((chrom, start, end))
+}
+
+/// Parses `{start}-{end}.gz` and `{start}-{end}_reg.gz` → (start, end).
+fn parse_region_file_range(name: &str) -> Option<(i64, i64)> {
+    let (start_raw, rest) = name.split_once('-')?;
+    if start_raw.is_empty() || !start_raw.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let end_len = rest
+        .as_bytes()
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let end_raw = &rest[..end_len];
+    if end_raw.is_empty() {
+        return None;
+    }
+
+    let start = start_raw.parse::<i64>().ok()?;
+    let end = end_raw.parse::<i64>().ok()?;
+    Some((start, end))
 }
 
 impl ExecutionPlan for EnsemblCacheExec {
@@ -1553,5 +1596,43 @@ mod tests {
             .map(|f| f.to_str().unwrap().to_string())
             .collect();
         assert_eq!(flattened, expected);
+    }
+
+    #[test]
+    fn transcript_region_file_pruning_uses_interval_overlap() {
+        use crate::filter::SimplePredicate;
+
+        let matching = PathBuf::from("/cache/22/15000001-16000000.gz");
+        let before = PathBuf::from("/cache/22/14000001-15000000.gz");
+        let after = PathBuf::from("/cache/22/16000001-17000000.gz");
+        let other_chrom = PathBuf::from("/cache/1/15000001-16000000.gz");
+
+        let predicate = SimplePredicate {
+            chrom: Some("22".to_string()),
+            start_min: Some(15_500_000),
+            end_max: Some(15_600_000),
+            ..Default::default()
+        };
+
+        assert!(file_matches_chrom_predicate(
+            &matching,
+            &predicate,
+            EnsemblEntityKind::Transcript,
+        ));
+        assert!(!file_matches_chrom_predicate(
+            &before,
+            &predicate,
+            EnsemblEntityKind::Transcript,
+        ));
+        assert!(!file_matches_chrom_predicate(
+            &after,
+            &predicate,
+            EnsemblEntityKind::Transcript,
+        ));
+        assert!(!file_matches_chrom_predicate(
+            &other_chrom,
+            &predicate,
+            EnsemblEntityKind::Transcript,
+        ));
     }
 }
