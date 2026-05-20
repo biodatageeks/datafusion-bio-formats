@@ -31,6 +31,28 @@ fn transcript_select_list(schema: &Schema) -> String {
         .join(", ")
 }
 
+fn schema_has_column(schema: &Schema, name: &str) -> bool {
+    schema.fields().iter().any(|field| field.name() == name)
+}
+
+fn transcript_dedup_order_expr(schema: &Schema) -> String {
+    let mut order = Vec::new();
+    // Mirror Ensembl VEP's RefSeq/merged duplicate handling where possible:
+    // prefer Ensembl-source rows, then choose the lowest dbID when resolving
+    // stable-id duplicates. The following source-region/source-file terms only
+    // stabilize cache boundary duplicates.
+    if schema_has_column(schema, "source") {
+        order.push("CASE WHEN source = 'Ensembl' THEN 0 ELSE 1 END".to_string());
+    }
+    if schema_has_column(schema, "db_id") {
+        order.push("db_id NULLS LAST".to_string());
+    }
+    order.push(source_region_preference_expr("start", "source_file"));
+    order.push("cds_start NULLS LAST".to_string());
+    order.push("source_file".to_string());
+    order.join(", ")
+}
+
 fn build_export_query_with_where_clause(
     kind: EnsemblEntityKind,
     table_name: &str,
@@ -41,12 +63,12 @@ fn build_export_query_with_where_clause(
         EnsemblEntityKind::Transcript => {
             let schema = schema.expect("Transcript requires schema for HGNC propagation");
             let select_list = transcript_select_list(schema);
-            let source_pref = source_region_preference_expr("start", "source_file");
+            let dedup_order = transcript_dedup_order_expr(schema);
             format!(
                 "SELECT {select_list} FROM (\
                     SELECT *, ROW_NUMBER() OVER (\
-                        PARTITION BY stable_id \
-                        ORDER BY {source_pref}, cds_start NULLS LAST, source_file\
+                        PARTITION BY chrom, stable_id \
+                        ORDER BY {dedup_order}\
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
                 ) WHERE _rn = 1 \
@@ -58,7 +80,7 @@ fn build_export_query_with_where_clause(
             format!(
                 "SELECT * FROM (\
                     SELECT *, ROW_NUMBER() OVER (\
-                        PARTITION BY transcript_id, exon_number \
+                        PARTITION BY chrom, transcript_id, exon_number \
                         ORDER BY stable_id NULLS LAST\
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
@@ -77,7 +99,7 @@ fn build_translation_dedup_query_with_where_clause(table_name: &str, where_claus
     format!(
         "SELECT * FROM (\
             SELECT *, ROW_NUMBER() OVER (\
-                PARTITION BY transcript_id \
+                PARTITION BY chrom, transcript_id \
                 ORDER BY {source_pref}, cdna_coding_start NULLS LAST, source_file\
             ) AS _rn \
             FROM {table_name}{where_clause}\
@@ -153,6 +175,8 @@ mod tests {
             Field::new("start", DataType::Int64, false),
             Field::new("end", DataType::Int64, false),
             Field::new("stable_id", DataType::Utf8, false),
+            Field::new("db_id", DataType::Int64, true),
+            Field::new("source", DataType::Utf8, true),
             Field::new("cds_start", DataType::Int64, true),
             Field::new("gene_symbol", DataType::Utf8, true),
             Field::new("gene_hgnc_id", DataType::Utf8, true),
@@ -185,7 +209,9 @@ mod tests {
             Some(&schema),
         );
         assert!(q.contains("ROW_NUMBER()"));
-        assert!(q.contains("PARTITION BY stable_id"));
+        assert!(q.contains("PARTITION BY chrom, stable_id"));
+        assert!(q.contains("CASE WHEN source = 'Ensembl' THEN 0 ELSE 1 END"));
+        assert!(q.contains("db_id NULLS LAST"));
         assert!(q.contains("WHERE _rn = 1"));
         assert!(q.contains("ORDER BY chrom, start"));
         assert!(q.contains("WHERE chrom = 'X'"));
@@ -220,7 +246,7 @@ mod tests {
     #[test]
     fn build_export_query_exon_dedup() {
         let q = build_export_query(EnsemblEntityKind::Exon, "exon", None, None);
-        assert!(q.contains("PARTITION BY transcript_id, exon_number"));
+        assert!(q.contains("PARTITION BY chrom, transcript_id, exon_number"));
         assert!(q.contains("ORDER BY transcript_id, start"));
     }
 
@@ -248,14 +274,14 @@ mod tests {
         assert!(q.contains("WHERE chrom IN ('1', '2')"));
         assert!(q.contains("ROW_NUMBER()"));
         assert!(q.contains("WHERE _rn = 1"));
-        assert!(q.contains("PARTITION BY stable_id"));
+        assert!(q.contains("PARTITION BY chrom, stable_id"));
         assert!(q.contains("source_file LIKE CONCAT('%/'"));
     }
 
     #[test]
     fn build_translation_dedup_query_prefers_transcript_start_region() {
         let q = build_translation_dedup_query("tl", Some("2"));
-        assert!(q.contains("PARTITION BY transcript_id"));
+        assert!(q.contains("PARTITION BY chrom, transcript_id"));
         assert!(q.contains("source_file LIKE CONCAT('%/'"));
         assert!(q.contains("cdna_coding_start NULLS LAST"));
         assert!(q.contains("WHERE chrom = '2'"));
@@ -264,7 +290,7 @@ mod tests {
     #[test]
     fn build_translation_dedup_query_multi_chrom_prefers_transcript_start_region() {
         let q = build_translation_dedup_query_multi_chrom("tl", &["2", "X"]);
-        assert!(q.contains("PARTITION BY transcript_id"));
+        assert!(q.contains("PARTITION BY chrom, transcript_id"));
         assert!(q.contains("source_file LIKE CONCAT('%/'"));
         assert!(q.contains("WHERE chrom IN ('2', 'X')"));
     }

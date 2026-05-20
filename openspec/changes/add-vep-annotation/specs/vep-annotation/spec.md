@@ -130,6 +130,48 @@ The system SHALL consume cache data through DataFusion `TableProvider` instances
 - **THEN** the system returns a clear error identifying which required columns are missing
 - **AND** the error includes the expected column names and types
 
+### Requirement: Explicit VEP Cache Source Mode
+The system SHALL require every VEP cache table to declare an explicit `cache_source_type` value of `ensembl`, `merged`, or `refseq`, and SHALL expose that value in schema metadata as `bio.vep.cache_source_type`.
+
+#### Scenario: Register native Ensembl cache with explicit source mode
+- **WHEN** a user registers a native Ensembl cache table provider with `cache_source_type = 'refseq'`
+- **THEN** the table schema metadata contains `bio.vep.cache_source_type = 'refseq'`
+- **AND** downstream VEP annotation treats the table as a RefSeq cache
+
+#### Scenario: Export cache table with explicit source mode
+- **WHEN** a user exports native cache data to Parquet or another pluggable table format
+- **THEN** the export command requires an explicit `cache_source_type`
+- **AND** the exported table preserves `bio.vep.cache_source_type` in schema metadata
+
+#### Scenario: Missing cache source mode is rejected
+- **WHEN** a VEP cache table is registered or exported without `cache_source_type`
+- **THEN** the system returns a clear error requiring one of `ensembl`, `merged`, or `refseq`
+- **AND** the system does not infer source mode from directory names such as `homo_sapiens_refseq` or `homo_sapiens_merged`
+
+#### Scenario: Legacy merged boolean is rejected
+- **WHEN** a user provides a legacy `merged = true` option instead of `cache_source_type = 'merged'`
+- **THEN** the system returns a clear error explaining that `cache_source_type` is required
+- **AND** no compatibility fallback treats `merged = true` as merged source mode
+
+### Requirement: Source-Specific Transcript Semantics
+The system SHALL apply Ensembl VEP-compatible transcript inclusion and output semantics based on explicit `cache_source_type`.
+
+#### Scenario: Ensembl source mode filters Ensembl transcripts
+- **WHEN** `annotate_variants()` reads a transcript table with `bio.vep.cache_source_type = 'ensembl'`
+- **THEN** transcript consequence prediction includes Ensembl transcript stable IDs such as `ENST...`
+- **AND** RefSeq-only transcript IDs are excluded unless they are represented by the explicit cache source mode
+
+#### Scenario: RefSeq source mode filters RefSeq transcripts
+- **WHEN** `annotate_variants()` reads a transcript table with `bio.vep.cache_source_type = 'refseq'`
+- **THEN** transcript consequence prediction includes RefSeq transcript IDs such as `NM_...`, `NR_...`, `XM_...`, and `XR_...`
+- **AND** mitochondrial RefSeq transcript names such as numeric IDs and `rna-*` IDs are retained when they match Ensembl VEP RefSeq cache behavior
+
+#### Scenario: Merged source mode preserves merged-only SOURCE output
+- **WHEN** `annotate_variants()` reads a transcript table with `bio.vep.cache_source_type = 'merged'`
+- **THEN** transcript consequence prediction can include both Ensembl and RefSeq cache rows
+- **AND** the output `SOURCE` field is populated for merged cache rows
+- **AND** the output `SOURCE` field is not populated merely because the source mode is `refseq`
+
 ### Requirement: Allele Conversion UDFs
 The system SHALL provide scalar UDFs for converting between VCF and VEP allele representations and for matching alleles against cache entries.
 
@@ -151,7 +193,7 @@ The system SHALL provide scalar UDFs for converting between VCF and VEP allele r
 - **AND** `match_allele('C', 'A/G/T')` returns `false`
 
 ### Requirement: Transcript Model Structured Columns
-The system SHALL provide structured columns in the Ensembl cache transcript table for exon arrays, coding sequences, and annotation metadata required by the consequence engine.
+The system SHALL provide structured columns in the Ensembl cache transcript table for exon arrays, coding sequences, transcript database IDs, and annotation metadata required by the consequence engine.
 
 #### Scenario: Query exon structure
 - **WHEN** a user executes `SELECT stable_id, exons FROM vep_transcript LIMIT 10`
@@ -166,6 +208,11 @@ The system SHALL provide structured columns in the Ensembl cache transcript tabl
 - **WHEN** a query does not select `cdna_seq` or `peptide_seq`
 - **THEN** the parser skips extraction of `_variation_effect_feature_cache.translateable_seq` and `peptide`
 - **AND** parsing throughput increases due to reduced per-record processing
+
+#### Scenario: Query transcript database ID
+- **WHEN** a user executes `SELECT stable_id, db_id FROM vep_transcript WHERE stable_id IS NOT NULL`
+- **THEN** the nullable `db_id` column contains the Ensembl Storable `dbID` value when present
+- **AND** downstream merged and RefSeq de-duplication can use `db_id` as a deterministic tie breaker
 
 ### Requirement: Promoted VEP Cache Attribute Columns
 The system SHALL expose transcript and motif attributes that are currently embedded only in `raw_object_json` as top-level nullable columns so downstream VEP annotation can avoid query-time JSON parsing for common CSQ fields.

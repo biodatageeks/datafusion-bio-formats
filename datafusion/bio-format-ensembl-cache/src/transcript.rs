@@ -27,6 +27,7 @@ pub(crate) struct TranscriptColumnIndices {
     end: Option<usize>,
     strand: Option<usize>,
     stable_id: Option<usize>,
+    db_id: Option<usize>,
     version: Option<usize>,
     biotype: Option<usize>,
     source: Option<usize>,
@@ -122,6 +123,7 @@ impl TranscriptColumnIndices {
             end: col_map.get("end"),
             strand: col_map.get("strand"),
             stable_id: col_map.get("stable_id"),
+            db_id: col_map.get("db_id"),
             version: col_map.get("version"),
             biotype: col_map.get("biotype"),
             source: col_map.get("source"),
@@ -1096,6 +1098,12 @@ pub(crate) fn parse_transcript_line_into(
     }
 
     // Optional columns
+    if let Some(idx) = col_idx.db_id {
+        batch.set_opt_i64(
+            idx,
+            json_i64(object.get("dbID").or_else(|| object.get("db_id"))),
+        );
+    }
     if let Some(idx) = col_idx.version {
         batch.set_opt_i32(idx, json_i32(object.get("version")));
     }
@@ -1633,6 +1641,12 @@ fn append_transcript_storable_row_into(
     }
 
     // Optional scalar columns
+    if let Some(idx) = col_idx.db_id {
+        batch.set_opt_i64(
+            idx,
+            sv_i64(object.get("dbID").or_else(|| object.get("db_id"))),
+        );
+    }
     if let Some(idx) = col_idx.version {
         batch.set_opt_i32(
             idx,
@@ -2026,7 +2040,7 @@ mod tests {
     use crate::info::CacheInfo;
     use crate::schema::transcript_schema;
     use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter};
-    use datafusion::arrow::array::{Array, StringArray};
+    use datafusion::arrow::array::{Array, Int64Array, StringArray};
     use serde_json::json;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -2059,7 +2073,11 @@ mod tests {
         CacheInfo,
     ) {
         let cache_info = test_cache_info(serializer_type);
-        let schema = transcript_schema(&cache_info, false);
+        let schema = transcript_schema(
+            &cache_info,
+            false,
+            crate::source_type::CacheSourceType::Ensembl,
+        );
         let col_map = ColumnMap::from_schema(&schema);
         let batch = BatchBuilder::new(schema, 1).unwrap();
         let col_idx = TranscriptColumnIndices::new(&col_map);
@@ -2084,6 +2102,26 @@ mod tests {
             None
         } else {
             Some(values.value(0).to_string())
+        }
+    }
+
+    fn batch_i64_value(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+        col: &str,
+    ) -> Option<i64> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name(col)
+            .unwrap_or_else(|| panic!("missing column: {col}"));
+        let values = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap_or_else(|| panic!("expected Int64 column: {col}"));
+        if values.is_null(0) {
+            None
+        } else {
+            Some(values.value(0))
         }
     }
 
@@ -2195,6 +2233,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_transcript_line_extracts_db_id() {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let payload = json!({
+            "stable_id": "ENST000010",
+            "dbID": 4242,
+            "strand": 1,
+            "biotype": "protein_coding"
+        });
+        let line = format!(
+            "1\t100\t200\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        assert!(written);
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(batch_i64_value(&batch, "db_id"), Some(4242));
+    }
+
+    #[test]
     fn append_transcript_storable_row_promotes_nested_vef_sequences() {
         let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
         let mut vef_cache = HashMap::new();
@@ -2255,6 +2325,43 @@ mod tests {
             batch_utf8_value(&batch, "five_prime_utr_seq").as_deref(),
             Some("GGCC")
         );
+    }
+
+    #[test]
+    fn append_transcript_storable_row_extracts_db_id() {
+        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+        let mut object = HashMap::new();
+        object.insert("dbID".to_string(), SValue::Int(31337));
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "1".to_string(),
+            start: 100,
+            end: 200,
+            source_start: 100,
+            source_end: 200,
+            strand: 1,
+            stable_id: "ENST000011".to_string(),
+        };
+
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(batch_i64_value(&batch, "db_id"), Some(31337));
     }
 
     #[test]

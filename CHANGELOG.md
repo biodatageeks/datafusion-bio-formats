@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - BAM file format support for sequence alignments
 - VCF file format support for genetic variants with case-sensitive INFO/FORMAT fields
 - FASTQ file format support with parallel BGZF reading
+- Ensembl VEP cache source metadata for explicit `ensembl`, `merged`, and
+  `refseq` cache modes, including RefSeq cache schema support
 - Core utilities crate with object storage support (GCS, S3, Azure)
 - Comprehensive documentation for all crates with usage examples
 - CI workflow with formatting, linting, documentation, and testing checks
@@ -26,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Upgraded DataFusion to version 50.3.0
+- **BREAKING**: `datafusion-bio-format-ensembl-cache` table providers now
+  require an explicit `EnsemblCacheOptions::with_cache_source_type(...)` value,
+  and `translation_core_schema` / `translation_sift_schema` require a
+  `CacheSourceType` argument so generated schemas carry cache source metadata
 - Enhanced README with badges, quick start examples, and development instructions
 - Improved crate-level documentation with `#![warn(missing_docs)]` lint
 

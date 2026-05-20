@@ -16,6 +16,7 @@ mod info;
 mod physical_exec;
 mod regulatory;
 pub(crate) mod schema;
+mod source_type;
 mod tabix_reader;
 mod table_provider;
 mod transcript;
@@ -29,6 +30,7 @@ pub use export_query::{
     build_translation_dedup_query, build_translation_dedup_query_multi_chrom,
 };
 pub use schema::{translation_core_schema, translation_sift_schema};
+pub use source_type::{CacheSourceType, VEP_CACHE_SOURCE_TYPE_METADATA_KEY};
 pub use table_provider::{
     EnsemblCacheOptions, EnsemblCacheTableProvider, ExonTableProvider, MotifFeatureTableProvider,
     RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,

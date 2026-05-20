@@ -104,6 +104,17 @@
 - [x] 2.8.4 Add motif tests covering `transcription_factors` schema/queryability and alias extraction
 - [x] 2.8.5 Update `bio-format-ensembl-cache` README schema tables and projection-pushdown notes for the promoted columns
 
+### 2.9 Explicit Cache Source Mode and RefSeq Cache Support
+- [x] 2.9.1 Add `CacheSourceType` enum with `ensembl`, `merged`, and `refseq` values to `bio-format-ensembl-cache`
+- [x] 2.9.2 Add explicit `cache_source_type` to native cache provider/export options; reject missing or invalid values
+- [x] 2.9.3 Write `bio.vep.cache_source_type` schema metadata from the explicit option for transcript, variation, regulatory, motif, exon, and translation schemas
+- [x] 2.9.4 Ensure provider/export code does not infer source mode from paths such as `homo_sapiens_refseq` or `homo_sapiens_merged`
+- [x] 2.9.5 Parse transcript Storable/JSON `dbID` into nullable `db_id`
+- [x] 2.9.6 Update cache export de-duplication to use source-aware ordering and nullable `db_id` as a deterministic tie breaker for merged and RefSeq caches
+- [x] 2.9.7 Add region overlap pruning for RefSeq/merged transcript and regulatory region files such as `15000001-16000000.gz`
+- [x] 2.9.8 Add unit tests for explicit source-mode validation, schema metadata, rejected path inference, and `db_id` parsing
+- [x] 2.9.9 Add gated integration smoke tests against a real RefSeq cache path for chr22, MT, and an alternate contig
+
 ## 3. Phase 3: Consequence Engine (bio-functions)
 
 ### 3.1 Implement Genetic Code Tables (`codon.rs`)
@@ -181,6 +192,16 @@
 - [ ] 4.5.4 Test combined mode: `annotate_variants` + `lookup_variants` via SQL JOIN
 - [ ] 4.5.5 Test with multi-chromosome VCF verifying parallel execution
 - [ ] 4.5.6 Benchmark throughput on 1M-variant VCF against full GRCh38 cache
+
+### 4.6 Cache Source Mode Semantics
+- [ ] 4.6.1 Read `bio.vep.cache_source_type` from cache table schema metadata in `lookup_variants()` and `annotate_variants()`
+- [ ] 4.6.2 Reject cache tables that omit `bio.vep.cache_source_type` or use a value other than `ensembl`, `merged`, or `refseq`
+- [ ] 4.6.3 Remove unsupported legacy `merged = true` option handling; require `cache_source_type = 'merged'` via schema metadata instead
+- [ ] 4.6.4 Implement Ensembl, merged, and RefSeq transcript inclusion filters matching Ensembl VEP behavior, including RefSeq mitochondrial transcript IDs
+- [ ] 4.6.5 Populate `SOURCE` output only for merged cache mode; keep it empty for Ensembl-only and RefSeq-only modes
+- [ ] 4.6.6 Extend RefSeq hydration helpers to recognize RefSeq mitochondrial transcript IDs accepted by Ensembl VEP
+- [ ] 4.6.7 Add tests covering `NM_`, `NR_`, `XM_`, `XR_`, numeric mitochondrial IDs, `rna-*` IDs, and rejected `merged = true`
+- [ ] 4.6.8 Add RefSeq cache comparison tests against Ensembl VEP output for representative chr22 and MT variants
 
 ## 5. Phase 5: Polish (deferred)
 

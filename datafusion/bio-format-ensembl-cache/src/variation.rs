@@ -929,7 +929,8 @@ mod tests {
         SourceIdWriter,
     ) {
         let info = make_cache_info(standard_cols(), standard_sources());
-        let schema = variation_schema(&info, false).unwrap();
+        let schema =
+            variation_schema(&info, false, crate::source_type::CacheSourceType::Ensembl).unwrap();
         let col_map = ColumnMap::from_schema(&schema);
         let ctx = VariationContext::new(&info);
         let col_idx = VariationColumnIndices::new(&col_map, &ctx);

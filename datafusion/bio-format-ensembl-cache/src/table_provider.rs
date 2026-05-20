@@ -14,6 +14,7 @@ use crate::schema::{
     exon_schema, motif_feature_schema, regulatory_feature_schema, transcript_schema,
     translation_schema, variation_schema,
 };
+use crate::source_type::CacheSourceType;
 use crate::variation::detect_region_size;
 use async_trait::async_trait;
 use datafusion::arrow::compute::SortOptions;
@@ -34,6 +35,13 @@ use std::sync::Arc;
 pub struct EnsemblCacheOptions {
     /// Root directory of a single Ensembl VEP cache.
     pub cache_root: String,
+    /// Explicit VEP cache source mode.
+    ///
+    /// This must be set by callers. The provider does not infer source mode
+    /// from directory names such as `homo_sapiens_refseq`. Leaving this as
+    /// `None` (or resetting it to `None`) causes provider construction to fail
+    /// before any filesystem access.
+    pub cache_source_type: Option<CacheSourceType>,
     /// If true, expose genomic coordinates as 0-based half-open.
     /// If false, expose genomic coordinates as 1-based closed (VEP native).
     ///
@@ -72,12 +80,19 @@ impl EnsemblCacheOptions {
     pub fn new(cache_root: impl Into<String>) -> Self {
         Self {
             cache_root: cache_root.into(),
+            cache_source_type: None,
             coordinate_system_zero_based: false,
             target_partitions: None,
             batch_size_hint: None,
             max_storable_partitions: None,
             preserve_sort_order: None,
         }
+    }
+
+    /// Returns options with an explicit VEP cache source mode.
+    pub fn with_cache_source_type(mut self, cache_source_type: CacheSourceType) -> Self {
+        self.cache_source_type = Some(cache_source_type);
+        self
     }
 }
 
@@ -103,12 +118,21 @@ struct ProviderInner {
 
 impl ProviderInner {
     fn new(kind: EnsemblEntityKind, options: EnsemblCacheOptions) -> Result<Self> {
+        let cache_source_type = options.cache_source_type.ok_or_else(|| {
+            exec_err(
+                "EnsemblCacheOptions.cache_source_type is required; provide one of ensembl, merged, or refseq",
+            )
+        })?;
         let cache_root = Path::new(&options.cache_root);
         let cache_info = CacheInfo::from_root(cache_root)?;
 
         let (schema, files, variation_region_size) = match kind {
             EnsemblEntityKind::Variation => {
-                let schema = variation_schema(&cache_info, options.coordinate_system_zero_based)?;
+                let schema = variation_schema(
+                    &cache_info,
+                    options.coordinate_system_zero_based,
+                    cache_source_type,
+                )?;
                 // var_type is part of VEP cache contract. v1 discovery already prefers all_vars
                 // when present, which matches tabix caches.
                 let files = discover_variation_files(cache_root)?;
@@ -117,33 +141,51 @@ impl ProviderInner {
             }
             EnsemblEntityKind::Transcript => {
                 validate_serializer(&cache_info)?;
-                let schema = transcript_schema(&cache_info, options.coordinate_system_zero_based);
+                let schema = transcript_schema(
+                    &cache_info,
+                    options.coordinate_system_zero_based,
+                    cache_source_type,
+                );
                 let files = discover_transcript_files(cache_root)?;
                 (schema, files, None)
             }
             EnsemblEntityKind::RegulatoryFeature => {
                 validate_serializer(&cache_info)?;
-                let schema =
-                    regulatory_feature_schema(&cache_info, options.coordinate_system_zero_based);
+                let schema = regulatory_feature_schema(
+                    &cache_info,
+                    options.coordinate_system_zero_based,
+                    cache_source_type,
+                );
                 let files = discover_regulatory_files(cache_root)?;
                 (schema, files, None)
             }
             EnsemblEntityKind::MotifFeature => {
                 validate_serializer(&cache_info)?;
-                let schema =
-                    motif_feature_schema(&cache_info, options.coordinate_system_zero_based);
+                let schema = motif_feature_schema(
+                    &cache_info,
+                    options.coordinate_system_zero_based,
+                    cache_source_type,
+                );
                 let files = discover_regulatory_files(cache_root)?;
                 (schema, files, None)
             }
             EnsemblEntityKind::Exon => {
                 validate_serializer(&cache_info)?;
-                let schema = exon_schema(&cache_info, options.coordinate_system_zero_based);
+                let schema = exon_schema(
+                    &cache_info,
+                    options.coordinate_system_zero_based,
+                    cache_source_type,
+                );
                 let files = discover_transcript_files(cache_root)?;
                 (schema, files, None)
             }
             EnsemblEntityKind::Translation => {
                 validate_serializer(&cache_info)?;
-                let schema = translation_schema(&cache_info, options.coordinate_system_zero_based);
+                let schema = translation_schema(
+                    &cache_info,
+                    options.coordinate_system_zero_based,
+                    cache_source_type,
+                );
                 let files = discover_transcript_files(cache_root)?;
                 (schema, files, None)
             }
@@ -598,3 +640,53 @@ impl_table_provider!(RegulatoryFeatureTableProvider);
 impl_table_provider!(MotifFeatureTableProvider);
 impl_table_provider!(ExonTableProvider);
 impl_table_provider!(TranslationTableProvider);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_requires_explicit_cache_source_type() {
+        let err = VariationTableProvider::new(EnsemblCacheOptions::new("/tmp/missing-cache"))
+            .expect_err("missing cache_source_type should fail before file discovery");
+        assert!(
+            err.to_string().contains("cache_source_type"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn provider_does_not_infer_cache_source_type_from_path_name() {
+        let err =
+            TranscriptTableProvider::new(EnsemblCacheOptions::new("/tmp/homo_sapiens_refseq"))
+                .expect_err("path suffix must not imply RefSeq source mode");
+        assert!(
+            err.to_string().contains("cache_source_type"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn cache_source_type_string_values_match_metadata_contract() {
+        assert_eq!(CacheSourceType::Ensembl.as_str(), "ensembl");
+        assert_eq!(CacheSourceType::Merged.as_str(), "merged");
+        assert_eq!(CacheSourceType::RefSeq.as_str(), "refseq");
+        assert_eq!(
+            "ensembl".parse::<CacheSourceType>(),
+            Ok(CacheSourceType::Ensembl)
+        );
+        assert_eq!(
+            "merged".parse::<CacheSourceType>(),
+            Ok(CacheSourceType::Merged)
+        );
+        assert_eq!(
+            "refseq".parse::<CacheSourceType>(),
+            Ok(CacheSourceType::RefSeq)
+        );
+        let err = "homo_sapiens_refseq"
+            .parse::<CacheSourceType>()
+            .expect_err("path suffix must not parse as cache source type");
+        assert!(err.contains("homo_sapiens_refseq"));
+        assert!(err.contains("ensembl, merged, refseq"));
+    }
+}

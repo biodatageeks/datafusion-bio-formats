@@ -318,12 +318,15 @@ reducing parse overhead.
 
 ```rust,no_run
 use datafusion::prelude::SessionContext;
-use datafusion_bio_format_ensembl_cache::{EnsemblCacheOptions, VariationTableProvider};
+use datafusion_bio_format_ensembl_cache::{
+    CacheSourceType, EnsemblCacheOptions, VariationTableProvider,
+};
 use std::sync::Arc;
 
 # async fn example() -> datafusion::common::Result<()> {
 let ctx = SessionContext::new();
-let mut options = EnsemblCacheOptions::new("/path/to/cache");
+let mut options = EnsemblCacheOptions::new("/path/to/cache")
+    .with_cache_source_type(CacheSourceType::Ensembl);
 options.coordinate_system_zero_based = true;
 options.target_partitions = Some(8);
 let table = VariationTableProvider::new(options)?;
@@ -340,7 +343,7 @@ and switch by entity type yourself.
 ```rust,no_run
 use datafusion::prelude::SessionContext;
 use datafusion_bio_format_ensembl_cache::{
-    EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
+    CacheSourceType, EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
 };
 
 fn parse_cache_type(cache_type: &str) -> Option<EnsemblEntityKind> {
@@ -361,7 +364,8 @@ let kind = parse_cache_type(cache_type).expect("unsupported cache type");
 
 let table = EnsemblCacheTableProvider::for_entity(
     kind,
-    EnsemblCacheOptions::new("/path/to/cache"),
+    EnsemblCacheOptions::new("/path/to/cache")
+        .with_cache_source_type(CacheSourceType::Ensembl),
 )?;
 
 let ctx = SessionContext::new();

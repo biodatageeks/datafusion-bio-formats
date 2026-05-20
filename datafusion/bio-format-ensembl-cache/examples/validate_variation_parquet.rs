@@ -7,7 +7,6 @@
 /// parquet row counts to surface any conversion losses.
 use datafusion::arrow::array::RecordBatchReader;
 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use datafusion_bio_format_ensembl_cache::EnsemblCacheOptions;
 use flate2::read::MultiGzDecoder;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -101,8 +100,6 @@ fn main() {
         println!("Chrom filter: {chrom}");
     }
 
-    // Discover variation files
-    let options = EnsemblCacheOptions::new(&cache_root);
     // Use a low-level approach: read info.txt to get variation_cols,
     // then walk the cache directory to find variation files.
     let cache_path = std::path::Path::new(&cache_root);
@@ -219,9 +216,6 @@ fn main() {
             println!("  {name}: {lines} lines, {fields} fields{flag}");
         }
     }
-
-    // Emit the options info just to confirm it was parseable
-    drop(options);
 }
 
 fn walk_variation_files(

@@ -8,7 +8,7 @@ use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
-    EnsemblCacheOptions, ExonTableProvider, MotifFeatureTableProvider,
+    CacheSourceType, EnsemblCacheOptions, ExonTableProvider, MotifFeatureTableProvider,
     RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,
     VariationTableProvider,
 };
@@ -17,6 +17,10 @@ use tempfile::TempDir;
 
 fn fixture_path(name: &str) -> String {
     format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+}
+
+fn ensembl_options(cache_root: impl Into<String>) -> EnsemblCacheOptions {
+    EnsemblCacheOptions::new(cache_root).with_cache_source_type(CacheSourceType::Ensembl)
 }
 
 /// Write all batches from a provider to a parquet file and return the path.
@@ -80,9 +84,8 @@ fn total_rows(batches: &[RecordBatch]) -> usize {
 #[tokio::test]
 async fn variation_parquet_roundtrip_preserves_row_count() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
     let original_schema = provider.schema();
 
     // Get original row count
@@ -142,9 +145,8 @@ async fn variation_parquet_roundtrip_preserves_row_count() -> datafusion::common
 #[tokio::test]
 async fn variation_parquet_roundtrip_preserves_values() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
 
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "var_values", &temp_dir).await;
 
@@ -195,9 +197,8 @@ async fn variation_parquet_roundtrip_preserves_values() -> datafusion::common::R
 #[tokio::test]
 async fn variation_parquet_roundtrip_source_ids() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_dynamic_sources",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_dynamic_sources")))?;
 
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "var_src", &temp_dir).await;
 
@@ -234,9 +235,8 @@ async fn variation_parquet_roundtrip_source_ids() -> datafusion::common::Result<
 #[tokio::test]
 async fn transcript_parquet_roundtrip_preserves_data() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     // Get original count
     let ctx1 = SessionContext::new();
@@ -293,9 +293,8 @@ async fn transcript_parquet_roundtrip_preserves_data() -> datafusion::common::Re
 #[tokio::test]
 async fn transcript_parquet_roundtrip_exons_list() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     // Write to parquet — the exons column is List<Struct<start, end, phase>>
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "tx_exons", &temp_dir).await;
@@ -327,9 +326,8 @@ async fn transcript_parquet_roundtrip_exons_list() -> datafusion::common::Result
 #[tokio::test]
 async fn transcript_parquet_roundtrip_ncrna_structure() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "tx_ncrna", &temp_dir).await;
 
@@ -370,8 +368,7 @@ async fn transcript_parquet_roundtrip_ncrna_structure() -> datafusion::common::R
 #[tokio::test]
 async fn translation_parquet_roundtrip_preserves_data() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     // Get original count
     let ctx1 = SessionContext::new();
@@ -416,8 +413,7 @@ async fn translation_parquet_roundtrip_preserves_data() -> datafusion::common::R
 #[tokio::test]
 async fn translation_parquet_roundtrip_protein_features() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "tl_pf", &temp_dir).await;
 
@@ -489,8 +485,7 @@ async fn translation_parquet_roundtrip_protein_features() -> datafusion::common:
 #[tokio::test]
 async fn translation_parquet_roundtrip_sift_polyphen() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "tl_pred", &temp_dir).await;
 
@@ -537,7 +532,7 @@ async fn translation_parquet_roundtrip_sift_polyphen() -> datafusion::common::Re
 #[tokio::test]
 async fn exon_parquet_roundtrip_preserves_data() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx1 = SessionContext::new();
     ctx1.register_table("exon_orig", Arc::new(provider.clone()))?;
@@ -596,9 +591,8 @@ async fn exon_parquet_roundtrip_preserves_data() -> datafusion::common::Result<(
 #[tokio::test]
 async fn regulatory_parquet_roundtrip() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = RegulatoryFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
+    let provider =
+        RegulatoryFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
 
     let ctx1 = SessionContext::new();
     ctx1.register_table("reg_orig", Arc::new(provider.clone()))?;
@@ -637,9 +631,8 @@ async fn regulatory_parquet_roundtrip() -> datafusion::common::Result<()> {
 #[tokio::test]
 async fn motif_parquet_roundtrip() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
+    let provider =
+        MotifFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
 
     let ctx1 = SessionContext::new();
     ctx1.register_table("motif_orig", Arc::new(provider.clone()))?;
@@ -687,9 +680,8 @@ async fn motif_parquet_roundtrip() -> datafusion::common::Result<()> {
 #[tokio::test]
 async fn parquet_roundtrip_supports_sql_filtering() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
 
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "var_filter", &temp_dir).await;
 
@@ -728,9 +720,8 @@ async fn parquet_roundtrip_preserves_all_schema_fields() -> datafusion::common::
     let temp_dir = TempDir::new().unwrap();
 
     // Test transcript schema — it has the most complex types (List<Struct>)
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
     let original_schema = provider.schema();
 
     let parquet_path = write_provider_to_parquet(Arc::new(provider), "tx_schema", &temp_dir).await;
@@ -761,7 +752,7 @@ async fn parquet_roundtrip_preserves_all_schema_fields() -> datafusion::common::
 async fn parquet_roundtrip_zero_based_coordinates() -> datafusion::common::Result<()> {
     let temp_dir = TempDir::new().unwrap();
 
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    let mut options = ensembl_options(fixture_path("variation_non_tabix"));
     options.coordinate_system_zero_based = true;
     let provider = VariationTableProvider::new(options)?;
 
