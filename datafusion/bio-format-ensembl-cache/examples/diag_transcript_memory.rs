@@ -1,14 +1,29 @@
 /// Diagnostic: measure RSS memory growth during transcript table scanning.
 ///
-/// Usage: cargo run --release --example diag_transcript_memory -- /path/to/vep/cache [partitions]
+/// Usage: VEP_CACHE_SOURCE_TYPE=<ensembl|merged|refseq> cargo run --release --example diag_transcript_memory -- /path/to/vep/cache [partitions]
 ///
 /// Streams all rows from the transcript table and reports RSS at regular
 /// intervals to identify memory growth patterns.
 use datafusion::prelude::{SessionConfig, SessionContext};
-use datafusion_bio_format_ensembl_cache::{EnsemblCacheOptions, TranscriptTableProvider};
+use datafusion_bio_format_ensembl_cache::{
+    CacheSourceType, EnsemblCacheOptions, TranscriptTableProvider,
+};
 use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Instant;
+
+fn cache_source_type_from_env() -> datafusion::common::Result<CacheSourceType> {
+    let value = std::env::var("VEP_CACHE_SOURCE_TYPE").map_err(|_| {
+        datafusion::error::DataFusionError::Execution(
+            "Set VEP_CACHE_SOURCE_TYPE to ensembl, merged, or refseq".to_string(),
+        )
+    })?;
+    value.parse().map_err(|err| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "invalid VEP_CACHE_SOURCE_TYPE {value:?}: {err}"
+        ))
+    })
+}
 
 fn rss_mb() -> f64 {
     // macOS: use mach API for accurate self-RSS
@@ -71,8 +86,10 @@ async fn main() -> datafusion::common::Result<()> {
         .nth(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or(1);
+    let cache_source_type = cache_source_type_from_env()?;
 
     println!("Cache: {cache_root}");
+    println!("Source type: {cache_source_type}");
     println!("Partitions: {partitions}");
     println!("Initial RSS: {:.1} MB", rss_mb());
 
@@ -84,7 +101,8 @@ async fn main() -> datafusion::common::Result<()> {
         .unwrap_or_else(|| "SELECT chrom, start, \"end\", stable_id FROM tx".to_string());
     let max_storable: Option<usize> = std::env::args().nth(4).and_then(|s| s.parse().ok());
 
-    let mut options = EnsemblCacheOptions::new(&cache_root);
+    let mut options =
+        EnsemblCacheOptions::new(&cache_root).with_cache_source_type(cache_source_type);
     options.target_partitions = Some(partitions);
     if let Some(cap) = max_storable {
         options.max_storable_partitions = Some(cap);

@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-vcf"
-version = "1.2.0"
+version = "1.7.0"
 description = "VCF file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
@@ -10,6 +10,7 @@ edition.workspace = true
 readme = "README.md"
 
 [dependencies]
+zarrs = { version = "0.23.10", default-features = true }
 datafusion.workspace = true
 datafusion-execution.workspace = true
 async-trait.workspace = true

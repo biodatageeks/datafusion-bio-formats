@@ -1,6 +1,6 @@
 /// Convert Ensembl VEP cache transcripts to Parquet with memory monitoring.
 ///
-/// Usage: cargo run --release --example transcript_to_parquet -- <cache_root> <output_dir> [partitions]
+/// Usage: VEP_CACHE_SOURCE_TYPE=<ensembl|merged|refseq> cargo run --release --example transcript_to_parquet -- <cache_root> <output_dir> [partitions]
 ///
 /// Uses streaming Parquet writers to avoid buffering all data in memory.
 /// Each partition writes directly to a separate Parquet file as batches arrive.
@@ -9,11 +9,26 @@ use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::physical_plan::execute_stream_partitioned;
 use datafusion::prelude::{SessionConfig, SessionContext};
-use datafusion_bio_format_ensembl_cache::{EnsemblCacheOptions, TranscriptTableProvider};
+use datafusion_bio_format_ensembl_cache::{
+    CacheSourceType, EnsemblCacheOptions, TranscriptTableProvider,
+};
 use futures::StreamExt;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Instant;
+
+fn cache_source_type_from_env() -> datafusion::common::Result<CacheSourceType> {
+    let value = std::env::var("VEP_CACHE_SOURCE_TYPE").map_err(|_| {
+        datafusion::error::DataFusionError::Execution(
+            "Set VEP_CACHE_SOURCE_TYPE to ensembl, merged, or refseq".to_string(),
+        )
+    })?;
+    value.parse().map_err(|err| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "invalid VEP_CACHE_SOURCE_TYPE {value:?}: {err}"
+        ))
+    })
+}
 
 fn rss_mb() -> f64 {
     #[cfg(target_os = "macos")]
@@ -69,16 +84,19 @@ async fn main() -> datafusion::common::Result<()> {
         .nth(3)
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
+    let cache_source_type = cache_source_type_from_env()?;
 
     println!("Cache root:  {cache_root}");
     println!("Output dir:  {output_dir}");
+    println!("Source type: {cache_source_type}");
     println!("Partitions:  {partitions}");
     println!("Initial RSS: {:.1} MB", rss_mb());
 
     let config = SessionConfig::new().with_target_partitions(partitions);
     let ctx = SessionContext::new_with_config(config);
 
-    let mut options = EnsemblCacheOptions::new(&cache_root);
+    let mut options =
+        EnsemblCacheOptions::new(&cache_root).with_cache_source_type(cache_source_type);
     options.target_partitions = Some(partitions);
     let provider = TranscriptTableProvider::new(options)?;
     ctx.register_table("tx", Arc::new(provider))?;

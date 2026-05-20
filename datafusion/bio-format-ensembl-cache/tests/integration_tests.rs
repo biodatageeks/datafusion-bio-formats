@@ -9,14 +9,20 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::test_utils::find_leaf_exec;
 use datafusion_bio_format_ensembl_cache::{
-    EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, ExonTableProvider,
-    MotifFeatureTableProvider, RegulatoryFeatureTableProvider, TranscriptTableProvider,
-    TranslationTableProvider, VEP_CHROMOSOMES_METADATA_KEY, VariationTableProvider,
+    CacheSourceType, EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
+    ExonTableProvider, MotifFeatureTableProvider, RegulatoryFeatureTableProvider,
+    TranscriptTableProvider, TranslationTableProvider, VEP_CHROMOSOMES_METADATA_KEY,
+    VariationTableProvider, build_export_query,
 };
+use serde_json::Value;
 use std::sync::Arc;
 
 fn fixture_path(name: &str) -> String {
     format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+}
+
+fn ensembl_options(cache_root: impl Into<String>) -> EnsemblCacheOptions {
+    EnsemblCacheOptions::new(cache_root).with_cache_source_type(CacheSourceType::Ensembl)
 }
 
 fn first_i64(batches: &[datafusion::arrow::record_batch::RecordBatch]) -> i64 {
@@ -55,7 +61,7 @@ fn session_ctx_with_target_partitions(target_partitions: usize) -> SessionContex
 
 #[tokio::test]
 async fn variation_non_tabix_streaming_query_works() -> datafusion::common::Result<()> {
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    let mut options = ensembl_options(fixture_path("variation_non_tabix"));
     options.batch_size_hint = Some(1);
 
     let provider = VariationTableProvider::new(options)?;
@@ -84,9 +90,8 @@ async fn variation_non_tabix_streaming_query_works() -> datafusion::common::Resu
 #[tokio::test]
 async fn variation_parallel_row_count_invariant() -> datafusion::common::Result<()> {
     for partitions in [1usize, 2, 4, 8] {
-        let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-            "variation_non_tabix",
-        )))?;
+        let provider =
+            VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
         let ctx = session_ctx_with_target_partitions(partitions);
         ctx.register_table("variation", Arc::new(provider))?;
 
@@ -109,7 +114,7 @@ async fn variation_parallel_row_count_invariant() -> datafusion::common::Result<
 async fn variation_target_partitions_override_applied() -> datafusion::common::Result<()> {
     let ctx = session_ctx_with_target_partitions(8);
 
-    let mut one_partition_options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    let mut one_partition_options = ensembl_options(fixture_path("variation_non_tabix"));
     one_partition_options.target_partitions = Some(1);
     let provider = VariationTableProvider::new(one_partition_options)?;
     ctx.register_table("variation_one", Arc::new(provider))?;
@@ -119,7 +124,7 @@ async fn variation_target_partitions_override_applied() -> datafusion::common::R
     assert_eq!(leaf.name(), "EnsemblCacheExec");
     assert_eq!(leaf.output_partitioning().partition_count(), 1);
 
-    let mut many_partition_options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    let mut many_partition_options = ensembl_options(fixture_path("variation_non_tabix"));
     many_partition_options.target_partitions = Some(8);
     let provider = VariationTableProvider::new(many_partition_options)?;
     ctx.register_table("variation_many", Arc::new(provider))?;
@@ -135,8 +140,7 @@ async fn variation_target_partitions_override_applied() -> datafusion::common::R
 
 #[tokio::test]
 async fn variation_tabix_mode_prefers_all_vars() -> datafusion::common::Result<()> {
-    let provider =
-        VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path("variation_tabix")))?;
+    let provider = VariationTableProvider::new(ensembl_options(fixture_path("variation_tabix")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("variation", Arc::new(provider))?;
@@ -157,9 +161,8 @@ async fn variation_tabix_mode_prefers_all_vars() -> datafusion::common::Result<(
 
 #[tokio::test]
 async fn variation_chromosomes_from_file_paths() -> datafusion::common::Result<()> {
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
 
     // Chromosomes are available directly from the provider API
     let chroms = provider
@@ -184,8 +187,7 @@ async fn variation_chromosomes_from_file_paths() -> datafusion::common::Result<(
 async fn variation_tabix_chroms_unavailable_from_paths() -> datafusion::common::Result<()> {
     // variation_tabix has `variation/all_vars.gz` — parent dir is "variation",
     // so chroms can't be extracted from paths.
-    let provider =
-        VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path("variation_tabix")))?;
+    let provider = VariationTableProvider::new(ensembl_options(fixture_path("variation_tabix")))?;
 
     assert!(provider.chromosomes().is_none());
     assert!(
@@ -201,9 +203,8 @@ async fn variation_tabix_chroms_unavailable_from_paths() -> datafusion::common::
 
 #[tokio::test]
 async fn transcript_storable_chroms_from_file_paths() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let chroms = provider
         .chromosomes()
@@ -215,9 +216,8 @@ async fn transcript_storable_chroms_from_file_paths() -> datafusion::common::Res
 
 #[tokio::test]
 async fn transcript_merged_chroms_from_file_paths() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_merged_layout",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_merged_layout")))?;
 
     let chroms = provider
         .chromosomes()
@@ -229,9 +229,8 @@ async fn transcript_merged_chroms_from_file_paths() -> datafusion::common::Resul
 
 #[tokio::test]
 async fn regulatory_chroms_from_file_paths() -> datafusion::common::Result<()> {
-    let provider = RegulatoryFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
+    let provider =
+        RegulatoryFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
 
     let chroms = provider
         .chromosomes()
@@ -243,9 +242,8 @@ async fn regulatory_chroms_from_file_paths() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn variation_dynamic_source_schema_and_ids_work() -> datafusion::common::Result<()> {
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_dynamic_sources",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_dynamic_sources")))?;
 
     assert!(provider.schema().field_with_name("source_dbsnp").is_ok());
     assert!(provider.schema().field_with_name("source_cosmic").is_ok());
@@ -291,9 +289,8 @@ async fn variation_dynamic_source_schema_and_ids_work() -> datafusion::common::R
 
 #[tokio::test]
 async fn variation_coordinate_system_metadata_and_values_work() -> datafusion::common::Result<()> {
-    let one_based = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let one_based =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
     assert_eq!(
         one_based
             .schema()
@@ -311,7 +308,7 @@ async fn variation_coordinate_system_metadata_and_values_work() -> datafusion::c
         .await?;
     assert_eq!(first_i64_at(&one_based_rows, 0), 100);
 
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_non_tabix"));
+    let mut options = ensembl_options(fixture_path("variation_non_tabix"));
     options.coordinate_system_zero_based = true;
     let zero_based = VariationTableProvider::new(options)?;
     assert_eq!(
@@ -343,9 +340,8 @@ async fn variation_coordinate_system_metadata_and_values_work() -> datafusion::c
 
 #[tokio::test]
 async fn transcript_storable_query_works() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -370,7 +366,7 @@ async fn transcript_storable_query_works() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn transcript_storable_streams_with_small_batch_size() -> datafusion::common::Result<()> {
-    let mut options = EnsemblCacheOptions::new(fixture_path("transcript_storable"));
+    let mut options = ensembl_options(fixture_path("transcript_storable"));
     options.batch_size_hint = Some(1);
     let provider = TranscriptTableProvider::new(options)?;
 
@@ -393,7 +389,7 @@ async fn transcript_storable_streams_with_small_batch_size() -> datafusion::comm
 #[tokio::test]
 async fn transcript_sereal_query_works() -> datafusion::common::Result<()> {
     let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("transcript_sereal")))?;
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_sereal")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -406,7 +402,7 @@ async fn transcript_sereal_query_works() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn transcript_coordinate_system_metadata_and_values_work() -> datafusion::common::Result<()> {
-    let mut options = EnsemblCacheOptions::new(fixture_path("transcript_sereal"));
+    let mut options = ensembl_options(fixture_path("transcript_sereal"));
     options.coordinate_system_zero_based = true;
     let provider = TranscriptTableProvider::new(options)?;
     assert_eq!(
@@ -439,9 +435,8 @@ async fn transcript_coordinate_system_metadata_and_values_work() -> datafusion::
 
 #[tokio::test]
 async fn transcript_merged_layout_without_serializer_works() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_merged_layout",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_merged_layout")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -454,12 +449,10 @@ async fn transcript_merged_layout_without_serializer_works() -> datafusion::comm
 
 #[tokio::test]
 async fn regulatory_and_motif_storable_work() -> datafusion::common::Result<()> {
-    let reg = RegulatoryFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
-    let motif = MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
+    let reg =
+        RegulatoryFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
+    let motif =
+        MotifFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("reg", Arc::new(reg))?;
@@ -485,12 +478,9 @@ async fn regulatory_and_motif_storable_work() -> datafusion::common::Result<()> 
 
 #[tokio::test]
 async fn regulatory_and_motif_sereal_work() -> datafusion::common::Result<()> {
-    let reg = RegulatoryFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_sereal",
-    )))?;
-    let motif = MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_sereal",
-    )))?;
+    let reg =
+        RegulatoryFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_sereal")))?;
+    let motif = MotifFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_sereal")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("reg", Arc::new(reg))?;
@@ -511,9 +501,8 @@ async fn regulatory_and_motif_sereal_work() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn motif_schema_contains_transcription_factors() -> datafusion::common::Result<()> {
-    let provider = MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
+    let provider =
+        MotifFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
     assert!(
         provider
             .schema()
@@ -526,8 +515,7 @@ async fn motif_schema_contains_transcription_factors() -> datafusion::common::Re
 #[tokio::test]
 async fn motif_transcription_factors_queryable() -> datafusion::common::Result<()> {
     for fixture in ["regulatory_storable", "regulatory_sereal"] {
-        let provider =
-            MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(fixture)))?;
+        let provider = MotifFeatureTableProvider::new(ensembl_options(fixture_path(fixture)))?;
         let ctx = SessionContext::new();
         ctx.register_table("motif", Arc::new(provider))?;
 
@@ -557,7 +545,7 @@ async fn motif_transcription_factors_queryable() -> datafusion::common::Result<(
 #[tokio::test]
 async fn regulatory_and_motif_coordinate_system_metadata_and_values_work()
 -> datafusion::common::Result<()> {
-    let mut reg_options = EnsemblCacheOptions::new(fixture_path("regulatory_sereal"));
+    let mut reg_options = ensembl_options(fixture_path("regulatory_sereal"));
     reg_options.coordinate_system_zero_based = true;
     let reg = RegulatoryFeatureTableProvider::new(reg_options)?;
     assert_eq!(
@@ -565,7 +553,7 @@ async fn regulatory_and_motif_coordinate_system_metadata_and_values_work()
         Some(&"true".to_string())
     );
 
-    let mut motif_options = EnsemblCacheOptions::new(fixture_path("regulatory_sereal"));
+    let mut motif_options = ensembl_options(fixture_path("regulatory_sereal"));
     motif_options.coordinate_system_zero_based = true;
     let motif = MotifFeatureTableProvider::new(motif_options)?;
     assert_eq!(
@@ -603,9 +591,8 @@ async fn regulatory_and_motif_coordinate_system_metadata_and_values_work()
 
 #[tokio::test]
 async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
     let schema = provider.schema();
 
     // Verify new columns exist with correct types
@@ -655,9 +642,8 @@ async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<
 #[tokio::test]
 async fn transcript_storable_exons_query_returns_structured_data() -> datafusion::common::Result<()>
 {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -719,7 +705,7 @@ async fn transcript_storable_exons_query_returns_structured_data() -> datafusion
 #[tokio::test]
 async fn transcript_sereal_exons_query_returns_structured_data() -> datafusion::common::Result<()> {
     let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("transcript_sereal")))?;
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_sereal")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -748,9 +734,8 @@ async fn transcript_sereal_exons_query_returns_structured_data() -> datafusion::
 
 #[tokio::test]
 async fn transcript_vep_sequences_queryable() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -776,8 +761,7 @@ async fn transcript_vep_sequences_queryable() -> datafusion::common::Result<()> 
 
 #[tokio::test]
 async fn transcript_promoted_metadata_columns_queryable() -> datafusion::common::Result<()> {
-    let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -823,9 +807,8 @@ async fn transcript_promoted_metadata_columns_queryable() -> datafusion::common:
 
 #[tokio::test]
 async fn transcript_mature_mirna_regions_queryable() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -862,9 +845,8 @@ async fn transcript_mature_mirna_regions_queryable() -> datafusion::common::Resu
 
 #[tokio::test]
 async fn transcript_ncrna_structure_queryable() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -892,9 +874,8 @@ async fn transcript_ncrna_structure_queryable() -> datafusion::common::Result<()
 
 #[tokio::test]
 async fn transcript_projection_pushdown_excludes_vep_columns() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -920,9 +901,8 @@ async fn transcript_projection_pushdown_excludes_vep_columns() -> datafusion::co
 async fn transcript_backward_compat_existing_queries_work() -> datafusion::common::Result<()> {
     // Ensure existing queries from before the VEP columns were added still produce
     // the same results.
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -952,9 +932,8 @@ async fn transcript_backward_compat_existing_queries_work() -> datafusion::commo
 #[tokio::test]
 async fn transcript_coding_region_populated_for_protein_coding() -> datafusion::common::Result<()> {
     // Text fixture: ENST000001 is protein_coding with cds_start=1010, cds_end=1090
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -978,9 +957,8 @@ async fn transcript_coding_region_populated_for_protein_coding() -> datafusion::
 #[tokio::test]
 async fn transcript_coding_region_null_for_non_coding() -> datafusion::common::Result<()> {
     // Text fixture: ENST000002 is lncRNA — cds_start/end should be null
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -1015,8 +993,7 @@ async fn transcript_coding_region_null_for_non_coding() -> datafusion::common::R
 async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::common::Result<()> {
     // VEP storable binary stores cds_start/end as undef, but the
     // parser derives them from cdna_coding_start/end + exon array.
-    let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -1088,8 +1065,7 @@ async fn transcript_coding_region_derived_in_storable_binary() -> datafusion::co
 async fn transcript_cdna_coding_populated_in_real_115() -> datafusion::common::Result<()> {
     // cdna_coding_start/end are populated for some coding transcripts in VEP
     // storable binary (unlike cds_start/end which are always undef).
-    let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -1142,7 +1118,7 @@ async fn transcript_cdna_coding_populated_in_real_115() -> datafusion::common::R
 
 #[tokio::test]
 async fn exon_real_115_query_returns_rows() -> datafusion::common::Result<()> {
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
@@ -1167,7 +1143,7 @@ async fn exon_real_115_query_returns_rows() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn exon_schema_has_all_columns() -> datafusion::common::Result<()> {
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let schema = provider.schema();
 
     for col in &[
@@ -1195,7 +1171,7 @@ async fn exon_schema_has_all_columns() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn exon_foreign_key_populated() -> datafusion::common::Result<()> {
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
@@ -1221,7 +1197,7 @@ async fn exon_foreign_key_populated() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn exon_number_is_non_negative() -> datafusion::common::Result<()> {
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
@@ -1253,7 +1229,7 @@ async fn exon_number_is_non_negative() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn exon_coordinates_valid() -> datafusion::common::Result<()> {
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
@@ -1291,7 +1267,7 @@ async fn exon_coordinates_valid() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn exon_stable_id_populated() -> datafusion::common::Result<()> {
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
@@ -1329,8 +1305,7 @@ async fn exon_stable_id_populated() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn exon_parallel_row_count_invariant() -> datafusion::common::Result<()> {
-    let base_provider =
-        ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let base_provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(base_provider))?;
 
@@ -1338,7 +1313,7 @@ async fn exon_parallel_row_count_invariant() -> datafusion::common::Result<()> {
     let base_count: usize = base_batches.iter().map(|b| b.num_rows()).sum();
 
     for partitions in [1usize, 2, 4] {
-        let mut options = EnsemblCacheOptions::new(fixture_path("exon_real_115"));
+        let mut options = ensembl_options(fixture_path("exon_real_115"));
         options.max_storable_partitions = Some(partitions);
         let provider = ExonTableProvider::new(options)?;
         let ctx = session_ctx_with_target_partitions(partitions);
@@ -1357,7 +1332,7 @@ async fn exon_parallel_row_count_invariant() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn exon_projection_pushdown() -> datafusion::common::Result<()> {
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
@@ -1378,9 +1353,7 @@ async fn exon_projection_pushdown() -> datafusion::common::Result<()> {
 async fn exon_text_format_works() -> datafusion::common::Result<()> {
     // The transcript_storable text fixture lacks _trans_exon_array, so no exon
     // rows will be produced — but the query must not error.
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
@@ -1407,8 +1380,7 @@ async fn exon_text_format_works() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn translation_real_115_query_returns_rows() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("translations", Arc::new(provider))?;
@@ -1433,10 +1405,9 @@ async fn translation_real_115_query_returns_rows() -> datafusion::common::Result
 
 #[tokio::test]
 async fn translation_count_leq_transcript_count() -> datafusion::common::Result<()> {
-    let tx_provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let tx_provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let tl_provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+        TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(tx_provider))?;
@@ -1459,8 +1430,7 @@ async fn translation_count_leq_transcript_count() -> datafusion::common::Result<
 
 #[tokio::test]
 async fn translation_foreign_key_populated() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("translations", Arc::new(provider))?;
@@ -1486,8 +1456,7 @@ async fn translation_foreign_key_populated() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn translation_stable_id_populated() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("translations", Arc::new(provider))?;
@@ -1525,7 +1494,7 @@ async fn translation_stable_id_populated() -> datafusion::common::Result<()> {
 #[tokio::test]
 async fn translation_parallel_row_count_invariant() -> datafusion::common::Result<()> {
     let base_provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+        TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let ctx = SessionContext::new();
     ctx.register_table("translations", Arc::new(base_provider))?;
 
@@ -1537,7 +1506,7 @@ async fn translation_parallel_row_count_invariant() -> datafusion::common::Resul
     let base_count: usize = base_batches.iter().map(|b| b.num_rows()).sum();
 
     for partitions in [1usize, 2, 4] {
-        let mut options = EnsemblCacheOptions::new(fixture_path("exon_real_115"));
+        let mut options = ensembl_options(fixture_path("exon_real_115"));
         options.max_storable_partitions = Some(partitions);
         let provider = TranslationTableProvider::new(options)?;
         let ctx = session_ctx_with_target_partitions(partitions);
@@ -1560,8 +1529,7 @@ async fn translation_parallel_row_count_invariant() -> datafusion::common::Resul
 
 #[tokio::test]
 async fn translation_projection_pushdown() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("translations", Arc::new(provider))?;
@@ -1580,8 +1548,7 @@ async fn translation_projection_pushdown() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn translation_sequence_columns_populated() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("translations", Arc::new(provider))?;
@@ -1651,8 +1618,7 @@ async fn translation_sequence_columns_populated() -> datafusion::common::Result<
 
 #[tokio::test]
 async fn translation_sequence_projection_pushdown() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("translations", Arc::new(provider))?;
@@ -1689,8 +1655,7 @@ async fn translation_sequence_projection_pushdown() -> datafusion::common::Resul
 async fn transcript_gnomon_source_included() -> datafusion::common::Result<()> {
     // VEP evaluates Gnomon (XM_/XR_) transcripts in --merged mode.
     // They must NOT be filtered out.
-    let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
 
@@ -1713,7 +1678,7 @@ async fn transcript_gnomon_source_included() -> datafusion::common::Result<()> {
 async fn exon_stable_ids_are_exon_patterns() -> datafusion::common::Result<()> {
     // Exon stable_id column should contain ENSE*/exon-* patterns,
     // never transcript (ENST*) or gene (ENSG*) IDs.
-    let provider = ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let ctx = SessionContext::new();
     ctx.register_table("exons", Arc::new(provider))?;
 
@@ -1743,8 +1708,7 @@ async fn exon_stable_ids_are_exon_patterns() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn transcript_loc_pseudo_records_excluded() -> datafusion::common::Result<()> {
-    let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
 
@@ -1771,7 +1735,7 @@ async fn transcript_loc_pseudo_records_excluded() -> datafusion::common::Result<
 async fn factory_for_entity_variation() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::Variation,
-        EnsemblCacheOptions::new(fixture_path("variation_non_tabix")),
+        ensembl_options(fixture_path("variation_non_tabix")),
     )?;
     assert!(provider.schema().field_with_name("variation_name").is_ok());
 
@@ -1787,7 +1751,7 @@ async fn factory_for_entity_variation() -> datafusion::common::Result<()> {
 async fn factory_for_entity_transcript() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::Transcript,
-        EnsemblCacheOptions::new(fixture_path("transcript_storable")),
+        ensembl_options(fixture_path("transcript_storable")),
     )?;
     assert!(provider.schema().field_with_name("stable_id").is_ok());
 
@@ -1803,7 +1767,7 @@ async fn factory_for_entity_transcript() -> datafusion::common::Result<()> {
 async fn factory_for_entity_exon() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::Exon,
-        EnsemblCacheOptions::new(fixture_path("exon_real_115")),
+        ensembl_options(fixture_path("exon_real_115")),
     )?;
     assert!(provider.schema().field_with_name("exon_number").is_ok());
 
@@ -1823,7 +1787,7 @@ async fn factory_for_entity_exon() -> datafusion::common::Result<()> {
 async fn factory_for_entity_translation() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::Translation,
-        EnsemblCacheOptions::new(fixture_path("exon_real_115")),
+        ensembl_options(fixture_path("exon_real_115")),
     )?;
     assert!(provider.schema().field_with_name("protein_len").is_ok());
 
@@ -1839,7 +1803,7 @@ async fn factory_for_entity_translation() -> datafusion::common::Result<()> {
 async fn factory_for_entity_regulatory() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::RegulatoryFeature,
-        EnsemblCacheOptions::new(fixture_path("regulatory_storable")),
+        ensembl_options(fixture_path("regulatory_storable")),
     )?;
     assert!(provider.schema().field_with_name("feature_type").is_ok());
 
@@ -1855,7 +1819,7 @@ async fn factory_for_entity_regulatory() -> datafusion::common::Result<()> {
 async fn factory_for_entity_motif() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
         EnsemblEntityKind::MotifFeature,
-        EnsemblCacheOptions::new(fixture_path("regulatory_storable")),
+        ensembl_options(fixture_path("regulatory_storable")),
     )?;
     assert!(provider.schema().field_with_name("binding_matrix").is_ok());
 
@@ -1868,9 +1832,8 @@ async fn factory_for_entity_motif() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn variation_core_field_values() -> datafusion::common::Result<()> {
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("var", Arc::new(provider))?;
@@ -1969,9 +1932,8 @@ async fn variation_core_field_values() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn variation_optional_fields_nullable() -> datafusion::common::Result<()> {
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("var", Arc::new(provider))?;
@@ -2030,9 +1992,8 @@ async fn variation_optional_fields_nullable() -> datafusion::common::Result<()> 
 
 #[tokio::test]
 async fn variation_provenance_values() -> datafusion::common::Result<()> {
-    let provider = VariationTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "variation_non_tabix",
-    )))?;
+    let provider =
+        VariationTableProvider::new(ensembl_options(fixture_path("variation_non_tabix")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("var", Arc::new(provider))?;
@@ -2060,9 +2021,8 @@ async fn variation_provenance_values() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn transcript_storable_gene_fields() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -2102,8 +2062,7 @@ async fn transcript_storable_gene_fields() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn transcript_real_115_translation_fields() -> datafusion::common::Result<()> {
-    let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -2149,9 +2108,8 @@ async fn transcript_real_115_translation_fields() -> datafusion::common::Result<
 async fn transcript_cdna_mapper_segments_schema() -> datafusion::common::Result<()> {
     // Use text-format fixture since the exon_real_115 fixture has truncated
     // storable binary that errors when deep VEF cache fields are projected.
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -2198,9 +2156,8 @@ async fn transcript_cdna_mapper_segments_schema() -> datafusion::common::Result<
 async fn transcript_translateable_seq_queryable() -> datafusion::common::Result<()> {
     // Use text-format fixture since the exon_real_115 fixture has truncated
     // storable binary that errors when deep VEF cache fields are projected.
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -2240,8 +2197,7 @@ async fn transcript_translateable_seq_queryable() -> datafusion::common::Result<
 
 #[tokio::test]
 async fn transcript_real_115_flags_str() -> datafusion::common::Result<()> {
-    let provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -2276,8 +2232,7 @@ async fn transcript_real_115_flags_str() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn translation_protein_features_populated() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tl", Arc::new(provider))?;
@@ -2372,8 +2327,7 @@ async fn translation_protein_features_populated() -> datafusion::common::Result<
 
 #[tokio::test]
 async fn translation_sift_predictions_from_storable() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tl", Arc::new(provider))?;
@@ -2443,8 +2397,7 @@ async fn translation_sift_predictions_from_storable() -> datafusion::common::Res
 
 #[tokio::test]
 async fn translation_cds_len_derived_correctly() -> datafusion::common::Result<()> {
-    let provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let provider = TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tl", Arc::new(provider))?;
@@ -2502,10 +2455,9 @@ async fn translation_cds_len_derived_correctly() -> datafusion::common::Result<(
 
 #[tokio::test]
 async fn cross_entity_translation_transcript_ids_exist() -> datafusion::common::Result<()> {
-    let tx_provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let tx_provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
     let tl_provider =
-        TranslationTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+        TranslationTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(tx_provider))?;
@@ -2534,10 +2486,8 @@ async fn cross_entity_translation_transcript_ids_exist() -> datafusion::common::
 
 #[tokio::test]
 async fn cross_entity_exon_transcript_ids_exist() -> datafusion::common::Result<()> {
-    let tx_provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
-    let exon_provider =
-        ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let tx_provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
+    let exon_provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(tx_provider))?;
@@ -2566,10 +2516,8 @@ async fn cross_entity_exon_transcript_ids_exist() -> datafusion::common::Result<
 
 #[tokio::test]
 async fn cross_entity_exon_count_matches_exon_rows() -> datafusion::common::Result<()> {
-    let tx_provider =
-        TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
-    let exon_provider =
-        ExonTableProvider::new(EnsemblCacheOptions::new(fixture_path("exon_real_115")))?;
+    let tx_provider = TranscriptTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
+    let exon_provider = ExonTableProvider::new(ensembl_options(fixture_path("exon_real_115")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(tx_provider))?;
@@ -2603,9 +2551,8 @@ async fn cross_entity_exon_count_matches_exon_rows() -> datafusion::common::Resu
 
 #[tokio::test]
 async fn regulatory_field_values_storable() -> datafusion::common::Result<()> {
-    let provider = RegulatoryFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
+    let provider =
+        RegulatoryFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("reg", Arc::new(provider))?;
@@ -2659,9 +2606,8 @@ async fn regulatory_field_values_storable() -> datafusion::common::Result<()> {
 
 #[tokio::test]
 async fn motif_field_values_storable() -> datafusion::common::Result<()> {
-    let provider = MotifFeatureTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "regulatory_storable",
-    )))?;
+    let provider =
+        MotifFeatureTableProvider::new(ensembl_options(fixture_path("regulatory_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("motif", Arc::new(provider))?;
@@ -2711,37 +2657,37 @@ async fn all_entities_have_coordinate_system_metadata() -> datafusion::common::R
     let fixtures_and_providers: Vec<(&str, Arc<dyn TableProvider>)> = vec![
         (
             "variation",
-            Arc::new(VariationTableProvider::new(EnsemblCacheOptions::new(
-                fixture_path("variation_non_tabix"),
-            ))?) as Arc<dyn TableProvider>,
+            Arc::new(VariationTableProvider::new(ensembl_options(fixture_path(
+                "variation_non_tabix",
+            )))?) as Arc<dyn TableProvider>,
         ),
         (
             "transcript",
-            Arc::new(TranscriptTableProvider::new(EnsemblCacheOptions::new(
+            Arc::new(TranscriptTableProvider::new(ensembl_options(
                 fixture_path("transcript_storable"),
             ))?),
         ),
         (
             "exon",
-            Arc::new(ExonTableProvider::new(EnsemblCacheOptions::new(
-                fixture_path("exon_real_115"),
-            ))?),
+            Arc::new(ExonTableProvider::new(ensembl_options(fixture_path(
+                "exon_real_115",
+            )))?),
         ),
         (
             "translation",
-            Arc::new(TranslationTableProvider::new(EnsemblCacheOptions::new(
+            Arc::new(TranslationTableProvider::new(ensembl_options(
                 fixture_path("exon_real_115"),
             ))?),
         ),
         (
             "regulatory",
-            Arc::new(RegulatoryFeatureTableProvider::new(
-                EnsemblCacheOptions::new(fixture_path("regulatory_storable")),
-            )?),
+            Arc::new(RegulatoryFeatureTableProvider::new(ensembl_options(
+                fixture_path("regulatory_storable"),
+            ))?),
         ),
         (
             "motif",
-            Arc::new(MotifFeatureTableProvider::new(EnsemblCacheOptions::new(
+            Arc::new(MotifFeatureTableProvider::new(ensembl_options(
                 fixture_path("regulatory_storable"),
             ))?),
         ),
@@ -2774,9 +2720,8 @@ async fn all_entities_have_coordinate_system_metadata() -> datafusion::common::R
 
 #[tokio::test]
 async fn transcript_object_hash_stable() -> datafusion::common::Result<()> {
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -2828,9 +2773,8 @@ async fn transcript_object_hash_stable() -> datafusion::common::Result<()> {
 async fn transcript_object_hash_stable_text() -> datafusion::common::Result<()> {
     // Use the text-format storable fixture to verify object_hash and raw_object_json
     // (exon_real_115 storable binary has truncation issues with deep VEF cache).
-    let provider = TranscriptTableProvider::new(EnsemblCacheOptions::new(fixture_path(
-        "transcript_storable",
-    )))?;
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
 
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(provider))?;
@@ -2876,6 +2820,87 @@ async fn transcript_object_hash_stable_text() -> datafusion::common::Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn transcript_export_hgnc_matches_raw_object_json_text() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let schema = Arc::new(ctx.table("tx").await?.schema().as_arrow().clone());
+    let export_query = build_export_query(EnsemblEntityKind::Transcript, "tx", None, Some(&schema));
+    let query = format!(
+        "WITH exported AS ({export_query}) \
+         SELECT stable_id, gene_hgnc_id, raw_object_json FROM exported"
+    );
+
+    let batches = ctx.sql(&query).await?.collect().await?;
+    let mut checked_rows = 0usize;
+    let mut mismatches = Vec::new();
+
+    for batch in &batches {
+        let stable_ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("expected stable_id StringArray");
+        let gene_hgnc_ids = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("expected gene_hgnc_id StringArray");
+        let raw_jsons = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("expected raw_object_json StringArray");
+
+        for i in 0..batch.num_rows() {
+            checked_rows += 1;
+
+            let promoted = if gene_hgnc_ids.is_null(i) {
+                None
+            } else {
+                Some(gene_hgnc_ids.value(i))
+            };
+
+            let raw: Value = serde_json::from_str(raw_jsons.value(i))
+                .expect("raw_object_json should contain valid JSON");
+            let raw_native = match raw
+                .as_object()
+                .and_then(|obj| obj.get("_gene_hgnc_id").or_else(|| obj.get("gene_hgnc_id")))
+            {
+                Some(Value::String(value)) => Some(value.as_str()),
+                Some(Value::Null) | None => None,
+                Some(other) => panic!("unexpected HGNC value in raw_object_json: {other}"),
+            };
+
+            if promoted != raw_native {
+                mismatches.push(format!(
+                    "{}: promoted={promoted:?}, raw_native={raw_native:?}",
+                    stable_ids.value(i)
+                ));
+            }
+        }
+    }
+
+    assert!(checked_rows > 0, "expected exported transcript rows");
+    assert!(
+        mismatches.is_empty(),
+        "exported gene_hgnc_id disagrees with raw_object_json for {} rows: {}",
+        mismatches.len(),
+        mismatches
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Sort-preserving merge and parallel execution tests
 //
@@ -2909,7 +2934,7 @@ fn assert_no_exec_named(plan: &Arc<dyn ExecutionPlan>, name: &str) {
 async fn variation_multi_region_parallel_exec_with_merge() -> datafusion::common::Result<()> {
     // With 4 chr1 files and target_partitions=2, the EnsemblCacheExec should
     // have 2 partitions (2 files each) and be wrapped by SortPreservingMergeExec.
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    let mut options = ensembl_options(fixture_path("variation_multi_region"));
     options.target_partitions = Some(2);
     let provider = VariationTableProvider::new(options)?;
     let ctx = session_ctx_with_target_partitions(2);
@@ -2944,7 +2969,7 @@ async fn variation_multi_region_partition_count_scales() -> datafusion::common::
     // Verify that EnsemblCacheExec partition count scales with target_partitions
     // up to the number of matching files (4 chr1 files).
     for target_partitions in [2, 3, 4] {
-        let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+        let mut options = ensembl_options(fixture_path("variation_multi_region"));
         options.target_partitions = Some(target_partitions);
         let provider = VariationTableProvider::new(options)?;
         let ctx = session_ctx_with_target_partitions(target_partitions);
@@ -2984,7 +3009,7 @@ async fn variation_multi_region_partition_count_scales() -> datafusion::common::
 #[tokio::test]
 async fn variation_multi_region_single_partition_no_merge() -> datafusion::common::Result<()> {
     // With 1 partition, no SortPreservingMergeExec is needed.
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    let mut options = ensembl_options(fixture_path("variation_multi_region"));
     options.target_partitions = Some(1);
     let provider = VariationTableProvider::new(options)?;
     let ctx = session_ctx_with_target_partitions(1);
@@ -3007,7 +3032,7 @@ async fn variation_multi_region_single_partition_no_merge() -> datafusion::commo
 async fn variation_multi_region_no_chrom_filter_no_merge() -> datafusion::common::Result<()> {
     // Without WHERE chrom = '...', scan() should NOT wrap with
     // SortPreservingMergeExec (karyotypic != lexicographic).
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    let mut options = ensembl_options(fixture_path("variation_multi_region"));
     options.target_partitions = Some(4);
     let provider = VariationTableProvider::new(options)?;
     let ctx = session_ctx_with_target_partitions(4);
@@ -3030,7 +3055,7 @@ async fn variation_multi_region_no_coalesce_for_various_partitions()
     // Verify that for partition counts 2..4, the plan never coalesces
     // when filtering to a single chromosome with ORDER BY.
     for target_partitions in 2..=4 {
-        let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+        let mut options = ensembl_options(fixture_path("variation_multi_region"));
         options.target_partitions = Some(target_partitions);
         let provider = VariationTableProvider::new(options)?;
         let ctx = session_ctx_with_target_partitions(target_partitions);
@@ -3055,7 +3080,7 @@ async fn variation_multi_region_results_ordered_with_parallel_exec()
 -> datafusion::common::Result<()> {
     // End-to-end: with 4 chr1 files across 2 partitions, verify that
     // results come back correctly ordered by start.
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_multi_region"));
+    let mut options = ensembl_options(fixture_path("variation_multi_region"));
     options.target_partitions = Some(2);
     let provider = VariationTableProvider::new(options)?;
     let ctx = session_ctx_with_target_partitions(2);
@@ -3112,7 +3137,7 @@ async fn tabix_bgzf_parallel_partitions() -> datafusion::common::Result<()> {
     // With a single bgzf all_vars.gz and target_partitions=4,
     // the EnsemblCacheExec should split into multiple bgzf byte-range
     // partitions for true intra-file parallelism.
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_tabix_bgzf"));
+    let mut options = ensembl_options(fixture_path("variation_tabix_bgzf"));
     options.target_partitions = Some(4);
     let provider = VariationTableProvider::new(options)?;
     let ctx = session_ctx_with_target_partitions(4);
@@ -3151,7 +3176,7 @@ async fn tabix_bgzf_results_correct_and_ordered() -> datafusion::common::Result<
     let fixture = fixture_path("variation_tabix_bgzf");
 
     // Single partition (baseline)
-    let mut options_1 = EnsemblCacheOptions::new(&fixture);
+    let mut options_1 = ensembl_options(&fixture);
     options_1.target_partitions = Some(1);
     let provider_1 = VariationTableProvider::new(options_1)?;
     let ctx_1 = session_ctx_with_target_partitions(1);
@@ -3163,7 +3188,7 @@ async fn tabix_bgzf_results_correct_and_ordered() -> datafusion::common::Result<
         .await?;
 
     // Multiple partitions (parallel bgzf)
-    let mut options_4 = EnsemblCacheOptions::new(&fixture);
+    let mut options_4 = ensembl_options(&fixture);
     options_4.target_partitions = Some(4);
     let provider_4 = VariationTableProvider::new(options_4)?;
     let ctx_4 = session_ctx_with_target_partitions(4);
@@ -3232,7 +3257,7 @@ async fn tabix_bgzf_results_correct_and_ordered() -> datafusion::common::Result<
 #[tokio::test]
 async fn tabix_bgzf_single_partition_no_split() -> datafusion::common::Result<()> {
     // With target_partitions=1, no bgzf splitting should occur.
-    let mut options = EnsemblCacheOptions::new(fixture_path("variation_tabix_bgzf"));
+    let mut options = ensembl_options(fixture_path("variation_tabix_bgzf"));
     options.target_partitions = Some(1);
     let provider = VariationTableProvider::new(options)?;
     let ctx = session_ctx_with_target_partitions(1);

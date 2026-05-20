@@ -8,7 +8,7 @@
 //!
 //! Uses multi_chrom.vcf.gz: 1000 variants across 21(500), 22(500).
 
-use datafusion::arrow::array::Array;
+use datafusion::arrow::array::{Array, Int64Array, UInt64Array};
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::VCF_CONTIGS_INDEXED_KEY;
@@ -21,6 +21,29 @@ async fn count_rows(ctx: &SessionContext, sql: &str) -> u64 {
     let df = ctx.sql(sql).await.expect("SQL execution failed");
     let batches = df.collect().await.expect("collect failed");
     batches.iter().map(|b| b.num_rows() as u64).sum()
+}
+
+/// Helper: execute a SQL COUNT query and return the scalar count value.
+async fn count_value(ctx: &SessionContext, sql: &str) -> u64 {
+    let df = ctx.sql(sql).await.expect("SQL execution failed");
+    let batches = df.collect().await.expect("collect failed");
+    assert_eq!(batches.len(), 1, "COUNT query should produce one batch");
+    assert_eq!(
+        batches[0].num_rows(),
+        1,
+        "COUNT query should produce one row"
+    );
+    let count_column = batches[0].column(0);
+    if let Some(values) = count_column.as_any().downcast_ref::<UInt64Array>() {
+        values.value(0)
+    } else if let Some(values) = count_column.as_any().downcast_ref::<Int64Array>() {
+        values.value(0) as u64
+    } else {
+        panic!(
+            "expected integer COUNT column, got {:?}",
+            count_column.data_type()
+        );
+    }
 }
 
 /// Helper: collect distinct chrom values from a query result.
@@ -54,6 +77,20 @@ async fn setup_vcf_ctx() -> datafusion::error::Result<SessionContext> {
         true, // zero-based coordinates
     )?;
     ctx.register_table("vcf", Arc::new(provider))?;
+    Ok(ctx)
+}
+
+/// Create a VCF context with INFO columns explicitly disabled, matching info_fields=[].
+async fn setup_vcf_ctx_without_info_fields() -> datafusion::error::Result<SessionContext> {
+    let ctx = SessionContext::new();
+    let provider = VcfTableProvider::new(
+        "tests/multi_chrom.vcf.gz".to_string(),
+        Some(Vec::new()),
+        None,
+        None,
+        false, // 1-based coordinates: matches VCF POS directly.
+    )?;
+    ctx.register_table("vcf_no_info", Arc::new(provider))?;
     Ok(ctx)
 }
 
@@ -175,6 +212,72 @@ async fn test_vcf_region_with_positions() -> datafusion::error::Result<()> {
     assert!(
         region_count < chr21_total,
         "Region count ({region_count}) should be < chr21 total ({chr21_total})"
+    );
+
+    Ok(())
+}
+
+/// Test: exact start equality with info_fields=[] uses a bounded indexed region.
+#[tokio::test]
+async fn test_vcf_exact_start_count_with_no_info_fields() -> datafusion::error::Result<()> {
+    let ctx = setup_vcf_ctx_without_info_fields().await?;
+
+    // multi_chrom.vcf.gz has one generated variant at 21:5000100.
+    let count = count_value(
+        &ctx,
+        "SELECT COUNT(*) FROM vcf_no_info WHERE chrom = '21' AND start = 5000100",
+    )
+    .await;
+
+    assert_eq!(count, 1, "Expected exactly one variant at 21:5000100");
+
+    Ok(())
+}
+
+/// Test: contradictory start predicates return no rows instead of producing an invalid region.
+#[tokio::test]
+async fn test_vcf_contradictory_exact_start_count_with_no_info_fields()
+-> datafusion::error::Result<()> {
+    let ctx = setup_vcf_ctx_without_info_fields().await?;
+
+    let count = count_value(
+        &ctx,
+        "SELECT COUNT(*) FROM vcf_no_info WHERE chrom = '21' AND start = 5000100 AND start > 5000100",
+    )
+    .await;
+
+    assert_eq!(
+        count, 0,
+        "Contradictory start predicates should match no variants"
+    );
+
+    Ok(())
+}
+
+/// Test: contradictory genomic bounds use an empty plan, not a full indexed scan.
+#[tokio::test]
+async fn test_vcf_contradictory_bounds_use_empty_plan() -> datafusion::error::Result<()> {
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    let provider = VcfTableProvider::new(
+        "tests/multi_chrom.vcf.gz".to_string(),
+        Some(Vec::new()),
+        None,
+        None,
+        false,
+    )?;
+    let filters = vec![
+        col("chrom").eq(lit("21")),
+        col("start").eq(lit(5000100u32)),
+        col("start").gt(lit(5000100u32)),
+    ];
+
+    let plan = provider.scan(&state, None, &filters, None).await?;
+
+    assert!(
+        plan.as_any()
+            .is::<datafusion::physical_plan::empty::EmptyExec>(),
+        "contradictory genomic bounds should produce an empty plan instead of a full indexed scan"
     );
 
     Ok(())

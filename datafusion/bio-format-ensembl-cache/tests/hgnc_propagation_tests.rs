@@ -1,31 +1,32 @@
-//! Tests for cache-region-local HGNC_ID propagation in the cache builder.
+//! Tests for native HGNC_ID handling after removing export-time propagation.
 //!
-//! The cache builder should only propagate `gene_hgnc_id` within the same
-//! VEP-sized cache region for a `(chrom, gene_symbol)` cluster. This preserves
-//! local colocated loci such as FGF7P3 while avoiding false positives across
-//! distant same-symbol loci such as SNORA75, SNORA72, and LINC03025.
+//! The cache builder no longer propagates `gene_hgnc_id` at export time.
+//! Both `gene_hgnc_id` and `gene_hgnc_id_native` now store the value parsed
+//! directly from the raw VEP cache object. Any propagation belongs to the
+//! downstream annotation engine (buffer-scoped, matching VEP behavior).
 
 use datafusion::arrow::array::{Array, RecordBatch, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
-use datafusion_bio_format_ensembl_cache::VEP_CACHE_REGION_SIZE_BP;
 use std::sync::Arc;
-type PropagationInput<'a> = (&'a str, &'a str, i64, Option<&'a str>, Option<&'a str>);
-type PropagationResult = (String, Option<String>, Option<String>);
+type NativeInput<'a> = (&'a str, &'a str, i64, Option<&'a str>, Option<&'a str>);
+type NativeResult = (String, Option<String>, Option<String>, Option<String>);
 
-/// Build a minimal transcript-like table and run the HGNC propagation query.
+/// Build a minimal transcript-like table and query both gene_hgnc_id and
+/// gene_hgnc_id_native (both pass through without propagation).
 ///
-/// Returns the result rows as `(stable_id, gene_symbol, gene_hgnc_id)`.
-async fn run_propagation(
-    rows: Vec<PropagationInput<'_>>, // (stable_id, chrom, start, gene_symbol, gene_hgnc_id)
-) -> Vec<PropagationResult> {
+/// Returns `(stable_id, gene_symbol, gene_hgnc_id, gene_hgnc_id_native)`.
+async fn run_native_query(
+    rows: Vec<NativeInput<'_>>, // (stable_id, chrom, start, gene_symbol, gene_hgnc_id)
+) -> Vec<NativeResult> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("stable_id", DataType::Utf8, false),
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::Int64, false),
         Field::new("gene_symbol", DataType::Utf8, true),
         Field::new("gene_hgnc_id", DataType::Utf8, true),
+        Field::new("gene_hgnc_id_native", DataType::Utf8, true),
     ]));
 
     let stable_ids: Vec<&str> = rows.iter().map(|r| r.0).collect();
@@ -33,6 +34,8 @@ async fn run_propagation(
     let starts: Vec<i64> = rows.iter().map(|r| r.2).collect();
     let gene_symbols: Vec<Option<&str>> = rows.iter().map(|r| r.3).collect();
     let gene_hgnc_ids: Vec<Option<&str>> = rows.iter().map(|r| r.4).collect();
+    // gene_hgnc_id_native mirrors gene_hgnc_id (same native value)
+    let gene_hgnc_ids_native: Vec<Option<&str>> = rows.iter().map(|r| r.4).collect();
 
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -42,6 +45,7 @@ async fn run_propagation(
             Arc::new(datafusion::arrow::array::Int64Array::from(starts)),
             Arc::new(StringArray::from(gene_symbols)),
             Arc::new(StringArray::from(gene_hgnc_ids)),
+            Arc::new(StringArray::from(gene_hgnc_ids_native)),
         ],
     )
     .unwrap();
@@ -51,20 +55,12 @@ async fn run_propagation(
     let ctx = SessionContext::new();
     ctx.register_table("tx", Arc::new(mem_table)).unwrap();
 
-    let region_expr = format!("CAST(FLOOR((start - 1) / {VEP_CACHE_REGION_SIZE_BP}.0) AS BIGINT)");
-    let query = format!(
-        "SELECT \"stable_id\", \"gene_symbol\", \
-                COALESCE(gene_hgnc_id, \
-                     CASE WHEN gene_symbol IS NOT NULL \
-                          THEN FIRST_VALUE(gene_hgnc_id) IGNORE NULLS \
-                               OVER (PARTITION BY chrom, gene_symbol, {region_expr} \
-                                      ORDER BY gene_hgnc_id NULLS LAST) \
-                          ELSE NULL END) AS gene_hgnc_id \
-         FROM tx \
-         ORDER BY stable_id"
-    );
+    // No propagation — just pass through both columns
+    let query = "SELECT \"stable_id\", \"gene_symbol\", \"gene_hgnc_id\", \
+                        \"gene_hgnc_id_native\" \
+                 FROM tx ORDER BY stable_id";
 
-    let batches = ctx.sql(&query).await.unwrap().collect().await.unwrap();
+    let batches = ctx.sql(query).await.unwrap().collect().await.unwrap();
 
     let mut results = Vec::new();
     for batch in &batches {
@@ -83,6 +79,11 @@ async fn run_propagation(
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
+        let hgncs_native = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
         for i in 0..batch.num_rows() {
             results.push((
                 ids.value(i).to_string(),
@@ -96,6 +97,11 @@ async fn run_propagation(
                 } else {
                     Some(hgncs.value(i).to_string())
                 },
+                if hgncs_native.is_null(i) {
+                    None
+                } else {
+                    Some(hgncs_native.value(i).to_string())
+                },
             ));
         }
     }
@@ -103,7 +109,7 @@ async fn run_propagation(
 }
 
 /// Helper: find a row by stable_id.
-fn find_row<'a>(results: &'a [PropagationResult], stable_id: &str) -> &'a PropagationResult {
+fn find_row<'a>(results: &'a [NativeResult], stable_id: &str) -> &'a NativeResult {
     results
         .iter()
         .find(|r| r.0 == stable_id)
@@ -114,38 +120,10 @@ fn find_row<'a>(results: &'a [PropagationResult], stable_id: &str) -> &'a Propag
 // Test cases
 // -----------------------------------------------------------------------
 
-/// Basic propagation: one transcript has HGNC_ID, two local siblings with NULL get filled.
+/// Transcripts with native HGNC_ID retain it in both columns.
 #[tokio::test]
-async fn propagation_fills_nulls_within_region() {
-    let results = run_propagation(vec![
-        (
-            "ENST001",
-            "9",
-            39_817_530,
-            Some("FGF7P3"),
-            Some("HGNC:26671"),
-        ),
-        ("ENST002", "9", 39_816_479, Some("FGF7P3"), None),
-        ("ENST003", "9", 39_888_877, Some("FGF7P3"), None),
-    ])
-    .await;
-
-    assert_eq!(results.len(), 3);
-    for row in &results {
-        assert_eq!(
-            row.2.as_deref(),
-            Some("HGNC:26671"),
-            "transcript {} should have HGNC:26671, got {:?}",
-            row.0,
-            row.2
-        );
-    }
-}
-
-/// COALESCE preserves original: transcripts that already have HGNC_ID keep it.
-#[tokio::test]
-async fn no_overwrite_existing_hgnc() {
-    let results = run_propagation(vec![
+async fn native_hgnc_preserved() {
+    let results = run_native_query(vec![
         (
             "ENST001",
             "17",
@@ -166,31 +144,76 @@ async fn no_overwrite_existing_hgnc() {
     assert_eq!(results.len(), 2);
     for row in &results {
         assert_eq!(row.2.as_deref(), Some("HGNC:1100"));
+        assert_eq!(row.3.as_deref(), Some("HGNC:1100"));
+        assert_eq!(
+            row.2, row.3,
+            "gene_hgnc_id and gene_hgnc_id_native must match"
+        );
     }
 }
 
-/// NULL gene_symbol: transcripts with NULL symbol must NOT get HGNC_ID propagated.
+/// Transcripts without native HGNC_ID stay NULL — no propagation from siblings.
+#[tokio::test]
+async fn no_propagation_from_local_siblings() {
+    let results = run_native_query(vec![
+        (
+            "ENST001",
+            "9",
+            39_817_530,
+            Some("FGF7P3"),
+            Some("HGNC:26671"),
+        ),
+        ("ENST002", "9", 39_816_479, Some("FGF7P3"), None),
+        ("ENST003", "9", 39_888_877, Some("FGF7P3"), None),
+    ])
+    .await;
+
+    assert_eq!(results.len(), 3);
+    assert_eq!(
+        find_row(&results, "ENST001").2.as_deref(),
+        Some("HGNC:26671")
+    );
+    // No propagation — siblings without native HGNC stay NULL
+    assert_eq!(
+        find_row(&results, "ENST002").2,
+        None,
+        "sibling without native HGNC_ID should stay NULL"
+    );
+    assert_eq!(
+        find_row(&results, "ENST003").2,
+        None,
+        "sibling without native HGNC_ID should stay NULL"
+    );
+    // gene_hgnc_id_native always matches gene_hgnc_id
+    for row in &results {
+        assert_eq!(
+            row.2, row.3,
+            "gene_hgnc_id and gene_hgnc_id_native must match"
+        );
+    }
+}
+
+/// NULL gene_symbol transcripts stay NULL.
 #[tokio::test]
 async fn null_gene_symbol_stays_null() {
-    let results = run_propagation(vec![
+    let results = run_native_query(vec![
         ("ENST001", "1", 100_000, Some("ABC"), Some("HGNC:999")),
-        ("ENST002", "1", 120_000, None, None), // NULL symbol — should stay NULL
+        ("ENST002", "1", 120_000, None, None),
     ])
     .await;
 
     assert_eq!(results.len(), 2);
     assert_eq!(find_row(&results, "ENST001").2.as_deref(), Some("HGNC:999"));
-    assert_eq!(
-        find_row(&results, "ENST002").2,
-        None,
-        "NULL-symbol transcript should not get HGNC_ID"
-    );
+    assert_eq!(find_row(&results, "ENST002").2, None);
+    for row in &results {
+        assert_eq!(row.2, row.3);
+    }
 }
 
 /// All transcripts for a symbol have NULL HGNC_ID: nothing changes.
 #[tokio::test]
 async fn all_null_hgnc_stays_null() {
-    let results = run_propagation(vec![
+    let results = run_native_query(vec![
         ("ENST001", "1", 100_000, Some("UNKNOWN"), None),
         ("ENST002", "1", 120_000, Some("UNKNOWN"), None),
         ("ENST003", "1", 130_000, Some("UNKNOWN"), None),
@@ -200,33 +223,18 @@ async fn all_null_hgnc_stays_null() {
     assert_eq!(results.len(), 3);
     for row in &results {
         assert_eq!(row.2, None, "transcript {} should remain NULL", row.0);
+        assert_eq!(
+            row.3, None,
+            "native column for {} should remain NULL",
+            row.0
+        );
     }
 }
 
-/// Multiple gene symbols: propagation is independent per symbol.
+/// Distant same-symbol loci: no cross-fill (was the original bug).
 #[tokio::test]
-async fn multiple_symbols_independent() {
-    let results = run_propagation(vec![
-        // Symbol A: one has HGNC, one doesn't
-        ("ENST001", "1", 100_000, Some("GENE_A"), Some("HGNC:100")),
-        ("ENST002", "1", 120_000, Some("GENE_A"), None),
-        // Symbol B: one has HGNC, one doesn't
-        ("ENST003", "1", 200_000, Some("GENE_B"), Some("HGNC:200")),
-        ("ENST004", "1", 220_000, Some("GENE_B"), None),
-    ])
-    .await;
-
-    assert_eq!(results.len(), 4);
-    assert_eq!(find_row(&results, "ENST001").2.as_deref(), Some("HGNC:100"));
-    assert_eq!(find_row(&results, "ENST002").2.as_deref(), Some("HGNC:100"));
-    assert_eq!(find_row(&results, "ENST003").2.as_deref(), Some("HGNC:200"));
-    assert_eq!(find_row(&results, "ENST004").2.as_deref(), Some("HGNC:200"));
-}
-
-/// Distant same-symbol loci must not cross-fill across cache regions.
-#[tokio::test]
-async fn distant_same_symbol_does_not_propagate() {
-    let results = run_propagation(vec![
+async fn distant_same_symbol_no_cross_fill() {
+    let results = run_native_query(vec![
         (
             "ENST001",
             "9",
@@ -244,16 +252,16 @@ async fn distant_same_symbol_does_not_propagate() {
         Some("HGNC:56158")
     );
     assert_eq!(
-        find_row(&results, "ENST002").2.as_deref(),
+        find_row(&results, "ENST002").2,
         None,
-        "distant same-symbol locus should not inherit HGNC"
+        "distant same-symbol locus must not inherit HGNC"
     );
 }
 
-/// Same-symbol rows on different chromosomes must not cross-fill.
+/// Same-symbol rows on different chromosomes: no cross-fill.
 #[tokio::test]
-async fn same_symbol_different_chroms_do_not_propagate() {
-    let results = run_propagation(vec![
+async fn same_symbol_different_chroms_no_cross_fill() {
+    let results = run_native_query(vec![
         (
             "ENST001",
             "2",
@@ -277,11 +285,36 @@ async fn same_symbol_different_chroms_do_not_propagate() {
     );
 }
 
-/// Mixed: local propagation + gene without any HGNC + NULL-symbol row.
+/// Multiple gene symbols: each transcript retains only its own native value.
+#[tokio::test]
+async fn multiple_symbols_independent() {
+    let results = run_native_query(vec![
+        ("ENST001", "1", 100_000, Some("GENE_A"), Some("HGNC:100")),
+        ("ENST002", "1", 120_000, Some("GENE_A"), None),
+        ("ENST003", "1", 200_000, Some("GENE_B"), Some("HGNC:200")),
+        ("ENST004", "1", 220_000, Some("GENE_B"), None),
+    ])
+    .await;
+
+    assert_eq!(results.len(), 4);
+    assert_eq!(find_row(&results, "ENST001").2.as_deref(), Some("HGNC:100"));
+    assert_eq!(
+        find_row(&results, "ENST002").2,
+        None,
+        "no propagation from GENE_A sibling"
+    );
+    assert_eq!(find_row(&results, "ENST003").2.as_deref(), Some("HGNC:200"));
+    assert_eq!(
+        find_row(&results, "ENST004").2,
+        None,
+        "no propagation from GENE_B sibling"
+    );
+}
+
+/// Mixed scenario: native values preserved, no propagation, NULL-symbol safe.
 #[tokio::test]
 async fn mixed_scenario() {
-    let results = run_propagation(vec![
-        // FGF7P3-like local locus: one HGNC source, one colocated EntrezGene row.
+    let results = run_native_query(vec![
         (
             "ENST001",
             "9",
@@ -290,27 +323,38 @@ async fn mixed_scenario() {
             Some("HGNC:26671"),
         ),
         ("ENST002", "9", 39_816_479, Some("FGF7P3"), None),
-        // Gene with no HGNC at all
         ("ENST003", "9", 50_000_000, Some("NOVELGENE"), None),
-        // NULL symbol
         ("ENST004", "9", 60_000_000, None, None),
     ])
     .await;
 
     assert_eq!(results.len(), 4);
     assert_eq!(
-        find_row(&results, "ENST002").2.as_deref(),
+        find_row(&results, "ENST001").2.as_deref(),
         Some("HGNC:26671"),
-        "local sibling should get propagated HGNC"
+        "native HGNC preserved"
+    );
+    assert_eq!(
+        find_row(&results, "ENST002").2,
+        None,
+        "no propagation from sibling"
     );
     assert_eq!(
         find_row(&results, "ENST003").2,
         None,
-        "gene with no HGNC should stay NULL"
+        "gene with no HGNC stays NULL"
     );
     assert_eq!(
         find_row(&results, "ENST004").2,
         None,
-        "NULL-symbol should stay NULL"
+        "NULL-symbol stays NULL"
     );
+    // All rows: gene_hgnc_id == gene_hgnc_id_native
+    for row in &results {
+        assert_eq!(
+            row.2, row.3,
+            "gene_hgnc_id and gene_hgnc_id_native must match for {}",
+            row.0
+        );
+    }
 }

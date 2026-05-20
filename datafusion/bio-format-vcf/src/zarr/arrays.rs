@@ -1,0 +1,1968 @@
+use std::sync::Arc;
+
+use datafusion::arrow::array::{
+    ArrayRef, BooleanArray, BooleanBuilder, Float64Array, ListBuilder, PrimitiveArray,
+    PrimitiveBuilder, StringArray, StringBuilder, StructArray, UInt32Array,
+};
+use datafusion::arrow::datatypes::{
+    ArrowPrimitiveType, DataType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+    Int64Type, SchemaRef, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
+use datafusion::common::{DataFusionError, Result};
+use datafusion_bio_format_core::metadata::{VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY};
+use zarrs::array::{Array, ArraySubset, CodecOptions, ElementOwned};
+use zarrs::filesystem::FilesystemStore;
+
+use super::metadata::VcfZarrMetadata;
+use super::planning::RowSelection;
+use super::samples::{SampleSelection, format_array_name};
+use super::schema::VCF_ZARR_RAW_ARRAY_METADATA_KEY;
+use super::table_provider::VcfZarrReadOptions;
+
+pub(crate) fn read_projected_arrays(
+    metadata: &VcfZarrMetadata,
+    schema: &SchemaRef,
+    options: &VcfZarrReadOptions,
+    sample_selection: &SampleSelection,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<Vec<ArrayRef>> {
+    let mut cache = ArrayCache::new(
+        metadata,
+        row_selection.clone(),
+        options.coordinate_system_zero_based,
+        codec_options,
+    );
+    let mut arrays = Vec::with_capacity(schema.fields().len());
+
+    for field in schema.fields() {
+        let array: ArrayRef = match field.name().as_str() {
+            "chrom" => Arc::new(StringArray::from(cache.chrom()?)),
+            "start" => Arc::new(UInt32Array::from(cache.start()?)),
+            "end" => Arc::new(UInt32Array::from(cache.end()?)),
+            "id" => Arc::new(StringArray::from(cache.id()?)),
+            "ref" => Arc::new(StringArray::from(cache.ref_allele()?)),
+            "alt" => Arc::new(StringArray::from(cache.alt()?)),
+            "qual" => Arc::new(Float64Array::from(cache.qual()?)),
+            "filter" => Arc::new(StringArray::from(cache.filter()?)),
+            "genotypes" => read_genotypes(
+                metadata,
+                options,
+                field.data_type(),
+                sample_selection,
+                row_selection,
+                codec_options,
+            )?,
+            _info_field
+                if field
+                    .metadata()
+                    .get(VCF_FIELD_FIELD_TYPE_KEY)
+                    .is_some_and(|field_type| field_type == "INFO") =>
+            {
+                read_info_array(metadata, field, row_selection, codec_options)?
+            }
+            other => {
+                return Err(DataFusionError::Execution(format!(
+                    "VCF Zarr logical column '{other}' is not implemented"
+                )));
+            }
+        };
+        arrays.push(array);
+    }
+
+    Ok(arrays)
+}
+
+struct ArrayCache<'a> {
+    metadata: &'a VcfZarrMetadata,
+    row_selection: RowSelection,
+    coordinate_system_zero_based: bool,
+    codec_options: &'a CodecOptions,
+    contig_ids: Option<Vec<String>>,
+    contig_indices: Option<Vec<i64>>,
+    positions: Option<Vec<i64>>,
+    lengths: Option<Vec<i64>>,
+    alleles: Option<Vec<String>>,
+    allele_width: Option<usize>,
+}
+
+impl<'a> ArrayCache<'a> {
+    fn new(
+        metadata: &'a VcfZarrMetadata,
+        row_selection: RowSelection,
+        coordinate_system_zero_based: bool,
+        codec_options: &'a CodecOptions,
+    ) -> Self {
+        Self {
+            metadata,
+            row_selection,
+            coordinate_system_zero_based,
+            codec_options,
+            contig_ids: None,
+            contig_indices: None,
+            positions: None,
+            lengths: None,
+            alleles: None,
+            allele_width: None,
+        }
+    }
+
+    fn row_count(&self) -> usize {
+        self.row_selection.row_count()
+    }
+
+    fn chrom(&mut self) -> Result<Vec<String>> {
+        let contig_ids = self.contig_ids()?.clone();
+        let contig_indices = self.contig_indices()?.clone();
+        contig_indices
+            .iter()
+            .map(|index| {
+                let index = usize::try_from(*index).map_err(|_| {
+                    DataFusionError::Execution(format!("negative VCF Zarr contig index {index}"))
+                })?;
+                contig_ids.get(index).cloned().ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "VCF Zarr contig index {index} is out of range for contig_id"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    fn start(&mut self) -> Result<Vec<u32>> {
+        let zero_based = self.coordinate_system_zero_based;
+        self.positions()?
+            .iter()
+            .map(|position| {
+                let value = if zero_based {
+                    position.checked_sub(1).ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "VCF Zarr variant_position {position} cannot be converted to zero-based"
+                        ))
+                    })?
+                } else {
+                    *position
+                };
+                u32::try_from(value).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "VCF Zarr start coordinate {value} does not fit UInt32"
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    fn end(&mut self) -> Result<Vec<u32>> {
+        let starts = self.start()?;
+        let zero_based = self.coordinate_system_zero_based;
+        let lengths = self.lengths()?;
+        starts
+            .iter()
+            .zip(lengths.iter())
+            .map(|(start, length)| {
+                let length = u32::try_from((*length).max(1)).map_err(|_| {
+                    DataFusionError::Execution(format!("invalid VCF Zarr variant_length {length}"))
+                })?;
+                if zero_based {
+                    start.checked_add(length).ok_or_else(|| {
+                        DataFusionError::Execution("VCF Zarr end coordinate overflow".to_string())
+                    })
+                } else {
+                    start
+                        .checked_add(length)
+                        .and_then(|value| value.checked_sub(1))
+                        .ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "VCF Zarr end coordinate overflow".to_string(),
+                            )
+                        })
+                }
+            })
+            .collect()
+    }
+
+    fn id(&mut self) -> Result<Vec<Option<String>>> {
+        if !self.metadata.array_exists("variant_id") {
+            return Ok(vec![None; self.row_count()]);
+        }
+        Ok(read_strings_1d_for_pruning(
+            self.metadata,
+            "variant_id",
+            &self.row_selection,
+            self.codec_options,
+        )?
+        .into_iter()
+        .map(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty() && value != ".").then_some(value)
+        })
+        .collect())
+    }
+
+    fn ref_allele(&mut self) -> Result<Vec<String>> {
+        let allele_width = self.allele_width()?;
+        let alleles = self.alleles()?.clone();
+        Ok((0..self.row_count())
+            .map(|row| alleles[row * allele_width].clone())
+            .collect())
+    }
+
+    fn alt(&mut self) -> Result<Vec<String>> {
+        let allele_width = self.allele_width()?;
+        let alleles = self.alleles()?.clone();
+        Ok((0..self.row_count())
+            .map(|row| {
+                let start = row * allele_width + 1;
+                let end = (row + 1) * allele_width;
+                let values: Vec<&str> = alleles[start..end]
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|value| !value.is_empty() && *value != ".")
+                    .collect();
+                if values.is_empty() {
+                    ".".to_string()
+                } else {
+                    values.join(",")
+                }
+            })
+            .collect())
+    }
+
+    fn qual(&mut self) -> Result<Vec<Option<f64>>> {
+        if !self.metadata.array_exists("variant_quality") {
+            return Ok(vec![None; self.row_count()]);
+        }
+        Ok(read_f64_1d(
+            self.metadata,
+            "variant_quality",
+            &self.row_selection,
+            self.codec_options,
+        )?
+        .into_iter()
+        .map(|value| value.is_finite().then_some(value))
+        .collect())
+    }
+
+    fn filter(&mut self) -> Result<Vec<Option<String>>> {
+        if !self.metadata.array_exists("variant_filter") || !self.metadata.array_exists("filter_id")
+        {
+            return Ok(vec![None; self.row_count()]);
+        }
+
+        let filter_ids = read_strings_all(self.metadata, "filter_id", self.codec_options)?;
+        let filter_array = self.metadata.open_array("variant_filter")?;
+        let width = second_dimension(&filter_array, "variant_filter")?;
+        let values = read_bool_2d(
+            self.metadata,
+            "variant_filter",
+            &self.row_selection,
+            width,
+            self.codec_options,
+        )?;
+
+        Ok((0..self.row_count())
+            .map(|row| {
+                let active: Vec<&str> = (0..width)
+                    .filter(|col| values[row * width + col])
+                    .filter_map(|col| filter_ids.get(col).map(String::as_str))
+                    .filter(|value| !value.is_empty())
+                    .collect();
+                if active.is_empty() {
+                    Some("PASS".to_string())
+                } else {
+                    Some(active.join(","))
+                }
+            })
+            .collect())
+    }
+
+    fn contig_ids(&mut self) -> Result<&Vec<String>> {
+        if self.contig_ids.is_none() {
+            self.contig_ids = Some(read_strings_all(
+                self.metadata,
+                "contig_id",
+                self.codec_options,
+            )?);
+        }
+        Ok(self.contig_ids.as_ref().expect("contig ids initialized"))
+    }
+
+    fn contig_indices(&mut self) -> Result<&Vec<i64>> {
+        if self.contig_indices.is_none() {
+            self.contig_indices = Some(read_i64_1d(
+                self.metadata,
+                "variant_contig",
+                &self.row_selection,
+                self.codec_options,
+            )?);
+        }
+        Ok(self
+            .contig_indices
+            .as_ref()
+            .expect("contig indices initialized"))
+    }
+
+    fn positions(&mut self) -> Result<&Vec<i64>> {
+        if self.positions.is_none() {
+            self.positions = Some(read_i64_1d(
+                self.metadata,
+                "variant_position",
+                &self.row_selection,
+                self.codec_options,
+            )?);
+        }
+        Ok(self.positions.as_ref().expect("positions initialized"))
+    }
+
+    fn lengths(&mut self) -> Result<&Vec<i64>> {
+        if self.lengths.is_none() {
+            self.lengths = if self.metadata.array_exists("variant_length") {
+                Some(read_i64_1d(
+                    self.metadata,
+                    "variant_length",
+                    &self.row_selection,
+                    self.codec_options,
+                )?)
+            } else {
+                Some(vec![1; self.row_count()])
+            };
+        }
+        Ok(self.lengths.as_ref().expect("lengths initialized"))
+    }
+
+    fn alleles(&mut self) -> Result<&Vec<String>> {
+        if self.alleles.is_none() {
+            let allele_array = self.metadata.open_array("variant_allele")?;
+            let width = second_dimension(&allele_array, "variant_allele")?;
+            self.allele_width = Some(width);
+            self.alleles = Some(read_strings_2d(
+                self.metadata,
+                "variant_allele",
+                &self.row_selection,
+                width,
+                self.codec_options,
+            )?);
+        }
+        Ok(self.alleles.as_ref().expect("alleles initialized"))
+    }
+
+    fn allele_width(&mut self) -> Result<usize> {
+        if self.allele_width.is_none() {
+            let _ = self.alleles()?;
+        }
+        Ok(self.allele_width.expect("allele width initialized"))
+    }
+}
+
+fn read_info_array(
+    metadata: &VcfZarrMetadata,
+    field: &datafusion::arrow::datatypes::Field,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef> {
+    let raw_array = field
+        .metadata()
+        .get(VCF_ZARR_RAW_ARRAY_METADATA_KEY)
+        .cloned()
+        .unwrap_or_else(|| format!("variant_{}", field.name()));
+    let array = metadata.open_array(&raw_array)?;
+    match array.shape().len() {
+        1 => read_any_1d_as_array(metadata, &raw_array, row_selection, codec_options),
+        2 => {
+            let width = second_dimension(&array, &raw_array)?;
+            read_any_2d_as_list_array(metadata, &raw_array, row_selection, width, codec_options)
+        }
+        _ => Err(DataFusionError::Execution(format!(
+            "VCF Zarr INFO array '{raw_array}' has unsupported shape {:?}",
+            array.shape()
+        ))),
+    }
+}
+
+fn read_genotypes(
+    metadata: &VcfZarrMetadata,
+    options: &VcfZarrReadOptions,
+    data_type: &DataType,
+    sample_selection: &SampleSelection,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef> {
+    let DataType::Struct(children) = data_type else {
+        return Err(DataFusionError::Execution(format!(
+            "VCF Zarr genotypes column must be Struct, got {data_type:?}"
+        )));
+    };
+
+    let mut child_arrays = Vec::with_capacity(children.len());
+
+    for child in children {
+        let field_id = child
+            .metadata()
+            .get(VCF_FIELD_FORMAT_ID_KEY)
+            .map(String::as_str)
+            .unwrap_or_else(|| child.name().as_str());
+        let raw_array = child
+            .metadata()
+            .get(VCF_ZARR_RAW_ARRAY_METADATA_KEY)
+            .cloned()
+            .map(Ok)
+            .unwrap_or_else(|| format_array_name(metadata, field_id))?;
+        let values = read_format_array(
+            metadata,
+            &raw_array,
+            field_id,
+            options,
+            row_selection,
+            sample_selection,
+            codec_options,
+        )?;
+        child_arrays.push(values);
+    }
+
+    Ok(Arc::new(StructArray::try_new(
+        children.clone(),
+        child_arrays,
+        None,
+    )?))
+}
+
+fn build_string_list_array(values: Vec<String>, row_count: usize, sample_count: usize) -> ArrayRef {
+    let mut builder = ListBuilder::new(StringBuilder::new());
+
+    for row in 0..row_count {
+        for sample in 0..sample_count {
+            builder
+                .values()
+                .append_value(&values[row * sample_count + sample]);
+        }
+        builder.append(true);
+    }
+
+    Arc::new(builder.finish())
+}
+
+fn read_format_array(
+    metadata: &VcfZarrMetadata,
+    raw_array: &str,
+    field_id: &str,
+    options: &VcfZarrReadOptions,
+    row_selection: &RowSelection,
+    sample_selection: &SampleSelection,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef> {
+    if is_gt_field(field_id, raw_array) && !options.genotype_encoding_raw {
+        let values = read_format_values(
+            metadata,
+            raw_array,
+            field_id,
+            row_selection,
+            sample_selection.source_names.len(),
+            &sample_selection.selected_indices,
+            codec_options,
+        )?;
+        return Ok(build_string_list_array(
+            values,
+            row_selection.row_count(),
+            sample_selection.selected_indices.len(),
+        ));
+    }
+
+    let array = metadata.open_array(raw_array)?;
+    validate_format_shape_and_samples(
+        &array,
+        raw_array,
+        sample_selection.source_names.len(),
+        &sample_selection.selected_indices,
+    )?;
+
+    match array.shape().len() {
+        2 => read_any_2d_selected_as_array(
+            &array,
+            raw_array,
+            row_selection,
+            &sample_selection.selected_indices,
+            codec_options,
+        ),
+        3 => read_any_3d_selected_as_nested_array(
+            &array,
+            raw_array,
+            row_selection,
+            &sample_selection.selected_indices,
+            codec_options,
+        ),
+        _ => Err(DataFusionError::Execution(format!(
+            "VCF Zarr FORMAT array '{raw_array}' has unsupported shape {:?}",
+            array.shape()
+        ))),
+    }
+}
+
+fn read_format_values(
+    metadata: &VcfZarrMetadata,
+    raw_array: &str,
+    field_id: &str,
+    row_selection: &RowSelection,
+    source_sample_count: usize,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    let array = metadata.open_array(raw_array)?;
+    validate_format_shape_and_samples(&array, raw_array, source_sample_count, sample_indices)?;
+
+    match array.shape().len() {
+        2 => read_any_2d_selected_as_strings(
+            &array,
+            raw_array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        ),
+        3 if is_gt_field(field_id, raw_array) => read_genotype_3d_as_strings(
+            metadata,
+            &array,
+            raw_array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        ),
+        3 => read_any_3d_selected_as_strings(
+            &array,
+            raw_array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        ),
+        _ => Err(DataFusionError::Execution(format!(
+            "VCF Zarr FORMAT array '{raw_array}' has unsupported shape {:?}",
+            array.shape()
+        ))),
+    }
+}
+
+fn validate_format_shape_and_samples(
+    array: &Array<FilesystemStore>,
+    raw_array: &str,
+    source_sample_count: usize,
+    sample_indices: &[usize],
+) -> Result<()> {
+    if array.shape().len() < 2 {
+        return Err(DataFusionError::Execution(format!(
+            "VCF Zarr FORMAT array '{raw_array}' must have at least variants and samples dimensions; got shape {:?}",
+            array.shape()
+        )));
+    }
+
+    let array_sample_count = usize::try_from(array.shape()[1]).map_err(|_| {
+        DataFusionError::Execution(format!(
+            "VCF Zarr FORMAT array '{raw_array}' sample dimension exceeds platform size"
+        ))
+    })?;
+    if source_sample_count != 0 && array_sample_count != source_sample_count {
+        return Err(DataFusionError::Execution(format!(
+            "VCF Zarr FORMAT array '{raw_array}' sample dimension {array_sample_count} does not match sample_id length {source_sample_count}"
+        )));
+    }
+    if let Some(index) = sample_indices
+        .iter()
+        .find(|index| **index >= array_sample_count)
+    {
+        return Err(DataFusionError::Execution(format!(
+            "VCF Zarr FORMAT array '{raw_array}' does not contain requested sample index {index}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_gt_field(field_id: &str, raw_array: &str) -> bool {
+    field_id == "GT" || raw_array == "call_genotype"
+}
+
+fn read_any_1d_as_array(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef> {
+    let array = metadata.open_array(name)?;
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "string", "|O") {
+        read_vec_1d::<String>(&array, row_selection, codec_options)
+            .map(|values| Arc::new(StringArray::from(values)) as ArrayRef)
+    } else if is_dtype(&data_type, "bool", "|b1") {
+        read_vec_1d::<bool>(&array, row_selection, codec_options)
+            .map(|values| Arc::new(BooleanArray::from(values)) as ArrayRef)
+    } else if is_dtype(&data_type, "int8", "|i1") {
+        read_primitive_1d_as_array::<Int8Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_primitive_1d_as_array::<Int16Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_primitive_1d_as_array::<Int32Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_primitive_1d_as_array::<Int64Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_primitive_1d_as_array::<UInt8Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_primitive_1d_as_array::<UInt16Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_primitive_1d_as_array::<UInt32Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_primitive_1d_as_array::<UInt64Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "float32", "<f4") {
+        read_primitive_1d_as_array::<Float32Type>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        read_primitive_1d_as_array::<Float64Type>(&array, row_selection, codec_options)
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported data type {data_type}"
+        )))
+    }
+}
+
+fn read_any_2d_as_list_array(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef> {
+    let array = metadata.open_array(name)?;
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "string", "|O") {
+        read_vec_2d::<String>(&array, row_selection, width, codec_options)
+            .map(|values| build_string_list_array(values, row_selection.row_count(), width))
+    } else if is_dtype(&data_type, "bool", "|b1") {
+        read_vec_2d::<bool>(&array, row_selection, width, codec_options)
+            .map(|values| build_bool_list_array(values, row_selection.row_count(), width))
+    } else if is_dtype(&data_type, "int8", "|i1") {
+        read_primitive_2d_as_list_array::<Int8Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_primitive_2d_as_list_array::<Int16Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_primitive_2d_as_list_array::<Int32Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_primitive_2d_as_list_array::<Int64Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_primitive_2d_as_list_array::<UInt8Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_primitive_2d_as_list_array::<UInt16Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_primitive_2d_as_list_array::<UInt32Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_primitive_2d_as_list_array::<UInt64Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "float32", "<f4") {
+        read_primitive_2d_as_list_array::<Float32Type>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        read_primitive_2d_as_list_array::<Float64Type>(&array, row_selection, width, codec_options)
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported data type {data_type}"
+        )))
+    }
+}
+
+fn read_any_2d_selected_as_array(
+    array: &Array<FilesystemStore>,
+    name: &str,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef> {
+    let sample_count = sample_indices.len();
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "string", "|O") {
+        read_selected_2d_values::<String>(array, row_selection, sample_indices, codec_options)
+            .map(|values| build_string_list_array(values, row_selection.row_count(), sample_count))
+    } else if is_dtype(&data_type, "bool", "|b1") {
+        read_selected_2d_values::<bool>(array, row_selection, sample_indices, codec_options)
+            .map(|values| build_bool_list_array(values, row_selection.row_count(), sample_count))
+    } else if is_dtype(&data_type, "int8", "|i1") {
+        read_primitive_selected_2d_as_list_array::<Int8Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_primitive_selected_2d_as_list_array::<Int16Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_primitive_selected_2d_as_list_array::<Int32Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_primitive_selected_2d_as_list_array::<Int64Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_primitive_selected_2d_as_list_array::<UInt8Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_primitive_selected_2d_as_list_array::<UInt16Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_primitive_selected_2d_as_list_array::<UInt32Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_primitive_selected_2d_as_list_array::<UInt64Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "float32", "<f4") {
+        read_primitive_selected_2d_as_list_array::<Float32Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        read_primitive_selected_2d_as_list_array::<Float64Type>(
+            array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported FORMAT data type {data_type}"
+        )))
+    }
+}
+
+fn read_any_3d_selected_as_nested_array(
+    array: &Array<FilesystemStore>,
+    name: &str,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef> {
+    let width = third_dimension(array, name)?;
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "string", "|O") {
+        read_selected_3d_values::<String>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+        .map(|values| {
+            build_string_nested_list_array(
+                values,
+                row_selection.row_count(),
+                sample_indices.len(),
+                width,
+            )
+        })
+    } else if is_dtype(&data_type, "bool", "|b1") {
+        read_selected_3d_values::<bool>(array, row_selection, sample_indices, width, codec_options)
+            .map(|values| {
+                build_bool_nested_list_array(
+                    values,
+                    row_selection.row_count(),
+                    sample_indices.len(),
+                    width,
+                )
+            })
+    } else if is_dtype(&data_type, "int8", "|i1") {
+        read_primitive_selected_3d_as_nested_list_array::<Int8Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_primitive_selected_3d_as_nested_list_array::<Int16Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_primitive_selected_3d_as_nested_list_array::<Int32Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_primitive_selected_3d_as_nested_list_array::<Int64Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_primitive_selected_3d_as_nested_list_array::<UInt8Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_primitive_selected_3d_as_nested_list_array::<UInt16Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_primitive_selected_3d_as_nested_list_array::<UInt32Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_primitive_selected_3d_as_nested_list_array::<UInt64Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "float32", "<f4") {
+        read_primitive_selected_3d_as_nested_list_array::<Float32Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        read_primitive_selected_3d_as_nested_list_array::<Float64Type>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+        )
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported FORMAT data type {data_type}"
+        )))
+    }
+}
+
+fn read_any_2d_selected_as_strings(
+    array: &Array<FilesystemStore>,
+    name: &str,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "string", "|O") {
+        read_selected_2d_values::<String>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(format_string_scalar).collect())
+    } else if is_dtype(&data_type, "bool", "|b1") {
+        read_selected_2d_values::<bool>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "int8", "|i1") {
+        read_selected_2d_values::<i8>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(format_integer_scalar).collect())
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_selected_2d_values::<i16>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(format_integer_scalar).collect())
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_selected_2d_values::<i32>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(format_integer_scalar).collect())
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_selected_2d_values::<i64>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(format_integer_scalar).collect())
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_selected_2d_values::<u8>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_selected_2d_values::<u16>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_selected_2d_values::<u32>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_selected_2d_values::<u64>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(|value| value.to_string()).collect())
+    } else if is_dtype(&data_type, "float32", "<f4") {
+        read_selected_2d_values::<f32>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(format_float_scalar).collect())
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        read_selected_2d_values::<f64>(array, row_selection, sample_indices, codec_options)
+            .map(|values| values.into_iter().map(format_float_scalar).collect())
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported FORMAT data type {data_type}"
+        )))
+    }
+}
+
+fn read_any_3d_selected_as_strings(
+    array: &Array<FilesystemStore>,
+    name: &str,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    let width = third_dimension(array, name)?;
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "string", "|O") {
+        read_selected_3d_collapsed_strings::<String, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_strings(values),
+        )
+    } else if is_dtype(&data_type, "bool", "|b1") {
+        read_selected_3d_collapsed_strings::<bool, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| join_values(values.iter().map(|value| value.to_string())),
+        )
+    } else if is_dtype(&data_type, "int8", "|i1") {
+        read_selected_3d_collapsed_strings::<i8, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_selected_3d_collapsed_strings::<i16, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_selected_3d_collapsed_strings::<i32, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_selected_3d_collapsed_strings::<i64, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_selected_3d_collapsed_strings::<u8, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_selected_3d_collapsed_strings::<u16, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_selected_3d_collapsed_strings::<u32, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "uint64", "<u8") {
+        read_selected_3d_collapsed_strings::<u64, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_integers(values),
+        )
+    } else if is_dtype(&data_type, "float32", "<f4") {
+        read_selected_3d_collapsed_strings::<f32, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_floats(values),
+        )
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        read_selected_3d_collapsed_strings::<f64, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |_, _, values| collapse_floats(values),
+        )
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported FORMAT data type {data_type}"
+        )))
+    }
+}
+
+fn read_genotype_3d_as_strings(
+    metadata: &VcfZarrMetadata,
+    array: &Array<FilesystemStore>,
+    name: &str,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    let width = third_dimension(array, name)?;
+    let phased = if metadata.array_exists("call_genotype_phased") {
+        let phased_array = metadata.open_array("call_genotype_phased")?;
+        read_selected_2d_values::<bool>(
+            &phased_array,
+            row_selection,
+            sample_indices,
+            codec_options,
+        )?
+    } else {
+        vec![
+            false;
+            row_selection
+                .row_count()
+                .saturating_mul(sample_indices.len())
+        ]
+    };
+
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "int8", "|i1") {
+        read_selected_3d_collapsed_strings::<i8, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |row, sample, values| {
+                format_gt_values(
+                    values.iter().map(|value| i64::from(*value)),
+                    phased[row * sample_indices.len() + sample],
+                )
+            },
+        )
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_selected_3d_collapsed_strings::<i16, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |row, sample, values| {
+                format_gt_values(
+                    values.iter().map(|value| i64::from(*value)),
+                    phased[row * sample_indices.len() + sample],
+                )
+            },
+        )
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_selected_3d_collapsed_strings::<i32, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |row, sample, values| {
+                format_gt_values(
+                    values.iter().map(|value| i64::from(*value)),
+                    phased[row * sample_indices.len() + sample],
+                )
+            },
+        )
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_selected_3d_collapsed_strings::<i64, _>(
+            array,
+            row_selection,
+            sample_indices,
+            width,
+            codec_options,
+            |row, sample, values| {
+                format_gt_values(
+                    values.iter().copied(),
+                    phased[row * sample_indices.len() + sample],
+                )
+            },
+        )
+    } else {
+        read_any_3d_selected_as_strings(array, name, row_selection, sample_indices, codec_options)
+    }
+}
+
+pub(crate) fn read_i64_1d(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<Vec<i64>> {
+    let array = metadata.open_array(name)?;
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "int8", "|i1") {
+        read_vec_1d::<i8>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_vec_1d::<i16>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_vec_1d::<i32>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_vec_1d::<i64>(&array, row_selection, codec_options)
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_vec_1d::<u8>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_vec_1d::<u16>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_vec_1d::<u32>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported integer data type {data_type}"
+        )))
+    }
+}
+
+pub(crate) fn read_i64_2d(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<Vec<i64>> {
+    let array = metadata.open_array(name)?;
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "int8", "|i1") {
+        read_vec_2d::<i8>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "int16", "<i2") {
+        read_vec_2d::<i16>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "int32", "<i4") {
+        read_vec_2d::<i32>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "int64", "<i8") {
+        read_vec_2d::<i64>(&array, row_selection, width, codec_options)
+    } else if is_dtype(&data_type, "uint8", "|u1") {
+        read_vec_2d::<u8>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "uint16", "<u2") {
+        read_vec_2d::<u16>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else if is_dtype(&data_type, "uint32", "<u4") {
+        read_vec_2d::<u32>(&array, row_selection, width, codec_options)
+            .map(|v| v.into_iter().map(i64::from).collect())
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported integer data type {data_type}"
+        )))
+    }
+}
+
+fn read_f64_1d(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<Vec<f64>> {
+    let array = metadata.open_array(name)?;
+    let data_type = array.data_type().to_string();
+    if is_dtype(&data_type, "float32", "<f4") {
+        read_vec_1d::<f32>(&array, row_selection, codec_options)
+            .map(|v| v.into_iter().map(f64::from).collect())
+    } else if is_dtype(&data_type, "float64", "<f8") {
+        read_vec_1d::<f64>(&array, row_selection, codec_options)
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' has unsupported floating data type {data_type}"
+        )))
+    }
+}
+
+fn read_bool_2d(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<Vec<bool>> {
+    let array = metadata.open_array(name)?;
+    read_vec_2d::<bool>(&array, row_selection, width, codec_options)
+}
+
+fn read_strings_all(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    let array = metadata.open_array(name)?;
+    let row_count = usize::try_from(
+        *array
+            .shape()
+            .first()
+            .ok_or_else(|| DataFusionError::Execution(format!("{name} is not 1-dimensional")))?,
+    )
+    .map_err(|_| DataFusionError::Execution(format!("{name} length exceeds platform size")))?;
+    read_vec_1d::<String>(&array, &RowSelection::all(row_count), codec_options)
+}
+
+pub(crate) fn read_strings_1d_for_pruning(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    let array = metadata.open_array(name)?;
+    read_strings_1d_array_for_pruning(&array, row_selection, codec_options)
+}
+
+pub(crate) fn read_strings_1d_array_for_pruning(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    read_vec_1d::<String>(array, row_selection, codec_options)
+}
+
+fn read_strings_2d(
+    metadata: &VcfZarrMetadata,
+    name: &str,
+    row_selection: &RowSelection,
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<Vec<String>> {
+    let array = metadata.open_array(name)?;
+    read_vec_2d::<String>(&array, row_selection, width, codec_options)
+}
+
+fn is_dtype(actual: &str, zarrs_name: &str, v2_name: &str) -> bool {
+    actual == zarrs_name
+        || actual == v2_name
+        || actual.starts_with(&format!("{zarrs_name} /"))
+        || actual.ends_with(&format!("/ {v2_name}"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SampleSpan {
+    source_start: usize,
+    output_start: usize,
+    len: usize,
+}
+
+fn contiguous_sample_spans(sample_indices: &[usize]) -> Vec<SampleSpan> {
+    if sample_indices.is_empty() {
+        return Vec::new();
+    }
+
+    let mut spans = Vec::new();
+    let mut source_start = sample_indices[0];
+    let mut output_start = 0;
+    let mut len = 1;
+
+    for (sample_out, sample_index) in sample_indices.iter().copied().enumerate().skip(1) {
+        if sample_index == source_start + len {
+            len += 1;
+        } else {
+            spans.push(SampleSpan {
+                source_start,
+                output_start,
+                len,
+            });
+            source_start = sample_index;
+            output_start = sample_out;
+            len = 1;
+        }
+    }
+
+    spans.push(SampleSpan {
+        source_start,
+        output_start,
+        len,
+    });
+    spans
+}
+
+fn read_primitive_1d_as_array<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef>
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy + ElementOwned,
+    Vec<T::Native>: zarrs::array::FromArrayBytes,
+{
+    read_vec_1d::<T::Native>(array, row_selection, codec_options)
+        .map(|values| Arc::new(PrimitiveArray::<T>::from_iter_values(values)) as ArrayRef)
+}
+
+fn read_primitive_2d_as_list_array<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef>
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy + ElementOwned,
+    Vec<T::Native>: zarrs::array::FromArrayBytes,
+{
+    read_vec_2d::<T::Native>(array, row_selection, width, codec_options)
+        .map(|values| build_primitive_list_array::<T>(values, row_selection.row_count(), width))
+}
+
+fn read_primitive_selected_2d_as_list_array<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef>
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy + Clone + Default + ElementOwned,
+    Vec<T::Native>: zarrs::array::FromArrayBytes,
+{
+    read_selected_2d_values::<T::Native>(array, row_selection, sample_indices, codec_options).map(
+        |values| {
+            build_primitive_list_array::<T>(values, row_selection.row_count(), sample_indices.len())
+        },
+    )
+}
+
+fn read_primitive_selected_3d_as_nested_list_array<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<ArrayRef>
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy + Clone + Default + ElementOwned,
+    Vec<T::Native>: zarrs::array::FromArrayBytes,
+{
+    read_selected_3d_values::<T::Native>(array, row_selection, sample_indices, width, codec_options)
+        .map(|values| {
+            build_primitive_nested_list_array::<T>(
+                values,
+                row_selection.row_count(),
+                sample_indices.len(),
+                width,
+            )
+        })
+}
+
+fn build_primitive_list_array<T>(values: Vec<T::Native>, row_count: usize, width: usize) -> ArrayRef
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy,
+{
+    let mut builder = ListBuilder::new(PrimitiveBuilder::<T>::new());
+
+    for row in 0..row_count {
+        for item in 0..width {
+            builder.values().append_value(values[row * width + item]);
+        }
+        builder.append(true);
+    }
+
+    Arc::new(builder.finish())
+}
+
+fn build_bool_list_array(values: Vec<bool>, row_count: usize, width: usize) -> ArrayRef {
+    let mut builder = ListBuilder::new(BooleanBuilder::new());
+
+    for row in 0..row_count {
+        for item in 0..width {
+            builder.values().append_value(values[row * width + item]);
+        }
+        builder.append(true);
+    }
+
+    Arc::new(builder.finish())
+}
+
+fn build_primitive_nested_list_array<T>(
+    values: Vec<T::Native>,
+    row_count: usize,
+    sample_count: usize,
+    width: usize,
+) -> ArrayRef
+where
+    T: ArrowPrimitiveType,
+    T::Native: Copy,
+{
+    let inner_builder = ListBuilder::new(PrimitiveBuilder::<T>::new());
+    let mut outer_builder = ListBuilder::new(inner_builder);
+
+    for row in 0..row_count {
+        for sample in 0..sample_count {
+            for item in 0..width {
+                let index = ((row * sample_count + sample) * width) + item;
+                outer_builder.values().values().append_value(values[index]);
+            }
+            outer_builder.values().append(true);
+        }
+        outer_builder.append(true);
+    }
+
+    Arc::new(outer_builder.finish())
+}
+
+fn build_bool_nested_list_array(
+    values: Vec<bool>,
+    row_count: usize,
+    sample_count: usize,
+    width: usize,
+) -> ArrayRef {
+    let inner_builder = ListBuilder::new(BooleanBuilder::new());
+    let mut outer_builder = ListBuilder::new(inner_builder);
+
+    for row in 0..row_count {
+        for sample in 0..sample_count {
+            for item in 0..width {
+                let index = ((row * sample_count + sample) * width) + item;
+                outer_builder.values().values().append_value(values[index]);
+            }
+            outer_builder.values().append(true);
+        }
+        outer_builder.append(true);
+    }
+
+    Arc::new(outer_builder.finish())
+}
+
+fn build_string_nested_list_array(
+    values: Vec<String>,
+    row_count: usize,
+    sample_count: usize,
+    width: usize,
+) -> ArrayRef {
+    let inner_builder = ListBuilder::new(StringBuilder::new());
+    let mut outer_builder = ListBuilder::new(inner_builder);
+
+    for row in 0..row_count {
+        for sample in 0..sample_count {
+            for item in 0..width {
+                let index = ((row * sample_count + sample) * width) + item;
+                outer_builder.values().values().append_value(&values[index]);
+            }
+            outer_builder.values().append(true);
+        }
+        outer_builder.append(true);
+    }
+
+    Arc::new(outer_builder.finish())
+}
+
+fn read_vec_1d<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    codec_options: &CodecOptions,
+) -> Result<Vec<T>>
+where
+    T: ElementOwned,
+    Vec<T>: zarrs::array::FromArrayBytes,
+{
+    let mut values = Vec::with_capacity(row_selection.row_count());
+
+    for range in &row_selection.ranges {
+        let start = u64::try_from(range.start)
+            .map_err(|_| DataFusionError::Execution("row range start exceeds u64".to_string()))?;
+        let end = u64::try_from(range.end)
+            .map_err(|_| DataFusionError::Execution("row range end exceeds u64".to_string()))?;
+        let ranges = std::iter::once(start..end).collect::<Vec<_>>();
+        let subset = ArraySubset::new_with_ranges(&ranges);
+        let mut chunk = array
+            .retrieve_array_subset_opt::<Vec<T>>(&subset, codec_options)
+            .map_err(|error| {
+                DataFusionError::Execution(format!(
+                    "Failed to read VCF Zarr array '{}': {error}",
+                    array.path()
+                ))
+            })?;
+        values.append(&mut chunk);
+    }
+
+    Ok(values)
+}
+
+fn read_vec_2d<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<Vec<T>>
+where
+    T: ElementOwned,
+    Vec<T>: zarrs::array::FromArrayBytes,
+{
+    let width_usize = width;
+    let width = u64::try_from(width_usize)
+        .map_err(|_| DataFusionError::Execution("array width exceeds u64".to_string()))?;
+    let mut values = Vec::with_capacity(row_selection.row_count().saturating_mul(width_usize));
+
+    for range in &row_selection.ranges {
+        let start = u64::try_from(range.start)
+            .map_err(|_| DataFusionError::Execution("row range start exceeds u64".to_string()))?;
+        let end = u64::try_from(range.end)
+            .map_err(|_| DataFusionError::Execution("row range end exceeds u64".to_string()))?;
+        let subset = ArraySubset::new_with_ranges(&[start..end, 0..width]);
+        let mut chunk = array
+            .retrieve_array_subset_opt::<Vec<T>>(&subset, codec_options)
+            .map_err(|error| {
+                DataFusionError::Execution(format!(
+                    "Failed to read VCF Zarr array '{}': {error}",
+                    array.path()
+                ))
+            })?;
+        values.append(&mut chunk);
+    }
+
+    Ok(values)
+}
+
+fn read_selected_2d_values<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    codec_options: &CodecOptions,
+) -> Result<Vec<T>>
+where
+    T: Clone + Default + ElementOwned,
+    Vec<T>: zarrs::array::FromArrayBytes,
+{
+    let sample_count = sample_indices.len();
+    if sample_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let row_count = row_selection.row_count();
+    let mut values = vec![T::default(); row_count.saturating_mul(sample_count)];
+    let mut row_offset = 0;
+
+    let sample_spans = contiguous_sample_spans(sample_indices);
+
+    for range in &row_selection.ranges {
+        let row_start = u64::try_from(range.start)
+            .map_err(|_| DataFusionError::Execution("row range start exceeds u64".to_string()))?;
+        let row_end = u64::try_from(range.end)
+            .map_err(|_| DataFusionError::Execution("row range end exceeds u64".to_string()))?;
+        let rows = range.end.saturating_sub(range.start);
+
+        for span in &sample_spans {
+            let sample_start = u64::try_from(span.source_start)
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let sample_end = u64::try_from(span.source_start.saturating_add(span.len))
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let subset =
+                ArraySubset::new_with_ranges(&[row_start..row_end, sample_start..sample_end]);
+            let chunk = array
+                .retrieve_array_subset_opt::<Vec<T>>(&subset, codec_options)
+                .map_err(|error| {
+                    DataFusionError::Execution(format!(
+                        "Failed to read VCF Zarr array '{}': {error}",
+                        array.path()
+                    ))
+                })?;
+            for row in 0..rows {
+                for sample_delta in 0..span.len {
+                    let sample_out = span.output_start + sample_delta;
+                    let value_index = row * span.len + sample_delta;
+                    values[(row_offset + row) * sample_count + sample_out] =
+                        chunk[value_index].clone();
+                }
+            }
+        }
+
+        row_offset += rows;
+    }
+
+    Ok(values)
+}
+
+fn read_selected_3d_values<T>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    width: usize,
+    codec_options: &CodecOptions,
+) -> Result<Vec<T>>
+where
+    T: Clone + Default + ElementOwned,
+    Vec<T>: zarrs::array::FromArrayBytes,
+{
+    let sample_count = sample_indices.len();
+    if sample_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let row_count = row_selection.row_count();
+    let mut values =
+        vec![T::default(); row_count.saturating_mul(sample_count).saturating_mul(width)];
+    let mut row_offset = 0;
+    let width_u64 = u64::try_from(width)
+        .map_err(|_| DataFusionError::Execution("array width exceeds u64".to_string()))?;
+
+    let sample_spans = contiguous_sample_spans(sample_indices);
+
+    for range in &row_selection.ranges {
+        let row_start = u64::try_from(range.start)
+            .map_err(|_| DataFusionError::Execution("row range start exceeds u64".to_string()))?;
+        let row_end = u64::try_from(range.end)
+            .map_err(|_| DataFusionError::Execution("row range end exceeds u64".to_string()))?;
+        let rows = range.end.saturating_sub(range.start);
+
+        for span in &sample_spans {
+            let sample_start = u64::try_from(span.source_start)
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let sample_end = u64::try_from(span.source_start.saturating_add(span.len))
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let subset = ArraySubset::new_with_ranges(&[
+                row_start..row_end,
+                sample_start..sample_end,
+                0..width_u64,
+            ]);
+            let chunk = array
+                .retrieve_array_subset_opt::<Vec<T>>(&subset, codec_options)
+                .map_err(|error| {
+                    DataFusionError::Execution(format!(
+                        "Failed to read VCF Zarr array '{}': {error}",
+                        array.path()
+                    ))
+                })?;
+            for row in 0..rows {
+                for sample_delta in 0..span.len {
+                    let sample_out = span.output_start + sample_delta;
+                    for item in 0..width {
+                        let source = (row * span.len + sample_delta) * width + item;
+                        let target =
+                            ((row_offset + row) * sample_count + sample_out) * width + item;
+                        values[target] = chunk[source].clone();
+                    }
+                }
+            }
+        }
+
+        row_offset += rows;
+    }
+
+    Ok(values)
+}
+
+fn read_selected_3d_collapsed_strings<T, F>(
+    array: &Array<FilesystemStore>,
+    row_selection: &RowSelection,
+    sample_indices: &[usize],
+    width: usize,
+    codec_options: &CodecOptions,
+    collapse: F,
+) -> Result<Vec<String>>
+where
+    T: ElementOwned,
+    Vec<T>: zarrs::array::FromArrayBytes,
+    F: Fn(usize, usize, &[T]) -> String,
+{
+    let sample_count = sample_indices.len();
+    if sample_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let row_count = row_selection.row_count();
+    let mut values = vec![String::new(); row_count.saturating_mul(sample_count)];
+    let mut row_offset = 0;
+    let width_u64 = u64::try_from(width)
+        .map_err(|_| DataFusionError::Execution("array width exceeds u64".to_string()))?;
+
+    let sample_spans = contiguous_sample_spans(sample_indices);
+
+    for range in &row_selection.ranges {
+        let row_start = u64::try_from(range.start)
+            .map_err(|_| DataFusionError::Execution("row range start exceeds u64".to_string()))?;
+        let row_end = u64::try_from(range.end)
+            .map_err(|_| DataFusionError::Execution("row range end exceeds u64".to_string()))?;
+        let rows = range.end.saturating_sub(range.start);
+
+        for span in &sample_spans {
+            let sample_start = u64::try_from(span.source_start)
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let sample_end = u64::try_from(span.source_start.saturating_add(span.len))
+                .map_err(|_| DataFusionError::Execution("sample index exceeds u64".to_string()))?;
+            let subset = ArraySubset::new_with_ranges(&[
+                row_start..row_end,
+                sample_start..sample_end,
+                0..width_u64,
+            ]);
+            let chunk = array
+                .retrieve_array_subset_opt::<Vec<T>>(&subset, codec_options)
+                .map_err(|error| {
+                    DataFusionError::Execution(format!(
+                        "Failed to read VCF Zarr array '{}': {error}",
+                        array.path()
+                    ))
+                })?;
+            for row in 0..rows {
+                for sample_delta in 0..span.len {
+                    let sample_out = span.output_start + sample_delta;
+                    let value_start = (row * span.len + sample_delta) * width;
+                    let value_end = value_start + width;
+                    values[(row_offset + row) * sample_count + sample_out] =
+                        collapse(row_offset + row, sample_out, &chunk[value_start..value_end]);
+                }
+            }
+        }
+
+        row_offset += rows;
+    }
+
+    Ok(values)
+}
+
+fn second_dimension(array: &Array<FilesystemStore>, name: &str) -> Result<usize> {
+    if array.shape().len() != 2 {
+        return Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' must be 2-dimensional; got shape {:?}",
+            array.shape()
+        )));
+    }
+    usize::try_from(array.shape()[1]).map_err(|_| {
+        DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' width exceeds platform size"
+        ))
+    })
+}
+
+fn third_dimension(array: &Array<FilesystemStore>, name: &str) -> Result<usize> {
+    if array.shape().len() != 3 {
+        return Err(DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' must be 3-dimensional; got shape {:?}",
+            array.shape()
+        )));
+    }
+    usize::try_from(array.shape()[2]).map_err(|_| {
+        DataFusionError::Execution(format!(
+            "VCF Zarr array '{name}' width exceeds platform size"
+        ))
+    })
+}
+
+fn format_string_scalar(value: String) -> String {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        ".".to_string()
+    } else {
+        value
+    }
+}
+
+fn format_integer_scalar<T>(value: T) -> String
+where
+    T: Into<i64>,
+{
+    value.into().to_string()
+}
+
+fn format_float_scalar<T>(value: T) -> String
+where
+    T: Into<f64>,
+{
+    let value = value.into();
+    if value.is_finite() {
+        value.to_string()
+    } else {
+        ".".to_string()
+    }
+}
+
+fn collapse_strings(values: &[String]) -> String {
+    join_values(
+        values
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                if value == "." {
+                    ".".to_string()
+                } else {
+                    value.to_string()
+                }
+            }),
+    )
+}
+
+fn collapse_integers<T>(values: &[T]) -> String
+where
+    T: std::fmt::Display,
+{
+    join_values(values.iter().map(|value| value.to_string()))
+}
+
+fn collapse_floats<T>(values: &[T]) -> String
+where
+    T: Copy + Into<f64>,
+{
+    join_values(values.iter().map(|value| format_float_scalar(*value)))
+}
+
+fn format_gt_values(values: impl Iterator<Item = i64>, phased: bool) -> String {
+    let separator = if phased { "|" } else { "/" };
+    let alleles = values
+        .filter_map(|value| match value {
+            -2 => None,
+            -1 => Some(".".to_string()),
+            value => Some(value.to_string()),
+        })
+        .collect::<Vec<_>>();
+    if alleles.is_empty() {
+        ".".to_string()
+    } else {
+        alleles.join(separator)
+    }
+}
+
+fn join_values(values: impl Iterator<Item = String>) -> String {
+    let joined = values.collect::<Vec<_>>().join(",");
+    if joined.is_empty() {
+        ".".to_string()
+    } else {
+        joined
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use zarrs::array::Array;
+    use zarrs::config::MetadataRetrieveVersion;
+    use zarrs::filesystem::FilesystemStore;
+
+    use super::{collapse_integers, contiguous_sample_spans, read_any_3d_selected_as_strings};
+    use crate::zarr::planning::RowSelection;
+
+    #[test]
+    fn contiguous_sample_spans_groups_adjacent_requested_samples() {
+        let spans = contiguous_sample_spans(&[0, 1, 2, 4, 7, 8]);
+
+        assert_eq!(
+            spans
+                .into_iter()
+                .map(|span| (span.source_start, span.output_start, span.len))
+                .collect::<Vec<_>>(),
+            vec![(0, 0, 3), (4, 3, 1), (7, 4, 2)]
+        );
+    }
+
+    #[test]
+    fn contiguous_sample_spans_preserves_requested_order_for_non_monotonic_samples() {
+        let spans = contiguous_sample_spans(&[2, 0, 1]);
+
+        assert_eq!(
+            spans
+                .into_iter()
+                .map(|span| (span.source_start, span.output_start, span.len))
+                .collect::<Vec<_>>(),
+            vec![(2, 0, 1), (0, 1, 2)]
+        );
+    }
+
+    #[test]
+    fn collapse_integers_preserves_negative_non_gt_values() {
+        assert_eq!(collapse_integers(&[-1_i32, -2, 3]), "-1,-2,3");
+    }
+
+    #[test]
+    fn read_any_3d_selected_as_strings_supports_uint64_arrays() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let array_path = temp_dir.path().join("call_U64");
+        std::fs::create_dir_all(&array_path).expect("array directory should be created");
+        std::fs::write(
+            array_path.join(".zarray"),
+            r#"{
+  "shape": [2, 2, 3],
+  "chunks": [2, 2, 3],
+  "dtype": "<u8",
+  "fill_value": 0,
+  "order": "C",
+  "filters": null,
+  "dimension_separator": ".",
+  "compressor": null,
+  "zarr_format": 2
+}"#,
+        )
+        .expect("array metadata should be written");
+
+        let mut bytes = Vec::new();
+        for value in 1_u64..=12 {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(array_path.join("0.0.0"), bytes).expect("array chunk should be written");
+
+        let store =
+            Arc::new(FilesystemStore::new(temp_dir.path()).expect("filesystem store should open"));
+        let array = Array::open_opt(store, "/call_U64", &MetadataRetrieveVersion::V2)
+            .expect("test array should open");
+        let values = read_any_3d_selected_as_strings(
+            &array,
+            "call_U64",
+            &RowSelection {
+                ranges: std::iter::once(0..2).collect(),
+            },
+            &[1],
+            &Default::default(),
+        )
+        .expect("uint64 3D FORMAT values should read as strings");
+
+        assert_eq!(values, vec!["4,5,6".to_string(), "10,11,12".to_string()]);
+    }
+}

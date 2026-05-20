@@ -5,7 +5,7 @@ use crate::storage::{
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{ArrayRef, RecordBatch};
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::error::ArrowError;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -23,21 +23,17 @@ use datafusion_bio_format_core::object_storage::{
 };
 use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
 use datafusion_bio_format_core::record_filter::evaluate_record_filters;
+use datafusion_bio_format_core::sam_tag_io::{TagBuilders, build_tag_to_index, load_record_tags};
 use datafusion_bio_format_core::table_utils::OptionalField;
-use datafusion_bio_format_core::tag_registry::get_known_tags;
 
 use futures::SinkExt;
 use futures_util::{StreamExt, TryStreamExt};
-use log::{debug, info, warn};
+use log::{debug, info};
 use noodles_bam as bam;
 use noodles_csi::binning_index::BinningIndex as _;
 use noodles_sam::alignment::Record;
-use noodles_sam::alignment::record::data::field::value::Array as SamArray;
-use noodles_sam::alignment::record::data::field::{Tag, Value};
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::io;
 use std::sync::Arc;
 
 #[allow(dead_code)]
@@ -176,480 +172,6 @@ impl ExecutionPlan for BamExec {
         Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
     }
 }
-/// Type alias for tag builders: (tag_names, tag_types, builders, parsed_tags)
-type TagBuilders = (Vec<String>, Vec<DataType>, Vec<OptionalField>, Vec<Tag>);
-
-/// Initialize tag builders based on schema fields
-fn set_tag_builders(
-    batch_size: usize,
-    tag_fields: Option<Vec<String>>,
-    schema: SchemaRef,
-    tag_builders: &mut TagBuilders,
-) {
-    if let Some(tags) = tag_fields {
-        for tag in tags {
-            // Find the field in the schema for this tag
-            let field = schema.fields().iter().find(|f| f.name() == &tag);
-
-            let arrow_type = if let Some(field) = field {
-                field.data_type().clone()
-            } else {
-                // Fallback to registry if not in schema
-                let known_tags = get_known_tags();
-                if let Some(tag_def) = known_tags.get(&tag) {
-                    tag_def.arrow_type.clone()
-                } else {
-                    DataType::Utf8
-                }
-            };
-
-            debug!("Creating builder for tag {tag}: {arrow_type:?}");
-
-            if let Ok(builder) = OptionalField::new(&arrow_type, batch_size) {
-                // Pre-parse tag to avoid parsing on every record
-                let tag_bytes = tag.as_bytes();
-                if tag_bytes.len() == 2 {
-                    let parsed_tag = Tag::from([tag_bytes[0], tag_bytes[1]]);
-                    tag_builders.0.push(tag.clone());
-                    tag_builders.1.push(arrow_type);
-                    tag_builders.2.push(builder);
-                    tag_builders.3.push(parsed_tag);
-                }
-            } else {
-                debug!("Failed to create builder for tag {tag}: {arrow_type:?}");
-            }
-        }
-    }
-}
-
-/// Dispatch a single tag value to the appropriate builder.
-fn append_tag_value(
-    builder: &mut OptionalField,
-    expected_type: &DataType,
-    value: Value<'_>,
-) -> Result<(), ArrowError> {
-    match value {
-        Value::Int8(v) => append_int_value(builder, expected_type, i64::from(v)),
-        Value::UInt8(v) => append_uint_value(builder, expected_type, u32::from(v)),
-        Value::Int16(v) => append_int_value(builder, expected_type, i64::from(v)),
-        Value::UInt16(v) => append_uint_value(builder, expected_type, u32::from(v)),
-        Value::Int32(v) => append_int_value(builder, expected_type, i64::from(v)),
-        Value::UInt32(v) => append_uint_value(builder, expected_type, v),
-        Value::Float(f) => {
-            if matches!(expected_type, DataType::Utf8) {
-                builder.append_string(&f.to_string())
-            } else {
-                builder.append_float(f)
-            }
-        }
-        Value::String(s) => match std::str::from_utf8(s.as_ref()) {
-            Ok(string) => builder.append_string(string),
-            Err(_) => builder.append_null(),
-        },
-        Value::Character(c) => {
-            if matches!(expected_type, DataType::UInt32) {
-                builder.append_uint(u32::from(c))
-            } else if matches!(expected_type, DataType::Int32) {
-                builder.append_int(i32::from(c))
-            } else {
-                let ch = char::from(c);
-                builder.append_string(&ch.to_string())
-            }
-        }
-        Value::Hex(h) => {
-            let bytes: &[u8] = h.as_ref();
-            match std::str::from_utf8(bytes) {
-                Ok(hex_str) => builder.append_string(hex_str),
-                Err(_) => builder.append_null(),
-            }
-        }
-        Value::Array(arr) => append_array_value(builder, expected_type, arr),
-    }
-}
-
-/// Extract tag values from a BAM record using single-pass iteration.
-///
-/// Instead of calling `data.get(tag)` per requested tag (O(N*M) per record),
-/// iterates all tags once and dispatches via HashMap lookup (O(M+N) per record).
-fn load_tags<R: Record>(
-    record: &R,
-    tag_builders: &mut TagBuilders,
-    tag_to_index: &HashMap<Tag, usize>,
-    tag_populated: &mut [bool],
-) -> Result<(), ArrowError> {
-    let num_tags = tag_builders.0.len();
-    if num_tags == 0 {
-        return Ok(());
-    }
-
-    // Reset populated tracking
-    tag_populated.fill(false);
-
-    // Single pass over all tags in the record
-    let data = record.data();
-    for result in data.iter() {
-        match result {
-            Ok((tag, value)) => {
-                if let Some(&idx) = tag_to_index.get(&tag) {
-                    tag_populated[idx] = true;
-                    let expected_type = &tag_builders.1[idx];
-                    let builder = &mut tag_builders.2[idx];
-                    append_tag_value(builder, expected_type, value)?;
-                }
-            }
-            Err(e) => {
-                warn!("Skipping malformed BAM tag while loading optional fields: {e}");
-                continue;
-            }
-        }
-    }
-
-    // Backfill nulls for tags not found in this record
-    for (idx, &populated) in tag_populated.iter().enumerate().take(num_tags) {
-        if !populated {
-            tag_builders.2[idx].append_null()?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Append an integer value to the builder, converting to string if the builder expects Utf8.
-///
-/// Some BAM files encode character tags (SAM type 'A') as integer types ('c', 'C', etc.)
-/// in the binary format. When the schema expects Utf8 (from the tag registry defining the
-/// tag as type 'A'), but noodles decodes the value as Int8/UInt8, we convert the byte to
-/// its ASCII character representation.
-fn append_int_value(
-    builder: &mut OptionalField,
-    expected_type: &DataType,
-    value: i64,
-) -> Result<(), ArrowError> {
-    if matches!(expected_type, DataType::Utf8) {
-        // Integer stored as character code - convert to ASCII char
-        if let Some(ch) = u32::try_from(value).ok().and_then(char::from_u32) {
-            builder.append_string(&ch.to_string())
-        } else {
-            builder.append_string(&value.to_string())
-        }
-    } else if matches!(expected_type, DataType::UInt32) {
-        let converted = u32::try_from(value).map_err(|_| {
-            ArrowError::SchemaError(format!("integer value {value} does not fit UInt32"))
-        })?;
-        builder.append_uint(converted)
-    } else {
-        let converted = i32::try_from(value).map_err(|_| {
-            ArrowError::SchemaError(format!("integer value {value} does not fit Int32"))
-        })?;
-        builder.append_int(converted)
-    }
-}
-
-fn append_uint_value(
-    builder: &mut OptionalField,
-    expected_type: &DataType,
-    value: u32,
-) -> Result<(), ArrowError> {
-    if matches!(expected_type, DataType::Utf8) {
-        if let Some(ch) = char::from_u32(value) {
-            builder.append_string(&ch.to_string())
-        } else {
-            builder.append_string(&value.to_string())
-        }
-    } else if matches!(expected_type, DataType::UInt32) {
-        builder.append_uint(value)
-    } else {
-        let converted = i32::try_from(value).map_err(|_| {
-            ArrowError::SchemaError(format!("unsigned integer value {value} does not fit Int32"))
-        })?;
-        builder.append_int(converted)
-    }
-}
-
-fn type_mismatch(expected_type: &DataType, actual: &str) -> ArrowError {
-    ArrowError::SchemaError(format!(
-        "tag value type mismatch: expected {expected_type:?}, got {actual}"
-    ))
-}
-
-fn collect_array_values<T, U>(
-    iter: impl Iterator<Item = io::Result<T>>,
-    mut convert: impl FnMut(T) -> Result<U, ArrowError>,
-) -> Result<Vec<U>, ArrowError> {
-    iter.map(|result| {
-        result
-            .map_err(|e| ArrowError::ExternalError(Box::new(e)))
-            .and_then(&mut convert)
-    })
-    .collect()
-}
-
-fn append_array_value(
-    builder: &mut OptionalField,
-    expected_type: &DataType,
-    arr: SamArray<'_>,
-) -> Result<(), ArrowError> {
-    let DataType::List(field) = expected_type else {
-        return Err(type_mismatch(expected_type, "array"));
-    };
-
-    match field.data_type() {
-        DataType::Int8 => match arr {
-            SamArray::Int8(vals) => {
-                builder.append_array_int8_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
-            }
-            SamArray::UInt8(vals) => builder.append_array_int8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Int16(vals) => builder.append_array_int8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt16(vals) => builder.append_array_int8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Int32(vals) => builder.append_array_int8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt32(vals) => builder.append_array_int8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
-        },
-        DataType::UInt8 => match arr {
-            SamArray::Int8(vals) => builder.append_array_uint8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt8(vals) => {
-                builder.append_array_uint8_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
-            }
-            SamArray::Int16(vals) => builder.append_array_uint8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt16(vals) => builder.append_array_uint8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Int32(vals) => builder.append_array_uint8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt32(vals) => builder.append_array_uint8_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u8::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit UInt8"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
-        },
-        DataType::Int16 => match arr {
-            SamArray::Int8(vals) => builder.append_array_int16_iter(
-                collect_array_values(vals.iter(), |value| Ok(i16::from(value)))?.into_iter(),
-            ),
-            SamArray::UInt8(vals) => builder.append_array_int16_iter(
-                collect_array_values(vals.iter(), |value| Ok(i16::from(value)))?.into_iter(),
-            ),
-            SamArray::Int16(vals) => {
-                builder.append_array_int16_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
-            }
-            SamArray::UInt16(vals) => builder.append_array_int16_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i16::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int16"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Int32(vals) => builder.append_array_int16_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i16::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int16"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt32(vals) => builder.append_array_int16_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i16::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int16"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
-        },
-        DataType::UInt16 => match arr {
-            SamArray::Int8(vals) => builder.append_array_uint16_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u16::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!(
-                            "array element {value} does not fit UInt16"
-                        ))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt8(vals) => builder.append_array_uint16_iter(
-                collect_array_values(vals.iter(), |value| Ok(u16::from(value)))?.into_iter(),
-            ),
-            SamArray::Int16(vals) => builder.append_array_uint16_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u16::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!(
-                            "array element {value} does not fit UInt16"
-                        ))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt16(vals) => {
-                builder.append_array_uint16_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
-            }
-            SamArray::Int32(vals) => builder.append_array_uint16_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u16::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!(
-                            "array element {value} does not fit UInt16"
-                        ))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt32(vals) => builder.append_array_uint16_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u16::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!(
-                            "array element {value} does not fit UInt16"
-                        ))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
-        },
-        DataType::Int32 => match arr {
-            SamArray::Int8(vals) => builder.append_array_int_iter(
-                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
-            ),
-            SamArray::UInt8(vals) => builder.append_array_int_iter(
-                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
-            ),
-            SamArray::Int16(vals) => builder.append_array_int_iter(
-                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
-            ),
-            SamArray::UInt16(vals) => builder.append_array_int_iter(
-                collect_array_values(vals.iter(), |value| Ok(i32::from(value)))?.into_iter(),
-            ),
-            SamArray::Int32(vals) => {
-                builder.append_array_int_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
-            }
-            SamArray::UInt32(vals) => builder.append_array_int_iter(
-                collect_array_values(vals.iter(), |value| {
-                    i32::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!("array element {value} does not fit Int32"))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
-        },
-        DataType::UInt32 => match arr {
-            SamArray::Int8(vals) => builder.append_array_uint32_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u32::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!(
-                            "array element {value} does not fit UInt32"
-                        ))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt8(vals) => builder.append_array_uint32_iter(
-                collect_array_values(vals.iter(), |value| Ok(u32::from(value)))?.into_iter(),
-            ),
-            SamArray::Int16(vals) => builder.append_array_uint32_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u32::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!(
-                            "array element {value} does not fit UInt32"
-                        ))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt16(vals) => builder.append_array_uint32_iter(
-                collect_array_values(vals.iter(), |value| Ok(u32::from(value)))?.into_iter(),
-            ),
-            SamArray::Int32(vals) => builder.append_array_uint32_iter(
-                collect_array_values(vals.iter(), |value| {
-                    u32::try_from(value).map_err(|_| {
-                        ArrowError::SchemaError(format!(
-                            "array element {value} does not fit UInt32"
-                        ))
-                    })
-                })?
-                .into_iter(),
-            ),
-            SamArray::UInt32(vals) => {
-                builder.append_array_uint32_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
-            }
-            SamArray::Float(_) => Err(type_mismatch(expected_type, "float array")),
-        },
-        DataType::Float32 => match arr {
-            SamArray::Float(vals) => {
-                builder.append_array_float_iter(collect_array_values(vals.iter(), Ok)?.into_iter())
-            }
-            _ => Err(type_mismatch(expected_type, "integer array")),
-        },
-        other => Err(type_mismatch(other, "unsupported array builder")),
-    }
-}
-
-/// Convert tag builders to Arrow arrays
 fn builders_to_arrays(builders: &mut [OptionalField]) -> Result<Vec<ArrayRef>, ArrowError> {
     builders.iter_mut().map(|b| b.finish()).collect()
 }
@@ -673,11 +195,10 @@ macro_rules! process_bam_records_impl {
         let flags = ProjectionFlags::new(&$projection);
         let mut builders = CoreBatchBuilders::new(&flags, $batch_size, binary_cigar);
 
-        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
-        let num_tag_fields = tag_builders.0.len();
+        let mut tag_builders = TagBuilders::from_schema($batch_size, $tag_fields, $schema.clone());
+        let num_tag_fields = tag_builders.len();
 
-        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let tag_to_index = build_tag_to_index(tag_builders.parsed_tags());
         let mut tag_populated = vec![false; num_tag_fields];
 
         let mut cigar_buf = String::new();
@@ -775,7 +296,7 @@ macro_rules! process_bam_records_impl {
             }
 
             if flags.any_tag {
-                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
+                load_record_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated, "BAM", |_, _| Ok(false))?;
             }
 
             record_num += 1;
@@ -783,7 +304,7 @@ macro_rules! process_bam_records_impl {
             if record_num % $batch_size == 0 {
                 log::debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
-                    Some(builders_to_arrays(&mut tag_builders.2)?)
+                    Some(builders_to_arrays(tag_builders.builders_mut())?)
                 } else {
                     None
                 };
@@ -802,7 +323,7 @@ macro_rules! process_bam_records_impl {
 
         if record_num > 0 && record_num % $batch_size != 0 {
             let tag_arrays = if num_tag_fields > 0 {
-                Some(builders_to_arrays(&mut tag_builders.2)?)
+                Some(builders_to_arrays(tag_builders.builders_mut())?)
             } else {
                 None
             };
@@ -874,16 +395,10 @@ async fn get_local_bam_sync(
             let flags = ProjectionFlags::new(&projection);
             let mut builders = CoreBatchBuilders::new(&flags, batch_size, binary_cigar);
 
-            let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
-            let num_tag_fields = tag_builders.0.len();
+            let mut tag_builders = TagBuilders::from_schema(batch_size, tag_fields, schema.clone());
+            let num_tag_fields = tag_builders.len();
 
-            let tag_to_index: HashMap<Tag, usize> = tag_builders
-                .3
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (*t, i))
-                .collect();
+            let tag_to_index = build_tag_to_index(tag_builders.parsed_tags());
             let mut tag_populated = vec![false; num_tag_fields];
 
             let mut cigar_buf = String::new();
@@ -1016,11 +531,13 @@ async fn get_local_bam_sync(
                         }
 
                         if flags.any_tag {
-                            load_tags(
+                            load_record_tags(
                                 &record,
                                 &mut tag_builders,
                                 &tag_to_index,
                                 &mut tag_populated,
+                                "BAM",
+                                |_, _| Ok(false),
                             )
                             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                         }
@@ -1031,9 +548,9 @@ async fn get_local_bam_sync(
                         if batch_row_count == batch_size {
                             let tag_arrays =
                                 if num_tag_fields > 0 {
-                                    Some(builders_to_arrays(&mut tag_builders.2).map_err(|e| {
-                                        DataFusionError::ArrowError(Box::new(e), None)
-                                    })?)
+                                    Some(builders_to_arrays(tag_builders.builders_mut()).map_err(
+                                        |e| DataFusionError::ArrowError(Box::new(e), None),
+                                    )?)
                                 } else {
                                     None
                                 };
@@ -1063,7 +580,7 @@ async fn get_local_bam_sync(
             if batch_row_count > 0 {
                 let tag_arrays = if num_tag_fields > 0 {
                     Some(
-                        builders_to_arrays(&mut tag_builders.2)
+                        builders_to_arrays(tag_builders.builders_mut())
                             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
                     )
                 } else {
@@ -1104,11 +621,10 @@ macro_rules! process_sam_records_impl {
         let flags = ProjectionFlags::new(&$projection);
         let mut builders = CoreBatchBuilders::new(&flags, $batch_size, binary_cigar);
 
-        let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        set_tag_builders($batch_size, $tag_fields, $schema.clone(), &mut tag_builders);
-        let num_tag_fields = tag_builders.0.len();
+        let mut tag_builders = TagBuilders::from_schema($batch_size, $tag_fields, $schema.clone());
+        let num_tag_fields = tag_builders.len();
 
-        let tag_to_index: HashMap<Tag, usize> = tag_builders.3.iter().enumerate().map(|(i, t)| (*t, i)).collect();
+        let tag_to_index = build_tag_to_index(tag_builders.parsed_tags());
         let mut tag_populated = vec![false; num_tag_fields];
 
         let mut cigar_buf = String::new();
@@ -1208,7 +724,7 @@ macro_rules! process_sam_records_impl {
             }
 
             if flags.any_tag {
-                load_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated)?;
+                load_record_tags(&record, &mut tag_builders, &tag_to_index, &mut tag_populated, "BAM", |_, _| Ok(false))?;
             }
 
             record_num += 1;
@@ -1216,7 +732,7 @@ macro_rules! process_sam_records_impl {
             if record_num % $batch_size == 0 {
                 log::debug!("Record number: {}", record_num);
                 let tag_arrays = if num_tag_fields > 0 {
-                    Some(builders_to_arrays(&mut tag_builders.2)?)
+                    Some(builders_to_arrays(tag_builders.builders_mut())?)
                 } else {
                     None
                 };
@@ -1235,7 +751,7 @@ macro_rules! process_sam_records_impl {
 
         if record_num > 0 && record_num % $batch_size != 0 {
             let tag_arrays = if num_tag_fields > 0 {
-                Some(builders_to_arrays(&mut tag_builders.2)?)
+                Some(builders_to_arrays(tag_builders.builders_mut())?)
             } else {
                 None
             };
@@ -1389,16 +905,10 @@ async fn get_indexed_stream(
             // and sub-region dedup, but only accumulated when projected
             let has_residual_filters = !residual_filters.is_empty();
 
-            let mut tag_builders: TagBuilders = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-            set_tag_builders(batch_size, tag_fields, schema.clone(), &mut tag_builders);
-            let num_tag_fields = tag_builders.0.len();
+            let mut tag_builders = TagBuilders::from_schema(batch_size, tag_fields, schema.clone());
+            let num_tag_fields = tag_builders.len();
 
-            let tag_to_index: HashMap<Tag, usize> = tag_builders
-                .3
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (*t, i))
-                .collect();
+            let tag_to_index = build_tag_to_index(tag_builders.parsed_tags());
             let mut tag_populated = vec![false; num_tag_fields];
 
             let mut cigar_buf = String::new();
@@ -1412,7 +922,7 @@ async fn get_indexed_stream(
                 ($batch_row_count:expr, $disconnect_action:expr) => {{
                     let tag_arrays = if num_tag_fields > 0 {
                         Some(
-                            builders_to_arrays(&mut tag_builders.2)
+                            builders_to_arrays(tag_builders.builders_mut())
                                 .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
                         )
                     } else {
@@ -1506,11 +1016,13 @@ async fn get_indexed_stream(
                         };
                     }
                     if flags.any_tag {
-                        load_tags(
+                        load_record_tags(
                             &$record,
                             &mut tag_builders,
                             &tag_to_index,
                             &mut tag_populated,
+                            "BAM",
+                            |_, _| Ok(false),
                         )
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     }

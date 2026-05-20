@@ -1,6 +1,6 @@
 /// Convert Ensembl VEP cache storable entities to optimized Parquet files.
 ///
-/// Usage: cargo run --release --example storable_to_parquet -- <cache_root> <output_dir> <entity> [partitions] [--chrom CHROM]
+/// Usage: cargo run --release --example storable_to_parquet -- <cache_root> <output_dir> <entity> [partitions] --cache-source-type <ensembl|merged|refseq> [--chrom CHROM]
 ///
 /// entity: transcript | exon | translation | regulatory | motif | variation
 ///
@@ -24,13 +24,27 @@ use datafusion::parquet::format::SortingColumn;
 use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
-    EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind, build_export_query,
-    build_translation_dedup_query,
+    CacheSourceType, EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
+    build_export_query, build_translation_dedup_query, translation_core_schema,
+    translation_sift_schema,
 };
 use futures::StreamExt;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Instant;
+
+const USAGE: &str = "Usage: storable_to_parquet <cache_root> <output_dir> <entity> [partitions] --cache-source-type <ensembl|merged|refseq> [--chrom CHROM]\n\
+entity: transcript | exon | translation | regulatory | motif | variation";
+
+fn execution_error(message: impl Into<String>) -> datafusion::error::DataFusionError {
+    datafusion::error::DataFusionError::Execution(message.into())
+}
+
+fn parse_cache_source_type(value: &str) -> datafusion::common::Result<CacheSourceType> {
+    value
+        .parse()
+        .map_err(|err| execution_error(format!("invalid cache_source_type {value:?}: {err}")))
+}
 
 fn rss_mb() -> f64 {
     #[cfg(target_os = "macos")]
@@ -178,6 +192,7 @@ async fn write_translation_split(
     output_dir: &str,
     cache_dir_name: &str,
     coordinate_system_zero_based: bool,
+    cache_source_type: CacheSourceType,
 ) -> datafusion::common::Result<Vec<(String, usize)>> {
     let chrom_suffix = if let Some(chrom) = &chrom_filter {
         format!("_{chrom}")
@@ -212,8 +227,7 @@ async fn write_translation_split(
     let mut results = Vec::new();
 
     // --- translation_core: sorted by transcript_id ---
-    let core_schema =
-        datafusion_bio_format_ensembl_cache::translation_core_schema(coordinate_system_zero_based);
+    let core_schema = translation_core_schema(coordinate_system_zero_based, cache_source_type);
     let core_select = core_schema
         .fields()
         .iter()
@@ -253,8 +267,7 @@ async fn write_translation_split(
     results.push((core_file, core_rows));
 
     // --- translation_sift: sorted by (chrom, start) ---
-    let sift_schema =
-        datafusion_bio_format_ensembl_cache::translation_sift_schema(coordinate_system_zero_based);
+    let sift_schema = translation_sift_schema(coordinate_system_zero_based, cache_source_type);
     let sift_select = sift_schema
         .fields()
         .iter()
@@ -303,28 +316,47 @@ async fn write_translation_split(
 
 #[tokio::main]
 async fn main() -> datafusion::common::Result<()> {
-    let cache_root = std::env::args().nth(1).expect(
-        "Usage: storable_to_parquet <cache_root> <output_dir> <entity> [partitions] [--chrom CHROM]\n\
-         entity: transcript | exon | translation | regulatory | motif | variation",
-    );
+    let cache_root = std::env::args().nth(1).expect(USAGE);
     let output_dir = std::env::args().nth(2).expect("Missing output_dir");
     let entity_str = std::env::args().nth(3).expect("Missing entity type");
-    // Parse remaining args: [partitions] [--chrom CHROM]
+    // Parse remaining args: [partitions] --cache-source-type TYPE [--chrom CHROM]
     let mut partitions: usize = 8;
     let mut chrom_filter: Option<String> = None;
+    let mut cache_source_type: Option<CacheSourceType> = None;
     let remaining: Vec<String> = std::env::args().skip(4).collect();
     let mut i = 0;
     while i < remaining.len() {
-        if remaining[i] == "--chrom" {
-            chrom_filter = remaining.get(i + 1).cloned();
-            i += 2;
-        } else if let Ok(p) = remaining[i].parse::<usize>() {
-            partitions = p;
-            i += 1;
-        } else {
-            i += 1;
+        match remaining[i].as_str() {
+            "--chrom" => {
+                let chrom = remaining
+                    .get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| execution_error("--chrom requires a value"))?;
+                chrom_filter = Some(chrom);
+                i += 2;
+            }
+            "--cache-source-type" | "--cache_source_type" => {
+                let value = remaining
+                    .get(i + 1)
+                    .ok_or_else(|| execution_error("--cache-source-type requires a value"))?;
+                cache_source_type = Some(parse_cache_source_type(value)?);
+                i += 2;
+            }
+            value => {
+                if let Ok(p) = value.parse::<usize>() {
+                    partitions = p;
+                    i += 1;
+                } else {
+                    return Err(execution_error(format!(
+                        "Unrecognized argument '{value}'. {USAGE}"
+                    )));
+                }
+            }
         }
     }
+    let cache_source_type = cache_source_type.ok_or_else(|| {
+        execution_error("Missing --cache-source-type; provide one of ensembl, merged, or refseq")
+    })?;
 
     let (kind, table_name, entity_label) = match entity_str.as_str() {
         "transcript" | "tx" => (EnsemblEntityKind::Transcript, "tx", "transcript"),
@@ -349,6 +381,7 @@ async fn main() -> datafusion::common::Result<()> {
 
     println!("Cache root:  {cache_root}");
     println!("Entity:      {entity_str} ({kind:?})");
+    println!("Source type: {cache_source_type}");
     println!("Partitions:  {partitions}");
     if let Some(ref chrom) = chrom_filter {
         println!("Chrom filter: {chrom}");
@@ -358,7 +391,8 @@ async fn main() -> datafusion::common::Result<()> {
     let config = SessionConfig::new().with_target_partitions(partitions);
     let ctx = SessionContext::new_with_config(config);
 
-    let mut options = EnsemblCacheOptions::new(&cache_root);
+    let mut options =
+        EnsemblCacheOptions::new(&cache_root).with_cache_source_type(cache_source_type);
     options.target_partitions = Some(partitions);
     let provider = EnsemblCacheTableProvider::for_entity(kind, options)?;
     ctx.register_table(table_name, provider)?;
@@ -396,6 +430,7 @@ async fn main() -> datafusion::common::Result<()> {
             &output_dir,
             cache_dir_name,
             false, // coordinate_system_zero_based
+            cache_source_type,
         )
         .await?;
 
