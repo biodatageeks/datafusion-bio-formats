@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 
-members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bed",
+members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bbi", "datafusion/bio-format-bed",
     "datafusion/bio-format-core", "datafusion/bio-format-fastq", "datafusion/bio-format-gff",
     "datafusion/bio-format-gtf", "datafusion/bio-format-vcf", "datafusion/bio-format-fasta",
     "datafusion/bio-format-cram", "datafusion/bio-format-pairs", "datafusion/bio-format-ensembl-cache",
