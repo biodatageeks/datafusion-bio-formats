@@ -38,7 +38,9 @@ pub struct EnsemblCacheOptions {
     /// Explicit VEP cache source mode.
     ///
     /// This must be set by callers. The provider does not infer source mode
-    /// from directory names such as `homo_sapiens_refseq`.
+    /// from directory names such as `homo_sapiens_refseq`. Leaving this as
+    /// `None` (or resetting it to `None`) causes provider construction to fail
+    /// before any filesystem access.
     pub cache_source_type: Option<CacheSourceType>,
     /// If true, expose genomic coordinates as 0-based half-open.
     /// If false, expose genomic coordinates as 1-based closed (VEP native).
@@ -681,6 +683,10 @@ mod tests {
             "refseq".parse::<CacheSourceType>(),
             Ok(CacheSourceType::RefSeq)
         );
-        assert!("homo_sapiens_refseq".parse::<CacheSourceType>().is_err());
+        let err = "homo_sapiens_refseq"
+            .parse::<CacheSourceType>()
+            .expect_err("path suffix must not parse as cache source type");
+        assert!(err.contains("homo_sapiens_refseq"));
+        assert!(err.contains("ensembl, merged, refseq"));
     }
 }

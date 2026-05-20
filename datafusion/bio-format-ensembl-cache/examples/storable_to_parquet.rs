@@ -41,11 +41,9 @@ fn execution_error(message: impl Into<String>) -> datafusion::error::DataFusionE
 }
 
 fn parse_cache_source_type(value: &str) -> datafusion::common::Result<CacheSourceType> {
-    value.parse().map_err(|()| {
-        execution_error(format!(
-            "cache_source_type must be one of ensembl, merged, or refseq; got {value}"
-        ))
-    })
+    value
+        .parse()
+        .map_err(|err| execution_error(format!("invalid cache_source_type {value:?}: {err}")))
 }
 
 fn rss_mb() -> f64 {

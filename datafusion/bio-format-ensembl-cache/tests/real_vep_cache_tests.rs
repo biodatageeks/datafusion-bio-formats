@@ -28,7 +28,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 const REAL_FIXTURE: &str = "real_vep_115_chr22";
-const LOCAL_REFSEQ_CACHE_PATH: &str = "/Users/mwiewior/workspace/data_vepyr/homo_sapiens_refseq";
 
 fn fixture_path(name: &str) -> String {
     format!("{}/tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
@@ -39,11 +38,26 @@ fn ensembl_options(cache_root: impl Into<String>) -> EnsemblCacheOptions {
 }
 
 fn refseq_cache_path() -> Option<String> {
-    std::env::var("VEP_REFSEQ_CACHE_PATH")
-        .ok()
-        .as_deref()
-        .and_then(normalize_refseq_cache_root)
-        .or_else(|| normalize_refseq_cache_root(LOCAL_REFSEQ_CACHE_PATH))
+    match std::env::var("VEP_REFSEQ_CACHE_PATH") {
+        Ok(path) => {
+            let normalized = normalize_refseq_cache_root(&path);
+            if normalized.is_none() {
+                eprintln!(
+                    "Skipping RefSeq smoke test; VEP_REFSEQ_CACHE_PATH does not contain info.txt \
+                     directly or under 115_GRCh38: {path}"
+                );
+            }
+            normalized
+        }
+        Err(std::env::VarError::NotPresent) => {
+            eprintln!("Skipping RefSeq smoke test; set VEP_REFSEQ_CACHE_PATH to enable it");
+            None
+        }
+        Err(err) => {
+            eprintln!("Skipping RefSeq smoke test; VEP_REFSEQ_CACHE_PATH is invalid: {err}");
+            None
+        }
+    }
 }
 
 fn normalize_refseq_cache_root(path: &str) -> Option<String> {
@@ -1116,7 +1130,6 @@ async fn real_factory_all_entities() -> datafusion::common::Result<()> {
 #[tokio::test]
 async fn real_refseq_cache_smoke_chr22_mt_and_alt_contig() -> datafusion::common::Result<()> {
     let Some(cache_root) = refseq_cache_path() else {
-        eprintln!("Skipping RefSeq smoke test; set VEP_REFSEQ_CACHE_PATH to enable it");
         return Ok(());
     };
 

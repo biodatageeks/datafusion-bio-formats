@@ -33,14 +33,16 @@ impl Display for CacheSourceType {
 }
 
 impl FromStr for CacheSourceType {
-    type Err = ();
+    type Err = String;
 
     fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
         match value {
             "ensembl" => Ok(Self::Ensembl),
             "merged" => Ok(Self::Merged),
             "refseq" => Ok(Self::RefSeq),
-            _ => Err(()),
+            other => Err(format!(
+                "unknown VEP cache source type {other:?}; expected one of ensembl, merged, refseq"
+            )),
         }
     }
 }

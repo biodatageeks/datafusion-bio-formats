@@ -37,6 +37,10 @@ fn schema_has_column(schema: &Schema, name: &str) -> bool {
 
 fn transcript_dedup_order_expr(schema: &Schema) -> String {
     let mut order = Vec::new();
+    // Mirror Ensembl VEP's RefSeq/merged duplicate handling where possible:
+    // prefer Ensembl-source rows, then choose the lowest dbID when resolving
+    // stable-id duplicates. The following source-region/source-file terms only
+    // stabilize cache boundary duplicates.
     if schema_has_column(schema, "source") {
         order.push("CASE WHEN source = 'Ensembl' THEN 0 ELSE 1 END".to_string());
     }

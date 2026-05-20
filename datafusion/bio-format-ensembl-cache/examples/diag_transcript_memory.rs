@@ -18,9 +18,9 @@ fn cache_source_type_from_env() -> datafusion::common::Result<CacheSourceType> {
             "Set VEP_CACHE_SOURCE_TYPE to ensembl, merged, or refseq".to_string(),
         )
     })?;
-    value.parse().map_err(|()| {
+    value.parse().map_err(|err| {
         datafusion::error::DataFusionError::Execution(format!(
-            "VEP_CACHE_SOURCE_TYPE must be ensembl, merged, or refseq; got {value}"
+            "invalid VEP_CACHE_SOURCE_TYPE {value:?}: {err}"
         ))
     })
 }

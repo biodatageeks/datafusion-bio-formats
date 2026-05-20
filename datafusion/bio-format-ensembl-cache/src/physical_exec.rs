@@ -260,7 +260,11 @@ pub(crate) fn variation_file_matches_predicate(path: &Path, predicate: &SimplePr
         return false;
     }
 
-    // Check region range overlap
+    // Check region range overlap. VEP cache filenames use native 1-based closed
+    // ranges; predicate bounds use the exposed table coordinate system. In
+    // 0-based mode, lower-boundary start predicates can therefore keep one
+    // extra file conservatively. Row-level filtering rechecks normalized
+    // coordinates, so this avoids data loss at the cost of minor over-reading.
     if let Some(start_min) = predicate.start_min
         && file_end < start_min
     {
@@ -302,6 +306,11 @@ pub(crate) fn file_matches_chrom_predicate(
         return true;
     };
 
+    // VEP cache filenames use native 1-based closed ranges; predicate bounds
+    // use the exposed table coordinate system. In 0-based mode,
+    // lower-boundary start predicates can therefore keep one extra file
+    // conservatively. Row-level filtering rechecks normalized coordinates, so
+    // this avoids data loss at the cost of minor over-reading.
     if let Some(start_min) = predicate.start_min
         && file_end < start_min
     {
@@ -1631,6 +1640,24 @@ mod tests {
         ));
         assert!(!file_matches_chrom_predicate(
             &other_chrom,
+            &predicate,
+            EnsemblEntityKind::Transcript,
+        ));
+    }
+
+    #[test]
+    fn transcript_region_file_pruning_keeps_zero_based_boundary_conservatively() {
+        use crate::filter::SimplePredicate;
+
+        let boundary = PathBuf::from("/cache/22/15000001-16000000.gz");
+        let predicate = SimplePredicate {
+            chrom: Some("22".to_string()),
+            start_min: Some(16_000_000),
+            ..Default::default()
+        };
+
+        assert!(file_matches_chrom_predicate(
+            &boundary,
             &predicate,
             EnsemblEntityKind::Transcript,
         ));
