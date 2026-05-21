@@ -337,7 +337,7 @@ fn decompose_multi_allelic_batch(batch: &RecordBatch) -> Result<RecordBatch> {
                     builder.append_null();
                 }
             }
-            columns.push(Arc::new(builder.finish()));
+            columns.push(finish_string_builder(builder, field.data_type())?);
             continue;
         }
         columns.push(expand_column(
@@ -370,7 +370,7 @@ fn expand_column(
                     builder.append_value(string_value(source, row));
                 }
             }
-            Ok(Arc::new(builder.finish()))
+            finish_string_builder(builder, data_type)
         }
         DataType::UInt32 => {
             let array = source
@@ -433,6 +433,18 @@ fn expand_column(
             "Unsupported ClinVar decomposition column type: {other}"
         ))),
     }
+}
+
+fn finish_string_builder(builder: StringBuilder, data_type: &DataType) -> Result<ArrayRef> {
+    let array: ArrayRef = Arc::new(builder.finish());
+    if data_type == &DataType::Utf8 {
+        return Ok(array);
+    }
+    cast(&array, data_type).map_err(|e| {
+        DataFusionError::Execution(format!(
+            "Failed to cast ClinVar decomposition string column to {data_type}: {e}"
+        ))
+    })
 }
 
 fn string_value(source: &ArrayRef, row: usize) -> &str {
