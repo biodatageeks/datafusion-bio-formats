@@ -11,8 +11,8 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, ArrayRef, Float32Array, Float32Builder, Int32Array, Int32Builder, StringArray,
-    StringBuilder, UInt32Array, UInt32Builder,
+    Array, ArrayRef, Float32Array, Float32Builder, Int32Array, Int32Builder, LargeStringArray,
+    StringArray, StringBuilder, StringViewArray, UInt32Array, UInt32Builder,
 };
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -292,15 +292,9 @@ fn decompose_multi_allelic_batch(batch: &RecordBatch) -> Result<RecordBatch> {
     let Some((alt_idx, _)) = batch.schema().column_with_name("alt") else {
         return Ok(batch.clone());
     };
-    let alt_array = batch
-        .column(alt_idx)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            DataFusionError::Execution("ClinVar alt column must be StringArray".to_string())
-        })?;
+    let alt_array = batch.column(alt_idx);
     if !(0..alt_array.len())
-        .any(|row| !alt_array.is_null(row) && alt_array.value(row).contains([',', '|']))
+        .any(|row| !alt_array.is_null(row) && string_value(alt_array, row).contains([',', '|']))
     {
         return Ok(batch.clone());
     }
@@ -313,7 +307,7 @@ fn decompose_multi_allelic_batch(batch: &RecordBatch) -> Result<RecordBatch> {
             expanded_alts.push(None);
             continue;
         }
-        let value = alt_array.value(row);
+        let value = string_value(alt_array, row);
         let mut seen_split = false;
         for alt in value
             .split([',', '|'])
@@ -366,22 +360,14 @@ fn expand_column(
     row_indices: &[usize],
 ) -> Result<ArrayRef> {
     match data_type {
-        DataType::Utf8 => {
-            let array = source
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "Expected Utf8 column during ClinVar decomposition".into(),
-                    )
-                })?;
+        DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => {
             let mut builder =
                 StringBuilder::with_capacity(row_indices.len(), row_indices.len() * 16);
             for &row in row_indices {
-                if array.is_null(row) {
+                if source.is_null(row) {
                     builder.append_null();
                 } else {
-                    builder.append_value(array.value(row));
+                    builder.append_value(string_value(source, row));
                 }
             }
             Ok(Arc::new(builder.finish()))
@@ -446,6 +432,27 @@ fn expand_column(
         other => Err(DataFusionError::Execution(format!(
             "Unsupported ClinVar decomposition column type: {other}"
         ))),
+    }
+}
+
+fn string_value(source: &ArrayRef, row: usize) -> &str {
+    match source.data_type() {
+        DataType::Utf8 => source
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .map(|array| array.value(row))
+            .unwrap_or(""),
+        DataType::Utf8View => source
+            .as_any()
+            .downcast_ref::<StringViewArray>()
+            .map(|array| array.value(row))
+            .unwrap_or(""),
+        DataType::LargeUtf8 => source
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .map(|array| array.value(row))
+            .unwrap_or(""),
+        _ => "",
     }
 }
 
