@@ -435,7 +435,7 @@ fn expand_column(
     }
 }
 
-fn finish_string_builder(builder: StringBuilder, data_type: &DataType) -> Result<ArrayRef> {
+fn finish_string_builder(mut builder: StringBuilder, data_type: &DataType) -> Result<ArrayRef> {
     let array: ArrayRef = Arc::new(builder.finish());
     if data_type == &DataType::Utf8 {
         return Ok(array);
