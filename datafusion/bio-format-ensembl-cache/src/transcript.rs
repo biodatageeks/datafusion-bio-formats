@@ -570,6 +570,22 @@ fn json_source_cache(object: &serde_json::Map<String, Value>) -> Option<String> 
     }
 }
 
+fn storable_display_xref_id(object: &std::collections::HashMap<String, SValue>) -> Option<String> {
+    object
+        .get("display_xref")
+        .and_then(SValue::as_hash)
+        .and_then(|display_xref| sv_str(display_xref.get("display_id")))
+        .or_else(|| sv_str(object.get("display_xref_id")))
+        .filter(|value| value != "-")
+}
+
+fn storable_source_cache(object: &std::collections::HashMap<String, SValue>) -> Option<String> {
+    object
+        .get("_source_cache")
+        .and_then(SValue::as_string)
+        .filter(|value| !value.is_empty() && value != "-")
+}
+
 fn refseq_edit_tuples(attrs: &TranscriptAttributes) -> Vec<RefseqEditTuple> {
     attrs
         .refseq_edits
@@ -1870,10 +1886,12 @@ fn append_transcript_storable_row_into(
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     if let Some(idx) = col_idx.display_xref_id {
-        batch.set_null(idx);
+        let value = storable_display_xref_id(object);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     if let Some(idx) = col_idx.source_cache {
-        batch.set_null(idx);
+        let value = storable_source_cache(object);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     // coding_region_start/end: read from object first; if undef (common in
     // storable binary), derive from cdna_coding_start/end + exon array.
@@ -2159,16 +2177,18 @@ fn append_transcript_storable_row_into(
             batch.set_opt_utf8_owned(idx, value.as_ref());
         }
         if let Some(idx) = col_idx.refseq_match {
-            batch.set_null(idx);
+            let value = build_refseq_match(&attributes);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
         }
         if let Some(idx) = col_idx.refseq_edits {
-            batch.set_refseq_edit_list(idx, None);
+            let edits = refseq_edit_tuples(&attributes);
+            batch.set_refseq_edit_list(idx, (!edits.is_empty()).then_some(edits.as_slice()));
         }
         if let Some(idx) = col_idx.is_gencode_basic {
-            batch.set_opt_bool(idx, Some(false));
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_basic));
         }
         if let Some(idx) = col_idx.is_gencode_primary {
-            batch.set_opt_bool(idx, Some(false));
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_primary));
         }
     }
 
@@ -2393,6 +2413,19 @@ mod tests {
         )
     }
 
+    fn storable_attribute(code: &str, value: &str, description: Option<&str>) -> SValue {
+        let mut attr = HashMap::new();
+        attr.insert("code".to_string(), SValue::String(Arc::from(code)));
+        attr.insert("value".to_string(), SValue::String(Arc::from(value)));
+        if let Some(description) = description {
+            attr.insert(
+                "description".to_string(),
+                SValue::String(Arc::from(description)),
+            );
+        }
+        SValue::Hash(Arc::new(attr))
+    }
+
     fn storable_bioseq(seq: &str) -> SValue {
         let mut primary = HashMap::new();
         primary.insert(
@@ -2589,6 +2622,87 @@ mod tests {
         );
         assert_eq!(batch_bool_value(&batch, "is_gencode_basic"), Some(true));
         assert_eq!(batch_bool_value(&batch, "is_gencode_primary"), Some(false));
+    }
+
+    #[test]
+    fn append_transcript_storable_row_promotes_issue_190_fields() {
+        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+        let mut display_xref = HashMap::new();
+        display_xref.insert(
+            "display_id".to_string(),
+            SValue::String(Arc::from("NM_000002.3")),
+        );
+
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        object.insert(
+            "_source_cache".to_string(),
+            SValue::String(Arc::from("LRG_RefSeq")),
+        );
+        object.insert(
+            "display_xref".to_string(),
+            SValue::Blessed {
+                class: Arc::from("Bio::EnsEMBL::DBEntry"),
+                value: Arc::new(SValue::Hash(Arc::new(display_xref))),
+            },
+        );
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_attribute("rseq_mrna_match", "1", None),
+                storable_attribute("rseq_mrna_match", "duplicate ignored", None),
+                storable_attribute("rseq_cds_match", "1", None),
+                storable_attribute("gencode_primary", "1", None),
+                storable_attribute("_rna_edit", "30 30 T", None),
+                storable_attribute("_rna_edit", "20 25", Some("op=X")),
+            ])),
+        );
+
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "1".to_string(),
+            start: 100,
+            end: 200,
+            source_start: 100,
+            source_end: 200,
+            strand: 1,
+            stable_id: "ENST000190".to_string(),
+        };
+
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "display_xref_id").as_deref(),
+            Some("NM_000002.3")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "source_cache").as_deref(),
+            Some("LRG_RefSeq")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "refseq_match").as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert_eq!(
+            batch_refseq_edit_values(&batch),
+            Some(vec![(20, 25, None, true), (30, 30, Some(1), true)])
+        );
+        assert_eq!(batch_bool_value(&batch, "is_gencode_basic"), Some(false));
+        assert_eq!(batch_bool_value(&batch, "is_gencode_primary"), Some(true));
     }
 
     #[test]
