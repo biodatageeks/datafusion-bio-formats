@@ -11,8 +11,8 @@ use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
 use crate::util::{
     BatchBuilder, ColumnMap, RefseqEditTuple, canonical_json_string, json_bool, json_i32, json_i64,
-    json_str, normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64,
-    stable_hash,
+    json_str, normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_bool,
+    parse_i64, stable_hash,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -786,6 +786,10 @@ fn build_refseq_match(attrs: &TranscriptAttributes) -> Option<String> {
     }
 }
 
+fn presence_attribute_is_true(value: &str) -> bool {
+    parse_bool(Some(value)).unwrap_or(true)
+}
+
 fn parse_transcript_attributes_json(
     object: &serde_json::Map<String, Value>,
     tx_start: i64,
@@ -813,11 +817,11 @@ fn parse_transcript_attributes_json(
         }
 
         match code {
-            "cds_start_NF" if value == "1" => {
+            "cds_start_NF" if presence_attribute_is_true(value) => {
                 out.cds_start_nf = true;
                 out.cds_nf_order.push("cds_start_NF");
             }
-            "cds_end_NF" if value == "1" => {
+            "cds_end_NF" if presence_attribute_is_true(value) => {
                 out.cds_end_nf = true;
                 out.cds_nf_order.push("cds_end_NF");
             }
@@ -891,11 +895,11 @@ fn parse_transcript_attributes_storable(
         }
 
         match code.as_str() {
-            "cds_start_NF" if value == "1" => {
+            "cds_start_NF" if presence_attribute_is_true(&value) => {
                 out.cds_start_nf = true;
                 out.cds_nf_order.push("cds_start_NF");
             }
-            "cds_end_NF" if value == "1" => {
+            "cds_end_NF" if presence_attribute_is_true(&value) => {
                 out.cds_end_nf = true;
                 out.cds_nf_order.push("cds_end_NF");
             }
@@ -2965,6 +2969,23 @@ mod tests {
     }
 
     #[test]
+    fn json_transcript_attributes_treat_presence_only_cds_nf_as_true() {
+        let payload = json!({
+            "attributes": [
+                { "code": "cds_start_NF", "name": "CDS start not found", "value": "" },
+                { "code": "cds_end_NF", "name": "CDS end not found", "value": "0" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false, false);
+
+        assert!(parsed.cds_start_nf);
+        assert!(!parsed.cds_end_nf);
+        assert_eq!(build_flags_str(&parsed).as_deref(), Some("cds_start_NF"));
+    }
+
+    #[test]
     fn json_transcript_attributes_parse_wrapped_minus_strand_regions() {
         let payload = json!({
             "attributes": [
@@ -3014,6 +3035,25 @@ mod tests {
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
         assert_eq!(parsed.mature_mirna_regions, vec![(141, 158)]);
+    }
+
+    #[test]
+    fn storable_transcript_attributes_treat_presence_only_cds_nf_as_true() {
+        let mut object = HashMap::new();
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_attribute("cds_start_NF", "false", None),
+                storable_attribute("cds_end_NF", "", None),
+            ])),
+        );
+
+        let parsed =
+            parse_transcript_attributes_storable(&object, 100, 200, 1, false, false, false);
+
+        assert!(!parsed.cds_start_nf);
+        assert!(parsed.cds_end_nf);
+        assert_eq!(build_flags_str(&parsed).as_deref(), Some("cds_end_NF"));
     }
 
     #[test]
