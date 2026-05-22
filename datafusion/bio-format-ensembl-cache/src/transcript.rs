@@ -842,7 +842,7 @@ fn parse_transcript_attributes_json(
             "gencode_primary" => {
                 out.is_gencode_primary = true;
             }
-            "_rna_edit" => {
+            _ if code.starts_with("_rna_edit") => {
                 if check_rna_edits && !out.has_non_polya_rna_edit && is_non_polya_rna_edit(value) {
                     out.has_non_polya_rna_edit = true;
                 }
@@ -920,7 +920,7 @@ fn parse_transcript_attributes_storable(
             "gencode_primary" => {
                 out.is_gencode_primary = true;
             }
-            "_rna_edit" => {
+            code if code.starts_with("_rna_edit") => {
                 if check_rna_edits && !out.has_non_polya_rna_edit && is_non_polya_rna_edit(&value) {
                     out.has_non_polya_rna_edit = true;
                 }
@@ -3027,6 +3027,7 @@ mod tests {
                 { "code": "gencode_primary", "value": "1" },
                 { "code": "_rna_edit", "value": "10 12 AAA" },
                 { "code": "_rna_edit", "value": "1 2 GG", "description": "op=X" },
+                { "code": "_rna_edit_foo", "value": "4 4 C" },
                 { "code": "_rna_edit", "value": "7 9" }
             ]
         });
@@ -3047,6 +3048,12 @@ mod tests {
                     start: 1,
                     end: 2,
                     replacement_len: Some(2),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 4,
+                    end: 4,
+                    replacement_len: Some(1),
                     skip_refseq_offset: true,
                 },
                 RefseqEdit {
@@ -3091,6 +3098,7 @@ mod tests {
                 attr("gencode_primary", "1", None),
                 attr("_rna_edit", "10 12 AAA", None),
                 attr("_rna_edit", "1 2 GG", Some("op=X")),
+                attr("_rna_edit_1", "4 4 C", None),
                 attr("_rna_edit", "7 9", None),
             ])),
         );
@@ -3110,6 +3118,12 @@ mod tests {
                     start: 1,
                     end: 2,
                     replacement_len: Some(2),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 4,
+                    end: 4,
+                    replacement_len: Some(1),
                     skip_refseq_offset: true,
                 },
                 RefseqEdit {
