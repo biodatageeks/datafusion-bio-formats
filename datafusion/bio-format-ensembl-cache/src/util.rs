@@ -1,7 +1,7 @@
 use crate::errors::{Result, exec_err};
 use crate::schema::{
     cdna_mapper_segment_list_data_type, exon_list_data_type, mirna_region_list_data_type,
-    prediction_list_data_type, protein_feature_list_data_type,
+    prediction_list_data_type, protein_feature_list_data_type, refseq_edit_list_data_type,
 };
 use datafusion::arrow::array::{
     ArrayBuilder, ArrayRef, BooleanBuilder, Float32Builder, Float64Builder, Int8Builder,
@@ -18,6 +18,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 const IO_BUFFER_SIZE: usize = 64 * 1024;
+
+#[allow(dead_code)]
+pub(crate) type RefseqEditTuple = (i64, i64, Option<i64>, bool);
 
 pub(crate) fn open_text_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
     let file = File::open(path)
@@ -655,6 +658,61 @@ impl BatchBuilder {
         self.mark_written(col);
     }
 
+    /// Append a list of RefSeq RNA edit metadata to a `List<Struct>` column.
+    #[allow(dead_code)]
+    pub fn set_refseq_edit_list(&mut self, col: usize, edits: Option<&[RefseqEditTuple]>) {
+        let mut overflow: Option<(usize, usize)> = None;
+        if let AnyBuilder::RefseqEditList(list_builder) = &mut self.builders[col] {
+            match edits {
+                Some(edit_slice) => {
+                    let current_child_len = list_builder.values().len();
+                    let next_child_len = current_child_len.saturating_add(edit_slice.len());
+                    if next_child_len > i32::MAX as usize {
+                        overflow = Some((current_child_len, edit_slice.len()));
+                        list_builder.append(false);
+                        self.mark_written(col);
+                    } else {
+                        let struct_builder = list_builder.values();
+                        for &(start, end, replacement_len, skip_refseq_offset) in edit_slice {
+                            struct_builder
+                                .field_builder::<Int64Builder>(0)
+                                .unwrap()
+                                .append_value(start);
+                            struct_builder
+                                .field_builder::<Int64Builder>(1)
+                                .unwrap()
+                                .append_value(end);
+                            let replacement_builder =
+                                struct_builder.field_builder::<Int64Builder>(2).unwrap();
+                            match replacement_len {
+                                Some(v) => replacement_builder.append_value(v),
+                                None => replacement_builder.append_null(),
+                            }
+                            struct_builder
+                                .field_builder::<BooleanBuilder>(3)
+                                .unwrap()
+                                .append_value(skip_refseq_offset);
+                            struct_builder.append(true);
+                        }
+                        list_builder.append(true);
+                    }
+                }
+                None => {
+                    list_builder.append(false);
+                }
+            }
+        }
+        if let Some((current_child_len, added)) = overflow {
+            let col_name = self.schema.field(col).name().clone();
+            self.set_pending_error_once(format!(
+                "Arrow List offset overflow in column '{col_name}' ({current_child_len} + {added} values exceeds i32::MAX). \
+                 Reduce batch_size_hint."
+            ));
+            return;
+        }
+        self.mark_written(col);
+    }
+
     /// Append a list of protein features to a `List<Struct>` column.
     /// Each feature is `(analysis, hseqname, start, end)`.
     #[allow(clippy::type_complexity)]
@@ -856,6 +914,7 @@ enum AnyBuilder {
     ExonList(ListBuilder<StructBuilder>),
     MirnaRegionList(ListBuilder<StructBuilder>),
     CdnaMapperList(ListBuilder<StructBuilder>),
+    RefseqEditList(ListBuilder<StructBuilder>),
     ProteinFeatureList(ListBuilder<StructBuilder>),
     PredictionList(ListBuilder<StructBuilder>),
 }
@@ -873,6 +932,7 @@ impl AnyBuilder {
             Self::ExonList(b) => b.append(false),
             Self::MirnaRegionList(b) => b.append(false),
             Self::CdnaMapperList(b) => b.append(false),
+            Self::RefseqEditList(b) => b.append(false),
             Self::ProteinFeatureList(b) => b.append(false),
             Self::PredictionList(b) => b.append(false),
         }
@@ -924,6 +984,24 @@ impl AnyBuilder {
                     ],
                 );
                 Ok(Self::CdnaMapperList(ListBuilder::new(struct_builder)))
+            }
+            dt if *dt == refseq_edit_list_data_type() => {
+                let fields = vec![
+                    Field::new("start", DataType::Int64, false),
+                    Field::new("end", DataType::Int64, false),
+                    Field::new("replacement_len", DataType::Int64, true),
+                    Field::new("skip_refseq_offset", DataType::Boolean, false),
+                ];
+                let struct_builder = StructBuilder::new(
+                    fields,
+                    vec![
+                        Box::new(Int64Builder::with_capacity(capacity * 4)),
+                        Box::new(Int64Builder::with_capacity(capacity * 4)),
+                        Box::new(Int64Builder::with_capacity(capacity * 4)),
+                        Box::new(BooleanBuilder::with_capacity(capacity * 4)),
+                    ],
+                );
+                Ok(Self::RefseqEditList(ListBuilder::new(struct_builder)))
             }
             dt if *dt == mirna_region_list_data_type() => {
                 let fields = vec![
@@ -992,6 +1070,7 @@ impl AnyBuilder {
             Self::ExonList(mut builder) => Arc::new(builder.finish()),
             Self::MirnaRegionList(mut builder) => Arc::new(builder.finish()),
             Self::CdnaMapperList(mut builder) => Arc::new(builder.finish()),
+            Self::RefseqEditList(mut builder) => Arc::new(builder.finish()),
             Self::ProteinFeatureList(mut builder) => Arc::new(builder.finish()),
             Self::PredictionList(mut builder) => Arc::new(builder.finish()),
         }

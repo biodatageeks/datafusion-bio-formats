@@ -635,6 +635,22 @@ async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<
         .field_with_name("ncrna_structure")
         .expect("ncrna_structure column missing");
     assert_eq!(ncrna_structure.data_type(), &DataType::Utf8);
+    for col in [
+        "display_xref_id",
+        "source_cache",
+        "refseq_match",
+        "refseq_edits",
+        "is_gencode_basic",
+        "is_gencode_primary",
+    ] {
+        assert!(schema.field_with_name(col).is_ok(), "missing column: {col}");
+    }
+    let refseq_edits = schema.field_with_name("refseq_edits").unwrap();
+    assert!(
+        matches!(refseq_edits.data_type(), DataType::List(_)),
+        "refseq_edits should be List<Struct>, got {:?}",
+        refseq_edits.data_type()
+    );
 
     Ok(())
 }

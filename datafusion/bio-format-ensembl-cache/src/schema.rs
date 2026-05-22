@@ -34,6 +34,18 @@ pub(crate) fn cdna_mapper_segment_list_data_type() -> DataType {
     DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
 }
 
+/// Returns the Arrow `DataType` for RefSeq RNA edit metadata:
+/// `List<Struct<start:Int64, end:Int64, replacement_len:Int64?, skip_refseq_offset:Boolean>>`.
+pub(crate) fn refseq_edit_list_data_type() -> DataType {
+    let fields = Fields::from(vec![
+        Field::new("start", DataType::Int64, false),
+        Field::new("end", DataType::Int64, false),
+        Field::new("replacement_len", DataType::Int64, true),
+        Field::new("skip_refseq_offset", DataType::Boolean, false),
+    ]);
+    DataType::List(Arc::new(Field::new("item", DataType::Struct(fields), true)))
+}
+
 /// Returns the Arrow `DataType` for protein features:
 /// `List<Struct<analysis:Utf8, hseqname:Utf8, start:Int64, end:Int64>>`.
 pub(crate) fn protein_feature_list_data_type() -> DataType {
@@ -180,6 +192,12 @@ pub(crate) fn transcript_schema(
         Field::new("gene_hgnc_id", DataType::Utf8, true),
         Field::new("gene_hgnc_id_native", DataType::Utf8, true),
         Field::new("refseq_id", DataType::Utf8, true),
+        Field::new("display_xref_id", DataType::Utf8, true),
+        Field::new("source_cache", DataType::Utf8, true),
+        Field::new("refseq_match", DataType::Utf8, true),
+        Field::new("refseq_edits", refseq_edit_list_data_type(), true),
+        Field::new("is_gencode_basic", DataType::Boolean, false),
+        Field::new("is_gencode_primary", DataType::Boolean, false),
         Field::new("cds_start", DataType::Int64, true),
         Field::new("cds_end", DataType::Int64, true),
         Field::new("cdna_coding_start", DataType::Int64, true),
