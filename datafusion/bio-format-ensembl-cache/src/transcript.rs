@@ -179,6 +179,14 @@ impl TranscriptColumnIndices {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefseqEdit {
+    start: i64,
+    end: i64,
+    replacement_len: Option<i64>,
+    skip_refseq_offset: bool,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct TranscriptAttributes {
     cds_start_nf: bool,
@@ -190,6 +198,10 @@ struct TranscriptAttributes {
     /// Raw ncRNA structure string from the "ncRNA" attribute (e.g. "(19.(6.(2.(4.14)12.)10.)9").
     ncrna_structure: Option<String>,
     has_non_polya_rna_edit: bool,
+    refseq_match_codes: Vec<String>,
+    refseq_edits: Vec<RefseqEdit>,
+    is_gencode_basic: bool,
+    is_gencode_primary: bool,
 }
 
 struct TranscriptRowCore {
@@ -658,6 +670,53 @@ fn is_non_polya_rna_edit(value: &str) -> bool {
     }
 }
 
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn parse_refseq_edit(value: &str, description: Option<&str>) -> Option<RefseqEdit> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if !(parts.len() == 2 || parts.len() == 3) {
+        return None;
+    }
+    let start = parts[0].parse::<i64>().ok()?;
+    let end = parts[1].parse::<i64>().ok()?;
+    let replacement_len = if parts.len() == 3 {
+        Some(i64::try_from(parts[2].len()).ok()?)
+    } else {
+        None
+    };
+    let length_preserving = replacement_len.is_some_and(|len| end - start + 1 == len);
+    let op_x = description.is_some_and(|d| d.contains("op=X"));
+    Some(RefseqEdit {
+        start,
+        end,
+        replacement_len,
+        skip_refseq_offset: length_preserving || op_x,
+    })
+}
+
+fn sort_refseq_edits(edits: &mut [RefseqEdit]) {
+    edits.sort_by_key(|edit| {
+        (
+            edit.start,
+            edit.end,
+            edit.replacement_len.unwrap_or(i64::MIN),
+        )
+    });
+}
+
+#[allow(dead_code)]
+fn build_refseq_match(attrs: &TranscriptAttributes) -> Option<String> {
+    if attrs.refseq_match_codes.is_empty() {
+        None
+    } else {
+        Some(attrs.refseq_match_codes.join("&"))
+    }
+}
+
 fn parse_transcript_attributes_json(
     object: &serde_json::Map<String, Value>,
     tx_start: i64,
@@ -678,6 +737,11 @@ fn parse_transcript_attributes_json(
         };
         let code = attr_obj.get("code").and_then(Value::as_str).unwrap_or("");
         let value = attr_obj.get("value").and_then(Value::as_str).unwrap_or("");
+        let description = attr_obj.get("description").and_then(Value::as_str);
+
+        if code.starts_with("rseq") {
+            push_unique(&mut out.refseq_match_codes, code);
+        }
 
         match code {
             "cds_start_NF" if value == "1" => {
@@ -703,15 +767,25 @@ fn parse_transcript_attributes_json(
                     out.ncrna_structure = Some(structure.to_string());
                 }
             }
-            "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
-                if is_non_polya_rna_edit(value) {
+            "gencode_basic" => {
+                out.is_gencode_basic = true;
+            }
+            "gencode_primary" => {
+                out.is_gencode_primary = true;
+            }
+            "_rna_edit" => {
+                if check_rna_edits && !out.has_non_polya_rna_edit && is_non_polya_rna_edit(value) {
                     out.has_non_polya_rna_edit = true;
+                }
+                if let Some(edit) = parse_refseq_edit(value, description) {
+                    out.refseq_edits.push(edit);
                 }
             }
             _ => {}
         }
     }
 
+    sort_refseq_edits(&mut out.refseq_edits);
     out
 }
 
@@ -741,6 +815,11 @@ fn parse_transcript_attributes_storable(
             .get("value")
             .and_then(SValue::as_string)
             .unwrap_or_default();
+        let description = attr_obj.get("description").and_then(SValue::as_string);
+
+        if code.starts_with("rseq") {
+            push_unique(&mut out.refseq_match_codes, &code);
+        }
 
         match code.as_str() {
             "cds_start_NF" if value == "1" => {
@@ -766,15 +845,25 @@ fn parse_transcript_attributes_storable(
                     out.ncrna_structure = Some(structure.to_string());
                 }
             }
-            "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
-                if is_non_polya_rna_edit(&value) {
+            "gencode_basic" => {
+                out.is_gencode_basic = true;
+            }
+            "gencode_primary" => {
+                out.is_gencode_primary = true;
+            }
+            "_rna_edit" => {
+                if check_rna_edits && !out.has_non_polya_rna_edit && is_non_polya_rna_edit(&value) {
                     out.has_non_polya_rna_edit = true;
+                }
+                if let Some(edit) = parse_refseq_edit(&value, description.as_deref()) {
+                    out.refseq_edits.push(edit);
                 }
             }
             _ => {}
         }
     }
 
+    sort_refseq_edits(&mut out.refseq_edits);
     out
 }
 
@@ -2498,6 +2587,118 @@ mod tests {
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
         assert_eq!(parsed.mature_mirna_regions, vec![(141, 158)]);
+    }
+
+    #[test]
+    fn parse_refseq_and_gencode_attributes_json() {
+        let payload = json!({
+            "attributes": [
+                { "code": "rseq_mrna_match", "value": "ignored" },
+                { "code": "rseq_mrna_match", "value": "duplicate ignored" },
+                { "code": "rseq_cds_match", "value": "ignored" },
+                { "code": "gencode_basic", "value": "1" },
+                { "code": "gencode_primary", "value": "1" },
+                { "code": "_rna_edit", "value": "10 12 AAA" },
+                { "code": "_rna_edit", "value": "1 2 GG", "description": "op=X" },
+                { "code": "_rna_edit", "value": "7 9" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false, true);
+
+        assert_eq!(
+            build_refseq_match(&parsed).as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert!(parsed.is_gencode_basic);
+        assert!(parsed.is_gencode_primary);
+        assert_eq!(
+            parsed.refseq_edits,
+            vec![
+                RefseqEdit {
+                    start: 1,
+                    end: 2,
+                    replacement_len: Some(2),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 7,
+                    end: 9,
+                    replacement_len: None,
+                    skip_refseq_offset: false,
+                },
+                RefseqEdit {
+                    start: 10,
+                    end: 12,
+                    replacement_len: Some(3),
+                    skip_refseq_offset: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_refseq_and_gencode_attributes_storable() {
+        fn attr(code: &str, value: &str, description: Option<&str>) -> SValue {
+            let mut attr = HashMap::new();
+            attr.insert("code".to_string(), SValue::String(Arc::from(code)));
+            attr.insert("value".to_string(), SValue::String(Arc::from(value)));
+            if let Some(description) = description {
+                attr.insert(
+                    "description".to_string(),
+                    SValue::String(Arc::from(description)),
+                );
+            }
+            SValue::Hash(Arc::new(attr))
+        }
+
+        let mut object = HashMap::new();
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![
+                attr("rseq_mrna_match", "ignored", None),
+                attr("rseq_mrna_match", "duplicate ignored", None),
+                attr("rseq_cds_match", "ignored", None),
+                attr("gencode_basic", "1", None),
+                attr("gencode_primary", "1", None),
+                attr("_rna_edit", "10 12 AAA", None),
+                attr("_rna_edit", "1 2 GG", Some("op=X")),
+                attr("_rna_edit", "7 9", None),
+            ])),
+        );
+
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, false, false, true);
+
+        assert_eq!(
+            build_refseq_match(&parsed).as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert!(parsed.is_gencode_basic);
+        assert!(parsed.is_gencode_primary);
+        assert_eq!(
+            parsed.refseq_edits,
+            vec![
+                RefseqEdit {
+                    start: 1,
+                    end: 2,
+                    replacement_len: Some(2),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 7,
+                    end: 9,
+                    replacement_len: None,
+                    skip_refseq_offset: false,
+                },
+                RefseqEdit {
+                    start: 10,
+                    end: 12,
+                    replacement_len: Some(3),
+                    skip_refseq_offset: true,
+                },
+            ]
+        );
     }
 
     #[test]
