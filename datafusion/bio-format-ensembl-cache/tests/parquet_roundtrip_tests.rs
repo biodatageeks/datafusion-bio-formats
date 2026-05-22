@@ -1,6 +1,8 @@
 //! Parquet round-trip tests: write VEP cache → Parquet → read back, verify.
 
-use datafusion::arrow::array::{Array, Int64Array, ListArray, StringArray, StructArray};
+use datafusion::arrow::array::{
+    Array, BooleanArray, Int64Array, ListArray, StringArray, StructArray,
+};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
 use datafusion::parquet::arrow::ArrowWriter;
@@ -357,6 +359,54 @@ async fn transcript_parquet_roundtrip_ncrna_structure() -> datafusion::common::R
         "ncrna_structure should be string type, got {:?}",
         field.data_type()
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_parquet_roundtrip_issue_190_fields() -> datafusion::common::Result<()> {
+    let temp_dir = TempDir::new().unwrap();
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
+
+    let parquet_path =
+        write_provider_to_parquet(Arc::new(provider), "tx_issue_190", &temp_dir).await;
+
+    let ctx = SessionContext::new();
+    ctx.register_parquet("tx", &parquet_path, ParquetReadOptions::default())
+        .await?;
+
+    let batches = ctx
+        .sql(
+            "SELECT display_xref_id, source_cache, refseq_match, refseq_edits, \
+             is_gencode_basic, is_gencode_primary FROM tx LIMIT 5",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert!(!batches.is_empty());
+    assert!(batches[0].num_rows() > 0);
+    assert_eq!(batches[0].num_columns(), 6);
+
+    assert!(
+        batches[0]
+            .column_by_name("refseq_edits")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .is_some(),
+        "refseq_edits should remain a ListArray after parquet round-trip"
+    );
+
+    for col in ["is_gencode_basic", "is_gencode_primary"] {
+        let values = batches[0]
+            .column_by_name(col)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap_or_else(|| panic!("{col} should remain BooleanArray after round-trip"));
+        assert_eq!(values.null_count(), 0, "{col} should remain non-null");
+    }
 
     Ok(())
 }
