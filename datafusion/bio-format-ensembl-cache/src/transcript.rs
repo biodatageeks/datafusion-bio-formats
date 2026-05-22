@@ -10,8 +10,9 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
 use crate::util::{
-    BatchBuilder, ColumnMap, canonical_json_string, json_bool, json_i32, json_i64, json_str,
-    normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
+    BatchBuilder, ColumnMap, RefseqEditTuple, canonical_json_string, json_bool, json_i32, json_i64,
+    json_str, normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64,
+    stable_hash,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -38,6 +39,12 @@ pub(crate) struct TranscriptColumnIndices {
     gene_hgnc_id: Option<usize>,
     gene_hgnc_id_native: Option<usize>,
     refseq_id: Option<usize>,
+    display_xref_id: Option<usize>,
+    source_cache: Option<usize>,
+    refseq_match: Option<usize>,
+    refseq_edits: Option<usize>,
+    is_gencode_basic: Option<usize>,
+    is_gencode_primary: Option<usize>,
     coding_region_start: Option<usize>,
     coding_region_end: Option<usize>,
     cdna_coding_start: Option<usize>,
@@ -107,12 +114,20 @@ impl TranscriptColumnIndices {
         let ncrna_structure = col_map.get("ncrna_structure");
         let has_non_polya_rna_edit = col_map.get("has_non_polya_rna_edit");
         let flags_str = col_map.get("flags_str");
+        let refseq_match = col_map.get("refseq_match");
+        let refseq_edits = col_map.get("refseq_edits");
+        let is_gencode_basic = col_map.get("is_gencode_basic");
+        let is_gencode_primary = col_map.get("is_gencode_primary");
         let transcript_attributes_projected = cds_start_nf.is_some()
             || cds_end_nf.is_some()
             || mature_mirna_regions.is_some()
             || ncrna_structure.is_some()
             || has_non_polya_rna_edit.is_some()
-            || flags_str.is_some();
+            || flags_str.is_some()
+            || refseq_match.is_some()
+            || refseq_edits.is_some()
+            || is_gencode_basic.is_some()
+            || is_gencode_primary.is_some();
 
         let cdna_mapper_segments = col_map.get("cdna_mapper_segments");
         let cdna_mapper_projected = cdna_mapper_segments.is_some();
@@ -134,6 +149,12 @@ impl TranscriptColumnIndices {
             gene_hgnc_id: col_map.get("gene_hgnc_id"),
             gene_hgnc_id_native: col_map.get("gene_hgnc_id_native"),
             refseq_id: col_map.get("refseq_id"),
+            display_xref_id: col_map.get("display_xref_id"),
+            source_cache: col_map.get("source_cache"),
+            refseq_match,
+            refseq_edits,
+            is_gencode_basic,
+            is_gencode_primary,
             coding_region_start: col_map.get("cds_start"),
             coding_region_end: col_map.get("cds_end"),
             cdna_coding_start: col_map.get("cdna_coding_start"),
@@ -531,6 +552,39 @@ fn sv_first_bool(
     keys.iter().find_map(|key| sv_bool(object.get(*key)))
 }
 
+fn json_display_xref_id(object: &serde_json::Map<String, Value>) -> Option<String> {
+    object
+        .get("display_xref")
+        .and_then(unwrap_blessed_object_optional)
+        .and_then(|display_xref| json_str(display_xref.get("display_id")))
+        .or_else(|| json_str(object.get("display_xref_id")))
+        .filter(|value| value != "-")
+}
+
+fn json_source_cache(object: &serde_json::Map<String, Value>) -> Option<String> {
+    match object.get("_source_cache") {
+        Some(Value::String(value)) if !value.is_empty() && value != "-" => Some(value.clone()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        Some(Value::Bool(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn refseq_edit_tuples(attrs: &TranscriptAttributes) -> Vec<RefseqEditTuple> {
+    attrs
+        .refseq_edits
+        .iter()
+        .map(|edit| {
+            (
+                edit.start,
+                edit.end,
+                edit.replacement_len,
+                edit.skip_refseq_offset,
+            )
+        })
+        .collect()
+}
+
 /// Parse TSL attribute value like "tsl1" → 1, "tsl5" → 5, or plain "1" → 1.
 /// Also handles extended format "tsl2 (assigned to previous version 1)".
 fn parse_tsl_value(value: &str) -> Option<i32> {
@@ -708,7 +762,6 @@ fn sort_refseq_edits(edits: &mut [RefseqEdit]) {
     });
 }
 
-#[allow(dead_code)]
 fn build_refseq_match(attrs: &TranscriptAttributes) -> Option<String> {
     if attrs.refseq_match_codes.is_empty() {
         None
@@ -1259,6 +1312,14 @@ pub(crate) fn parse_transcript_line_into(
             .filter(|v| v != "-");
         batch.set_opt_utf8_owned(idx, refseq_id.as_ref());
     }
+    if let Some(idx) = col_idx.display_xref_id {
+        let value = json_display_xref_id(object);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.source_cache {
+        let value = json_source_cache(object);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
     // coding_region_start/end: read from object first; if null, derive from
     // cdna_coding_start/end + exon array (same derivation as storable path).
     let cdna_coding_start_val = json_i64(object.get("cdna_coding_start"));
@@ -1532,6 +1593,20 @@ pub(crate) fn parse_transcript_line_into(
             let value = build_flags_str(&attributes);
             batch.set_opt_utf8_owned(idx, value.as_ref());
         }
+        if let Some(idx) = col_idx.refseq_match {
+            let value = build_refseq_match(&attributes);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.refseq_edits {
+            let edits = refseq_edit_tuples(&attributes);
+            batch.set_refseq_edit_list(idx, (!edits.is_empty()).then_some(edits.as_slice()));
+        }
+        if let Some(idx) = col_idx.is_gencode_basic {
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_basic));
+        }
+        if let Some(idx) = col_idx.is_gencode_primary {
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_primary));
+        }
     }
 
     // Only compute canonical JSON + hash if projected
@@ -1793,6 +1868,12 @@ fn append_transcript_storable_row_into(
         let value =
             sv_str(object.get("refseq_id").or_else(|| object.get("_refseq"))).filter(|v| v != "-");
         batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.display_xref_id {
+        batch.set_null(idx);
+    }
+    if let Some(idx) = col_idx.source_cache {
+        batch.set_null(idx);
     }
     // coding_region_start/end: read from object first; if undef (common in
     // storable binary), derive from cdna_coding_start/end + exon array.
@@ -2077,6 +2158,18 @@ fn append_transcript_storable_row_into(
             let value = build_flags_str(&attributes);
             batch.set_opt_utf8_owned(idx, value.as_ref());
         }
+        if let Some(idx) = col_idx.refseq_match {
+            batch.set_null(idx);
+        }
+        if let Some(idx) = col_idx.refseq_edits {
+            batch.set_refseq_edit_list(idx, None);
+        }
+        if let Some(idx) = col_idx.is_gencode_basic {
+            batch.set_opt_bool(idx, Some(false));
+        }
+        if let Some(idx) = col_idx.is_gencode_primary {
+            batch.set_opt_bool(idx, Some(false));
+        }
     }
 
     // Only compute canonical JSON + hash if projected
@@ -2128,8 +2221,10 @@ mod tests {
     use crate::filter::SimplePredicate;
     use crate::info::CacheInfo;
     use crate::schema::transcript_schema;
-    use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter};
-    use datafusion::arrow::array::{Array, Int64Array, StringArray};
+    use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter, RefseqEditTuple};
+    use datafusion::arrow::array::{
+        Array, BooleanArray, Int64Array, ListArray, StringArray, StructArray,
+    };
     use serde_json::json;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -2212,6 +2307,90 @@ mod tests {
         } else {
             Some(values.value(0))
         }
+    }
+
+    fn batch_bool_value(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+        col: &str,
+    ) -> Option<bool> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name(col)
+            .unwrap_or_else(|| panic!("missing column: {col}"));
+        let values = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap_or_else(|| panic!("expected Boolean column: {col}"));
+        if values.is_null(0) {
+            None
+        } else {
+            Some(values.value(0))
+        }
+    }
+
+    fn batch_refseq_edit_values(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> Option<Vec<RefseqEditTuple>> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name("refseq_edits")
+            .expect("missing refseq_edits column");
+        let list_array = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("expected ListArray for refseq_edits");
+        if list_array.is_null(0) {
+            return None;
+        }
+
+        let values = list_array.value(0);
+        let edits = values
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("expected StructArray for refseq_edits values");
+        let starts = edits
+            .column_by_name("start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = edits
+            .column_by_name("end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let replacement_lens = edits
+            .column_by_name("replacement_len")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let skip_refseq_offsets = edits
+            .column_by_name("skip_refseq_offset")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+
+        Some(
+            (0..edits.len())
+                .map(|row| {
+                    (
+                        starts.value(row),
+                        ends.value(row),
+                        if replacement_lens.is_null(row) {
+                            None
+                        } else {
+                            Some(replacement_lens.value(row))
+                        },
+                        skip_refseq_offsets.value(row),
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn storable_bioseq(seq: &str) -> SValue {
@@ -2351,6 +2530,65 @@ mod tests {
 
         let batch = batch.finish().unwrap();
         assert_eq!(batch_i64_value(&batch, "db_id"), Some(4242));
+    }
+
+    #[test]
+    fn parse_transcript_line_promotes_issue_190_fields() {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let payload = json!({
+            "stable_id": "ENST000190",
+            "strand": 1,
+            "biotype": "protein_coding",
+            "_source_cache": "BestRefSeq",
+            "display_xref": {
+                "__class": "Bio::EnsEMBL::DBEntry",
+                "__value": { "display_id": "NM_000001.2" }
+            },
+            "attributes": [
+                { "code": "rseq_mrna_match", "value": "1" },
+                { "code": "rseq_cds_match", "value": "1" },
+                { "code": "gencode_basic", "value": "1" },
+                { "code": "_rna_edit", "value": "10 12 AAA" }
+            ]
+        });
+        let line = format!(
+            "1\t100\t200\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        assert!(written);
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "display_xref_id").as_deref(),
+            Some("NM_000001.2")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "source_cache").as_deref(),
+            Some("BestRefSeq")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "refseq_match").as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert_eq!(
+            batch_refseq_edit_values(&batch),
+            Some(vec![(10, 12, Some(3), true)])
+        );
+        assert_eq!(batch_bool_value(&batch, "is_gencode_basic"), Some(true));
+        assert_eq!(batch_bool_value(&batch, "is_gencode_primary"), Some(false));
     }
 
     #[test]

@@ -19,7 +19,6 @@ use std::sync::Arc;
 
 const IO_BUFFER_SIZE: usize = 64 * 1024;
 
-#[allow(dead_code)]
 pub(crate) type RefseqEditTuple = (i64, i64, Option<i64>, bool);
 
 pub(crate) fn open_text_reader(path: &Path) -> Result<Box<dyn BufRead + Send>> {
@@ -659,7 +658,6 @@ impl BatchBuilder {
     }
 
     /// Append a list of RefSeq RNA edit metadata to a `List<Struct>` column.
-    #[allow(dead_code)]
     pub fn set_refseq_edit_list(&mut self, col: usize, edits: Option<&[RefseqEditTuple]>) {
         let mut overflow: Option<(usize, usize)> = None;
         if let AnyBuilder::RefseqEditList(list_builder) = &mut self.builders[col] {
