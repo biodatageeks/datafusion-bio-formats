@@ -101,6 +101,12 @@ of transcripts that would otherwise have no exon entries.
 | `gene_hgnc_id` | Utf8 | yes | HGNC ID parsed from the raw VEP object, with no export-time propagation/backfill |
 | `gene_hgnc_id_native` | Utf8 | yes | Stable copy of the native raw-object HGNC ID. In exported cache files it is identical to `gene_hgnc_id`; downstream annotation engines can preserve it if they later overwrite `gene_hgnc_id` |
 | `refseq_id` | Utf8 | yes | RefSeq transcript ID |
+| `display_xref_id` | Utf8 | yes | Transcript display xref display ID, from `display_xref.display_id` |
+| `source_cache` | Utf8 | yes | Raw VEP `_source_cache` value, preserved without normalization |
+| `refseq_match` | Utf8 | yes | Unique transcript attribute codes starting with `rseq`, in encounter order, joined by `&` |
+| `refseq_edits` | `List<Struct<start:Int64, end:Int64, replacement_len:Int64?, skip_refseq_offset:Boolean>>` | yes | Parsed `_rna_edit` metadata for RefSeq offset and edited-sequence behavior |
+| `is_gencode_basic` | Boolean | no | True when transcript attributes contain `gencode_basic`; false otherwise |
+| `is_gencode_primary` | Boolean | no | True when transcript attributes contain `gencode_primary`; false otherwise |
 | `cds_start` | Int64 | yes | CDS genomic start |
 | `cds_end` | Int64 | yes | CDS genomic end |
 | `cdna_coding_start` | Int64 | yes | cDNA coding start offset |
@@ -303,9 +309,15 @@ Transcript, exon, and translation schemas support projection pushdown. When VEP-
 columns (e.g. `exons`, `cdna_seq`, `peptide_seq`, `mature_mirna_regions`,
 `cdna_mapper_segments`, `spliced_seq`, `translation_seq`, `cds_sequence`,
 `translation_seq_canonical`, `cds_sequence_canonical`,
-`protein_features`, `sift_predictions`, `polyphen_predictions`) are not
+`display_xref_id`, `source_cache`, `refseq_match`, `refseq_edits`,
+`is_gencode_basic`, `is_gencode_primary`, `protein_features`,
+`sift_predictions`, `polyphen_predictions`) are not
 selected in a query, the parser skips extracting those fields, significantly
 reducing parse overhead.
+
+Downstream annotation queries can use the promoted transcript columns needed by
+VEP consequence logic without selecting `raw_object_json`; that column remains
+available for traceability and debugging.
 
 ## Parallel Scanning
 

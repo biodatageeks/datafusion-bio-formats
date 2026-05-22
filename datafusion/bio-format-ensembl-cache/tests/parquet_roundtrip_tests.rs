@@ -791,6 +791,16 @@ async fn parquet_roundtrip_preserves_all_schema_fields() -> datafusion::common::
         );
     }
 
+    let batches = ctx
+        .sql(
+            "SELECT display_xref_id, source_cache, refseq_match, refseq_edits, \
+             is_gencode_basic, is_gencode_primary FROM tx LIMIT 1",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(batches[0].num_columns(), 6);
+
     Ok(())
 }
 
