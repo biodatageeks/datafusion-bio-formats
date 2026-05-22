@@ -885,6 +885,34 @@ async fn transcript_issue_190_columns_queryable_for_storable_and_merged()
 }
 
 #[tokio::test]
+async fn transcript_raw_free_existing_columns_remain_queryable() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT gene_stable_id, gene_hgnc_id_native, cdna_mapper_segments, spliced_seq, \
+             five_prime_utr_seq, three_prime_utr_seq, translateable_seq, flags_str, \
+             cds_start_nf, cds_end_nf, bam_edit_status, has_non_polya_rna_edit, \
+             mature_mirna_regions, ncrna_structure FROM tx LIMIT 5",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_columns(), 14);
+    assert!(
+        batches[0].column_by_name("raw_object_json").is_none(),
+        "raw_object_json must not be projected by the raw-free contract query"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn transcript_mature_mirna_regions_queryable() -> datafusion::common::Result<()> {
     let provider =
         TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;

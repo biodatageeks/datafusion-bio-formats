@@ -975,6 +975,7 @@ fn extract_cdna_mapper_segments_json(
     if segments.is_empty() {
         None
     } else {
+        sort_cdna_mapper_segments(&mut segments);
         Some(segments)
     }
 }
@@ -1021,8 +1022,13 @@ fn extract_cdna_mapper_segments_storable(
     if segments.is_empty() {
         None
     } else {
+        sort_cdna_mapper_segments(&mut segments);
         Some(segments)
     }
+}
+
+fn sort_cdna_mapper_segments(segments: &mut [MapperSegment]) {
+    segments.sort_by_key(|(g_start, g_end, c_start, _c_end, _ori)| (*g_start, *g_end, *c_start));
 }
 
 fn extract_mapper_pair_storable(
@@ -2426,6 +2432,28 @@ mod tests {
         SValue::Hash(Arc::new(attr))
     }
 
+    fn storable_mapper_pair(
+        genomic_start: i64,
+        genomic_end: i64,
+        cdna_start: i64,
+        cdna_end: i64,
+        ori: i64,
+    ) -> SValue {
+        let mut from = HashMap::new();
+        from.insert("start".to_string(), SValue::Int(genomic_start));
+        from.insert("end".to_string(), SValue::Int(genomic_end));
+
+        let mut to = HashMap::new();
+        to.insert("start".to_string(), SValue::Int(cdna_start));
+        to.insert("end".to_string(), SValue::Int(cdna_end));
+
+        let mut pair = HashMap::new();
+        pair.insert("from".to_string(), SValue::Hash(Arc::new(from)));
+        pair.insert("to".to_string(), SValue::Hash(Arc::new(to)));
+        pair.insert("ori".to_string(), SValue::Int(ori));
+        SValue::Hash(Arc::new(pair))
+    }
+
     fn storable_bioseq(seq: &str) -> SValue {
         let mut primary = HashMap::new();
         primary.insert(
@@ -2703,6 +2731,53 @@ mod tests {
         );
         assert_eq!(batch_bool_value(&batch, "is_gencode_basic"), Some(false));
         assert_eq!(batch_bool_value(&batch, "is_gencode_primary"), Some(true));
+    }
+
+    #[test]
+    fn cdna_mapper_segments_are_sorted_by_genomic_then_cdna_start() {
+        let expected = vec![(10, 12, 1, 3, 1), (50, 55, 6, 11, 1)];
+        let payload = json!({
+            "_variation_effect_feature_cache": {
+                "mapper": {
+                    "pair_genomic": {
+                        "1": [
+                            { "from": { "start": 50, "end": 55 }, "to": { "start": 6, "end": 11 }, "ori": 1 },
+                            { "from": { "start": 10, "end": 12 }, "to": { "start": 1, "end": 3 }, "ori": 1 }
+                        ]
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            extract_cdna_mapper_segments_json(payload.as_object().unwrap()).unwrap(),
+            expected
+        );
+
+        let mut pair_genomic = HashMap::new();
+        pair_genomic.insert(
+            "1".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_mapper_pair(50, 55, 6, 11, 1),
+                storable_mapper_pair(10, 12, 1, 3, 1),
+            ])),
+        );
+        let mut mapper = HashMap::new();
+        mapper.insert(
+            "pair_genomic".to_string(),
+            SValue::Hash(Arc::new(pair_genomic)),
+        );
+        let mut vef_cache = HashMap::new();
+        vef_cache.insert("mapper".to_string(), SValue::Hash(Arc::new(mapper)));
+        let mut object = HashMap::new();
+        object.insert(
+            "_variation_effect_feature_cache".to_string(),
+            SValue::Hash(Arc::new(vef_cache)),
+        );
+
+        assert_eq!(
+            extract_cdna_mapper_segments_storable(&object).unwrap(),
+            expected
+        );
     }
 
     #[test]
