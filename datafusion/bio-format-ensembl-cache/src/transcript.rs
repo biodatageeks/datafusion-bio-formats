@@ -948,7 +948,9 @@ fn parse_transcript_attributes_storable(
 type MapperSegment = (i64, i64, i64, i64, i8);
 
 /// Extract cDNA mapper segments from JSON transcript object.
-/// Path: `_variation_effect_feature_cache.mapper.pair_genomic.{region_key}[].{from,to,ori}`
+/// Primary VEP path:
+/// `_variation_effect_feature_cache.mapper.exon_coord_mapper._pair_cdna.CDNA[]`.
+/// Falls back to the simplified legacy `mapper.pair_genomic.{region_key}[]` shape.
 fn extract_cdna_mapper_segments_json(
     object: &serde_json::Map<String, Value>,
 ) -> Option<Vec<MapperSegment>> {
@@ -956,6 +958,37 @@ fn extract_cdna_mapper_segments_json(
         .get("_variation_effect_feature_cache")
         .and_then(unwrap_blessed_object_optional)?;
     let mapper = vef.get("mapper").and_then(unwrap_blessed_object_optional)?;
+
+    extract_pair_cdna_segments_json(mapper).or_else(|| extract_pair_genomic_segments_json(mapper))
+}
+
+fn extract_pair_cdna_segments_json(
+    mapper: &serde_json::Map<String, Value>,
+) -> Option<Vec<MapperSegment>> {
+    let pairs = mapper
+        .get("exon_coord_mapper")
+        .and_then(unwrap_blessed_object_optional)?
+        .get("_pair_cdna")
+        .and_then(unwrap_blessed_object_optional)?
+        .get("CDNA")
+        .and_then(Value::as_array)?;
+
+    let mut segments = Vec::new();
+    for pair_val in pairs {
+        let pair = unwrap_blessed_object_optional(pair_val).or_else(|| pair_val.as_object());
+        let Some(pair) = pair else {
+            continue;
+        };
+        if let Some(seg) = extract_cdna_to_genomic_mapper_pair_json(pair) {
+            segments.push(seg);
+        }
+    }
+    cdna_mapper_segments_or_none(segments)
+}
+
+fn extract_pair_genomic_segments_json(
+    mapper: &serde_json::Map<String, Value>,
+) -> Option<Vec<MapperSegment>> {
     let pair_genomic = mapper
         .get("pair_genomic")
         .and_then(unwrap_blessed_object_optional)?;
@@ -976,12 +1009,29 @@ fn extract_cdna_mapper_segments_json(
             }
         }
     }
+    cdna_mapper_segments_or_none(segments)
+}
+
+fn cdna_mapper_segments_or_none(mut segments: Vec<MapperSegment>) -> Option<Vec<MapperSegment>> {
     if segments.is_empty() {
         None
     } else {
         sort_cdna_mapper_segments(&mut segments);
         Some(segments)
     }
+}
+
+fn extract_cdna_to_genomic_mapper_pair_json(
+    pair: &serde_json::Map<String, Value>,
+) -> Option<MapperSegment> {
+    let from = pair.get("from").and_then(unwrap_blessed_object_optional)?;
+    let to = pair.get("to").and_then(unwrap_blessed_object_optional)?;
+    let ori = json_i64(pair.get("ori")).and_then(|v| i8::try_from(v).ok())?;
+    let c_start = json_i64(from.get("start"))?;
+    let c_end = json_i64(from.get("end"))?;
+    let g_start = json_i64(to.get("start"))?;
+    let g_end = json_i64(to.get("end"))?;
+    Some((g_start, g_end, c_start, c_end, ori))
 }
 
 fn extract_mapper_pair_json(pair: &serde_json::Map<String, Value>) -> Option<MapperSegment> {
@@ -1003,6 +1053,37 @@ fn extract_cdna_mapper_segments_storable(
         .get("_variation_effect_feature_cache")
         .and_then(SValue::as_hash)?;
     let mapper = vef.get("mapper").and_then(SValue::as_hash)?;
+
+    extract_pair_cdna_segments_storable(mapper)
+        .or_else(|| extract_pair_genomic_segments_storable(mapper))
+}
+
+fn extract_pair_cdna_segments_storable(
+    mapper: &std::collections::HashMap<String, SValue>,
+) -> Option<Vec<MapperSegment>> {
+    let pairs = mapper
+        .get("exon_coord_mapper")
+        .and_then(SValue::as_hash)?
+        .get("_pair_cdna")
+        .and_then(SValue::as_hash)?
+        .get("CDNA")
+        .and_then(SValue::as_array)?;
+
+    let mut segments = Vec::new();
+    for pair_val in pairs.iter() {
+        let Some(pair) = pair_val.as_hash() else {
+            continue;
+        };
+        if let Some(seg) = extract_cdna_to_genomic_mapper_pair_storable(pair) {
+            segments.push(seg);
+        }
+    }
+    cdna_mapper_segments_or_none(segments)
+}
+
+fn extract_pair_genomic_segments_storable(
+    mapper: &std::collections::HashMap<String, SValue>,
+) -> Option<Vec<MapperSegment>> {
     let pair_genomic = mapper.get("pair_genomic").and_then(SValue::as_hash)?;
 
     let mut segments = Vec::new();
@@ -1023,12 +1104,7 @@ fn extract_cdna_mapper_segments_storable(
             }
         }
     }
-    if segments.is_empty() {
-        None
-    } else {
-        sort_cdna_mapper_segments(&mut segments);
-        Some(segments)
-    }
+    cdna_mapper_segments_or_none(segments)
 }
 
 fn sort_cdna_mapper_segments(segments: &mut [MapperSegment]) {
@@ -1045,6 +1121,19 @@ fn extract_mapper_pair_storable(
     let g_end = sv_i64(from.get("end"))?;
     let c_start = sv_i64(to.get("start"))?;
     let c_end = sv_i64(to.get("end"))?;
+    Some((g_start, g_end, c_start, c_end, ori))
+}
+
+fn extract_cdna_to_genomic_mapper_pair_storable(
+    pair: &std::collections::HashMap<String, SValue>,
+) -> Option<MapperSegment> {
+    let from = pair.get("from").and_then(SValue::as_hash)?;
+    let to = pair.get("to").and_then(SValue::as_hash)?;
+    let ori = sv_i64(pair.get("ori")).and_then(|v| i8::try_from(v).ok())?;
+    let c_start = sv_i64(from.get("start"))?;
+    let c_end = sv_i64(from.get("end"))?;
+    let g_start = sv_i64(to.get("start"))?;
+    let g_end = sv_i64(to.get("end"))?;
     Some((g_start, g_end, c_start, c_end, ori))
 }
 
@@ -2458,6 +2547,28 @@ mod tests {
         SValue::Hash(Arc::new(pair))
     }
 
+    fn storable_cdna_mapper_pair(
+        cdna_start: i64,
+        cdna_end: i64,
+        genomic_start: i64,
+        genomic_end: i64,
+        ori: i64,
+    ) -> SValue {
+        let mut from = HashMap::new();
+        from.insert("start".to_string(), SValue::Int(cdna_start));
+        from.insert("end".to_string(), SValue::Int(cdna_end));
+
+        let mut to = HashMap::new();
+        to.insert("start".to_string(), SValue::Int(genomic_start));
+        to.insert("end".to_string(), SValue::Int(genomic_end));
+
+        let mut pair = HashMap::new();
+        pair.insert("from".to_string(), SValue::Hash(Arc::new(from)));
+        pair.insert("to".to_string(), SValue::Hash(Arc::new(to)));
+        pair.insert("ori".to_string(), SValue::Int(ori));
+        SValue::Hash(Arc::new(pair))
+    }
+
     fn storable_bioseq(seq: &str) -> SValue {
         let mut primary = HashMap::new();
         primary.insert(
@@ -2769,6 +2880,57 @@ mod tests {
         mapper.insert(
             "pair_genomic".to_string(),
             SValue::Hash(Arc::new(pair_genomic)),
+        );
+        let mut vef_cache = HashMap::new();
+        vef_cache.insert("mapper".to_string(), SValue::Hash(Arc::new(mapper)));
+        let mut object = HashMap::new();
+        object.insert(
+            "_variation_effect_feature_cache".to_string(),
+            SValue::Hash(Arc::new(vef_cache)),
+        );
+
+        assert_eq!(
+            extract_cdna_mapper_segments_storable(&object).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cdna_mapper_segments_extract_nested_pair_cdna() {
+        let expected = vec![(10, 12, 1, 3, 1), (50, 55, 6, 11, -1)];
+        let payload = json!({
+            "_variation_effect_feature_cache": {
+                "mapper": {
+                    "exon_coord_mapper": {
+                        "_pair_cdna": {
+                            "CDNA": [
+                                { "from": { "start": 6, "end": 11 }, "to": { "start": 50, "end": 55 }, "ori": -1 },
+                                { "from": { "start": 1, "end": 3 }, "to": { "start": 10, "end": 12 }, "ori": 1 }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            extract_cdna_mapper_segments_json(payload.as_object().unwrap()).unwrap(),
+            expected
+        );
+
+        let mut pair_cdna = HashMap::new();
+        pair_cdna.insert(
+            "CDNA".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_cdna_mapper_pair(6, 11, 50, 55, -1),
+                storable_cdna_mapper_pair(1, 3, 10, 12, 1),
+            ])),
+        );
+        let mut exon_coord_mapper = HashMap::new();
+        exon_coord_mapper.insert("_pair_cdna".to_string(), SValue::Hash(Arc::new(pair_cdna)));
+        let mut mapper = HashMap::new();
+        mapper.insert(
+            "exon_coord_mapper".to_string(),
+            SValue::Hash(Arc::new(exon_coord_mapper)),
         );
         let mut vef_cache = HashMap::new();
         vef_cache.insert("mapper".to_string(), SValue::Hash(Arc::new(mapper)));
