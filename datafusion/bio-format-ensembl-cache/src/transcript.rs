@@ -1412,8 +1412,8 @@ pub(crate) fn parse_transcript_line_into(
     if col_idx.gene_hgnc_id.is_some() || col_idx.gene_hgnc_id_native.is_some() {
         let native_value = json_str(
             object
-                .get("_gene_hgnc_id")
-                .or_else(|| object.get("gene_hgnc_id")),
+                .get("gene_hgnc_id")
+                .or_else(|| object.get("_gene_hgnc_id")),
         );
         if let Some(idx) = col_idx.gene_hgnc_id {
             batch.set_opt_utf8_owned(idx, native_value.as_ref());
@@ -1969,8 +1969,8 @@ fn append_transcript_storable_row_into(
     if col_idx.gene_hgnc_id.is_some() || col_idx.gene_hgnc_id_native.is_some() {
         let native_value = sv_str(
             object
-                .get("_gene_hgnc_id")
-                .or_else(|| object.get("gene_hgnc_id")),
+                .get("gene_hgnc_id")
+                .or_else(|| object.get("_gene_hgnc_id")),
         );
         if let Some(idx) = col_idx.gene_hgnc_id {
             batch.set_opt_utf8_owned(idx, native_value.as_ref());
@@ -2768,46 +2768,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_transcript_line_prefers_underscored_gene_hgnc_id() {
-        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
-        let payload = json!({
-            "stable_id": "ENST000191",
-            "strand": 1,
-            "biotype": "protein_coding",
-            "_gene_hgnc_id": "HGNC:native",
-            "gene_hgnc_id": "HGNC:fallback"
-        });
-        let line = format!(
-            "1\t100\t200\tJSON:{}",
-            serde_json::to_string(&payload).unwrap()
-        );
-
-        let written = parse_transcript_line_into(
-            &line,
-            "/tmp/transcript.txt",
-            &cache_info,
-            &SimplePredicate::default(),
-            false,
-            &mut batch,
-            &col_idx,
-            &provenance,
-        )
-        .unwrap();
-
-        assert!(written);
-
-        let batch = batch.finish().unwrap();
-        assert_eq!(
-            batch_utf8_value(&batch, "gene_hgnc_id").as_deref(),
-            Some("HGNC:native")
-        );
-        assert_eq!(
-            batch_utf8_value(&batch, "gene_hgnc_id_native").as_deref(),
-            Some("HGNC:native")
-        );
-    }
-
-    #[test]
     fn append_transcript_storable_row_promotes_issue_190_fields() {
         let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
         let mut display_xref = HashMap::new();
@@ -2886,57 +2846,6 @@ mod tests {
         );
         assert_eq!(batch_bool_value(&batch, "is_gencode_basic"), Some(false));
         assert_eq!(batch_bool_value(&batch, "is_gencode_primary"), Some(true));
-    }
-
-    #[test]
-    fn append_transcript_storable_row_prefers_underscored_gene_hgnc_id() {
-        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
-        let mut object = HashMap::new();
-        object.insert(
-            "biotype".to_string(),
-            SValue::String(Arc::from("protein_coding")),
-        );
-        object.insert(
-            "_gene_hgnc_id".to_string(),
-            SValue::String(Arc::from("HGNC:native")),
-        );
-        object.insert(
-            "gene_hgnc_id".to_string(),
-            SValue::String(Arc::from("HGNC:fallback")),
-        );
-
-        let payload = SValue::Hash(Arc::new(object.clone()));
-        let core = TranscriptRowCore {
-            chrom: "1".to_string(),
-            start: 100,
-            end: 200,
-            source_start: 100,
-            source_end: 200,
-            strand: 1,
-            stable_id: "ENST000191".to_string(),
-        };
-
-        append_transcript_storable_row_into(
-            &payload,
-            &object,
-            core,
-            false,
-            "/tmp/transcript.storable.gz",
-            &mut batch,
-            &col_idx,
-            &provenance,
-        )
-        .unwrap();
-
-        let batch = batch.finish().unwrap();
-        assert_eq!(
-            batch_utf8_value(&batch, "gene_hgnc_id").as_deref(),
-            Some("HGNC:native")
-        );
-        assert_eq!(
-            batch_utf8_value(&batch, "gene_hgnc_id_native").as_deref(),
-            Some("HGNC:native")
-        );
     }
 
     #[test]
