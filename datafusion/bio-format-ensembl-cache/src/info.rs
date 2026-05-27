@@ -1002,4 +1002,72 @@ mod tests {
         //     // assert_eq!(info.cell_types, vec!["A549","GM12878","K562"]); // missing field
         // }
     }
+
+    // -----------------------------------------------------------------------
+    // v2 port of ensembl-vep/t/AnnotationSource_Cache.t
+    // (see porting-tests/detailed_plans/AnnotationSource_Cache.md)
+    //
+    // Perl test under port: 4 substantive subtests (+1 `use_ok` boilerplate)
+    // pinning the `dir` accessor contract on
+    // `Bio::EnsEMBL::VEP::AnnotationSource::Cache`. Vepyr's analogue is the
+    // `CacheInfo::cache_root` field plus `CacheInfo::from_root` constructor.
+    //
+    // Coverage parity (per detailed_plan): 2/3 = 66.7%. Row 4 (setter) is
+    // blocked-future-work because vepyr treats `cache_root` as immutable.
+    // -----------------------------------------------------------------------
+    mod port_annotation_source_cache {
+        use super::*;
+
+        // Build a tempdir holding a minimal `info.txt` the constructor accepts.
+        // Mirrors the v84-cache fixture shape that VEPTestingConfig provides.
+        fn minimal_info_dir() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().unwrap();
+            write_info_file(dir.path(), "species homo_sapiens\nassembly GRCh38\n");
+            dir
+        }
+
+        // Subtest row 2 (Perl: `Cache->new({dir => $dir})` returns defined).
+        // Vepyr analogue: `CacheInfo::from_root(&Path)` returns `Ok(_)` for a
+        // directory containing a minimal `info.txt`. Perl's blessed-ref check
+        // has no direct analogue; the closest Rust contract is "constructor
+        // returned a value carrying the supplied path" — i.e. `Ok(_)`.
+        #[test]
+        fn row2_constructor_accepts_dir() {
+            let dir = minimal_info_dir();
+            let info = CacheInfo::from_root(dir.path())
+                .expect("constructor accepts a path with minimal info.txt");
+            // Sanity: result carries the supplied path (cross-checked in row 3).
+            assert_eq!(info.cache_root, dir.path().to_path_buf());
+        }
+
+        // Subtest row 3 (Perl: `$c->dir == $dir` getter).
+        // Vepyr analogue: `CacheInfo::cache_root` is a `pub PathBuf` field that
+        // mirrors the constructor argument verbatim (info.rs:42, 112).
+        #[test]
+        fn row3_dir_getter_returns_construction_value() {
+            let dir = minimal_info_dir();
+            let info = CacheInfo::from_root(dir.path()).unwrap();
+            assert_eq!(info.cache_root, dir.path().to_path_buf());
+        }
+
+        // Subtest row 4 (Perl: `$c->dir('/tmp')` setter) — BLOCKED-FUTURE-WORK.
+        //
+        // `CacheInfo` has no setter for `cache_root`; the field is immutable
+        // post-construction by design (every consumer — parquet readers, schema
+        // metadata, region discovery — assumes a fixed path for the lifetime
+        // of the object). Adding `set_cache_root(&mut self, PathBuf)` would be
+        // backwards because derived state would also need to be invalidated.
+        //
+        // See: porting-tests/future-work-vepyr.md ::
+        //      "CacheInfo::set_cache_root (or with_cache_root builder)".
+        //
+        // #[test]
+        // fn row4_dir_setter_mutates_and_returns() {
+        //     let dir1 = minimal_info_dir();
+        //     let dir2 = minimal_info_dir();
+        //     let mut info = CacheInfo::from_root(dir1.path()).unwrap();
+        //     info.set_cache_root(dir2.path().to_path_buf());
+        //     assert_eq!(info.cache_root, dir2.path().to_path_buf());
+        // }
+    }
 }
