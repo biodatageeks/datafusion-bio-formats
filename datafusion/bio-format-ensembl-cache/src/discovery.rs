@@ -42,7 +42,13 @@ pub(crate) fn discover_variation_files(cache_root: &Path) -> Result<Vec<PathBuf>
                             || lower.contains("var.gz")
                             || (looks_like_region_file_name(&lower)
                                 && !lower.ends_with("_reg.gz")
-                                && !lower.contains("transcript")))
+                                && !lower.contains("transcript")
+                                // In a split-layout cache the bare `<region>.gz`
+                                // is the (binary) transcript file and the real
+                                // variation file is the sibling `<region>_var.gz`.
+                                // Only treat the bare region file as variation in
+                                // the merged layout, where no `_var` sibling exists.
+                                && !has_variation_sibling(path)))
                 })
         })
         .cloned()
@@ -298,6 +304,29 @@ pub(crate) fn extract_distinct_chroms(
     Some(chroms.into_iter().collect())
 }
 
+/// Returns `true` if a bare region file (e.g. `25000001-26000000.gz`) has a
+/// sibling variation file (e.g. `25000001-26000000_var.gz`) in the same
+/// directory.
+///
+/// This distinguishes the classic *split-layout* cache (separate transcript /
+/// `_var` / `_reg` files per region) from the *merged* layout (a single bare
+/// region file holds variation data). In the split layout the bare region file
+/// is the binary transcript Storable and must NOT be classified as variation.
+fn has_variation_sibling(path: &Path) -> bool {
+    let Some(stem) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".gz"))
+    else {
+        return false;
+    };
+    let var_sibling = format!("{stem}_var.gz");
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    parent.join(&var_sibling).is_file()
+}
+
 fn looks_like_region_file_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".gz") else {
         return false;
@@ -418,6 +447,53 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let files = discover_variation_files(dir.path()).unwrap();
         assert!(files.is_empty());
+    }
+
+    #[test]
+    fn variation_split_layout_excludes_bare_transcript_region_file() {
+        // Classic split-layout cache (e.g. Ensembl release 84): each region dir
+        // has a bare transcript file, a `_var` variation file, and a `_reg`
+        // regulatory file. Only the `_var` file is the real variation file.
+        let dir = tempfile::tempdir().unwrap();
+        let region = dir.path().join("1");
+        create_file(&region.join("25000001-26000000.gz")); // transcript (binary Storable)
+        create_file(&region.join("25000001-26000000_var.gz")); // variation (the real one)
+        create_file(&region.join("25000001-26000000_reg.gz")); // regulatory (binary)
+
+        let files = discover_variation_files(dir.path()).unwrap();
+        let names: Vec<&str> = files.iter().map(|p| p.to_str().unwrap()).collect();
+
+        assert!(
+            names
+                .iter()
+                .any(|n| n.ends_with("25000001-26000000_var.gz")),
+            "expected the _var.gz variation file, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.ends_with("25000001-26000000.gz")),
+            "bare transcript region file must NOT be classified as variation, got {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.ends_with("_reg.gz")),
+            "regulatory file must NOT be classified as variation, got {names:?}"
+        );
+        assert_eq!(
+            files.len(),
+            1,
+            "expected exactly one variation file, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn variation_merged_layout_picks_up_bare_region_file() {
+        // Merged layout: a bare region file with NO `_var.gz` sibling should
+        // still be treated as variation.
+        let dir = tempfile::tempdir().unwrap();
+        create_file(&dir.path().join("1/25000001-26000000.gz"));
+
+        let files = discover_variation_files(dir.path()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert!(files[0].to_str().unwrap().ends_with("25000001-26000000.gz"));
     }
 
     // -----------------------------------------------------------------------

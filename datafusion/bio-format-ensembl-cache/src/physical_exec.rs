@@ -598,6 +598,9 @@ fn process_partition(
         && kind == EnsemblEntityKind::Variation
     {
         let source_file_str = bgzf_path.to_str().unwrap_or_default();
+        // Split-layout `_var.gz` files have no chrom column; derive the chrom
+        // from the region directory so the per-line parser can fall back to it.
+        let dir_chrom = extract_chrom_from_path(bgzf_path, EnsemblEntityKind::Variation);
         let mut bgzf_reader =
             crate::tabix_reader::BgzfPartitionLineReader::open(bgzf_path, bgzf_part)?;
 
@@ -613,6 +616,7 @@ fn process_partition(
                 variation_ctx.as_ref().unwrap(),
                 &provenance,
                 source_id_writer.as_mut().unwrap(),
+                dir_chrom.as_deref(),
             )? {
                 VariationParseResult::Added => {
                     match dispatch_row(
@@ -662,6 +666,15 @@ fn process_partition(
             &source_file.to_string_lossy()
         } else {
             source_file_str
+        };
+
+        // Directory-derived chrom for split-layout variation `_var.gz` files,
+        // which carry no chrom column. Computed once per file; ignored by the
+        // parser when the line already carries a chrom (merged/tabix layout).
+        let variation_dir_chrom = if kind == EnsemblEntityKind::Variation {
+            extract_chrom_from_path(source_file, EnsemblEntityKind::Variation)
+        } else {
+            None
         };
 
         // Merge the pst0 header check with the alias-count scan to avoid
@@ -899,6 +912,7 @@ fn process_partition(
                         variation_ctx.as_ref().unwrap(),
                         &provenance,
                         source_id_writer.as_mut().unwrap(),
+                        variation_dir_chrom.as_deref(),
                     )? {
                         VariationParseResult::Added => true,
                         VariationParseResult::Skipped => false,

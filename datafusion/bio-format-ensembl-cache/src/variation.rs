@@ -477,6 +477,7 @@ pub(crate) fn parse_variation_line_into(
     ctx: &VariationContext,
     provenance: &ProvenanceWriter,
     source_id_writer: &mut SourceIdWriter,
+    dir_chrom: Option<&str>,
 ) -> Result<VariationParseResult> {
     let trimmed = line.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
@@ -501,8 +502,19 @@ pub(crate) fn parse_variation_line_into(
     // Extract required fields — return Malformed instead of Err so a single
     // bad line does not abort the entire partition and silently drop all
     // subsequent records.
-    let Some(chrom_ref) = field_at(ctx.chrom_tab).and_then(normalize_nullable_ref) else {
-        return Ok(VariationParseResult::Malformed);
+    //
+    // Split-layout `_var.gz` files (e.g. Ensembl release 84) carry NO chrom
+    // column: `variation_cols` has no chr/seq_region field, so `ctx.chrom_tab`
+    // is `None` and the chromosome is implicit from the region directory name.
+    // In that case fall back to the directory-derived chrom resolved at file
+    // discovery time. The merged/tabix layout DOES carry a chrom column, so
+    // `ctx.chrom_tab` is `Some` and the per-line value takes precedence.
+    let chrom_ref = match field_at(ctx.chrom_tab).and_then(normalize_nullable_ref) {
+        Some(chrom) => chrom,
+        None => match dir_chrom {
+            Some(chrom) => chrom,
+            None => return Ok(VariationParseResult::Malformed),
+        },
     };
 
     let Some(source_start) = parse_i64_ref(field_at(ctx.start_tab)) else {
@@ -928,7 +940,19 @@ mod tests {
         ProvenanceWriter,
         SourceIdWriter,
     ) {
-        let info = make_cache_info(standard_cols(), standard_sources());
+        setup_variation_parser_with_cols(standard_cols())
+    }
+
+    fn setup_variation_parser_with_cols(
+        cols: Vec<String>,
+    ) -> (
+        BatchBuilder,
+        VariationColumnIndices,
+        VariationContext,
+        ProvenanceWriter,
+        SourceIdWriter,
+    ) {
+        let info = make_cache_info(cols, standard_sources());
         let schema =
             variation_schema(&info, false, crate::source_type::CacheSourceType::Ensembl).unwrap();
         let col_map = ColumnMap::from_schema(&schema);
@@ -940,6 +964,100 @@ mod tests {
         (builder, col_idx, ctx, provenance, source_id_writer)
     }
 
+    /// Release-84 split-layout `variation_cols`: starts with `variation_name`
+    /// and has NO chrom/seq_region column — chrom is implicit from the region
+    /// directory name.
+    fn split_layout_cols() -> Vec<String> {
+        vec![
+            "variation_name",
+            "failed",
+            "somatic",
+            "start",
+            "end",
+            "allele_string",
+            "strand",
+            "minor_allele",
+            "minor_allele_freq",
+            "clin_sig",
+            "phenotype_or_disease",
+            "pubmed",
+            "var_synonyms",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    #[test]
+    fn parse_split_layout_uses_directory_chrom() {
+        // Split-layout `_var.gz` line: no chrom column. Columns are
+        // variation_name, failed, somatic, start, end, allele_string, ...
+        let (mut batch, col_idx, ctx, prov, mut sid) =
+            setup_variation_parser_with_cols(split_layout_cols());
+        assert_eq!(ctx.chrom_tab, None, "split layout must have no chrom field");
+        let predicate = SimplePredicate {
+            chrom: Some("21".to_string()),
+            ..Default::default()
+        };
+        let line = "rs574523538\t0\t0\t25000001\t25000001\tC/T\t1";
+        let result = parse_variation_line_into(
+            line,
+            "test_var.gz",
+            &predicate,
+            1_000_000,
+            false,
+            &mut batch,
+            &col_idx,
+            &ctx,
+            &prov,
+            &mut sid,
+            Some("21"),
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Added);
+        assert_eq!(batch.len(), 1);
+        let rb = batch.finish().unwrap();
+        let chroms = rb
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(chroms.value(0), "21");
+    }
+
+    #[test]
+    fn parse_merged_layout_line_chrom_takes_precedence_over_dir_chrom() {
+        // Merged/tabix layout DOES carry a chrom column. Even when a directory
+        // chrom is supplied, the per-line chrom must win — the dir fallback only
+        // applies when `variation_cols` has no chrom field.
+        let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
+        assert_eq!(ctx.chrom_tab, Some(0));
+        let predicate = SimplePredicate::default();
+        let line = "7\t100\t100\trs12345\tA/G\t0\t0\t1\tG\t0.45\t.\t0\t.\t.\t.";
+        let result = parse_variation_line_into(
+            line,
+            "test.gz",
+            &predicate,
+            1_000_000,
+            false,
+            &mut batch,
+            &col_idx,
+            &ctx,
+            &prov,
+            &mut sid,
+            Some("21"),
+        )
+        .unwrap();
+        assert_eq!(result, VariationParseResult::Added);
+        let rb = batch.finish().unwrap();
+        let chroms = rb
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        assert_eq!(chroms.value(0), "7");
+    }
+
     #[test]
     fn parse_valid_line() {
         let (mut batch, col_idx, ctx, prov, mut sid) = setup_variation_parser();
@@ -947,7 +1065,7 @@ mod tests {
         let line = "1\t100\t100\trs12345\tA/G\t0\t0\t1\tG\t0.45\t.\t0\t.\t.\t.";
         let result = parse_variation_line_into(
             line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
-            &mut sid,
+            &mut sid, None,
         )
         .unwrap();
         assert_eq!(result, VariationParseResult::Added);
@@ -960,7 +1078,7 @@ mod tests {
         let predicate = SimplePredicate::default();
         let result = parse_variation_line_into(
             "", "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
-            &mut sid,
+            &mut sid, None,
         )
         .unwrap();
         assert_eq!(result, VariationParseResult::Skipped);
@@ -982,6 +1100,7 @@ mod tests {
             &ctx,
             &prov,
             &mut sid,
+            None,
         )
         .unwrap();
         assert_eq!(result, VariationParseResult::Skipped);
@@ -994,7 +1113,7 @@ mod tests {
         let line = ".\t100\t100\trs12345\tA/G";
         let result = parse_variation_line_into(
             line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
-            &mut sid,
+            &mut sid, None,
         )
         .unwrap();
         assert_eq!(result, VariationParseResult::Malformed);
@@ -1007,7 +1126,7 @@ mod tests {
         let line = "1\t.\t100\trs12345\tA/G";
         let result = parse_variation_line_into(
             line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
-            &mut sid,
+            &mut sid, None,
         )
         .unwrap();
         assert_eq!(result, VariationParseResult::Malformed);
@@ -1023,7 +1142,7 @@ mod tests {
         let line = "1\t100\t100\trs12345\tA/G\t0\t0\t1\tG\t0.45\t.\t0\t.\t.\t.";
         let result = parse_variation_line_into(
             line, "test.gz", &predicate, 1_000_000, false, &mut batch, &col_idx, &ctx, &prov,
-            &mut sid,
+            &mut sid, None,
         )
         .unwrap();
         assert_eq!(result, VariationParseResult::Skipped);
@@ -1036,7 +1155,7 @@ mod tests {
         let line = "1\t100\t100\trs12345\tA/G\t0\t0\t1\tG\t0.45\t.\t0\t.\t.\t.";
         parse_variation_line_into(
             line, "test.gz", &predicate, 1_000_000, true, // zero-based
-            &mut batch, &col_idx, &ctx, &prov, &mut sid,
+            &mut batch, &col_idx, &ctx, &prov, &mut sid, None,
         )
         .unwrap();
         // Start should be 99 (100 - 1) in zero-based
