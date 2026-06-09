@@ -236,6 +236,19 @@ The system SHALL expose transcript and motif attributes that are currently embed
 - **WHEN** a query does not select `mature_mirna_regions`
 - **THEN** the parser skips the transcript-attribute walk needed to derive those intervals
 
+#### Scenario: Query raw-free RefSeq and GENCODE transcript metadata
+- **WHEN** a user executes `SELECT stable_id, display_xref_id, source_cache, refseq_match, is_gencode_basic, is_gencode_primary FROM vep_transcript`
+- **THEN** those values are returned from typed transcript columns
+- **AND** the query does not require selecting `raw_object_json`
+- **AND** `source_cache` preserves the raw `_source_cache` string without source normalization
+
+#### Scenario: Query parsed RefSeq edit metadata
+- **WHEN** transcript attributes contain `_rna_edit` entries with two or three whitespace-separated fields
+- **THEN** `refseq_edits` contains `List<Struct<start:Int64, end:Int64, replacement_len:Int64?, skip_refseq_offset:Boolean>>`
+- **AND** `replacement_len` is the length of the third field when present
+- **AND** `skip_refseq_offset` is true when the edit is length-preserving or the attribute description contains `op=X`
+- **AND** entries are sorted by `start`, then `end`, then `replacement_len`
+
 #### Scenario: Query motif transcription factors
 - **WHEN** a user executes `SELECT motif_id, transcription_factors FROM vep_motif_feature`
 - **THEN** the motif transcription factor annotation is returned from a dedicated top-level column

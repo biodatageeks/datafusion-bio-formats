@@ -115,6 +115,16 @@
 - [x] 2.9.8 Add unit tests for explicit source-mode validation, schema metadata, rejected path inference, and `db_id` parsing
 - [x] 2.9.9 Add gated integration smoke tests against a real RefSeq cache path for chr22, MT, and an alternate contig
 
+### 2.10 Complete Raw-Free Transcript Schema Contract (issue #190)
+- [ ] 2.10.1 Add transcript schema columns `display_xref_id`, `source_cache`, `refseq_match`, `refseq_edits`, `is_gencode_basic`, and `is_gencode_primary`
+- [ ] 2.10.2 Add Arrow builder support for `List<Struct<start:Int64, end:Int64, replacement_len:Int64?, skip_refseq_offset:Boolean>>`
+- [ ] 2.10.3 Parse RefSeq match codes, RefSeq edit metadata, and GENCODE booleans from transcript attributes in both JSON and Storable paths
+- [ ] 2.10.4 Populate `display_xref_id` from `display_xref.display_id` and `source_cache` from raw `_source_cache` in both parser paths
+- [ ] 2.10.5 Add integration tests showing standard and merged transcript cache layouts can query the promoted columns without projecting `raw_object_json`
+- [ ] 2.10.6 Add Parquet round-trip coverage for the new raw-free transcript columns
+- [ ] 2.10.7 Guard existing promoted transcript-object columns required by raw-free downstream VEP annotation
+- [ ] 2.10.8 Document the complete raw-free transcript schema contract in the `bio-format-ensembl-cache` README
+
 ## 3. Phase 3: Consequence Engine (bio-functions)
 
 ### 3.1 Implement Genetic Code Tables (`codon.rs`)

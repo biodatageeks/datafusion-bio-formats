@@ -10,8 +10,9 @@ use crate::filter::SimplePredicate;
 use crate::info::CacheInfo;
 use crate::util::ProvenanceWriter;
 use crate::util::{
-    BatchBuilder, ColumnMap, canonical_json_string, json_bool, json_i32, json_i64, json_str,
-    normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_i64, stable_hash,
+    BatchBuilder, ColumnMap, RefseqEditTuple, canonical_json_string, json_bool, json_i32, json_i64,
+    json_str, normalize_genomic_end, normalize_genomic_start, open_binary_reader, parse_bool,
+    parse_i64, stable_hash,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -38,6 +39,12 @@ pub(crate) struct TranscriptColumnIndices {
     gene_hgnc_id: Option<usize>,
     gene_hgnc_id_native: Option<usize>,
     refseq_id: Option<usize>,
+    display_xref_id: Option<usize>,
+    source_cache: Option<usize>,
+    refseq_match: Option<usize>,
+    refseq_edits: Option<usize>,
+    is_gencode_basic: Option<usize>,
+    is_gencode_primary: Option<usize>,
     coding_region_start: Option<usize>,
     coding_region_end: Option<usize>,
     cdna_coding_start: Option<usize>,
@@ -107,12 +114,20 @@ impl TranscriptColumnIndices {
         let ncrna_structure = col_map.get("ncrna_structure");
         let has_non_polya_rna_edit = col_map.get("has_non_polya_rna_edit");
         let flags_str = col_map.get("flags_str");
+        let refseq_match = col_map.get("refseq_match");
+        let refseq_edits = col_map.get("refseq_edits");
+        let is_gencode_basic = col_map.get("is_gencode_basic");
+        let is_gencode_primary = col_map.get("is_gencode_primary");
         let transcript_attributes_projected = cds_start_nf.is_some()
             || cds_end_nf.is_some()
             || mature_mirna_regions.is_some()
             || ncrna_structure.is_some()
             || has_non_polya_rna_edit.is_some()
-            || flags_str.is_some();
+            || flags_str.is_some()
+            || refseq_match.is_some()
+            || refseq_edits.is_some()
+            || is_gencode_basic.is_some()
+            || is_gencode_primary.is_some();
 
         let cdna_mapper_segments = col_map.get("cdna_mapper_segments");
         let cdna_mapper_projected = cdna_mapper_segments.is_some();
@@ -134,6 +149,12 @@ impl TranscriptColumnIndices {
             gene_hgnc_id: col_map.get("gene_hgnc_id"),
             gene_hgnc_id_native: col_map.get("gene_hgnc_id_native"),
             refseq_id: col_map.get("refseq_id"),
+            display_xref_id: col_map.get("display_xref_id"),
+            source_cache: col_map.get("source_cache"),
+            refseq_match,
+            refseq_edits,
+            is_gencode_basic,
+            is_gencode_primary,
             coding_region_start: col_map.get("cds_start"),
             coding_region_end: col_map.get("cds_end"),
             cdna_coding_start: col_map.get("cdna_coding_start"),
@@ -179,6 +200,14 @@ impl TranscriptColumnIndices {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefseqEdit {
+    start: i64,
+    end: i64,
+    replacement_len: Option<i64>,
+    skip_refseq_offset: bool,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct TranscriptAttributes {
     cds_start_nf: bool,
@@ -190,6 +219,10 @@ struct TranscriptAttributes {
     /// Raw ncRNA structure string from the "ncRNA" attribute (e.g. "(19.(6.(2.(4.14)12.)10.)9").
     ncrna_structure: Option<String>,
     has_non_polya_rna_edit: bool,
+    refseq_match_codes: Vec<String>,
+    refseq_edits: Vec<RefseqEdit>,
+    is_gencode_basic: bool,
+    is_gencode_primary: bool,
 }
 
 struct TranscriptRowCore {
@@ -519,6 +552,55 @@ fn sv_first_bool(
     keys.iter().find_map(|key| sv_bool(object.get(*key)))
 }
 
+fn json_display_xref_id(object: &serde_json::Map<String, Value>) -> Option<String> {
+    object
+        .get("display_xref")
+        .and_then(unwrap_blessed_object_optional)
+        .and_then(|display_xref| json_str(display_xref.get("display_id")))
+        .or_else(|| json_str(object.get("display_xref_id")))
+        .filter(|value| value != "-")
+}
+
+fn json_source_cache(object: &serde_json::Map<String, Value>) -> Option<String> {
+    match object.get("_source_cache") {
+        Some(Value::String(value)) if !value.is_empty() && value != "-" => Some(value.clone()),
+        Some(Value::Number(value)) => Some(value.to_string()),
+        Some(Value::Bool(value)) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn storable_display_xref_id(object: &std::collections::HashMap<String, SValue>) -> Option<String> {
+    object
+        .get("display_xref")
+        .and_then(SValue::as_hash)
+        .and_then(|display_xref| sv_str(display_xref.get("display_id")))
+        .or_else(|| sv_str(object.get("display_xref_id")))
+        .filter(|value| value != "-")
+}
+
+fn storable_source_cache(object: &std::collections::HashMap<String, SValue>) -> Option<String> {
+    object
+        .get("_source_cache")
+        .and_then(SValue::as_string)
+        .filter(|value| !value.is_empty() && value != "-")
+}
+
+fn refseq_edit_tuples(attrs: &TranscriptAttributes) -> Vec<RefseqEditTuple> {
+    attrs
+        .refseq_edits
+        .iter()
+        .map(|edit| {
+            (
+                edit.start,
+                edit.end,
+                edit.replacement_len,
+                edit.skip_refseq_offset,
+            )
+        })
+        .collect()
+}
+
 /// Parse TSL attribute value like "tsl1" → 1, "tsl5" → 5, or plain "1" → 1.
 /// Also handles extended format "tsl2 (assigned to previous version 1)".
 fn parse_tsl_value(value: &str) -> Option<i32> {
@@ -658,6 +740,56 @@ fn is_non_polya_rna_edit(value: &str) -> bool {
     }
 }
 
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !values.iter().any(|existing| existing == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn parse_refseq_edit(value: &str, description: Option<&str>) -> Option<RefseqEdit> {
+    let parts = value.split_whitespace().collect::<Vec<_>>();
+    if !(parts.len() == 2 || parts.len() == 3) {
+        return None;
+    }
+    let start = parts[0].parse::<i64>().ok()?;
+    let end = parts[1].parse::<i64>().ok()?;
+    let replacement_len = if parts.len() == 3 {
+        Some(i64::try_from(parts[2].len()).ok()?)
+    } else {
+        None
+    };
+    let length_preserving = replacement_len.is_some_and(|len| end - start + 1 == len);
+    let op_x = description.is_some_and(|d| d.contains("op=X"));
+    Some(RefseqEdit {
+        start,
+        end,
+        replacement_len,
+        skip_refseq_offset: length_preserving || op_x,
+    })
+}
+
+fn sort_refseq_edits(edits: &mut [RefseqEdit]) {
+    edits.sort_by_key(|edit| {
+        (
+            edit.start,
+            edit.end,
+            edit.replacement_len.unwrap_or(i64::MIN),
+        )
+    });
+}
+
+fn build_refseq_match(attrs: &TranscriptAttributes) -> Option<String> {
+    if attrs.refseq_match_codes.is_empty() {
+        None
+    } else {
+        Some(attrs.refseq_match_codes.join("&"))
+    }
+}
+
+fn presence_attribute_is_true(value: &str) -> bool {
+    parse_bool(Some(value)).unwrap_or(true)
+}
+
 fn parse_transcript_attributes_json(
     object: &serde_json::Map<String, Value>,
     tx_start: i64,
@@ -678,13 +810,18 @@ fn parse_transcript_attributes_json(
         };
         let code = attr_obj.get("code").and_then(Value::as_str).unwrap_or("");
         let value = attr_obj.get("value").and_then(Value::as_str).unwrap_or("");
+        let description = attr_obj.get("description").and_then(Value::as_str);
+
+        if code.starts_with("rseq") {
+            push_unique(&mut out.refseq_match_codes, code);
+        }
 
         match code {
-            "cds_start_NF" if value == "1" => {
+            "cds_start_NF" if presence_attribute_is_true(value) => {
                 out.cds_start_nf = true;
                 out.cds_nf_order.push("cds_start_NF");
             }
-            "cds_end_NF" if value == "1" => {
+            "cds_end_NF" if presence_attribute_is_true(value) => {
                 out.cds_end_nf = true;
                 out.cds_nf_order.push("cds_end_NF");
             }
@@ -703,15 +840,25 @@ fn parse_transcript_attributes_json(
                     out.ncrna_structure = Some(structure.to_string());
                 }
             }
-            "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
-                if is_non_polya_rna_edit(value) {
+            "gencode_basic" => {
+                out.is_gencode_basic = true;
+            }
+            "gencode_primary" => {
+                out.is_gencode_primary = true;
+            }
+            _ if code.starts_with("_rna_edit") => {
+                if check_rna_edits && !out.has_non_polya_rna_edit && is_non_polya_rna_edit(value) {
                     out.has_non_polya_rna_edit = true;
+                }
+                if let Some(edit) = parse_refseq_edit(value, description) {
+                    out.refseq_edits.push(edit);
                 }
             }
             _ => {}
         }
     }
 
+    sort_refseq_edits(&mut out.refseq_edits);
     out
 }
 
@@ -741,13 +888,18 @@ fn parse_transcript_attributes_storable(
             .get("value")
             .and_then(SValue::as_string)
             .unwrap_or_default();
+        let description = attr_obj.get("description").and_then(SValue::as_string);
+
+        if code.starts_with("rseq") {
+            push_unique(&mut out.refseq_match_codes, &code);
+        }
 
         match code.as_str() {
-            "cds_start_NF" if value == "1" => {
+            "cds_start_NF" if presence_attribute_is_true(&value) => {
                 out.cds_start_nf = true;
                 out.cds_nf_order.push("cds_start_NF");
             }
-            "cds_end_NF" if value == "1" => {
+            "cds_end_NF" if presence_attribute_is_true(&value) => {
                 out.cds_end_nf = true;
                 out.cds_nf_order.push("cds_end_NF");
             }
@@ -766,15 +918,25 @@ fn parse_transcript_attributes_storable(
                     out.ncrna_structure = Some(structure.to_string());
                 }
             }
-            "_rna_edit" if check_rna_edits && !out.has_non_polya_rna_edit => {
-                if is_non_polya_rna_edit(&value) {
+            "gencode_basic" => {
+                out.is_gencode_basic = true;
+            }
+            "gencode_primary" => {
+                out.is_gencode_primary = true;
+            }
+            code if code.starts_with("_rna_edit") => {
+                if check_rna_edits && !out.has_non_polya_rna_edit && is_non_polya_rna_edit(&value) {
                     out.has_non_polya_rna_edit = true;
+                }
+                if let Some(edit) = parse_refseq_edit(&value, description.as_deref()) {
+                    out.refseq_edits.push(edit);
                 }
             }
             _ => {}
         }
     }
 
+    sort_refseq_edits(&mut out.refseq_edits);
     out
 }
 
@@ -786,7 +948,9 @@ fn parse_transcript_attributes_storable(
 type MapperSegment = (i64, i64, i64, i64, i8);
 
 /// Extract cDNA mapper segments from JSON transcript object.
-/// Path: `_variation_effect_feature_cache.mapper.pair_genomic.{region_key}[].{from,to,ori}`
+/// Primary VEP path:
+/// `_variation_effect_feature_cache.mapper.exon_coord_mapper._pair_cdna.CDNA[]`.
+/// Falls back to the simplified legacy `mapper.pair_genomic.{region_key}[]` shape.
 fn extract_cdna_mapper_segments_json(
     object: &serde_json::Map<String, Value>,
 ) -> Option<Vec<MapperSegment>> {
@@ -794,6 +958,37 @@ fn extract_cdna_mapper_segments_json(
         .get("_variation_effect_feature_cache")
         .and_then(unwrap_blessed_object_optional)?;
     let mapper = vef.get("mapper").and_then(unwrap_blessed_object_optional)?;
+
+    extract_pair_cdna_segments_json(mapper).or_else(|| extract_pair_genomic_segments_json(mapper))
+}
+
+fn extract_pair_cdna_segments_json(
+    mapper: &serde_json::Map<String, Value>,
+) -> Option<Vec<MapperSegment>> {
+    let pairs = mapper
+        .get("exon_coord_mapper")
+        .and_then(unwrap_blessed_object_optional)?
+        .get("_pair_cdna")
+        .and_then(unwrap_blessed_object_optional)?
+        .get("CDNA")
+        .and_then(Value::as_array)?;
+
+    let mut segments = Vec::new();
+    for pair_val in pairs {
+        let pair = unwrap_blessed_object_optional(pair_val).or_else(|| pair_val.as_object());
+        let Some(pair) = pair else {
+            continue;
+        };
+        if let Some(seg) = extract_cdna_to_genomic_mapper_pair_json(pair) {
+            segments.push(seg);
+        }
+    }
+    cdna_mapper_segments_or_none(segments)
+}
+
+fn extract_pair_genomic_segments_json(
+    mapper: &serde_json::Map<String, Value>,
+) -> Option<Vec<MapperSegment>> {
     let pair_genomic = mapper
         .get("pair_genomic")
         .and_then(unwrap_blessed_object_optional)?;
@@ -814,11 +1009,29 @@ fn extract_cdna_mapper_segments_json(
             }
         }
     }
+    cdna_mapper_segments_or_none(segments)
+}
+
+fn cdna_mapper_segments_or_none(mut segments: Vec<MapperSegment>) -> Option<Vec<MapperSegment>> {
     if segments.is_empty() {
         None
     } else {
+        sort_cdna_mapper_segments(&mut segments);
         Some(segments)
     }
+}
+
+fn extract_cdna_to_genomic_mapper_pair_json(
+    pair: &serde_json::Map<String, Value>,
+) -> Option<MapperSegment> {
+    let from = pair.get("from").and_then(unwrap_blessed_object_optional)?;
+    let to = pair.get("to").and_then(unwrap_blessed_object_optional)?;
+    let ori = json_i64(pair.get("ori")).and_then(|v| i8::try_from(v).ok())?;
+    let c_start = json_i64(from.get("start"))?;
+    let c_end = json_i64(from.get("end"))?;
+    let g_start = json_i64(to.get("start"))?;
+    let g_end = json_i64(to.get("end"))?;
+    Some((g_start, g_end, c_start, c_end, ori))
 }
 
 fn extract_mapper_pair_json(pair: &serde_json::Map<String, Value>) -> Option<MapperSegment> {
@@ -840,6 +1053,37 @@ fn extract_cdna_mapper_segments_storable(
         .get("_variation_effect_feature_cache")
         .and_then(SValue::as_hash)?;
     let mapper = vef.get("mapper").and_then(SValue::as_hash)?;
+
+    extract_pair_cdna_segments_storable(mapper)
+        .or_else(|| extract_pair_genomic_segments_storable(mapper))
+}
+
+fn extract_pair_cdna_segments_storable(
+    mapper: &std::collections::HashMap<String, SValue>,
+) -> Option<Vec<MapperSegment>> {
+    let pairs = mapper
+        .get("exon_coord_mapper")
+        .and_then(SValue::as_hash)?
+        .get("_pair_cdna")
+        .and_then(SValue::as_hash)?
+        .get("CDNA")
+        .and_then(SValue::as_array)?;
+
+    let mut segments = Vec::new();
+    for pair_val in pairs.iter() {
+        let Some(pair) = pair_val.as_hash() else {
+            continue;
+        };
+        if let Some(seg) = extract_cdna_to_genomic_mapper_pair_storable(pair) {
+            segments.push(seg);
+        }
+    }
+    cdna_mapper_segments_or_none(segments)
+}
+
+fn extract_pair_genomic_segments_storable(
+    mapper: &std::collections::HashMap<String, SValue>,
+) -> Option<Vec<MapperSegment>> {
     let pair_genomic = mapper.get("pair_genomic").and_then(SValue::as_hash)?;
 
     let mut segments = Vec::new();
@@ -860,11 +1104,11 @@ fn extract_cdna_mapper_segments_storable(
             }
         }
     }
-    if segments.is_empty() {
-        None
-    } else {
-        Some(segments)
-    }
+    cdna_mapper_segments_or_none(segments)
+}
+
+fn sort_cdna_mapper_segments(segments: &mut [MapperSegment]) {
+    segments.sort_by_key(|(g_start, g_end, c_start, _c_end, _ori)| (*g_start, *g_end, *c_start));
 }
 
 fn extract_mapper_pair_storable(
@@ -877,6 +1121,19 @@ fn extract_mapper_pair_storable(
     let g_end = sv_i64(from.get("end"))?;
     let c_start = sv_i64(to.get("start"))?;
     let c_end = sv_i64(to.get("end"))?;
+    Some((g_start, g_end, c_start, c_end, ori))
+}
+
+fn extract_cdna_to_genomic_mapper_pair_storable(
+    pair: &std::collections::HashMap<String, SValue>,
+) -> Option<MapperSegment> {
+    let from = pair.get("from").and_then(SValue::as_hash)?;
+    let to = pair.get("to").and_then(SValue::as_hash)?;
+    let ori = sv_i64(pair.get("ori")).and_then(|v| i8::try_from(v).ok())?;
+    let c_start = sv_i64(from.get("start"))?;
+    let c_end = sv_i64(from.get("end"))?;
+    let g_start = sv_i64(to.get("start"))?;
+    let g_end = sv_i64(to.get("end"))?;
     Some((g_start, g_end, c_start, c_end, ori))
 }
 
@@ -1170,6 +1427,14 @@ pub(crate) fn parse_transcript_line_into(
             .filter(|v| v != "-");
         batch.set_opt_utf8_owned(idx, refseq_id.as_ref());
     }
+    if let Some(idx) = col_idx.display_xref_id {
+        let value = json_display_xref_id(object);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.source_cache {
+        let value = json_source_cache(object);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
     // coding_region_start/end: read from object first; if null, derive from
     // cdna_coding_start/end + exon array (same derivation as storable path).
     let cdna_coding_start_val = json_i64(object.get("cdna_coding_start"));
@@ -1443,6 +1708,20 @@ pub(crate) fn parse_transcript_line_into(
             let value = build_flags_str(&attributes);
             batch.set_opt_utf8_owned(idx, value.as_ref());
         }
+        if let Some(idx) = col_idx.refseq_match {
+            let value = build_refseq_match(&attributes);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.refseq_edits {
+            let edits = refseq_edit_tuples(&attributes);
+            batch.set_refseq_edit_list(idx, (!edits.is_empty()).then_some(edits.as_slice()));
+        }
+        if let Some(idx) = col_idx.is_gencode_basic {
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_basic));
+        }
+        if let Some(idx) = col_idx.is_gencode_primary {
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_primary));
+        }
     }
 
     // Only compute canonical JSON + hash if projected
@@ -1703,6 +1982,14 @@ fn append_transcript_storable_row_into(
     if let Some(idx) = col_idx.refseq_id {
         let value =
             sv_str(object.get("refseq_id").or_else(|| object.get("_refseq"))).filter(|v| v != "-");
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.display_xref_id {
+        let value = storable_display_xref_id(object);
+        batch.set_opt_utf8_owned(idx, value.as_ref());
+    }
+    if let Some(idx) = col_idx.source_cache {
+        let value = storable_source_cache(object);
         batch.set_opt_utf8_owned(idx, value.as_ref());
     }
     // coding_region_start/end: read from object first; if undef (common in
@@ -1988,6 +2275,20 @@ fn append_transcript_storable_row_into(
             let value = build_flags_str(&attributes);
             batch.set_opt_utf8_owned(idx, value.as_ref());
         }
+        if let Some(idx) = col_idx.refseq_match {
+            let value = build_refseq_match(&attributes);
+            batch.set_opt_utf8_owned(idx, value.as_ref());
+        }
+        if let Some(idx) = col_idx.refseq_edits {
+            let edits = refseq_edit_tuples(&attributes);
+            batch.set_refseq_edit_list(idx, (!edits.is_empty()).then_some(edits.as_slice()));
+        }
+        if let Some(idx) = col_idx.is_gencode_basic {
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_basic));
+        }
+        if let Some(idx) = col_idx.is_gencode_primary {
+            batch.set_opt_bool(idx, Some(attributes.is_gencode_primary));
+        }
     }
 
     // Only compute canonical JSON + hash if projected
@@ -2039,8 +2340,10 @@ mod tests {
     use crate::filter::SimplePredicate;
     use crate::info::CacheInfo;
     use crate::schema::transcript_schema;
-    use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter};
-    use datafusion::arrow::array::{Array, Int64Array, StringArray};
+    use crate::util::{BatchBuilder, ColumnMap, ProvenanceWriter, RefseqEditTuple};
+    use datafusion::arrow::array::{
+        Array, BooleanArray, Int64Array, ListArray, StringArray, StructArray,
+    };
     use serde_json::json;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -2123,6 +2426,147 @@ mod tests {
         } else {
             Some(values.value(0))
         }
+    }
+
+    fn batch_bool_value(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+        col: &str,
+    ) -> Option<bool> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name(col)
+            .unwrap_or_else(|| panic!("missing column: {col}"));
+        let values = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap_or_else(|| panic!("expected Boolean column: {col}"));
+        if values.is_null(0) {
+            None
+        } else {
+            Some(values.value(0))
+        }
+    }
+
+    fn batch_refseq_edit_values(
+        batch: &datafusion::arrow::record_batch::RecordBatch,
+    ) -> Option<Vec<RefseqEditTuple>> {
+        let (idx, _) = batch
+            .schema()
+            .column_with_name("refseq_edits")
+            .expect("missing refseq_edits column");
+        let list_array = batch
+            .column(idx)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("expected ListArray for refseq_edits");
+        if list_array.is_null(0) {
+            return None;
+        }
+
+        let values = list_array.value(0);
+        let edits = values
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .expect("expected StructArray for refseq_edits values");
+        let starts = edits
+            .column_by_name("start")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let ends = edits
+            .column_by_name("end")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let replacement_lens = edits
+            .column_by_name("replacement_len")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let skip_refseq_offsets = edits
+            .column_by_name("skip_refseq_offset")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+
+        Some(
+            (0..edits.len())
+                .map(|row| {
+                    (
+                        starts.value(row),
+                        ends.value(row),
+                        if replacement_lens.is_null(row) {
+                            None
+                        } else {
+                            Some(replacement_lens.value(row))
+                        },
+                        skip_refseq_offsets.value(row),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn storable_attribute(code: &str, value: &str, description: Option<&str>) -> SValue {
+        let mut attr = HashMap::new();
+        attr.insert("code".to_string(), SValue::String(Arc::from(code)));
+        attr.insert("value".to_string(), SValue::String(Arc::from(value)));
+        if let Some(description) = description {
+            attr.insert(
+                "description".to_string(),
+                SValue::String(Arc::from(description)),
+            );
+        }
+        SValue::Hash(Arc::new(attr))
+    }
+
+    fn storable_mapper_pair(
+        genomic_start: i64,
+        genomic_end: i64,
+        cdna_start: i64,
+        cdna_end: i64,
+        ori: i64,
+    ) -> SValue {
+        let mut from = HashMap::new();
+        from.insert("start".to_string(), SValue::Int(genomic_start));
+        from.insert("end".to_string(), SValue::Int(genomic_end));
+
+        let mut to = HashMap::new();
+        to.insert("start".to_string(), SValue::Int(cdna_start));
+        to.insert("end".to_string(), SValue::Int(cdna_end));
+
+        let mut pair = HashMap::new();
+        pair.insert("from".to_string(), SValue::Hash(Arc::new(from)));
+        pair.insert("to".to_string(), SValue::Hash(Arc::new(to)));
+        pair.insert("ori".to_string(), SValue::Int(ori));
+        SValue::Hash(Arc::new(pair))
+    }
+
+    fn storable_cdna_mapper_pair(
+        cdna_start: i64,
+        cdna_end: i64,
+        genomic_start: i64,
+        genomic_end: i64,
+        ori: i64,
+    ) -> SValue {
+        let mut from = HashMap::new();
+        from.insert("start".to_string(), SValue::Int(cdna_start));
+        from.insert("end".to_string(), SValue::Int(cdna_end));
+
+        let mut to = HashMap::new();
+        to.insert("start".to_string(), SValue::Int(genomic_start));
+        to.insert("end".to_string(), SValue::Int(genomic_end));
+
+        let mut pair = HashMap::new();
+        pair.insert("from".to_string(), SValue::Hash(Arc::new(from)));
+        pair.insert("to".to_string(), SValue::Hash(Arc::new(to)));
+        pair.insert("ori".to_string(), SValue::Int(ori));
+        SValue::Hash(Arc::new(pair))
     }
 
     fn storable_bioseq(seq: &str) -> SValue {
@@ -2262,6 +2706,244 @@ mod tests {
 
         let batch = batch.finish().unwrap();
         assert_eq!(batch_i64_value(&batch, "db_id"), Some(4242));
+    }
+
+    #[test]
+    fn parse_transcript_line_promotes_issue_190_fields() {
+        let (mut batch, col_idx, provenance, cache_info) = transcript_test_components("storable");
+        let payload = json!({
+            "stable_id": "ENST000190",
+            "strand": 1,
+            "biotype": "protein_coding",
+            "_source_cache": "BestRefSeq",
+            "display_xref": {
+                "__class": "Bio::EnsEMBL::DBEntry",
+                "__value": { "display_id": "NM_000001.2" }
+            },
+            "attributes": [
+                { "code": "rseq_mrna_match", "value": "1" },
+                { "code": "rseq_cds_match", "value": "1" },
+                { "code": "gencode_basic", "value": "1" },
+                { "code": "_rna_edit", "value": "10 12 AAA" }
+            ]
+        });
+        let line = format!(
+            "1\t100\t200\tJSON:{}",
+            serde_json::to_string(&payload).unwrap()
+        );
+
+        let written = parse_transcript_line_into(
+            &line,
+            "/tmp/transcript.txt",
+            &cache_info,
+            &SimplePredicate::default(),
+            false,
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        assert!(written);
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "display_xref_id").as_deref(),
+            Some("NM_000001.2")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "source_cache").as_deref(),
+            Some("BestRefSeq")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "refseq_match").as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert_eq!(
+            batch_refseq_edit_values(&batch),
+            Some(vec![(10, 12, Some(3), true)])
+        );
+        assert_eq!(batch_bool_value(&batch, "is_gencode_basic"), Some(true));
+        assert_eq!(batch_bool_value(&batch, "is_gencode_primary"), Some(false));
+    }
+
+    #[test]
+    fn append_transcript_storable_row_promotes_issue_190_fields() {
+        let (mut batch, col_idx, provenance, _) = transcript_test_components("storable");
+        let mut display_xref = HashMap::new();
+        display_xref.insert(
+            "display_id".to_string(),
+            SValue::String(Arc::from("NM_000002.3")),
+        );
+
+        let mut object = HashMap::new();
+        object.insert(
+            "biotype".to_string(),
+            SValue::String(Arc::from("protein_coding")),
+        );
+        object.insert(
+            "_source_cache".to_string(),
+            SValue::String(Arc::from("LRG_RefSeq")),
+        );
+        object.insert(
+            "display_xref".to_string(),
+            SValue::Blessed {
+                class: Arc::from("Bio::EnsEMBL::DBEntry"),
+                value: Arc::new(SValue::Hash(Arc::new(display_xref))),
+            },
+        );
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_attribute("rseq_mrna_match", "1", None),
+                storable_attribute("rseq_mrna_match", "duplicate ignored", None),
+                storable_attribute("rseq_cds_match", "1", None),
+                storable_attribute("gencode_primary", "1", None),
+                storable_attribute("_rna_edit", "30 30 T", None),
+                storable_attribute("_rna_edit", "20 25", Some("op=X")),
+            ])),
+        );
+
+        let payload = SValue::Hash(Arc::new(object.clone()));
+        let core = TranscriptRowCore {
+            chrom: "1".to_string(),
+            start: 100,
+            end: 200,
+            source_start: 100,
+            source_end: 200,
+            strand: 1,
+            stable_id: "ENST000190".to_string(),
+        };
+
+        append_transcript_storable_row_into(
+            &payload,
+            &object,
+            core,
+            false,
+            "/tmp/transcript.storable.gz",
+            &mut batch,
+            &col_idx,
+            &provenance,
+        )
+        .unwrap();
+
+        let batch = batch.finish().unwrap();
+        assert_eq!(
+            batch_utf8_value(&batch, "display_xref_id").as_deref(),
+            Some("NM_000002.3")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "source_cache").as_deref(),
+            Some("LRG_RefSeq")
+        );
+        assert_eq!(
+            batch_utf8_value(&batch, "refseq_match").as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert_eq!(
+            batch_refseq_edit_values(&batch),
+            Some(vec![(20, 25, None, true), (30, 30, Some(1), true)])
+        );
+        assert_eq!(batch_bool_value(&batch, "is_gencode_basic"), Some(false));
+        assert_eq!(batch_bool_value(&batch, "is_gencode_primary"), Some(true));
+    }
+
+    #[test]
+    fn cdna_mapper_segments_are_sorted_by_genomic_then_cdna_start() {
+        let expected = vec![(10, 12, 1, 3, 1), (50, 55, 6, 11, 1)];
+        let payload = json!({
+            "_variation_effect_feature_cache": {
+                "mapper": {
+                    "pair_genomic": {
+                        "1": [
+                            { "from": { "start": 50, "end": 55 }, "to": { "start": 6, "end": 11 }, "ori": 1 },
+                            { "from": { "start": 10, "end": 12 }, "to": { "start": 1, "end": 3 }, "ori": 1 }
+                        ]
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            extract_cdna_mapper_segments_json(payload.as_object().unwrap()).unwrap(),
+            expected
+        );
+
+        let mut pair_genomic = HashMap::new();
+        pair_genomic.insert(
+            "1".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_mapper_pair(50, 55, 6, 11, 1),
+                storable_mapper_pair(10, 12, 1, 3, 1),
+            ])),
+        );
+        let mut mapper = HashMap::new();
+        mapper.insert(
+            "pair_genomic".to_string(),
+            SValue::Hash(Arc::new(pair_genomic)),
+        );
+        let mut vef_cache = HashMap::new();
+        vef_cache.insert("mapper".to_string(), SValue::Hash(Arc::new(mapper)));
+        let mut object = HashMap::new();
+        object.insert(
+            "_variation_effect_feature_cache".to_string(),
+            SValue::Hash(Arc::new(vef_cache)),
+        );
+
+        assert_eq!(
+            extract_cdna_mapper_segments_storable(&object).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn cdna_mapper_segments_extract_nested_pair_cdna() {
+        let expected = vec![(10, 12, 1, 3, 1), (50, 55, 6, 11, -1)];
+        let payload = json!({
+            "_variation_effect_feature_cache": {
+                "mapper": {
+                    "exon_coord_mapper": {
+                        "_pair_cdna": {
+                            "CDNA": [
+                                { "from": { "start": 6, "end": 11 }, "to": { "start": 50, "end": 55 }, "ori": -1 },
+                                { "from": { "start": 1, "end": 3 }, "to": { "start": 10, "end": 12 }, "ori": 1 }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            extract_cdna_mapper_segments_json(payload.as_object().unwrap()).unwrap(),
+            expected
+        );
+
+        let mut pair_cdna = HashMap::new();
+        pair_cdna.insert(
+            "CDNA".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_cdna_mapper_pair(6, 11, 50, 55, -1),
+                storable_cdna_mapper_pair(1, 3, 10, 12, 1),
+            ])),
+        );
+        let mut exon_coord_mapper = HashMap::new();
+        exon_coord_mapper.insert("_pair_cdna".to_string(), SValue::Hash(Arc::new(pair_cdna)));
+        let mut mapper = HashMap::new();
+        mapper.insert(
+            "exon_coord_mapper".to_string(),
+            SValue::Hash(Arc::new(exon_coord_mapper)),
+        );
+        let mut vef_cache = HashMap::new();
+        vef_cache.insert("mapper".to_string(), SValue::Hash(Arc::new(mapper)));
+        let mut object = HashMap::new();
+        object.insert(
+            "_variation_effect_feature_cache".to_string(),
+            SValue::Hash(Arc::new(vef_cache)),
+        );
+
+        assert_eq!(
+            extract_cdna_mapper_segments_storable(&object).unwrap(),
+            expected
+        );
     }
 
     #[test]
@@ -2449,6 +3131,23 @@ mod tests {
     }
 
     #[test]
+    fn json_transcript_attributes_treat_presence_only_cds_nf_as_true() {
+        let payload = json!({
+            "attributes": [
+                { "code": "cds_start_NF", "name": "CDS start not found", "value": "" },
+                { "code": "cds_end_NF", "name": "CDS end not found", "value": "0" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false, false);
+
+        assert!(parsed.cds_start_nf);
+        assert!(!parsed.cds_end_nf);
+        assert_eq!(build_flags_str(&parsed).as_deref(), Some("cds_start_NF"));
+    }
+
+    #[test]
     fn json_transcript_attributes_parse_wrapped_minus_strand_regions() {
         let payload = json!({
             "attributes": [
@@ -2498,6 +3197,151 @@ mod tests {
         assert!(parsed.cds_start_nf);
         assert!(!parsed.cds_end_nf);
         assert_eq!(parsed.mature_mirna_regions, vec![(141, 158)]);
+    }
+
+    #[test]
+    fn storable_transcript_attributes_treat_presence_only_cds_nf_as_true() {
+        let mut object = HashMap::new();
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![
+                storable_attribute("cds_start_NF", "false", None),
+                storable_attribute("cds_end_NF", "", None),
+            ])),
+        );
+
+        let parsed =
+            parse_transcript_attributes_storable(&object, 100, 200, 1, false, false, false);
+
+        assert!(!parsed.cds_start_nf);
+        assert!(parsed.cds_end_nf);
+        assert_eq!(build_flags_str(&parsed).as_deref(), Some("cds_end_NF"));
+    }
+
+    #[test]
+    fn parse_refseq_and_gencode_attributes_json() {
+        let payload = json!({
+            "attributes": [
+                { "code": "rseq_mrna_match", "value": "ignored" },
+                { "code": "rseq_mrna_match", "value": "duplicate ignored" },
+                { "code": "rseq_cds_match", "value": "ignored" },
+                { "code": "gencode_basic", "value": "1" },
+                { "code": "gencode_primary", "value": "1" },
+                { "code": "_rna_edit", "value": "10 12 AAA" },
+                { "code": "_rna_edit", "value": "1 2 GG", "description": "op=X" },
+                { "code": "_rna_edit_foo", "value": "4 4 C" },
+                { "code": "_rna_edit", "value": "7 9" }
+            ]
+        });
+        let object = payload.as_object().unwrap();
+
+        let parsed = parse_transcript_attributes_json(object, 100, 200, 1, false, false, true);
+
+        assert_eq!(
+            build_refseq_match(&parsed).as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert!(parsed.is_gencode_basic);
+        assert!(parsed.is_gencode_primary);
+        assert_eq!(
+            parsed.refseq_edits,
+            vec![
+                RefseqEdit {
+                    start: 1,
+                    end: 2,
+                    replacement_len: Some(2),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 4,
+                    end: 4,
+                    replacement_len: Some(1),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 7,
+                    end: 9,
+                    replacement_len: None,
+                    skip_refseq_offset: false,
+                },
+                RefseqEdit {
+                    start: 10,
+                    end: 12,
+                    replacement_len: Some(3),
+                    skip_refseq_offset: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_refseq_and_gencode_attributes_storable() {
+        fn attr(code: &str, value: &str, description: Option<&str>) -> SValue {
+            let mut attr = HashMap::new();
+            attr.insert("code".to_string(), SValue::String(Arc::from(code)));
+            attr.insert("value".to_string(), SValue::String(Arc::from(value)));
+            if let Some(description) = description {
+                attr.insert(
+                    "description".to_string(),
+                    SValue::String(Arc::from(description)),
+                );
+            }
+            SValue::Hash(Arc::new(attr))
+        }
+
+        let mut object = HashMap::new();
+        object.insert(
+            "attributes".to_string(),
+            SValue::Array(Arc::new(vec![
+                attr("rseq_mrna_match", "ignored", None),
+                attr("rseq_mrna_match", "duplicate ignored", None),
+                attr("rseq_cds_match", "ignored", None),
+                attr("gencode_basic", "1", None),
+                attr("gencode_primary", "1", None),
+                attr("_rna_edit", "10 12 AAA", None),
+                attr("_rna_edit", "1 2 GG", Some("op=X")),
+                attr("_rna_edit_1", "4 4 C", None),
+                attr("_rna_edit", "7 9", None),
+            ])),
+        );
+
+        let parsed = parse_transcript_attributes_storable(&object, 100, 200, 1, false, false, true);
+
+        assert_eq!(
+            build_refseq_match(&parsed).as_deref(),
+            Some("rseq_mrna_match&rseq_cds_match")
+        );
+        assert!(parsed.is_gencode_basic);
+        assert!(parsed.is_gencode_primary);
+        assert_eq!(
+            parsed.refseq_edits,
+            vec![
+                RefseqEdit {
+                    start: 1,
+                    end: 2,
+                    replacement_len: Some(2),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 4,
+                    end: 4,
+                    replacement_len: Some(1),
+                    skip_refseq_offset: true,
+                },
+                RefseqEdit {
+                    start: 7,
+                    end: 9,
+                    replacement_len: None,
+                    skip_refseq_offset: false,
+                },
+                RefseqEdit {
+                    start: 10,
+                    end: 12,
+                    replacement_len: Some(3),
+                    skip_refseq_offset: true,
+                },
+            ]
+        );
     }
 
     #[test]
