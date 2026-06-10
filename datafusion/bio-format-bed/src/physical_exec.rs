@@ -34,7 +34,7 @@ pub struct BedExec {
     /// Optional column projection indices
     pub(crate) projection: Option<Vec<usize>>,
     /// Plan properties for optimization
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     /// Optional maximum number of rows to return
     pub(crate) limit: Option<usize>,
     /// Optional cloud storage configuration
@@ -81,7 +81,7 @@ impl ExecutionPlan for BedExec {
     }
 
     /// Returns the properties (schema, partitioning, etc.) of this plan
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

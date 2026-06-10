@@ -31,7 +31,7 @@ pub struct GtfExec {
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) filters: Vec<Expr>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) coordinate_system_zero_based: bool,
     /// Optional cloud storage configuration for remote files
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
@@ -78,7 +78,7 @@ impl ExecutionPlan for GtfExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

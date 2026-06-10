@@ -147,12 +147,12 @@ impl TableProvider for FastqTableProvider {
         };
 
         Ok(Arc::new(FastqExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(num_partitions),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             schema: schema.clone(),
             projection: projection.cloned(),

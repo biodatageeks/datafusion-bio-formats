@@ -50,7 +50,7 @@ pub struct VcfWriteExec {
     /// that may be lost during DataFusion query plan projections.
     source_metadata: Option<HashMap<String, String>>,
     /// Cached plan properties
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl VcfWriteExec {
@@ -90,12 +90,12 @@ impl VcfWriteExec {
             false,
         )]));
 
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             input,
@@ -161,7 +161,7 @@ impl ExecutionPlan for VcfWriteExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

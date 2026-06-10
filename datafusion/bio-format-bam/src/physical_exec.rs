@@ -41,7 +41,7 @@ pub struct BamExec {
     pub(crate) file_path: String,
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) limit: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -91,7 +91,7 @@ impl ExecutionPlan for BamExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

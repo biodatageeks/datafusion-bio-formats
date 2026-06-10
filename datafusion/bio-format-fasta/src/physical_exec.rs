@@ -41,7 +41,7 @@ pub struct FastaExec {
     /// Optional column projection indices.
     pub(crate) projection: Option<Vec<usize>>,
     /// Cached plan properties.
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     /// Optional record limit.
     pub(crate) limit: Option<usize>,
     /// Cloud storage configuration options.
@@ -83,7 +83,7 @@ impl ExecutionPlan for FastaExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

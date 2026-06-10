@@ -52,7 +52,7 @@ pub struct CramWriteExec {
     /// Whether to sort records by coordinate before writing
     sort_on_write: bool,
     /// Cached plan properties
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl CramWriteExec {
@@ -85,12 +85,12 @@ impl CramWriteExec {
             false,
         )]));
 
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             input,
@@ -151,7 +151,7 @@ impl ExecutionPlan for CramWriteExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

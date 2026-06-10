@@ -61,7 +61,7 @@ pub(crate) struct EnsemblCacheExec {
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) num_partitions: usize,
     pub(crate) bgzf_partitions: Option<Vec<(PathBuf, crate::tabix_reader::BgzfPartition)>>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
 }
 
 pub(crate) struct EnsemblCacheExecConfig {
@@ -213,12 +213,12 @@ impl EnsemblCacheExec {
             EquivalenceProperties::new(config.schema.clone())
         };
 
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             eq_props,
             Partitioning::UnknownPartitioning(num_partitions),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             kind: config.kind,
@@ -376,7 +376,7 @@ impl ExecutionPlan for EnsemblCacheExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -391,31 +391,64 @@ impl ExecutionPlan for EnsemblCacheExec {
         Ok(self)
     }
 
-    fn statistics(&self) -> DFResult<datafusion::physical_plan::Statistics> {
-        // Estimate row count from total compressed file sizes.
-        // Rough heuristic: ~50 bytes per row in compressed VEP cache files.
-        let total_bytes: u64 = if let Some(ref bp) = self.bgzf_partitions {
-            // BGZF mode: partition_files is empty; use the actual file paths
-            // from bgzf_partitions (deduplicated since they may all point to
-            // the same file).
-            let mut seen = std::collections::HashSet::new();
-            bp.iter()
-                .filter(|(p, _)| seen.insert(p.clone()))
-                .map(|(p, _)| estimate_file_size(p))
-                .sum()
-        } else {
-            self.partition_files
+    fn partition_statistics(
+        &self,
+        partition: Option<usize>,
+    ) -> DFResult<datafusion::physical_plan::Statistics> {
+        // Estimate row count from compressed byte ranges. Rough heuristic:
+        // ~50 bytes per row in compressed VEP cache files.
+        let total_bytes: u64 = match (partition, &self.bgzf_partitions) {
+            (Some(partition), Some(bgzf_partitions)) => {
+                let (_, bgzf_partition) = bgzf_partitions.get(partition).ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "EnsemblCacheExec has {} partitions, requested {partition}",
+                        self.num_partitions
+                    ))
+                })?;
+                bgzf_partition
+                    .end_compressed
+                    .saturating_sub(bgzf_partition.start_compressed)
+            }
+            (Some(partition), None) => self
+                .partition_files
+                .get(partition)
+                .ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "EnsemblCacheExec has {} partitions, requested {partition}",
+                        self.num_partitions
+                    ))
+                })?
+                .iter()
+                .map(|p| estimate_file_size(p))
+                .sum(),
+            (None, Some(bgzf_partitions)) => {
+                // BGZF mode: partition_files is empty; use the actual file
+                // paths from bgzf_partitions, deduplicated because multiple
+                // execution partitions can point at the same file.
+                let mut seen = std::collections::HashSet::new();
+                bgzf_partitions
+                    .iter()
+                    .filter(|(p, _)| seen.insert(p.clone()))
+                    .map(|(p, _)| estimate_file_size(p))
+                    .sum()
+            }
+            (None, None) => self
+                .partition_files
                 .iter()
                 .flatten()
                 .map(|p| estimate_file_size(p))
-                .sum()
+                .sum(),
         };
         let estimated_rows = total_bytes / 50;
-        Ok(datafusion::physical_plan::Statistics {
-            num_rows: datafusion::common::stats::Precision::Inexact(estimated_rows as usize),
-            total_byte_size: datafusion::common::stats::Precision::Inexact(total_bytes as usize),
-            column_statistics: vec![],
-        })
+        Ok(
+            datafusion::physical_plan::Statistics::new_unknown(self.schema.as_ref())
+                .with_num_rows(datafusion::common::stats::Precision::Inexact(
+                    estimated_rows as usize,
+                ))
+                .with_total_byte_size(datafusion::common::stats::Precision::Inexact(
+                    total_bytes as usize,
+                )),
+        )
     }
 
     fn execute(
@@ -1043,6 +1076,9 @@ fn process_partition(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tabix_reader::BgzfPartition;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::common::stats::Precision;
     use std::fs;
 
     // -----------------------------------------------------------------------
@@ -1274,6 +1310,110 @@ mod tests {
             &pred,
             EnsemblEntityKind::Exon
         ));
+    }
+
+    fn test_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]))
+    }
+
+    fn test_cache_info(cache_root: PathBuf) -> CacheInfo {
+        CacheInfo {
+            cache_root,
+            source_cache_path: "homo_sapiens_vep_110_GRCh38".to_string(),
+            species: "homo_sapiens".to_string(),
+            assembly: "GRCh38".to_string(),
+            cache_version: "110".to_string(),
+            serializer_type: None,
+            var_type: None,
+            cache_region_size: None,
+            variation_cols: vec![],
+            source_descriptors: vec![],
+        }
+    }
+
+    fn test_exec(
+        files: Vec<PathBuf>,
+        num_partitions: usize,
+        bgzf_partitions: Option<Vec<(PathBuf, BgzfPartition)>>,
+        cache_root: PathBuf,
+    ) -> EnsemblCacheExec {
+        EnsemblCacheExec::new(EnsemblCacheExecConfig {
+            kind: EnsemblEntityKind::Transcript,
+            cache_info: test_cache_info(cache_root),
+            files,
+            schema: test_schema(),
+            predicate: SimplePredicate::default(),
+            limit: None,
+            variation_region_size: None,
+            batch_size_hint: None,
+            coordinate_system_zero_based: true,
+            num_partitions,
+            preserve_sort_order: true,
+            single_chrom_filter: None,
+            bgzf_partitions,
+        })
+    }
+
+    #[test]
+    fn partition_statistics_uses_requested_file_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("f1.gz");
+        let f2 = dir.path().join("f2.gz");
+        fs::write(&f1, vec![0u8; 1500]).unwrap();
+        fs::write(&f2, vec![0u8; 2500]).unwrap();
+
+        let exec = test_exec(vec![f1, f2], 2, None, dir.path().to_path_buf());
+
+        let p0 = exec.partition_statistics(Some(0)).unwrap();
+        assert_eq!(p0.total_byte_size, Precision::Inexact(1500));
+        assert_eq!(p0.num_rows, Precision::Inexact(30));
+
+        let p1 = exec.partition_statistics(Some(1)).unwrap();
+        assert_eq!(p1.total_byte_size, Precision::Inexact(2500));
+        assert_eq!(p1.num_rows, Precision::Inexact(50));
+
+        let all = exec.partition_statistics(None).unwrap();
+        assert_eq!(all.total_byte_size, Precision::Inexact(4000));
+        assert_eq!(all.num_rows, Precision::Inexact(80));
+    }
+
+    #[test]
+    fn partition_statistics_uses_requested_bgzf_byte_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("all_vars.gz");
+        fs::write(&f, vec![0u8; 3500]).unwrap();
+
+        let bgzf_partitions = vec![
+            (
+                f.clone(),
+                BgzfPartition {
+                    start_compressed: 0,
+                    end_compressed: 1000,
+                    skip_first_line: false,
+                },
+            ),
+            (
+                f.clone(),
+                BgzfPartition {
+                    start_compressed: 1000,
+                    end_compressed: 3500,
+                    skip_first_line: false,
+                },
+            ),
+        ];
+        let exec = test_exec(vec![], 2, Some(bgzf_partitions), dir.path().to_path_buf());
+
+        let p0 = exec.partition_statistics(Some(0)).unwrap();
+        assert_eq!(p0.total_byte_size, Precision::Inexact(1000));
+        assert_eq!(p0.num_rows, Precision::Inexact(20));
+
+        let p1 = exec.partition_statistics(Some(1)).unwrap();
+        assert_eq!(p1.total_byte_size, Precision::Inexact(2500));
+        assert_eq!(p1.num_rows, Precision::Inexact(50));
+
+        let all = exec.partition_statistics(None).unwrap();
+        assert_eq!(all.total_byte_size, Precision::Inexact(3500));
+        assert_eq!(all.num_rows, Precision::Inexact(70));
     }
 
     // -----------------------------------------------------------------------

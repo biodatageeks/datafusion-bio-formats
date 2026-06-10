@@ -259,7 +259,7 @@ pub struct FastqExec {
     pub(crate) file_path: String,
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) limit: Option<usize>,
     pub(crate) strategy: FastqPartitionStrategy,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
@@ -300,7 +300,7 @@ impl ExecutionPlan for FastqExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

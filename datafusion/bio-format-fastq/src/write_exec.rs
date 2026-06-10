@@ -36,7 +36,7 @@ pub struct FastqWriteExec {
     /// Compression type for the output file
     compression: FastqCompressionType,
     /// Cached plan properties
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl FastqWriteExec {
@@ -66,12 +66,12 @@ impl FastqWriteExec {
             false,
         )]));
 
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             input,
@@ -125,7 +125,7 @@ impl ExecutionPlan for FastqWriteExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

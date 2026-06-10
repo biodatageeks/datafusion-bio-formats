@@ -6,7 +6,7 @@ use datafusion_bio_format_core::object_storage::{
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, stream};
-use noodles::bgzf;
+use noodles_bgzf as bgzf;
 use noodles_fasta as fasta;
 use noodles_fasta::Record;
 use noodles_fasta::io::Reader;

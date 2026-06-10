@@ -866,12 +866,12 @@ impl TableProvider for CramTableProvider {
                 );
 
                 return Ok(Arc::new(CramExec {
-                    cache: PlanProperties::new(
+                    cache: Arc::new(PlanProperties::new(
                         EquivalenceProperties::new(schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
                         EmissionType::Final,
                         Boundedness::Bounded,
-                    ),
+                    )),
                     file_path: self.file_path.clone(),
                     schema: schema.clone(),
                     projection: projection.cloned(),
@@ -889,12 +889,12 @@ impl TableProvider for CramTableProvider {
 
         // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(CramExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             schema: schema.clone(),
             projection: projection.cloned(),

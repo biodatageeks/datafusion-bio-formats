@@ -144,7 +144,7 @@ async fn main() -> datafusion::common::Result<()> {
     // Parquet writer properties
     let writer_props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(Default::default()))
-        .set_max_row_group_size(100_000)
+        .set_max_row_group_row_count(Some(100_000))
         .build();
 
     // Process each partition stream sequentially (to keep memory bounded),

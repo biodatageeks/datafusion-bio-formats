@@ -900,12 +900,12 @@ impl TableProvider for VcfTableProvider {
                 );
 
                 return Ok(Arc::new(VcfExec {
-                    cache: PlanProperties::new(
+                    cache: Arc::new(PlanProperties::new(
                         EquivalenceProperties::new(schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
                         EmissionType::Incremental,
                         Boundedness::Bounded,
-                    ),
+                    )),
                     file_path: self.file_path.clone(),
                     schema: schema.clone(),
                     info_fields: self.info_fields.clone(),
@@ -925,12 +925,12 @@ impl TableProvider for VcfTableProvider {
 
         // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(VcfExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             schema: schema.clone(),
             info_fields: self.info_fields.clone(),
