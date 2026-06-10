@@ -24,7 +24,7 @@ async-compression.workspace = true
 async-stream.workspace = true
 flate2.workspace = true
 bstr.workspace = true
-log = "0.4.27"
+log = "0.4.32"
 async-trait = "0.1.81"
 
 [dev-dependencies]
