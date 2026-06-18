@@ -57,7 +57,7 @@ fn get_string_column<'a>(
 /// The RecordBatch must have the following schema:
 /// - Column 0: `name` (Utf8, required) - Sequence identifier
 /// - Column 1: `description` (Utf8, nullable) - Sequence description
-/// - Column 2: `sequence` (Utf8, required) - The sequence data
+/// - Column 2: `sequence` (LargeUtf8, required) - The sequence data
 pub fn batch_to_fasta_records(batch: &RecordBatch) -> Result<Vec<fasta::Record>> {
     let num_columns = batch.num_columns();
 

@@ -23,12 +23,12 @@ use std::sync::Arc;
 /// Returns a schema with three fields:
 /// - `name` (Utf8, non-null): Sequence identifier
 /// - `description` (Utf8, nullable): Sequence description
-/// - `sequence` (Utf8, non-null): The actual sequence data
+/// - `sequence` (LargeUtf8, non-null): The actual sequence data
 fn determine_schema() -> datafusion::common::Result<SchemaRef> {
     let fields = vec![
         Field::new("name", DataType::Utf8, false),
         Field::new("description", DataType::Utf8, true),
-        Field::new("sequence", DataType::Utf8, false),
+        Field::new("sequence", DataType::LargeUtf8, false),
     ];
     let schema = Schema::new(fields);
     debug!("Schema: {schema:?}");

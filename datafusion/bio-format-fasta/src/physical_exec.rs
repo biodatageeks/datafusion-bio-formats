@@ -1,7 +1,9 @@
 use crate::storage::{FastaLocalReader, FastaRemoteReader, open_local_fasta_sync};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
+use datafusion::arrow::array::{
+    Array, LargeStringArray, NullArray, RecordBatch, StringArray, StringBuilder,
+};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -399,7 +401,7 @@ fn build_record_batch(
     projection: Option<Vec<usize>>,
 ) -> datafusion::error::Result<RecordBatch> {
     let name_array = Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>;
-    let sequence_array = Arc::new(StringArray::from(sequence.to_vec())) as Arc<dyn Array>;
+    let sequence_array = Arc::new(LargeStringArray::from(sequence.to_vec())) as Arc<dyn Array>;
     let description_array = Arc::new({
         let mut builder = StringBuilder::new();
         for s in description {

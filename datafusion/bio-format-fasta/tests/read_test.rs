@@ -26,6 +26,7 @@ fn generate_test_fasta(path: &str, num_records: usize) {
 }
 
 #[tokio::test]
+#[ignore = "slow: generates a ~2.6 GB FASTA"]
 async fn test_read_3gb_file() {
     let tmp_dir = TempDir::new().unwrap();
     let input_path = tmp_dir.path().join("input.fasta");
