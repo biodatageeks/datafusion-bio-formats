@@ -69,11 +69,28 @@ fn determine_schema_on_demand(
             // Mode 2: Projection - add requested attributes as individual columns
             // All GFF attributes are treated as nullable strings for simplicity
             for attr_name in &attrs {
-                fields.push(Field::new(
-                    attr_name,
-                    DataType::Utf8, // All GFF attributes are strings
-                    true,           // Attributes can be null
-                ));
+                if attr_name == "attributes" {
+                    // Sentinel: emit the nested attributes column alongside
+                    // flattened fields (identical to Mode 1's attributes field).
+                    fields.push(Field::new(
+                        "attributes",
+                        DataType::List(FieldRef::from(Box::new(Field::new(
+                            "item",
+                            DataType::Struct(Fields::from(vec![
+                                Field::new("tag", DataType::Utf8, false),
+                                Field::new("value", DataType::Utf8, true),
+                            ])),
+                            true,
+                        )))),
+                        true,
+                    ));
+                } else {
+                    fields.push(Field::new(
+                        attr_name,
+                        DataType::Utf8, // All GFF attributes are strings
+                        true,           // Attributes can be null
+                    ));
+                }
             }
             debug!(
                 "GFF Schema Mode 2 (Projection): 8 static fields + {} attribute fields = {} columns total",
