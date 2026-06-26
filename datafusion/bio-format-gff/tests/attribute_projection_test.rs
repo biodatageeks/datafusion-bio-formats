@@ -250,8 +250,7 @@ async fn test_attribute_projection_all_attributes() -> Result<(), Box<dyn std::e
 }
 
 #[tokio::test]
-async fn test_attributes_sentinel_with_flattened_field(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn test_attributes_sentinel_with_flattened_field() -> Result<(), Box<dyn std::error::Error>> {
     use datafusion::arrow::array::{Array, ListArray, StringArray};
     use datafusion::arrow::datatypes::DataType;
     use datafusion::datasource::TableProvider;
