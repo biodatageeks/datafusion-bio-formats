@@ -1104,5 +1104,5 @@ async fn test_gtf_attributes_sentinel_with_flattened_field() {
         .downcast_ref::<ListArray>()
         .unwrap();
     assert!(attrs.is_valid(0));
-    assert!(attrs.value(0).len() >= 1);
+    assert!(!attrs.value(0).is_empty());
 }
