@@ -631,7 +631,12 @@ async fn get_remote_gff_stream(
             }
 
             // TODO: Implement attribute loading for UnifiedGffRecord
-            // For now, we'll skip attribute processing to get the basic flow working
+            // For now, we'll skip attribute processing to get the basic flow working.
+            // NOTE: this pre-existing gap means remote GFF scans return null for ALL
+            // attribute fields (flattened and the nested "attributes" sentinel alike);
+            // the local and indexed paths populate them. See `record.attributes()`
+            // (RecordBuf) plus the `load_attributes`/`load_attributes_unnest` helpers
+            // for the wiring this still needs.
             if unnest_enable && !attribute_builders.0.is_empty() {
                 // For each attribute field, append null for now
                 for builder in &mut attribute_builders.2 {

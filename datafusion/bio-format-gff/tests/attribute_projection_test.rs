@@ -251,7 +251,7 @@ async fn test_attribute_projection_all_attributes() -> Result<(), Box<dyn std::e
 
 #[tokio::test]
 async fn test_attributes_sentinel_with_flattened_field() -> Result<(), Box<dyn std::error::Error>> {
-    use datafusion::arrow::array::{Array, ListArray, StringArray};
+    use datafusion::arrow::array::{ListArray, StringArray};
     use datafusion::arrow::datatypes::DataType;
     use datafusion::datasource::TableProvider;
 
@@ -295,5 +295,40 @@ async fn test_attributes_sentinel_with_flattened_field() -> Result<(), Box<dyn s
     // Row 0 has a non-null, non-empty nested attributes list
     assert!(attrs.is_valid(0));
     assert!(attrs.value(0).len() >= 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_attributes_sentinel_only() -> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::array::{Array, ListArray};
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::datasource::TableProvider;
+
+    // Mode 2 with the sentinel as the only requested attribute field.
+    let file_path = create_test_gff_file_with_attributes().await?;
+    let table = GffTableProvider::new(
+        file_path.clone(),
+        Some(vec!["attributes".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+    assert_eq!(schema.fields().len(), 9);
+    assert_eq!(schema.field(8).name(), "attributes");
+    assert!(matches!(schema.field(8).data_type(), DataType::List(_)));
+
+    let ctx = SessionContext::new();
+    ctx.register_table("g", Arc::new(table))?;
+    let results = ctx.sql("SELECT attributes FROM g").await?.collect().await?;
+    let batch = &results[0];
+
+    let attrs = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(attrs.is_valid(0));
+    assert!(!attrs.value(0).is_empty());
     Ok(())
 }
