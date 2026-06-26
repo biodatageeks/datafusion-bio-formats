@@ -430,7 +430,21 @@ fn load_attributes_unnest_from_string(
         .map(|s| s.as_str())
         .filter(|s| *s != "attributes")
         .collect();
-    let has_sentinel = attribute_builders.0.iter().any(|n| n == "attributes");
+
+    let projected_attribute_indices: Option<Vec<usize>> =
+        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
+
+    // Only do the full (parse-everything) parse when the nested "attributes"
+    // column is both requested AND actually projected by this query — otherwise
+    // a query like `SELECT "gene_id"` would pay for parsing every attribute even
+    // though the nested column is never emitted. The sentinel appears at most
+    // once in attr_fields, so `position` is sufficient.
+    let sentinel_index = attribute_builders.0.iter().position(|n| n == "attributes");
+    let sentinel_projected = sentinel_index.is_some_and(|si| {
+        projected_attribute_indices
+            .as_ref()
+            .is_none_or(|idx| idx.contains(&si))
+    });
 
     // For duplicate keys, concatenate values with commas (consistent with GFF3
     // multi-value handling).
@@ -443,12 +457,12 @@ fn load_attributes_unnest_from_string(
             .or_insert_with(|| value.to_string());
     };
 
-    // When the sentinel is requested we must parse every attribute anyway (for the
-    // nested column), so parse once and reuse that for both the flattened map and
-    // the nested slot. Without the sentinel, scan only for the wanted keys.
+    // When the sentinel column will be emitted we must parse every attribute
+    // anyway (for the nested column), so parse once and reuse that for both the
+    // flattened map and the nested slot. Otherwise scan only for the wanted keys.
     let mut attributes_map: HashMap<String, String> = HashMap::new();
     let mut sentinel_attrs: Option<Vec<Attribute>> = None;
-    if has_sentinel {
+    if sentinel_projected {
         let parsed = parse_gtf_attributes_to_vec(attributes_str);
         for attr in &parsed {
             if wanted.contains(attr.tag.as_str())
@@ -468,9 +482,6 @@ fn load_attributes_unnest_from_string(
         }
     }
 
-    let projected_attribute_indices: Option<Vec<usize>> =
-        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
-
     for i in 0..attribute_builders.1.len() {
         if let Some(indices) = &projected_attribute_indices
             && !indices.contains(&i)
@@ -481,6 +492,8 @@ fn load_attributes_unnest_from_string(
 
         if attribute_builders.0[i] == "attributes" {
             // Sentinel slot: append the already-parsed nested attributes struct.
+            // `take()` is correct because the sentinel appears at most once; a
+            // (malformed) second occurrence would get an empty list.
             let attributes = sentinel_attrs.take().unwrap_or_default();
             attribute_builders.1[i].append_array_struct(attributes)?;
             continue;
