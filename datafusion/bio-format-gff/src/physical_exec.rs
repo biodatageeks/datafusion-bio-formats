@@ -249,21 +249,40 @@ fn load_attributes_unnest_from_string(
     attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
     projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
-    // Create HashMap for efficient lookup of specific attributes
-    let mut attributes_map = HashMap::new();
+    // Wanted flattened keys (O(1) lookup). The "attributes" sentinel is the raw
+    // nested column and is handled separately, so it is excluded here.
+    let wanted: std::collections::HashSet<&str> = attribute_builders
+        .0
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| *s != "attributes")
+        .collect();
+    let has_sentinel = attribute_builders.0.iter().any(|n| n == "attributes");
 
-    // Parse only what we need for the specific attributes requested
-    if !attributes_str.is_empty() && attributes_str != "." {
+    // When the sentinel is requested we must parse every attribute anyway (for the
+    // nested column), so parse once and reuse that for both the flattened map and
+    // the nested slot. Without the sentinel, decode only the wanted keys.
+    let mut attributes_map: HashMap<String, String> = HashMap::new();
+    let mut sentinel_attrs: Option<Vec<Attribute>> = None;
+    if has_sentinel {
+        let parsed = parse_gff_attributes_to_vec(attributes_str);
+        for attr in &parsed {
+            if wanted.contains(attr.tag.as_str())
+                && let Some(v) = &attr.value
+            {
+                attributes_map.insert(attr.tag.clone(), v.clone());
+            }
+        }
+        sentinel_attrs = Some(parsed);
+    } else if !attributes_str.is_empty() && attributes_str != "." {
         for pair in attributes_str.split(';') {
             if pair.is_empty() {
                 continue;
             }
             if let Some(eq_pos) = pair.find('=') {
                 let key = &pair[..eq_pos];
-                let value = &pair[eq_pos + 1..];
-
-                // Only parse the values we actually need
-                if attribute_builders.0.contains(&key.to_string()) {
+                if wanted.contains(key) {
+                    let value = &pair[eq_pos + 1..];
                     let decoded_value = if value.starts_with('"') && value.ends_with('"') {
                         value[1..value.len() - 1].to_string()
                     } else if value.contains('%') {
@@ -294,8 +313,8 @@ fn load_attributes_unnest_from_string(
         }
 
         if attribute_builders.0[i] == "attributes" {
-            // Sentinel slot: append the fully-parsed nested attributes struct.
-            let attributes = parse_gff_attributes_to_vec(attributes_str);
+            // Sentinel slot: append the already-parsed nested attributes struct.
+            let attributes = sentinel_attrs.take().unwrap_or_default();
             attribute_builders.2[i].append_array_struct(attributes)?;
             continue;
         }

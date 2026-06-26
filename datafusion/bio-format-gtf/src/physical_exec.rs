@@ -422,23 +422,48 @@ fn load_attributes_unnest_from_string(
     attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
     projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
-    let mut attributes_map = HashMap::new();
+    // Wanted flattened keys (O(1) lookup). The "attributes" sentinel is the raw
+    // nested column and is handled separately, so it is excluded here.
+    let wanted: std::collections::HashSet<&str> = attribute_builders
+        .0
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| *s != "attributes")
+        .collect();
+    let has_sentinel = attribute_builders.0.iter().any(|n| n == "attributes");
 
-    if !attributes_str.is_empty() && attributes_str != "." {
-        let wanted: std::collections::HashSet<&str> =
-            attribute_builders.0.iter().map(|s| s.as_str()).collect();
+    // For duplicate keys, concatenate values with commas (consistent with GFF3
+    // multi-value handling).
+    let accumulate = |map: &mut HashMap<String, String>, key: &str, value: &str| {
+        map.entry(key.to_string())
+            .and_modify(|existing: &mut String| {
+                existing.push(',');
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.to_string());
+    };
+
+    // When the sentinel is requested we must parse every attribute anyway (for the
+    // nested column), so parse once and reuse that for both the flattened map and
+    // the nested slot. Without the sentinel, scan only for the wanted keys.
+    let mut attributes_map: HashMap<String, String> = HashMap::new();
+    let mut sentinel_attrs: Option<Vec<Attribute>> = None;
+    if has_sentinel {
+        let parsed = parse_gtf_attributes_to_vec(attributes_str);
+        for attr in &parsed {
+            if wanted.contains(attr.tag.as_str())
+                && let Some(v) = &attr.value
+            {
+                accumulate(&mut attributes_map, &attr.tag, v);
+            }
+        }
+        sentinel_attrs = Some(parsed);
+    } else if !attributes_str.is_empty() && attributes_str != "." {
         for pair in attributes_str.split(';') {
             if let Some((key, value)) = parse_gtf_pair(pair)
                 && wanted.contains(key)
             {
-                // For duplicate keys, concatenate values with commas (consistent with GFF3 multi-value handling)
-                attributes_map
-                    .entry(key.to_string())
-                    .and_modify(|existing: &mut String| {
-                        existing.push(',');
-                        existing.push_str(value);
-                    })
-                    .or_insert_with(|| value.to_string());
+                accumulate(&mut attributes_map, key, value);
             }
         }
     }
@@ -455,8 +480,8 @@ fn load_attributes_unnest_from_string(
         }
 
         if attribute_builders.0[i] == "attributes" {
-            // Sentinel slot: append the fully-parsed nested attributes struct.
-            let attributes = parse_gtf_attributes_to_vec(attributes_str);
+            // Sentinel slot: append the already-parsed nested attributes struct.
+            let attributes = sentinel_attrs.take().unwrap_or_default();
             attribute_builders.1[i].append_array_struct(attributes)?;
             continue;
         }

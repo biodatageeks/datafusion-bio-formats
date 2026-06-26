@@ -1106,3 +1106,56 @@ async fn test_gtf_attributes_sentinel_with_flattened_field() {
     assert!(attrs.is_valid(0));
     assert!(!attrs.value(0).is_empty());
 }
+
+#[tokio::test]
+async fn test_gtf_indexed_attributes_sentinel() {
+    use datafusion::arrow::array::{ListArray, StringArray};
+
+    // bgzf-compressed + tabix-indexed multi-chrom GTF (chr1=5, chr2=3, chrX=2).
+    let path = format!("{}/tests/multi_chrom.gtf.gz", env!("CARGO_MANIFEST_DIR"));
+    let table = GtfTableProvider::new(
+        path,
+        Some(vec!["gene_id".to_string(), "attributes".to_string()]),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let ctx = SessionContext::new();
+    ctx.register_table("gtf", Arc::new(table)).unwrap();
+
+    // chrom = 'chr1' exercises the TBI-indexed region path.
+    let results = ctx
+        .sql("SELECT \"gene_id\", attributes FROM gtf WHERE chrom = 'chr1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let total = total_rows(&results);
+    assert_eq!(total, 5, "Expected 5 features on chr1");
+
+    let mut saw_attributes = false;
+    for batch in &results {
+        let _gene_id = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("gene_id should be a StringArray");
+        let attrs = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("attributes should be a ListArray");
+        for i in 0..attrs.len() {
+            if attrs.is_valid(i) && !attrs.value(i).is_empty() {
+                saw_attributes = true;
+            }
+        }
+    }
+    assert!(
+        saw_attributes,
+        "Expected at least one row with a non-empty nested attributes list"
+    );
+}
