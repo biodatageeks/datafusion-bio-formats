@@ -1059,3 +1059,50 @@ async fn test_gencode_varying_tag_counts_per_gene() {
     assert_eq!(tag_values[8], "basic,Ensembl_canonical,MANE_Select");
     assert_eq!(tag_values[9], "basic,Ensembl_canonical,MANE_Select");
 }
+
+#[tokio::test]
+async fn test_gtf_attributes_sentinel_with_flattened_field() {
+    use datafusion::arrow::array::{ListArray, StringArray};
+    use datafusion::arrow::datatypes::DataType;
+
+    let table = GtfTableProvider::new(
+        test_gtf_path(),
+        Some(vec!["gene_id".to_string(), "attributes".to_string()]),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let schema = table.schema();
+    assert_eq!(schema.fields().len(), 10);
+    assert_eq!(schema.field(8).name(), "gene_id");
+    assert_eq!(schema.field(8).data_type(), &DataType::Utf8);
+    assert_eq!(schema.field(9).name(), "attributes");
+    assert!(matches!(schema.field(9).data_type(), DataType::List(_)));
+
+    let ctx = SessionContext::new();
+    ctx.register_table("gtf", Arc::new(table)).unwrap();
+    let results = ctx
+        .sql("SELECT \"gene_id\", attributes FROM gtf LIMIT 1")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let batch = &results[0];
+
+    let gene_id = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(!gene_id.value(0).is_empty());
+
+    let attrs = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(attrs.is_valid(0));
+    assert!(attrs.value(0).len() >= 1);
+}

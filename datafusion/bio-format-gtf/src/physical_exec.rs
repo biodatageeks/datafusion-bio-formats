@@ -369,7 +369,23 @@ fn set_attribute_builders(
     attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
 ) {
     for attr_name in attr_fields {
-        let field = OptionalField::new(&DataType::Utf8, batch_size).unwrap();
+        let field = if attr_name == "attributes" {
+            // Sentinel: a nested List<Struct> builder (matches the Mode 1 builder).
+            OptionalField::new(
+                &DataType::List(FieldRef::new(Field::new(
+                    "item",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("tag", DataType::Utf8, false),
+                        Field::new("value", DataType::Utf8, true),
+                    ])),
+                    true,
+                ))),
+                batch_size,
+            )
+            .unwrap()
+        } else {
+            OptionalField::new(&DataType::Utf8, batch_size).unwrap()
+        };
         attribute_builders.0.push(attr_name.clone());
         attribute_builders.1.push(field);
     }
@@ -438,13 +454,17 @@ fn load_attributes_unnest_from_string(
             continue;
         }
 
-        let name = &attribute_builders.0[i];
-        let builder = &mut attribute_builders.1[i];
+        if attribute_builders.0[i] == "attributes" {
+            // Sentinel slot: append the fully-parsed nested attributes struct.
+            let attributes = parse_gtf_attributes_to_vec(attributes_str);
+            attribute_builders.1[i].append_array_struct(attributes)?;
+            continue;
+        }
 
-        if let Some(value) = attributes_map.get(name) {
-            builder.append_string(value)?;
+        if let Some(value) = attributes_map.get(&attribute_builders.0[i]) {
+            attribute_builders.1[i].append_string(value)?;
         } else {
-            builder.append_null()?;
+            attribute_builders.1[i].append_null()?;
         }
     }
     Ok(())

@@ -65,7 +65,24 @@ fn determine_schema_on_demand(
         }
         Some(attrs) => {
             for attr_name in &attrs {
-                fields.push(Field::new(attr_name, DataType::Utf8, true));
+                if attr_name == "attributes" {
+                    // Sentinel: emit the nested attributes column alongside
+                    // flattened fields (identical to Mode 1's attributes field).
+                    fields.push(Field::new(
+                        "attributes",
+                        DataType::List(FieldRef::from(Box::new(Field::new(
+                            "item",
+                            DataType::Struct(Fields::from(vec![
+                                Field::new("tag", DataType::Utf8, false),
+                                Field::new("value", DataType::Utf8, true),
+                            ])),
+                            true,
+                        )))),
+                        true,
+                    ));
+                } else {
+                    fields.push(Field::new(attr_name, DataType::Utf8, true));
+                }
             }
             debug!(
                 "GTF Schema Mode 2 (Projection): 8 static fields + {} attribute fields = {} columns total",
