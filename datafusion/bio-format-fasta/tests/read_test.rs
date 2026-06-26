@@ -13,9 +13,8 @@ fn generate_test_fasta(path: &str, num_records: usize) {
     let mut file =
         std::io::BufWriter::new(std::fs::File::create(path).expect("Failed to create test file"));
     // Each line has 24 bytes, 12_500_000 lines per record means
-    // ten records will give ~ 3 GB of data
+    // ten records will give ~ 2.6 GB of data
     let num_lines = 12_500_000;
-    //let body = b"ACGTACGTACGTACGTACGT".repeat(num_lines);
     for i in 0..num_records {
         writeln!(file, ">seq_{i} sample description {i}").unwrap();
         for _j in 0..num_lines {
@@ -49,5 +48,6 @@ async fn test_read_3gb_file() {
         .await
         .expect("Failed to collect results");
 
-    assert_eq!(result.len(), 10);
+    let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total_rows, num_records);
 }
