@@ -6,3 +6,4 @@
 pub mod bigbed;
 /// BigWig table provider.
 pub mod bigwig;
+mod common;

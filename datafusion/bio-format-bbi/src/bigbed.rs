@@ -8,6 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bigtools::BigBedRead;
 use bigtools::bed::autosql::parse::{FieldType, parse_autosql};
+use bigtools::utils::reopen::ReopenableFile;
 use datafusion::arrow::array::{
     ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
@@ -25,9 +26,9 @@ use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::genomic_filter::is_genomic_coordinate_filter;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 
-use crate::bigwig::{
-    BbiScanRegion, build_batch, plan_bbi_scan_regions, project_schema, projected_indices,
-    projection_display, region_display, reject_unsupported_scheme, to_external_error,
+use crate::common::{
+    BbiScanRegion, build_batch, normalize_local_path, plan_bbi_scan_regions, project_schema,
+    projected_indices, projection_display, region_display, to_external_error,
 };
 
 /// BigBed schema discovery mode.
@@ -67,6 +68,12 @@ impl BigBedExtraColumn {
             BigBedExtraColumn::Float64 { .. } => DataType::Float64,
         }
     }
+
+    /// Whether this column reads from the split per-field view (`true`) or the
+    /// whole trailing `rest` string (`false`).
+    fn needs_split_fields(&self) -> bool {
+        !matches!(self, BigBedExtraColumn::Rest)
+    }
 }
 
 /// Table provider for local BigBed files.
@@ -74,7 +81,6 @@ impl BigBedExtraColumn {
 pub struct BigBedTableProvider {
     file_path: String,
     schema: SchemaRef,
-    full_schema: SchemaRef,
     chroms: Vec<(String, u32)>,
     extra_columns: Vec<BigBedExtraColumn>,
     coordinate_system_zero_based: bool,
@@ -87,7 +93,7 @@ impl BigBedTableProvider {
         coordinate_system_zero_based: bool,
         schema_mode: BigBedSchemaMode,
     ) -> Result<Self> {
-        reject_unsupported_scheme(&file_path, "BigBed")?;
+        let file_path = normalize_local_path(&file_path, "BigBed")?;
         let mut reader = BigBedRead::open_file(&file_path).map_err(|error| {
             DataFusionError::External(Box::new(std::io::Error::other(format!(
                 "Failed to open BigBed file '{file_path}': {error}"
@@ -99,11 +105,10 @@ impl BigBedTableProvider {
             .map(|chrom| (chrom.name.clone(), chrom.length))
             .collect::<Vec<_>>();
         let extra_columns = discover_extra_columns(&mut reader, schema_mode);
-        let full_schema = bigbed_schema(coordinate_system_zero_based, &extra_columns);
+        let schema = bigbed_schema(coordinate_system_zero_based, &extra_columns);
         Ok(Self {
             file_path,
-            schema: full_schema.clone(),
-            full_schema,
+            schema,
             chroms,
             extra_columns,
             coordinate_system_zero_based,
@@ -133,7 +138,7 @@ impl TableProvider for BigBedTableProvider {
             .iter()
             .map(|expr| {
                 if is_genomic_coordinate_filter(expr)
-                    || can_push_down_record_filter(expr, &self.full_schema)
+                    || can_push_down_record_filter(expr, &self.schema)
                 {
                     TableProviderFilterPushDown::Inexact
                 } else {
@@ -148,9 +153,11 @@ impl TableProvider for BigBedTableProvider {
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
+        // `_limit` is intentionally ignored: BBI scans have no cheap row cap, so
+        // DataFusion applies the LIMIT in a `GlobalLimitExec` above this node.
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let schema = project_schema(&self.full_schema, projection);
+        let schema = project_schema(&self.schema, projection);
         let regions =
             plan_bbi_scan_regions(filters, &self.chroms, self.coordinate_system_zero_based);
         Ok(Arc::new(BigBedExec {
@@ -160,12 +167,12 @@ impl TableProvider for BigBedTableProvider {
             regions,
             extra_columns: self.extra_columns.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
-            ),
+            )),
         }))
     }
 }
@@ -178,7 +185,7 @@ pub struct BigBedExec {
     regions: Vec<BbiScanRegion>,
     extra_columns: Vec<BigBedExtraColumn>,
     coordinate_system_zero_based: bool,
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl Debug for BigBedExec {
@@ -209,7 +216,7 @@ impl ExecutionPlan for BigBedExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -229,15 +236,28 @@ impl ExecutionPlan for BigBedExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let batch = read_bigbed_batch(
-            &self.file_path,
-            &self.schema,
-            self.projection.as_deref(),
-            &self.regions,
-            &self.extra_columns,
-            self.coordinate_system_zero_based,
-        )?;
-        let stream = futures_util::stream::iter(vec![Ok(batch)]);
+        let reader = BigBedRead::open_file(&self.file_path).map_err(|error| {
+            DataFusionError::External(Box::new(std::io::Error::other(format!(
+                "Failed to open BigBed file '{}': {error}",
+                self.file_path
+            ))))
+        })?;
+        // Emit one RecordBatch per scan region (one per chromosome when there is
+        // no genomic filter) so memory stays bounded by a single region instead
+        // of materializing the whole file up front.
+        let needs_split_fields = self
+            .extra_columns
+            .iter()
+            .any(BigBedExtraColumn::needs_split_fields);
+        let stream = futures_util::stream::iter(BigBedRegionStream {
+            reader,
+            schema: self.schema.clone(),
+            projection: self.projection.clone(),
+            regions: self.regions.clone().into_iter(),
+            extra_columns: self.extra_columns.clone(),
+            needs_split_fields,
+            coordinate_system_zero_based: self.coordinate_system_zero_based,
+        });
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema.clone(),
             stream,
@@ -250,65 +270,83 @@ struct BigBedRow {
     chrom: String,
     start: u32,
     end: u32,
+    /// Whole trailing field string; populated only when a `rest` column is used.
     rest: String,
+    /// Per-field split of `rest`; populated only when a typed column is used.
     fields: Vec<String>,
 }
 
-fn read_bigbed_batch(
-    file_path: &str,
-    schema: &SchemaRef,
-    projection: Option<&[usize]>,
-    regions: &[BbiScanRegion],
-    extra_columns: &[BigBedExtraColumn],
+/// Lazily yields one [`RecordBatch`] per scan region from an open BigBed reader.
+struct BigBedRegionStream {
+    reader: BigBedRead<ReopenableFile>,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    regions: std::vec::IntoIter<BbiScanRegion>,
+    extra_columns: Vec<BigBedExtraColumn>,
+    needs_split_fields: bool,
     coordinate_system_zero_based: bool,
-) -> Result<RecordBatch> {
-    let mut reader = BigBedRead::open_file(file_path).map_err(|error| {
-        DataFusionError::External(Box::new(std::io::Error::other(format!(
-            "Failed to open BigBed file '{file_path}': {error}"
-        ))))
-    })?;
+}
 
-    let mut rows = Vec::new();
-    for region in regions {
-        let iter = reader
+impl BigBedRegionStream {
+    fn build_region_batch(&mut self, region: &BbiScanRegion) -> Result<RecordBatch> {
+        let iter = self
+            .reader
             .get_interval(&region.chrom, region.start, region.end)
             .map_err(to_external_error)?;
+
+        let mut rows = Vec::new();
         for entry in iter {
             let entry = entry.map_err(to_external_error)?;
-            let start = if coordinate_system_zero_based {
+            let start = if self.coordinate_system_zero_based {
                 entry.start
             } else {
                 entry.start + 1
+            };
+            // Only allocate the split-field view or the `rest` string when a
+            // column actually consumes it; the other is left empty.
+            let fields = if self.needs_split_fields {
+                entry.rest.split('\t').map(ToString::to_string).collect()
+            } else {
+                Vec::new()
             };
             rows.push(BigBedRow {
                 chrom: region.chrom.clone(),
                 start,
                 end: entry.end,
-                fields: entry.rest.split('\t').map(ToString::to_string).collect(),
                 rest: entry.rest,
+                fields,
             });
         }
-    }
 
-    let row_count = rows.len();
-    let full_width = 3 + extra_columns.len();
-    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
-    for index in projected_indices(projection, full_width) {
-        match index {
-            0 => arrays.push(Arc::new(StringArray::from_iter_values(
-                rows.iter().map(|row| row.chrom.as_str()),
-            ))),
-            1 => arrays.push(Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|row| row.start),
-            ))),
-            2 => arrays.push(Arc::new(UInt32Array::from_iter_values(
-                rows.iter().map(|row| row.end),
-            ))),
-            index => arrays.push(build_extra_array(&rows, &extra_columns[index - 3])?),
+        let row_count = rows.len();
+        let full_width = 3 + self.extra_columns.len();
+        let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
+        for index in projected_indices(self.projection.as_deref(), full_width) {
+            match index {
+                0 => arrays.push(Arc::new(StringArray::from_iter_values(
+                    rows.iter().map(|row| row.chrom.as_str()),
+                ))),
+                1 => arrays.push(Arc::new(UInt32Array::from_iter_values(
+                    rows.iter().map(|row| row.start),
+                ))),
+                2 => arrays.push(Arc::new(UInt32Array::from_iter_values(
+                    rows.iter().map(|row| row.end),
+                ))),
+                index => arrays.push(build_extra_array(&rows, &self.extra_columns[index - 3])?),
+            }
         }
-    }
 
-    build_batch(schema.clone(), arrays, row_count)
+        build_batch(self.schema.clone(), arrays, row_count)
+    }
+}
+
+impl Iterator for BigBedRegionStream {
+    type Item = Result<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let region = self.regions.next()?;
+        Some(self.build_region_batch(&region))
+    }
 }
 
 fn build_extra_array(rows: &[BigBedRow], column: &BigBedExtraColumn) -> Result<ArrayRef> {
@@ -381,7 +419,7 @@ fn bigbed_schema(
 }
 
 fn discover_extra_columns(
-    reader: &mut BigBedRead<bigtools::utils::reopen::ReopenableFile>,
+    reader: &mut BigBedRead<ReopenableFile>,
     schema_mode: BigBedSchemaMode,
 ) -> Vec<BigBedExtraColumn> {
     if schema_mode == BigBedSchemaMode::Rest {
@@ -390,10 +428,11 @@ fn discover_extra_columns(
     let Some(autosql) = reader.autosql().ok().flatten() else {
         return vec![BigBedExtraColumn::Rest];
     };
-    let Ok(mut declarations) = parse_autosql(&autosql) else {
+    let Ok(declarations) = parse_autosql(&autosql) else {
         return vec![BigBedExtraColumn::Rest];
     };
-    let Some(declaration) = declarations.pop() else {
+    // BigBed files declare a single autoSQL table; take the first declaration.
+    let Some(declaration) = declarations.into_iter().next() else {
         return vec![BigBedExtraColumn::Rest];
     };
     if declaration.fields.len() <= 3 {
@@ -402,8 +441,15 @@ fn discover_extra_columns(
 
     let mut columns = Vec::new();
     for (rest_index, field) in declaration.fields.into_iter().skip(3).enumerate() {
+        // Fixed-size array fields (e.g. `int[3]`) are stored as a single raw
+        // token. Keep just that column as text rather than downgrading the
+        // entire typed schema to a single `rest` column.
         if field.field_size.is_some() {
-            return vec![BigBedExtraColumn::Rest];
+            columns.push(BigBedExtraColumn::Utf8 {
+                name: field.name,
+                rest_index,
+            });
+            continue;
         }
         let column = match field.field_type {
             FieldType::String
@@ -428,7 +474,12 @@ fn discover_extra_columns(
                 name: field.name,
                 rest_index,
             },
-            FieldType::Declaration(_, _) => return vec![BigBedExtraColumn::Rest],
+            // Nested declarations have no flat column representation; keep the
+            // raw token as text instead of discarding the whole typed schema.
+            FieldType::Declaration(_, _) => BigBedExtraColumn::Utf8 {
+                name: field.name,
+                rest_index,
+            },
         };
         columns.push(column);
     }

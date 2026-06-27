@@ -274,6 +274,80 @@ async fn filters_bigbed_by_genomic_region() -> TestResult<()> {
 }
 
 #[tokio::test]
+async fn rest_mode_exposes_single_rest_column() -> TestResult<()> {
+    let fixture = write_bigbed_fixture()?;
+    let table = BigBedTableProvider::new(
+        fixture.path().to_string_lossy().to_string(),
+        true,
+        BigBedSchemaMode::Rest,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bb", Arc::new(table))?;
+
+    let df = ctx
+        .sql("SELECT chrom, start, \"end\", rest FROM bb ORDER BY chrom, start")
+        .await?;
+    let batches = df.collect().await?;
+
+    let columns = batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(columns, vec!["chrom", "start", "end", "rest"]);
+
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 3);
+
+    let rest = batches[0]
+        .column(3)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(rest.value(0), "gene1\t42");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepts_file_uri_paths() -> TestResult<()> {
+    let fixture = write_bigwig_fixture()?;
+    let uri = format!("file://{}", fixture.path().to_string_lossy());
+    let table = BigWigTableProvider::new(uri, true)?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bw", Arc::new(table))?;
+
+    let df = ctx.sql("SELECT chrom FROM bw").await?;
+    let batches = df.collect().await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pushes_bigbed_projection_into_exec() -> TestResult<()> {
+    let fixture = write_bigbed_fixture()?;
+    let table = BigBedTableProvider::new(
+        fixture.path().to_string_lossy().to_string(),
+        true,
+        BigBedSchemaMode::Auto,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bb", Arc::new(table))?;
+
+    let df = ctx.sql("SELECT chrom, start FROM bb").await?;
+    let plan = df.create_physical_plan().await?;
+    assert_plan_projection(&plan, "BigBedExec", &["chrom", "start"]);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn pushes_bigbed_genomic_filter_into_scan_regions() -> TestResult<()> {
     let fixture = write_bigbed_fixture()?;
     let table = BigBedTableProvider::new(
