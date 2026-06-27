@@ -170,10 +170,26 @@ fn set_attribute_builders(
     attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
 ) {
     for attr_name in attr_fields {
-        let field = OptionalField::new(&DataType::Utf8, batch_size).unwrap();
-        attribute_builders.0.push(attr_name.clone());
-        attribute_builders.1.push(DataType::Utf8);
-        attribute_builders.2.push(field);
+        if attr_name == "attributes" {
+            // Sentinel: a nested List<Struct> builder (matches the Mode 1 builder).
+            let dt = DataType::List(FieldRef::new(Field::new(
+                "attribute",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("tag", DataType::Utf8, false),
+                    Field::new("value", DataType::Utf8, true),
+                ])),
+                true,
+            )));
+            let field = OptionalField::new(&dt, batch_size).unwrap();
+            attribute_builders.0.push(attr_name.clone());
+            attribute_builders.1.push(dt);
+            attribute_builders.2.push(field);
+        } else {
+            let field = OptionalField::new(&DataType::Utf8, batch_size).unwrap();
+            attribute_builders.0.push(attr_name.clone());
+            attribute_builders.1.push(DataType::Utf8);
+            attribute_builders.2.push(field);
+        }
     }
 }
 
@@ -233,21 +249,55 @@ fn load_attributes_unnest_from_string(
     attribute_builders: &mut (Vec<String>, Vec<DataType>, Vec<OptionalField>),
     projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
-    // Create HashMap for efficient lookup of specific attributes
-    let mut attributes_map = HashMap::new();
+    // Wanted flattened keys (O(1) lookup). The "attributes" sentinel is the raw
+    // nested column and is handled separately, so it is excluded here.
+    let wanted: std::collections::HashSet<&str> = attribute_builders
+        .0
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| *s != "attributes")
+        .collect();
 
-    // Parse only what we need for the specific attributes requested
-    if !attributes_str.is_empty() && attributes_str != "." {
+    let projected_attribute_indices: Option<Vec<usize>> =
+        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
+
+    // Only do the full (decode-everything) parse when the nested "attributes"
+    // column is both requested AND actually projected by this query — otherwise
+    // a query like `SELECT "ID"` would pay for parsing every attribute even
+    // though the nested column is never emitted. The sentinel appears at most
+    // once in attr_fields, so `position` is sufficient.
+    let sentinel_index = attribute_builders.0.iter().position(|n| n == "attributes");
+    let sentinel_projected = sentinel_index.is_some_and(|si| {
+        projected_attribute_indices
+            .as_ref()
+            .is_none_or(|idx| idx.contains(&si))
+    });
+
+    // When the sentinel column will be emitted we must parse every attribute
+    // anyway (for the nested column), so parse once and reuse that for both the
+    // flattened map and the nested slot. Otherwise decode only the wanted keys.
+    let mut attributes_map: HashMap<String, String> = HashMap::new();
+    let mut sentinel_attrs: Option<Vec<Attribute>> = None;
+    if sentinel_projected {
+        let parsed = parse_gff_attributes_to_vec(attributes_str);
+        for attr in &parsed {
+            if wanted.contains(attr.tag.as_str())
+                && let Some(v) = &attr.value
+            {
+                // Last-wins on duplicate keys, matching the non-sentinel GFF path.
+                attributes_map.insert(attr.tag.clone(), v.clone());
+            }
+        }
+        sentinel_attrs = Some(parsed);
+    } else if !attributes_str.is_empty() && attributes_str != "." {
         for pair in attributes_str.split(';') {
             if pair.is_empty() {
                 continue;
             }
             if let Some(eq_pos) = pair.find('=') {
                 let key = &pair[..eq_pos];
-                let value = &pair[eq_pos + 1..];
-
-                // Only parse the values we actually need
-                if attribute_builders.0.contains(&key.to_string()) {
+                if wanted.contains(key) {
+                    let value = &pair[eq_pos + 1..];
                     let decoded_value = if value.starts_with('"') && value.ends_with('"') {
                         value[1..value.len() - 1].to_string()
                     } else if value.contains('%') {
@@ -266,9 +316,6 @@ fn load_attributes_unnest_from_string(
         }
     }
 
-    let projected_attribute_indices: Option<Vec<usize>> =
-        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
-
     for i in 0..attribute_builders.2.len() {
         if let Some(indices) = &projected_attribute_indices
             && !indices.contains(&i)
@@ -277,13 +324,19 @@ fn load_attributes_unnest_from_string(
             continue;
         }
 
-        let name = &attribute_builders.0[i];
-        let builder = &mut attribute_builders.2[i];
+        if attribute_builders.0[i] == "attributes" {
+            // Sentinel slot: append the already-parsed nested attributes struct.
+            // `take()` is correct because the sentinel appears at most once; a
+            // (malformed) second occurrence would get an empty list.
+            let attributes = sentinel_attrs.take().unwrap_or_default();
+            attribute_builders.2[i].append_array_struct(attributes)?;
+            continue;
+        }
 
-        if let Some(value) = attributes_map.get(name) {
-            builder.append_string(value)?;
+        if let Some(value) = attributes_map.get(&attribute_builders.0[i]) {
+            attribute_builders.2[i].append_string(value)?;
         } else {
-            builder.append_null()?;
+            attribute_builders.2[i].append_null()?;
         }
     }
     Ok(())
@@ -611,7 +664,12 @@ async fn get_remote_gff_stream(
             }
 
             // TODO: Implement attribute loading for UnifiedGffRecord
-            // For now, we'll skip attribute processing to get the basic flow working
+            // For now, we'll skip attribute processing to get the basic flow working.
+            // NOTE: this pre-existing gap means remote GFF scans return null for ALL
+            // attribute fields (flattened and the nested "attributes" sentinel alike);
+            // the local and indexed paths populate them. See `record.attributes()`
+            // (RecordBuf) plus the `load_attributes`/`load_attributes_unnest` helpers
+            // for the wiring this still needs.
             if unnest_enable && !attribute_builders.0.is_empty() {
                 // For each attribute field, append null for now
                 for builder in &mut attribute_builders.2 {

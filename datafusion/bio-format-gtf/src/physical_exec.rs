@@ -369,7 +369,23 @@ fn set_attribute_builders(
     attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
 ) {
     for attr_name in attr_fields {
-        let field = OptionalField::new(&DataType::Utf8, batch_size).unwrap();
+        let field = if attr_name == "attributes" {
+            // Sentinel: a nested List<Struct> builder (matches the Mode 1 builder).
+            OptionalField::new(
+                &DataType::List(FieldRef::new(Field::new(
+                    "item",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("tag", DataType::Utf8, false),
+                        Field::new("value", DataType::Utf8, true),
+                    ])),
+                    true,
+                ))),
+                batch_size,
+            )
+            .unwrap()
+        } else {
+            OptionalField::new(&DataType::Utf8, batch_size).unwrap()
+        };
         attribute_builders.0.push(attr_name.clone());
         attribute_builders.1.push(field);
     }
@@ -406,29 +422,65 @@ fn load_attributes_unnest_from_string(
     attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
     projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
-    let mut attributes_map = HashMap::new();
+    // Wanted flattened keys (O(1) lookup). The "attributes" sentinel is the raw
+    // nested column and is handled separately, so it is excluded here.
+    let wanted: std::collections::HashSet<&str> = attribute_builders
+        .0
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| *s != "attributes")
+        .collect();
 
-    if !attributes_str.is_empty() && attributes_str != "." {
-        let wanted: std::collections::HashSet<&str> =
-            attribute_builders.0.iter().map(|s| s.as_str()).collect();
+    let projected_attribute_indices: Option<Vec<usize>> =
+        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
+
+    // Only do the full (parse-everything) parse when the nested "attributes"
+    // column is both requested AND actually projected by this query — otherwise
+    // a query like `SELECT "gene_id"` would pay for parsing every attribute even
+    // though the nested column is never emitted. The sentinel appears at most
+    // once in attr_fields, so `position` is sufficient.
+    let sentinel_index = attribute_builders.0.iter().position(|n| n == "attributes");
+    let sentinel_projected = sentinel_index.is_some_and(|si| {
+        projected_attribute_indices
+            .as_ref()
+            .is_none_or(|idx| idx.contains(&si))
+    });
+
+    // For duplicate keys, concatenate values with commas (consistent with GFF3
+    // multi-value handling).
+    let accumulate = |map: &mut HashMap<String, String>, key: &str, value: &str| {
+        map.entry(key.to_string())
+            .and_modify(|existing: &mut String| {
+                existing.push(',');
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.to_string());
+    };
+
+    // When the sentinel column will be emitted we must parse every attribute
+    // anyway (for the nested column), so parse once and reuse that for both the
+    // flattened map and the nested slot. Otherwise scan only for the wanted keys.
+    let mut attributes_map: HashMap<String, String> = HashMap::new();
+    let mut sentinel_attrs: Option<Vec<Attribute>> = None;
+    if sentinel_projected {
+        let parsed = parse_gtf_attributes_to_vec(attributes_str);
+        for attr in &parsed {
+            if wanted.contains(attr.tag.as_str())
+                && let Some(v) = &attr.value
+            {
+                accumulate(&mut attributes_map, &attr.tag, v);
+            }
+        }
+        sentinel_attrs = Some(parsed);
+    } else if !attributes_str.is_empty() && attributes_str != "." {
         for pair in attributes_str.split(';') {
             if let Some((key, value)) = parse_gtf_pair(pair)
                 && wanted.contains(key)
             {
-                // For duplicate keys, concatenate values with commas (consistent with GFF3 multi-value handling)
-                attributes_map
-                    .entry(key.to_string())
-                    .and_modify(|existing: &mut String| {
-                        existing.push(',');
-                        existing.push_str(value);
-                    })
-                    .or_insert_with(|| value.to_string());
+                accumulate(&mut attributes_map, key, value);
             }
         }
     }
-
-    let projected_attribute_indices: Option<Vec<usize>> =
-        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
 
     for i in 0..attribute_builders.1.len() {
         if let Some(indices) = &projected_attribute_indices
@@ -438,13 +490,19 @@ fn load_attributes_unnest_from_string(
             continue;
         }
 
-        let name = &attribute_builders.0[i];
-        let builder = &mut attribute_builders.1[i];
+        if attribute_builders.0[i] == "attributes" {
+            // Sentinel slot: append the already-parsed nested attributes struct.
+            // `take()` is correct because the sentinel appears at most once; a
+            // (malformed) second occurrence would get an empty list.
+            let attributes = sentinel_attrs.take().unwrap_or_default();
+            attribute_builders.1[i].append_array_struct(attributes)?;
+            continue;
+        }
 
-        if let Some(value) = attributes_map.get(name) {
-            builder.append_string(value)?;
+        if let Some(value) = attributes_map.get(&attribute_builders.0[i]) {
+            attribute_builders.1[i].append_string(value)?;
         } else {
-            builder.append_null()?;
+            attribute_builders.1[i].append_null()?;
         }
     }
     Ok(())
