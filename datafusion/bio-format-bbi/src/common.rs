@@ -26,6 +26,14 @@ pub(crate) struct BbiScanRegion {
     pub(crate) chrom: String,
     pub(crate) start: u32,
     pub(crate) end: u32,
+    /// Exclusive upper bound on interval `start` for early termination, in the
+    /// same 0-based coordinate space as the native interval `start`. `None`
+    /// means "no upper bound — drain the whole region".
+    ///
+    /// Used only by the BigWig provider: it scans whole chromosomes to avoid
+    /// coordinate clipping, but the streamed intervals are start-sorted, so it
+    /// can stop as soon as `start >= stop_at` rather than reading to the end.
+    pub(crate) stop_at: Option<u32>,
 }
 
 pub(crate) fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -131,10 +139,17 @@ pub(crate) fn plan_bbi_scan_regions(
             .filter(|region| seen.insert(region.chrom.clone()))
             .filter_map(|region| {
                 let length = *chrom_lengths.get(region.chrom.as_str())?;
+                // Scan the whole chromosome (so intervals are never clipped) but
+                // remember the filter's upper bound: `region.end` is 1-based
+                // inclusive, which equals the 0-based exclusive bound on `start`,
+                // letting the start-sorted stream stop early. `None` (no upper
+                // bound) means drain the whole chromosome.
+                let stop_at = region.end.map(|end| end.min(length as u64) as u32);
                 (length > 0).then_some(BbiScanRegion {
                     chrom: region.chrom,
                     start: 0,
                     end: length,
+                    stop_at,
                 })
             })
             .collect();
@@ -160,10 +175,13 @@ fn convert_genomic_region_to_bbi(
         .map(|end| end.min(length as u64) as u32)
         .unwrap_or(length);
 
+    // The narrow (BigBed) path bounds the scan with the query window itself, so
+    // it needs no separate early-termination cursor.
     (start < end).then_some(BbiScanRegion {
         chrom: region.chrom,
         start,
         end,
+        stop_at: None,
     })
 }
 

@@ -432,6 +432,101 @@ async fn streams_large_region_in_fixed_size_batches() -> TestResult<()> {
 }
 
 #[tokio::test]
+async fn bigwig_early_terminates_at_upper_bound() -> TestResult<()> {
+    // 20k intervals at starts 0, 2, 4, ...; a `start < 100` upper bound must stop
+    // the scan after the 50 matching rows instead of streaming the whole
+    // chromosome. The exec applies only the early-stop cursor (DataFusion
+    // re-applies the predicate above it), so observing 50 rows here — not
+    // 20_000 — proves the scan terminated early rather than read-then-filtered.
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    // A chrom predicate is required for the region's upper bound to be extracted.
+    let filter = col("chrom")
+        .eq(lit("chr1"))
+        .and(col("start").lt(lit(100u32)));
+    let plan = table.scan(&state, None, &[filter], None).await?;
+    let stream = plan.execute(0, ctx.task_ctx())?;
+    let batches = collect(stream).await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, 50,
+        "early termination should emit only the matching prefix, not the whole chromosome"
+    );
+    assert_eq!(
+        batches.len(),
+        1,
+        "50 rows fit in a single batch; a full scan would emit many"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_early_termination_spans_multiple_batches() -> TestResult<()> {
+    // `start < 20_000` matches the first 10_000 intervals (starts 0..19_998),
+    // which is more than one 8_192-row batch — verifying the stop cursor fires
+    // mid-stream across batch boundaries, not only within the first batch.
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    let filter = col("chrom")
+        .eq(lit("chr1"))
+        .and(col("start").lt(lit(20_000u32)));
+    let plan = table.scan(&state, None, &[filter], None).await?;
+    let stream = plan.execute(0, ctx.task_ctx())?;
+    let batches = collect(stream).await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, 10_000,
+        "should stop after the 10_000 matching intervals, not read all 20_000"
+    );
+    assert!(
+        batches.len() >= 2,
+        "10_000 rows must span multiple fixed-size batches, got {}",
+        batches.len()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_lower_bound_only_scans_whole_chromosome() -> TestResult<()> {
+    // A lower bound alone (`start > 100`) has no upper bound to stop at, and a
+    // safe left seek isn't possible (it would clip the straddling interval), so
+    // the scan must read the whole chromosome and let DataFusion filter. Guards
+    // against accidentally deriving a stop cursor from the lower bound.
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    let filter = col("chrom")
+        .eq(lit("chr1"))
+        .and(col("start").gt(lit(100u32)));
+    let plan = table.scan(&state, None, &[filter], None).await?;
+    let stream = plan.execute(0, ctx.task_ctx())?;
+    let batches = collect(stream).await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, intervals as usize,
+        "lower-bound-only filters must not early-terminate"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn accepts_file_localhost_uri_paths() -> TestResult<()> {
     let fixture = write_bigwig_fixture()?;
     let uri = format!("file://localhost{}", fixture.path().to_string_lossy());
