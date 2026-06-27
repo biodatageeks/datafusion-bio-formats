@@ -173,9 +173,57 @@ async fn pushes_bigwig_genomic_filter_into_scan_regions() -> TestResult<()> {
         plan_text.contains("BigWigExec"),
         "expected BigWigExec in plan:\n{plan_text}"
     );
+    // BigWig prunes by chromosome but scans it in full: BigWigRead clips interval
+    // values to the query window, so a positional sub-range (e.g. chr2:0-10)
+    // would emit truncated coordinates. The Inexact pushdown lets DataFusion
+    // re-apply `start < 10` after the unclipped scan.
     assert!(
-        plan_text.contains("regions=[chr2:0-10]"),
-        "expected chr2 interval pruning in plan:\n{plan_text}"
+        plan_text.contains("regions=[chr2:0-100]"),
+        "expected chr2 to be scanned in full:\n{plan_text}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_genomic_filter_returns_unclipped_intervals() -> TestResult<()> {
+    // Regression: a `start < N` filter must not clip the emitted interval `end`.
+    // The chr2 interval is [5, 12); filtering `start < 10` must still return
+    // end = 12, not 10 (the filter bound / clipped window edge).
+    let fixture = write_bigwig_fixture()?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bw", Arc::new(table))?;
+
+    let df = ctx
+        .sql("SELECT chrom, start, \"end\", value FROM bw WHERE chrom = 'chr2' AND start < 10")
+        .await?;
+    let batches = df.collect().await?;
+
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    let batch = &batches[0];
+    let chrom = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let start = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    let end = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert_eq!(chrom.value(0), "chr2");
+    assert_eq!(start.value(0), 5);
+    assert_eq!(
+        end.value(0),
+        12,
+        "interval end must be the true 12, not clipped to the filter bound"
     );
 
     Ok(())

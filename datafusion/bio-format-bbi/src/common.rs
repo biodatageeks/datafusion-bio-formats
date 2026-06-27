@@ -4,7 +4,7 @@
 //! genomic-region planning, path validation) and are reused by both
 //! [`crate::bigwig`] and [`crate::bigbed`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions};
@@ -76,10 +76,25 @@ pub(crate) fn projection_display(schema: &SchemaRef) -> String {
     }
 }
 
+/// Plan the native interval-query regions for a BBI scan.
+///
+/// `widen_to_chromosome` controls how a positional coordinate filter is turned
+/// into a query window:
+///
+/// * `false` (BigBed) — honor the filter's start/end bounds. `BigBedRead`
+///   returns full BED entries that *overlap* the window, so narrowing the window
+///   prunes work without altering the emitted coordinates.
+/// * `true` (BigWig) — ignore the positional bounds and scan each matched
+///   chromosome in full. `BigWigRead` *clips* interval values to the query
+///   window, so a sub-range would emit truncated start/end coordinates. Because
+///   coordinate filters are pushed down as `Inexact` (DataFusion re-applies
+///   them), scanning the whole chromosome is still correct — it only trades
+///   within-chromosome seek pruning for unclipped intervals.
 pub(crate) fn plan_bbi_scan_regions(
     filters: &[Expr],
     chroms: &[(String, u32)],
     coordinate_system_zero_based: bool,
+    widen_to_chromosome: bool,
 ) -> Vec<BbiScanRegion> {
     let analysis = extract_genomic_regions(filters, coordinate_system_zero_based);
     if analysis.unsatisfiable {
@@ -106,6 +121,24 @@ pub(crate) fn plan_bbi_scan_regions(
         .iter()
         .map(|(chrom, len)| (chrom.as_str(), *len))
         .collect();
+
+    if widen_to_chromosome {
+        // De-duplicate by chromosome so overlapping or OR'd ranges never scan the
+        // same chromosome twice (which would duplicate rows).
+        let mut seen = HashSet::new();
+        return source_regions
+            .into_iter()
+            .filter(|region| seen.insert(region.chrom.clone()))
+            .filter_map(|region| {
+                let length = *chrom_lengths.get(region.chrom.as_str())?;
+                (length > 0).then_some(BbiScanRegion {
+                    chrom: region.chrom,
+                    start: 0,
+                    end: length,
+                })
+            })
+            .collect();
+    }
 
     source_regions
         .into_iter()

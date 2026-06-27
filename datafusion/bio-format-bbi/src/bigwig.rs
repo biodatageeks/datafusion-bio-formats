@@ -103,8 +103,15 @@ impl TableProvider for BigWigTableProvider {
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = project_schema(&self.schema, projection);
-        let regions =
-            plan_bbi_scan_regions(filters, &self.chroms, self.coordinate_system_zero_based);
+        // `widen_to_chromosome = true`: BigWigRead clips interval values to the
+        // query window, so we scan whole chromosomes and let DataFusion's Inexact
+        // re-filter drop surplus rows, rather than emitting clipped coordinates.
+        let regions = plan_bbi_scan_regions(
+            filters,
+            &self.chroms,
+            self.coordinate_system_zero_based,
+            true,
+        );
         Ok(Arc::new(BigWigExec {
             file_path: self.file_path.clone(),
             schema: schema.clone(),
