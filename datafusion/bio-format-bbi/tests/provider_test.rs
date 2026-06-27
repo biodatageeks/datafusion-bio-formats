@@ -7,6 +7,8 @@ use bigtools::bed::bedparser::BedFileStream;
 use bigtools::beddata::BedParserStreamingIterator;
 use bigtools::{BigBedWrite, BigWigWrite};
 use datafusion::arrow::array::{Float32Array, StringArray, UInt32Array, UInt64Array};
+use datafusion::catalog::TableProvider;
+use datafusion::physical_plan::common::collect;
 use datafusion::physical_plan::display::DisplayableExecutionPlan;
 use datafusion::prelude::*;
 use datafusion_bio_format_bbi::bigbed::{BigBedSchemaMode, BigBedTableProvider};
@@ -326,6 +328,86 @@ async fn accepts_file_uri_paths() -> TestResult<()> {
     assert_eq!(rows, 3);
 
     Ok(())
+}
+
+fn write_large_bigwig_fixture(intervals: u32) -> TestResult<NamedTempFile> {
+    std::thread::spawn(move || write_large_bigwig_fixture_inner(intervals))
+        .join()
+        .unwrap()
+}
+
+fn write_large_bigwig_fixture_inner(intervals: u32) -> TestResult<NamedTempFile> {
+    let mut bedgraph = NamedTempFile::new()?;
+    for i in 0..intervals {
+        // Non-overlapping 1bp intervals at positions 0, 2, 4, ...
+        writeln!(bedgraph, "chr1\t{}\t{}\t{}", i * 2, i * 2 + 1, i as f32)?;
+    }
+    bedgraph.flush()?;
+
+    let sizes = HashMap::from([("chr1".to_string(), intervals * 2 + 10)]);
+    let bigwig = NamedTempFile::new()?;
+    let out = BigWigWrite::create_file(bigwig.path(), sizes)?;
+    let input = File::open(bedgraph.path())?;
+    let data = BedParserStreamingIterator::from_bedgraph_file(input, false);
+    out.write(data, runtime())?;
+    Ok(bigwig)
+}
+
+#[tokio::test]
+async fn streams_large_region_in_fixed_size_batches() -> TestResult<()> {
+    // More intervals than one batch holds, so a single (unfiltered) chromosome
+    // region must be emitted as several fixed-size batches rather than buffered
+    // whole.
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    let plan = table.scan(&state, None, &[], None).await?;
+    let stream = plan.execute(0, ctx.task_ctx())?;
+    let batches = collect(stream).await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, intervals as usize);
+    assert!(
+        batches.len() >= 2,
+        "expected multiple fixed-size batches, got {}",
+        batches.len()
+    );
+    assert!(
+        batches.iter().all(|b| b.num_rows() <= 8192),
+        "no batch should exceed the chunk size"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepts_file_localhost_uri_paths() -> TestResult<()> {
+    let fixture = write_bigwig_fixture()?;
+    let uri = format!("file://localhost{}", fixture.path().to_string_lossy());
+    let table = BigWigTableProvider::new(uri, true)?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bw", Arc::new(table))?;
+
+    let df = ctx.sql("SELECT chrom FROM bw").await?;
+    let batches = df.collect().await?;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_remote_host_file_uri() {
+    let result = BigWigTableProvider::new("file://example.com/data/file.bw".to_string(), true);
+    let error = result.expect_err("remote file:// host authority must be rejected");
+    assert!(
+        error.to_string().contains("remote file:// URIs"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test]

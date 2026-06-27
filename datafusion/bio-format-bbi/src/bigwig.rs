@@ -6,8 +6,8 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bigtools::BigWigRead;
 use bigtools::utils::reopen::ReopenableFile;
+use bigtools::{BigWigIntervalIter, BigWigRead};
 use datafusion::arrow::array::{ArrayRef, Float32Array, RecordBatch, StringArray, UInt32Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
@@ -24,8 +24,8 @@ use datafusion_bio_format_core::genomic_filter::is_genomic_coordinate_filter;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 
 use crate::common::{
-    BbiScanRegion, build_batch, normalize_local_path, plan_bbi_scan_regions, project_schema,
-    projected_indices, projection_display, region_display, to_external_error,
+    BBI_BATCH_ROWS, BbiScanRegion, build_batch, normalize_local_path, plan_bbi_scan_regions,
+    project_schema, projected_indices, projection_display, region_display, to_external_error,
 };
 
 /// Table provider for local BigWig files.
@@ -179,21 +179,16 @@ impl ExecutionPlan for BigWigExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let reader = BigWigRead::open_file(&self.file_path).map_err(|error| {
-            DataFusionError::External(Box::new(std::io::Error::other(format!(
-                "Failed to open BigWig file '{}': {error}",
-                self.file_path
-            ))))
-        })?;
-        // Emit one RecordBatch per scan region (one per chromosome when there is
-        // no genomic filter) so memory stays bounded by a single region instead
-        // of materializing the whole file up front.
+        // The stream opens a reader per region and pulls intervals in fixed-size
+        // chunks, so peak memory stays bounded by one batch (never a whole
+        // chromosome) and LIMIT/COUNT queries can stop early.
         let stream = futures_util::stream::iter(BigWigRegionStream {
-            reader,
+            file_path: self.file_path.clone(),
             schema: self.schema.clone(),
             projection: self.projection.clone(),
             regions: self.regions.clone().into_iter(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
+            current: None,
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema.clone(),
@@ -202,39 +197,55 @@ impl ExecutionPlan for BigWigExec {
     }
 }
 
-/// Lazily yields one [`RecordBatch`] per scan region from an open BigWig reader.
+/// An open interval iterator for the region currently being streamed.
+struct CurrentRegion {
+    chrom: String,
+    iter: BigWigIntervalIter<ReopenableFile, BigWigRead<ReopenableFile>>,
+}
+
+/// Lazily yields fixed-size [`RecordBatch`]es across all scan regions, opening a
+/// fresh reader per region and never buffering more than one batch at a time.
 struct BigWigRegionStream {
-    reader: BigWigRead<ReopenableFile>,
+    file_path: String,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
     regions: std::vec::IntoIter<BbiScanRegion>,
     coordinate_system_zero_based: bool,
+    current: Option<CurrentRegion>,
 }
 
 impl BigWigRegionStream {
-    fn build_region_batch(&mut self, region: &BbiScanRegion) -> Result<RecordBatch> {
-        let iter = self
-            .reader
-            .get_interval(&region.chrom, region.start, region.end)
-            .map_err(to_external_error)?;
-
-        let mut rows = Vec::new();
-        for value in iter {
-            let value = value.map_err(to_external_error)?;
-            let start = if self.coordinate_system_zero_based {
-                value.start
-            } else {
-                value.start + 1
-            };
-            rows.push((start, value.end, value.value));
+    /// Open the next region's interval iterator, or return `None` when all
+    /// regions are exhausted.
+    fn open_next_region(&mut self) -> Option<Result<CurrentRegion>> {
+        let region = self.regions.next()?;
+        let reader = match BigWigRead::open_file(&self.file_path) {
+            Ok(reader) => reader,
+            Err(error) => {
+                return Some(Err(DataFusionError::External(Box::new(
+                    std::io::Error::other(format!(
+                        "Failed to open BigWig file '{}': {error}",
+                        self.file_path
+                    )),
+                ))));
+            }
+        };
+        match reader.get_interval_move(&region.chrom, region.start, region.end) {
+            Ok(iter) => Some(Ok(CurrentRegion {
+                chrom: region.chrom,
+                iter,
+            })),
+            Err(error) => Some(Err(to_external_error(error))),
         }
+    }
 
+    fn build_batch(&self, chrom: &str, rows: &[(u32, u32, f32)]) -> Result<RecordBatch> {
         let row_count = rows.len();
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
         for index in projected_indices(self.projection.as_deref(), 4) {
             match index {
                 0 => arrays.push(Arc::new(StringArray::from_iter_values(
-                    std::iter::repeat_n(region.chrom.as_str(), row_count),
+                    std::iter::repeat_n(chrom, row_count),
                 ))),
                 1 => arrays.push(Arc::new(UInt32Array::from_iter_values(
                     rows.iter().map(|row| row.0),
@@ -248,7 +259,6 @@ impl BigWigRegionStream {
                 _ => unreachable!("BigWig projection contains invalid column index"),
             }
         }
-
         build_batch(self.schema.clone(), arrays, row_count)
     }
 }
@@ -257,8 +267,41 @@ impl Iterator for BigWigRegionStream {
     type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let region = self.regions.next()?;
-        Some(self.build_region_batch(&region))
+        loop {
+            if self.current.is_none() {
+                match self.open_next_region()? {
+                    Ok(region) => self.current = Some(region),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+
+            let current = self.current.as_mut().expect("current region is set");
+            let mut rows: Vec<(u32, u32, f32)> = Vec::with_capacity(BBI_BATCH_ROWS);
+            for value in current.iter.by_ref() {
+                let value = match value {
+                    Ok(value) => value,
+                    Err(error) => return Some(Err(to_external_error(error))),
+                };
+                let start = if self.coordinate_system_zero_based {
+                    value.start
+                } else {
+                    value.start + 1
+                };
+                rows.push((start, value.end, value.value));
+                if rows.len() >= BBI_BATCH_ROWS {
+                    break;
+                }
+            }
+
+            if rows.is_empty() {
+                // Region fully drained; advance to the next one.
+                self.current = None;
+                continue;
+            }
+
+            let chrom = current.chrom.clone();
+            return Some(self.build_batch(&chrom, &rows));
+        }
     }
 }
 

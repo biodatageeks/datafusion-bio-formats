@@ -15,7 +15,6 @@ async-trait.workspace = true
 datafusion-bio-format-core = { path = "../bio-format-core" }
 bigtools = { version = "0.5.8", default-features = false, features = ["read"] }
 futures-util.workspace = true
-log.workspace = true
 
 [dev-dependencies]
 bigtools = { version = "0.5.8", default-features = false, features = ["read", "write"] }

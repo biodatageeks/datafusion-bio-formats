@@ -1179,7 +1179,6 @@ dependencies = [
  "datafusion",
  "datafusion-bio-format-core",
  "futures-util",
- "log",
  "tempfile",
  "tokio",
 ]

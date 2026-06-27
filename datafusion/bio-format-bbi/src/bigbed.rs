@@ -6,9 +6,9 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use bigtools::BigBedRead;
 use bigtools::bed::autosql::parse::{FieldType, parse_autosql};
 use bigtools::utils::reopen::ReopenableFile;
+use bigtools::{BigBedIntervalIter, BigBedRead};
 use datafusion::arrow::array::{
     ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
@@ -27,8 +27,8 @@ use datafusion_bio_format_core::genomic_filter::is_genomic_coordinate_filter;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 
 use crate::common::{
-    BbiScanRegion, build_batch, normalize_local_path, plan_bbi_scan_regions, project_schema,
-    projected_indices, projection_display, region_display, to_external_error,
+    BBI_BATCH_ROWS, BbiScanRegion, build_batch, normalize_local_path, plan_bbi_scan_regions,
+    project_schema, projected_indices, projection_display, region_display, to_external_error,
 };
 
 /// BigBed schema discovery mode.
@@ -236,27 +236,22 @@ impl ExecutionPlan for BigBedExec {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let reader = BigBedRead::open_file(&self.file_path).map_err(|error| {
-            DataFusionError::External(Box::new(std::io::Error::other(format!(
-                "Failed to open BigBed file '{}': {error}",
-                self.file_path
-            ))))
-        })?;
-        // Emit one RecordBatch per scan region (one per chromosome when there is
-        // no genomic filter) so memory stays bounded by a single region instead
-        // of materializing the whole file up front.
+        // The stream opens a reader per region and pulls intervals in fixed-size
+        // chunks, so peak memory stays bounded by one batch (never a whole
+        // chromosome) and LIMIT/COUNT queries can stop early.
         let needs_split_fields = self
             .extra_columns
             .iter()
             .any(BigBedExtraColumn::needs_split_fields);
         let stream = futures_util::stream::iter(BigBedRegionStream {
-            reader,
+            file_path: self.file_path.clone(),
             schema: self.schema.clone(),
             projection: self.projection.clone(),
             regions: self.regions.clone().into_iter(),
             extra_columns: self.extra_columns.clone(),
             needs_split_fields,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
+            current: None,
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema.clone(),
@@ -276,48 +271,51 @@ struct BigBedRow {
     fields: Vec<String>,
 }
 
-/// Lazily yields one [`RecordBatch`] per scan region from an open BigBed reader.
+/// An open interval iterator for the region currently being streamed.
+struct CurrentRegion {
+    chrom: String,
+    iter: BigBedIntervalIter<ReopenableFile, BigBedRead<ReopenableFile>>,
+}
+
+/// Lazily yields fixed-size [`RecordBatch`]es across all scan regions, opening a
+/// fresh reader per region and never buffering more than one batch at a time.
 struct BigBedRegionStream {
-    reader: BigBedRead<ReopenableFile>,
+    file_path: String,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
     regions: std::vec::IntoIter<BbiScanRegion>,
     extra_columns: Vec<BigBedExtraColumn>,
     needs_split_fields: bool,
     coordinate_system_zero_based: bool,
+    current: Option<CurrentRegion>,
 }
 
 impl BigBedRegionStream {
-    fn build_region_batch(&mut self, region: &BbiScanRegion) -> Result<RecordBatch> {
-        let iter = self
-            .reader
-            .get_interval(&region.chrom, region.start, region.end)
-            .map_err(to_external_error)?;
-
-        let mut rows = Vec::new();
-        for entry in iter {
-            let entry = entry.map_err(to_external_error)?;
-            let start = if self.coordinate_system_zero_based {
-                entry.start
-            } else {
-                entry.start + 1
-            };
-            // Only allocate the split-field view or the `rest` string when a
-            // column actually consumes it; the other is left empty.
-            let fields = if self.needs_split_fields {
-                entry.rest.split('\t').map(ToString::to_string).collect()
-            } else {
-                Vec::new()
-            };
-            rows.push(BigBedRow {
-                chrom: region.chrom.clone(),
-                start,
-                end: entry.end,
-                rest: entry.rest,
-                fields,
-            });
+    /// Open the next region's interval iterator, or return `None` when all
+    /// regions are exhausted.
+    fn open_next_region(&mut self) -> Option<Result<CurrentRegion>> {
+        let region = self.regions.next()?;
+        let reader = match BigBedRead::open_file(&self.file_path) {
+            Ok(reader) => reader,
+            Err(error) => {
+                return Some(Err(DataFusionError::External(Box::new(
+                    std::io::Error::other(format!(
+                        "Failed to open BigBed file '{}': {error}",
+                        self.file_path
+                    )),
+                ))));
+            }
+        };
+        match reader.get_interval_move(&region.chrom, region.start, region.end) {
+            Ok(iter) => Some(Ok(CurrentRegion {
+                chrom: region.chrom,
+                iter,
+            })),
+            Err(error) => Some(Err(to_external_error(error))),
         }
+    }
 
+    fn build_batch(&self, rows: &[BigBedRow]) -> Result<RecordBatch> {
         let row_count = rows.len();
         let full_width = 3 + self.extra_columns.len();
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
@@ -332,10 +330,9 @@ impl BigBedRegionStream {
                 2 => arrays.push(Arc::new(UInt32Array::from_iter_values(
                     rows.iter().map(|row| row.end),
                 ))),
-                index => arrays.push(build_extra_array(&rows, &self.extra_columns[index - 3])?),
+                index => arrays.push(build_extra_array(rows, &self.extra_columns[index - 3])?),
             }
         }
-
         build_batch(self.schema.clone(), arrays, row_count)
     }
 }
@@ -344,11 +341,62 @@ impl Iterator for BigBedRegionStream {
     type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let region = self.regions.next()?;
-        Some(self.build_region_batch(&region))
+        loop {
+            if self.current.is_none() {
+                match self.open_next_region()? {
+                    Ok(region) => self.current = Some(region),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+
+            let current = self.current.as_mut().expect("current region is set");
+            let mut rows: Vec<BigBedRow> = Vec::with_capacity(BBI_BATCH_ROWS);
+            for entry in current.iter.by_ref() {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => return Some(Err(to_external_error(error))),
+                };
+                let start = if self.coordinate_system_zero_based {
+                    entry.start
+                } else {
+                    entry.start + 1
+                };
+                // Only allocate the split-field view or the `rest` string when a
+                // column actually consumes it; the other is left empty.
+                let fields = if self.needs_split_fields {
+                    entry.rest.split('\t').map(ToString::to_string).collect()
+                } else {
+                    Vec::new()
+                };
+                rows.push(BigBedRow {
+                    chrom: current.chrom.clone(),
+                    start,
+                    end: entry.end,
+                    rest: entry.rest,
+                    fields,
+                });
+                if rows.len() >= BBI_BATCH_ROWS {
+                    break;
+                }
+            }
+
+            if rows.is_empty() {
+                // Region fully drained; advance to the next one.
+                self.current = None;
+                continue;
+            }
+
+            return Some(self.build_batch(&rows));
+        }
     }
 }
 
+/// Build an Arrow array for one autoSQL-derived extra column.
+///
+/// A row whose trailing field is absent (the record has fewer tab-separated
+/// fields than the autoSQL declaration) yields a null rather than an error:
+/// BED allows optional trailing fields, the columns are declared nullable, and
+/// pushdown is `Inexact` so DataFusion re-applies predicates above the scan.
 fn build_extra_array(rows: &[BigBedRow], column: &BigBedExtraColumn) -> Result<ArrayRef> {
     match column {
         BigBedExtraColumn::Utf8 { rest_index, .. } => Ok(Arc::new(StringArray::from(

@@ -13,6 +13,13 @@ use datafusion::common::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
 use datafusion_bio_format_core::genomic_filter::{GenomicRegion, extract_genomic_regions};
 
+/// Maximum number of rows emitted per [`RecordBatch`] while streaming a region.
+///
+/// Region iterators are pulled in chunks of this size so peak memory stays
+/// bounded (a whole chromosome is never buffered) and `LIMIT`/`COUNT` queries
+/// can stop early instead of reading the entire region.
+pub(crate) const BBI_BATCH_ROWS: usize = 8192;
+
 /// Native BBI interval query region in 0-based half-open coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BbiScanRegion {
@@ -142,9 +149,22 @@ pub(crate) fn region_display(regions: &[BbiScanRegion]) -> String {
 /// `BigWigRead`/`BigBedRead` open plain paths rather than URIs.
 pub(crate) fn normalize_local_path(path: &str, format_name: &str) -> Result<String> {
     if let Some(rest) = path.strip_prefix("file://") {
-        // Accept `file:///abs/path` and the optional `file://localhost/abs/path`
-        // authority form, both of which map to a local filesystem path.
-        let local = rest.strip_prefix("localhost").unwrap_or(rest);
+        // Per RFC 8089 the authority must be empty or `localhost` for a local
+        // path: `file:///abs/path` or `file://localhost/abs/path`. A non-empty,
+        // non-`localhost` authority names a remote host and is unsupported.
+        let local = if rest.starts_with('/') {
+            rest
+        } else if let Some(after_host) = rest.strip_prefix("localhost") {
+            // Keep `after_host`'s leading slash so the result stays absolute.
+            // Reject `localhostfoo/...` (authority that merely starts with it).
+            if after_host.is_empty() || after_host.starts_with('/') {
+                after_host
+            } else {
+                return Err(remote_host_error(format_name));
+            }
+        } else {
+            return Err(remote_host_error(format_name));
+        };
         return Ok(local.to_string());
     }
     if path.contains("://") {
@@ -153,4 +173,10 @@ pub(crate) fn normalize_local_path(path: &str, format_name: &str) -> Result<Stri
         )));
     }
     Ok(path.to_string())
+}
+
+fn remote_host_error(format_name: &str) -> DataFusionError {
+    DataFusionError::NotImplemented(format!(
+        "{format_name} does not support remote file:// URIs with a host authority"
+    ))
 }
