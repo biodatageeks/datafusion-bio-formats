@@ -4,7 +4,7 @@
 //! genomic-region planning, path validation) and are reused by both
 //! [`crate::bigwig`] and [`crate::bigbed`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, RecordBatch, RecordBatchOptions};
@@ -26,6 +26,14 @@ pub(crate) struct BbiScanRegion {
     pub(crate) chrom: String,
     pub(crate) start: u32,
     pub(crate) end: u32,
+    /// Exclusive upper bound on interval `start` for early termination, in the
+    /// same 0-based coordinate space as the native interval `start`. `None`
+    /// means "no upper bound — drain the whole region".
+    ///
+    /// Used only by the BigWig provider: it scans whole chromosomes to avoid
+    /// coordinate clipping, but the streamed intervals are start-sorted, so it
+    /// can stop as soon as `start >= stop_at` rather than reading to the end.
+    pub(crate) stop_at: Option<u32>,
 }
 
 pub(crate) fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -76,10 +84,25 @@ pub(crate) fn projection_display(schema: &SchemaRef) -> String {
     }
 }
 
+/// Plan the native interval-query regions for a BBI scan.
+///
+/// `widen_to_chromosome` controls how a positional coordinate filter is turned
+/// into a query window:
+///
+/// * `false` (BigBed) — honor the filter's start/end bounds. `BigBedRead`
+///   returns full BED entries that *overlap* the window, so narrowing the window
+///   prunes work without altering the emitted coordinates.
+/// * `true` (BigWig) — ignore the positional bounds and scan each matched
+///   chromosome in full. `BigWigRead` *clips* interval values to the query
+///   window, so a sub-range would emit truncated start/end coordinates. Because
+///   coordinate filters are pushed down as `Inexact` (DataFusion re-applies
+///   them), scanning the whole chromosome is still correct — it only trades
+///   within-chromosome seek pruning for unclipped intervals.
 pub(crate) fn plan_bbi_scan_regions(
     filters: &[Expr],
     chroms: &[(String, u32)],
     coordinate_system_zero_based: bool,
+    widen_to_chromosome: bool,
 ) -> Vec<BbiScanRegion> {
     let analysis = extract_genomic_regions(filters, coordinate_system_zero_based);
     if analysis.unsatisfiable {
@@ -107,6 +130,31 @@ pub(crate) fn plan_bbi_scan_regions(
         .map(|(chrom, len)| (chrom.as_str(), *len))
         .collect();
 
+    if widen_to_chromosome {
+        // De-duplicate by chromosome so overlapping or OR'd ranges never scan the
+        // same chromosome twice (which would duplicate rows).
+        let mut seen = HashSet::new();
+        return source_regions
+            .into_iter()
+            .filter(|region| seen.insert(region.chrom.clone()))
+            .filter_map(|region| {
+                let length = *chrom_lengths.get(region.chrom.as_str())?;
+                // Scan the whole chromosome (so intervals are never clipped) but
+                // remember the filter's upper bound: `region.end` is 1-based
+                // inclusive, which equals the 0-based exclusive bound on `start`,
+                // letting the start-sorted stream stop early. `None` (no upper
+                // bound) means drain the whole chromosome.
+                let stop_at = region.end.map(|end| end.min(length as u64) as u32);
+                (length > 0).then_some(BbiScanRegion {
+                    chrom: region.chrom,
+                    start: 0,
+                    end: length,
+                    stop_at,
+                })
+            })
+            .collect();
+    }
+
     source_regions
         .into_iter()
         .filter_map(|region| convert_genomic_region_to_bbi(region, &chrom_lengths))
@@ -127,10 +175,13 @@ fn convert_genomic_region_to_bbi(
         .map(|end| end.min(length as u64) as u32)
         .unwrap_or(length);
 
+    // The narrow (BigBed) path bounds the scan with the query window itself, so
+    // it needs no separate early-termination cursor.
     (start < end).then_some(BbiScanRegion {
         chrom: region.chrom,
         start,
         end,
+        stop_at: None,
     })
 }
 

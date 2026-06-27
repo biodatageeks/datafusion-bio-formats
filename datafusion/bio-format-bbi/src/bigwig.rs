@@ -103,8 +103,15 @@ impl TableProvider for BigWigTableProvider {
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = project_schema(&self.schema, projection);
-        let regions =
-            plan_bbi_scan_regions(filters, &self.chroms, self.coordinate_system_zero_based);
+        // `widen_to_chromosome = true`: BigWigRead clips interval values to the
+        // query window, so we scan whole chromosomes and let DataFusion's Inexact
+        // re-filter drop surplus rows, rather than emitting clipped coordinates.
+        let regions = plan_bbi_scan_regions(
+            filters,
+            &self.chroms,
+            self.coordinate_system_zero_based,
+            true,
+        );
         Ok(Arc::new(BigWigExec {
             file_path: self.file_path.clone(),
             schema: schema.clone(),
@@ -201,6 +208,9 @@ impl ExecutionPlan for BigWigExec {
 struct CurrentRegion {
     chrom: String,
     iter: BigWigIntervalIter<ReopenableFile, BigWigRead<ReopenableFile>>,
+    /// Exclusive upper bound on `start`; once an interval reaches it the
+    /// (start-sorted) region is done and we stop reading further blocks.
+    stop_at: Option<u32>,
 }
 
 /// Lazily yields fixed-size [`RecordBatch`]es across all scan regions, opening a
@@ -234,6 +244,7 @@ impl BigWigRegionStream {
             Ok(iter) => Some(Ok(CurrentRegion {
                 chrom: region.chrom,
                 iter,
+                stop_at: region.stop_at,
             })),
             Err(error) => Some(Err(to_external_error(error))),
         }
@@ -276,12 +287,25 @@ impl Iterator for BigWigRegionStream {
             }
 
             let current = self.current.as_mut().expect("current region is set");
+            // Copied out before the loop so the loop only borrows `current.iter`,
+            // leaving `self.current` free to clear on early termination.
+            let stop_at = current.stop_at;
+            let chrom = current.chrom.clone();
             let mut rows: Vec<(u32, u32, f32)> = Vec::with_capacity(BBI_BATCH_ROWS);
+            let mut region_done = false;
             for value in current.iter.by_ref() {
                 let value = match value {
                     Ok(value) => value,
                     Err(error) => return Some(Err(to_external_error(error))),
                 };
+                // Intervals stream in ascending `start`, so once one reaches the
+                // upper bound nothing further in this region can match: stop.
+                if let Some(stop_at) = stop_at
+                    && value.start >= stop_at
+                {
+                    region_done = true;
+                    break;
+                }
                 let start = if self.coordinate_system_zero_based {
                     value.start
                 } else {
@@ -293,13 +317,17 @@ impl Iterator for BigWigRegionStream {
                 }
             }
 
+            if region_done {
+                // No more matching rows in this region — don't reopen it.
+                self.current = None;
+            }
+
             if rows.is_empty() {
-                // Region fully drained; advance to the next one.
+                // Region drained (or stopped with nothing buffered); advance.
                 self.current = None;
                 continue;
             }
 
-            let chrom = current.chrom.clone();
             return Some(self.build_batch(&chrom, &rows));
         }
     }

@@ -173,9 +173,57 @@ async fn pushes_bigwig_genomic_filter_into_scan_regions() -> TestResult<()> {
         plan_text.contains("BigWigExec"),
         "expected BigWigExec in plan:\n{plan_text}"
     );
+    // BigWig prunes by chromosome but scans it in full: BigWigRead clips interval
+    // values to the query window, so a positional sub-range (e.g. chr2:0-10)
+    // would emit truncated coordinates. The Inexact pushdown lets DataFusion
+    // re-apply `start < 10` after the unclipped scan.
     assert!(
-        plan_text.contains("regions=[chr2:0-10]"),
-        "expected chr2 interval pruning in plan:\n{plan_text}"
+        plan_text.contains("regions=[chr2:0-100]"),
+        "expected chr2 to be scanned in full:\n{plan_text}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_genomic_filter_returns_unclipped_intervals() -> TestResult<()> {
+    // Regression: a `start < N` filter must not clip the emitted interval `end`.
+    // The chr2 interval is [5, 12); filtering `start < 10` must still return
+    // end = 12, not 10 (the filter bound / clipped window edge).
+    let fixture = write_bigwig_fixture()?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("bw", Arc::new(table))?;
+
+    let df = ctx
+        .sql("SELECT chrom, start, \"end\", value FROM bw WHERE chrom = 'chr2' AND start < 10")
+        .await?;
+    let batches = df.collect().await?;
+
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    let batch = &batches[0];
+    let chrom = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let start = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    let end = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert_eq!(chrom.value(0), "chr2");
+    assert_eq!(start.value(0), 5);
+    assert_eq!(
+        end.value(0),
+        12,
+        "interval end must be the true 12, not clipped to the filter bound"
     );
 
     Ok(())
@@ -378,6 +426,101 @@ async fn streams_large_region_in_fixed_size_batches() -> TestResult<()> {
     assert!(
         batches.iter().all(|b| b.num_rows() <= 8192),
         "no batch should exceed the chunk size"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_early_terminates_at_upper_bound() -> TestResult<()> {
+    // 20k intervals at starts 0, 2, 4, ...; a `start < 100` upper bound must stop
+    // the scan after the 50 matching rows instead of streaming the whole
+    // chromosome. The exec applies only the early-stop cursor (DataFusion
+    // re-applies the predicate above it), so observing 50 rows here — not
+    // 20_000 — proves the scan terminated early rather than read-then-filtered.
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    // A chrom predicate is required for the region's upper bound to be extracted.
+    let filter = col("chrom")
+        .eq(lit("chr1"))
+        .and(col("start").lt(lit(100u32)));
+    let plan = table.scan(&state, None, &[filter], None).await?;
+    let stream = plan.execute(0, ctx.task_ctx())?;
+    let batches = collect(stream).await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, 50,
+        "early termination should emit only the matching prefix, not the whole chromosome"
+    );
+    assert_eq!(
+        batches.len(),
+        1,
+        "50 rows fit in a single batch; a full scan would emit many"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_early_termination_spans_multiple_batches() -> TestResult<()> {
+    // `start < 20_000` matches the first 10_000 intervals (starts 0..19_998),
+    // which is more than one 8_192-row batch — verifying the stop cursor fires
+    // mid-stream across batch boundaries, not only within the first batch.
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    let filter = col("chrom")
+        .eq(lit("chr1"))
+        .and(col("start").lt(lit(20_000u32)));
+    let plan = table.scan(&state, None, &[filter], None).await?;
+    let stream = plan.execute(0, ctx.task_ctx())?;
+    let batches = collect(stream).await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, 10_000,
+        "should stop after the 10_000 matching intervals, not read all 20_000"
+    );
+    assert!(
+        batches.len() >= 2,
+        "10_000 rows must span multiple fixed-size batches, got {}",
+        batches.len()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_lower_bound_only_scans_whole_chromosome() -> TestResult<()> {
+    // A lower bound alone (`start > 100`) has no upper bound to stop at, and a
+    // safe left seek isn't possible (it would clip the straddling interval), so
+    // the scan must read the whole chromosome and let DataFusion filter. Guards
+    // against accidentally deriving a stop cursor from the lower bound.
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = SessionContext::new();
+    let state = ctx.state();
+    let filter = col("chrom")
+        .eq(lit("chr1"))
+        .and(col("start").gt(lit(100u32)));
+    let plan = table.scan(&state, None, &[filter], None).await?;
+    let stream = plan.execute(0, ctx.task_ctx())?;
+    let batches = collect(stream).await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total, intervals as usize,
+        "lower-bound-only filters must not early-terminate"
     );
 
     Ok(())

@@ -158,8 +158,14 @@ impl TableProvider for BigBedTableProvider {
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = project_schema(&self.schema, projection);
-        let regions =
-            plan_bbi_scan_regions(filters, &self.chroms, self.coordinate_system_zero_based);
+        // `widen_to_chromosome = false`: BigBedRead returns full overlapping BED
+        // entries (coordinates are never clipped), so positional pruning is safe.
+        let regions = plan_bbi_scan_regions(
+            filters,
+            &self.chroms,
+            self.coordinate_system_zero_based,
+            false,
+        );
         Ok(Arc::new(BigBedExec {
             file_path: self.file_path.clone(),
             schema: schema.clone(),
