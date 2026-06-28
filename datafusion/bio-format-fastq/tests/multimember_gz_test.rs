@@ -44,3 +44,19 @@ async fn test_multimember_gz_split_record_boundary_reads_all_members() {
         "must not lose data or crash on a mid-record gzip member boundary"
     );
 }
+
+// Real tool-produced multi-member gzip: four pigz members concatenated
+// (the `cat lane1.fastq.gz lane2.fastq.gz ...` pattern), 500 reads each.
+// Pre-fix: returns only the first member (500). Post-fix: 2000.
+#[tokio::test]
+async fn test_multimember_gz_pigz_concatenated_reads_all_members() {
+    let path = format!(
+        "{}/data/multimember_pigz.fastq.gz",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    assert_eq!(
+        count_reads(path).await,
+        2000,
+        "must decode all pigz members of a concatenated gzip stream"
+    );
+}

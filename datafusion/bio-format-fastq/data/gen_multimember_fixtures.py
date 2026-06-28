@@ -12,7 +12,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 reads = [f"@read{i} simulated\n{SEQ}\n+\n{QUAL}\n" for i in range(N)]
 plain = "".join(reads).encode()
-open(os.path.join(HERE, "multimember.fastq"), "wb").write(plain)
 
 # (1) clean: member boundary BETWEEN records -> pre-fix returns only first member (40)
 cut_clean = plain.index(b"@read40")
@@ -24,4 +23,22 @@ cut_mid = plain.index(b"@read40") + len(b"@read40 simulated\nACGTAC")
 open(os.path.join(HERE, "multimember_split.fastq.gz"), "wb").write(
     gzip.compress(plain[:cut_mid]) + gzip.compress(plain[cut_mid:]))
 
-print(f"wrote fixtures with {N} reads")
+# (3) real tool-produced multi-member gzip: concatenate pigz-compressed, record-aligned
+# chunks -- mirrors the common `cat lane1.fastq.gz lane2.fastq.gz ...` pattern.
+# pigz -n strips name/mtime for reproducible bytes. Requires pigz on PATH; skipped otherwise.
+import shutil, subprocess
+if shutil.which("pigz"):
+    PIGZ_N = 2000          # reads in the pigz fixture
+    PIGZ_CHUNKS = 4        # -> 4 gzip members of 500 reads each
+    preads = [f"@read{i} simulated\n{SEQ}\n+\n{QUAL}\n" for i in range(PIGZ_N)]
+    per = PIGZ_N // PIGZ_CHUNKS
+    with open(os.path.join(HERE, "multimember_pigz.fastq.gz"), "wb") as out:
+        for k in range(PIGZ_CHUNKS):
+            chunk = "".join(preads[k * per:(k + 1) * per]).encode()
+            out.write(subprocess.run(["pigz", "-n", "-c"], input=chunk,
+                                     capture_output=True, check=True).stdout)
+    print(f"wrote multimember_pigz.fastq.gz ({PIGZ_CHUNKS} pigz members, {PIGZ_N} reads)")
+else:
+    print("pigz not found -- skipped multimember_pigz.fastq.gz (committed binary is used by tests)")
+
+print(f"wrote synthetic fixtures with {N} reads")
