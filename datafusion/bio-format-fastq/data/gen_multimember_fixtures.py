@@ -14,14 +14,15 @@ reads = [f"@read{i} simulated\n{SEQ}\n+\n{QUAL}\n" for i in range(N)]
 plain = "".join(reads).encode()
 
 # (1) clean: member boundary BETWEEN records -> pre-fix returns only first member (40)
+# mtime=0 keeps the bytes reproducible across runs.
 cut_clean = plain.index(b"@read40")
 open(os.path.join(HERE, "multimember_clean.fastq.gz"), "wb").write(
-    gzip.compress(plain[:cut_clean]) + gzip.compress(plain[cut_clean:]))
+    gzip.compress(plain[:cut_clean], mtime=0) + gzip.compress(plain[cut_clean:], mtime=0))
 
 # (2) split: member boundary MID-RECORD (inside read40 sequence) -> pre-fix CRASHES (UnexpectedEof)
 cut_mid = plain.index(b"@read40") + len(b"@read40 simulated\nACGTAC")
 open(os.path.join(HERE, "multimember_split.fastq.gz"), "wb").write(
-    gzip.compress(plain[:cut_mid]) + gzip.compress(plain[cut_mid:]))
+    gzip.compress(plain[:cut_mid], mtime=0) + gzip.compress(plain[cut_mid:], mtime=0))
 
 # (3) real tool-produced multi-member gzip: concatenate pigz-compressed, record-aligned
 # chunks -- mirrors the common `cat lane1.fastq.gz lane2.fastq.gz ...` pattern.
