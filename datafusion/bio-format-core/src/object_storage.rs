@@ -308,7 +308,7 @@ pub async fn get_remote_stream_gz_async(
     let remote_stream = StreamReader::new(
         get_remote_stream(file_path.clone(), object_storage_options, None).await?,
     );
-    Ok(GzipDecoder::new(remote_stream))
+    Ok(gzip_multi_member_decoder(remote_stream))
 }
 
 /// Determines the storage type from a file path or URL
