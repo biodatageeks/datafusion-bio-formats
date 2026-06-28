@@ -270,6 +270,20 @@ pub async fn get_remote_stream_bgzf_async(
     Ok(bgzf::AsyncReader::new(remote_stream))
 }
 
+/// Builds a gzip decoder that decodes **all** members of a multi-member
+/// (concatenated / block) gzip stream, not just the first one.
+///
+/// `async_compression`'s `GzipDecoder` stops after the first gzip member by
+/// default; for block-gzip files (e.g. produced by pigz, bgzip-as-gzip, fastp)
+/// this silently drops every member after the first, and crashes with
+/// `UnexpectedEof` when the first member's bytes end in the middle of a record.
+/// Enabling `multiple_members(true)` makes it consume every member.
+pub fn gzip_multi_member_decoder<R: tokio::io::AsyncBufRead>(inner: R) -> GzipDecoder<R> {
+    let mut decoder = GzipDecoder::new(inner);
+    decoder.multiple_members(true);
+    decoder
+}
+
 /// Creates a GZIP-decompressing async reader for a remote file
 ///
 /// # Arguments
@@ -294,7 +308,7 @@ pub async fn get_remote_stream_gz_async(
     let remote_stream = StreamReader::new(
         get_remote_stream(file_path.clone(), object_storage_options, None).await?,
     );
-    Ok(GzipDecoder::new(remote_stream))
+    Ok(gzip_multi_member_decoder(remote_stream))
 }
 
 /// Determines the storage type from a file path or URL
@@ -638,5 +652,31 @@ pub async fn get_remote_stream(
             }
         }
         _ => panic!("Invalid object storage type"),
+    }
+}
+
+#[cfg(test)]
+mod multimember_tests {
+    use super::gzip_multi_member_decoder;
+    use tokio::io::AsyncReadExt;
+
+    fn gz(bytes: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(bytes).unwrap();
+        e.finish().unwrap()
+    }
+
+    #[tokio::test]
+    async fn decodes_all_concatenated_gzip_members() {
+        // two gzip members concatenated -> "hello" + "world"
+        let mut data = gz(b"hello");
+        data.extend(gz(b"world"));
+
+        let cursor = std::io::Cursor::new(data);
+        let mut decoder = gzip_multi_member_decoder(tokio::io::BufReader::new(cursor));
+        let mut out = String::new();
+        decoder.read_to_string(&mut out).await.unwrap();
+        assert_eq!(out, "helloworld");
     }
 }

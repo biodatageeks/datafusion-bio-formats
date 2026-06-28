@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- FASTQ gzip reader now decodes all members of multi-member (concatenated /
+  block) gzip files (pigz, bgzip-as-gzip, fastp, etc.). Previously only the first
+  gzip member was read, causing silent truncation or an `UnexpectedEof` crash
+  depending on where the member boundary fell. Covers local and remote gz paths.
+
 ### Added
 
+- `gzip_multi_member_decoder` helper in `bio-format-core` for multi-member gzip decoding
 - CRAM file format support with reference-based compression
 - FASTA file format support for biological sequences
 - GFF file format support for genome annotations
