@@ -6,7 +6,8 @@ use std::sync::Arc;
 use bigtools::bed::bedparser::BedFileStream;
 use bigtools::beddata::BedParserStreamingIterator;
 use bigtools::{BigBedWrite, BigWigWrite};
-use datafusion::arrow::array::{Float32Array, StringArray, UInt32Array, UInt64Array};
+use datafusion::arrow::array::{Float32Array, Int64Array, StringArray, UInt32Array, UInt64Array};
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
 use datafusion::physical_plan::common::collect;
 use datafusion::physical_plan::display::DisplayableExecutionPlan;
@@ -609,11 +610,11 @@ async fn pushes_bigbed_genomic_filter_into_scan_regions() -> TestResult<()> {
 // COUNT(*) / empty-projection smoke tests — verify the BBI providers handle
 // the zero-column projection consistently (audit follow-up to #208).
 
-fn count_star_value(batch: &datafusion::arrow::record_batch::RecordBatch) -> i64 {
+fn count_star_value(batch: &RecordBatch) -> i64 {
     batch
         .column(0)
         .as_any()
-        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap()
         .value(0)
 }
