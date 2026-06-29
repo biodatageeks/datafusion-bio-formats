@@ -115,7 +115,7 @@ mod tests {
         Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, false),
             Field::new("description", DataType::Utf8, true),
-            Field::new("sequence", DataType::Utf8, false),
+            Field::new("sequence", DataType::LargeUtf8, false),
         ]))
     }
 
@@ -125,7 +125,7 @@ mod tests {
 
         let names = StringArray::from(vec!["seq1", "seq2"]);
         let descriptions = StringArray::from(vec![Some("protein A"), None]);
-        let sequences = StringArray::from(vec!["ACGT", "TGCA"]);
+        let sequences = LargeStringArray::from(vec!["ACGT", "TGCA"]);
 
         let batch = RecordBatch::try_new(
             schema,
@@ -151,7 +151,7 @@ mod tests {
 
         let names = StringArray::from(vec!["seq1"]);
         let descriptions = StringArray::from(vec![Some("")]);
-        let sequences = StringArray::from(vec!["ACGT"]);
+        let sequences = LargeStringArray::from(vec!["ACGT"]);
 
         let batch = RecordBatch::try_new(
             schema,
@@ -170,7 +170,7 @@ mod tests {
 
         let names = StringArray::from(vec![""]);
         let descriptions = StringArray::from(vec![Some("")]);
-        let sequences = StringArray::from(vec!["ACGT"]);
+        let sequences = LargeStringArray::from(vec!["ACGT"]);
 
         let batch = RecordBatch::try_new(
             schema,
@@ -194,7 +194,7 @@ mod tests {
 
         let names = StringArray::from(vec!["seq1"]);
         let descriptions = StringArray::from(vec![Some("")]);
-        let sequences = StringArray::from(vec![""]);
+        let sequences = LargeStringArray::from(vec![""]);
 
         let batch = RecordBatch::try_new(
             schema,
@@ -216,11 +216,11 @@ mod tests {
     fn test_batch_to_fasta_records_too_few_columns() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, false),
-            Field::new("sequence", DataType::Utf8, false),
+            Field::new("sequence", DataType::LargeUtf8, false),
         ]));
 
         let names = StringArray::from(vec!["seq1"]);
-        let sequences = StringArray::from(vec!["ACGT"]);
+        let sequences = LargeStringArray::from(vec!["ACGT"]);
 
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(names), Arc::new(sequences)]).unwrap();
