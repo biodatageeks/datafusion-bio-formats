@@ -47,10 +47,7 @@ async fn test_gzip_fastq_count_star() {
         let ctx = SessionContext::new_with_config(config);
 
         // Plain gzip (single member) -> Sequential strategy.
-        let file_path = format!(
-            "{}/data/count_star.fastq.gz",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let file_path = format!("{}/data/count_star.fastq.gz", env!("CARGO_MANIFEST_DIR"));
 
         let provider = FastqTableProvider::new(file_path, None).expect("Failed to create provider");
         ctx.register_table("fastq", Arc::new(provider))
