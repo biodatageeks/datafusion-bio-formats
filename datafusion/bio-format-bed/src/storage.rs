@@ -4,7 +4,7 @@ use async_stream::try_stream;
 use bytes::Bytes;
 use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, get_compression_type, get_remote_stream,
-    get_remote_stream_bgzf_async, get_remote_stream_gz_async,
+    get_remote_stream_bgzf_async, get_remote_stream_gz_async, gzip_multi_member_decoder,
 };
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
@@ -133,7 +133,7 @@ pub async fn get_local_bed_gz_reader<const N: usize>(
     tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
-        .map(GzipDecoder::new)
+        .map(gzip_multi_member_decoder)
         .map(tokio::io::BufReader::new)
         .map(async_reader::Reader::new)
 }
@@ -247,6 +247,15 @@ impl_bed_remote_reader!(3, 4, 5, 6);
 pub enum BedLocalReader<const N: usize> {
     /// BGZF-compressed BED reader
     BGZF(noodles_bed::io::Reader<N, BgzfReader<File>>),
+    /// GZIP-compressed BED reader (multi-member aware)
+    GZIP(
+        Box<
+            async_reader::Reader<
+                tokio::io::BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>,
+                N,
+            >,
+        >,
+    ),
     /// Uncompressed BED reader
     PLAIN(noodles_bed::io::Reader<N, std::io::BufReader<File>>),
 }
@@ -271,6 +280,10 @@ macro_rules! impl_bed_local_reader {
                             let reader = get_local_bed_bgzf_reader::<$n>(file_path)?;
                             Ok(BedLocalReader::BGZF(reader))
                         }
+                        CompressionType::GZIP => {
+                            let reader = get_local_bed_gz_reader::<$n>(file_path).await?;
+                            Ok(BedLocalReader::GZIP(Box::new(reader)))
+                        }
                         CompressionType::NONE => {
                             let reader = get_local_bed_reader::<$n>(file_path)?;
                             Ok(BedLocalReader::PLAIN(reader))
@@ -294,6 +307,7 @@ macro_rules! impl_bed_local_reader {
                                 }
                             }.boxed()
                         },
+                        BedLocalReader::GZIP(reader) => reader.records().boxed(),
                         BedLocalReader::PLAIN(reader) => {
                             try_stream! {
                                 loop{

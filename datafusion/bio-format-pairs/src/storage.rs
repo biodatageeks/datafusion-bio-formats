@@ -9,7 +9,7 @@ use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, get_compression_type,
 };
 use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use noodles_bgzf as bgzf;
 use noodles_csi::binning_index::BinningIndex;
 use std::fs::File;
@@ -21,7 +21,7 @@ pub enum PairsLocalReader {
     /// BGZF-compressed reader
     BGZF(BufReader<bgzf::Reader<File>>),
     /// GZIP-compressed reader
-    GZIP(Box<BufReader<GzDecoder<File>>>),
+    GZIP(Box<BufReader<MultiGzDecoder<File>>>),
     /// Plain text reader
     PLAIN(BufReader<File>),
 }
@@ -46,21 +46,29 @@ pub fn get_local_pairs_header(
     file_path: &str,
     _object_storage_options: &ObjectStorageOptions,
 ) -> std::io::Result<PairsHeader> {
-    // Detect compression by reading magic bytes (avoids async runtime dependency)
-    let is_bgzf = {
+    // Detect compression by reading magic bytes (avoids async runtime dependency).
+    // BGZF and plain gzip share the 0x1f 0x8b magic, so distinguish them by the
+    // gzip FEXTRA flag (bit 2 of FLG): BGZF always sets it, plain gzip (gzip/pigz)
+    // does not. Misclassifying plain gzip as BGZF would fail to read the header.
+    let (is_gzip, is_bgzf) = {
         use std::io::Read;
         let mut f = File::open(file_path)?;
         let mut magic = [0u8; 4];
         let n = f.read(&mut magic)?;
-        // BGZF/GZIP magic: 0x1f 0x8b
-        n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b
+        let is_gzip = n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b;
+        let is_bgzf = is_gzip && n >= 4 && magic[2] == 0x08 && (magic[3] & 0x04) != 0;
+        (is_gzip, is_bgzf)
     };
 
     if is_bgzf {
-        // Try BGZF first (superset of GZIP for our purposes)
         let file = File::open(file_path)?;
         let bgzf_reader = bgzf::Reader::new(file);
         let mut buf_reader = BufReader::new(bgzf_reader);
+        parse_pairs_header(&mut buf_reader)
+    } else if is_gzip {
+        // Plain gzip (possibly multi-member): decode every member.
+        let file = File::open(file_path)?;
+        let mut buf_reader = BufReader::new(MultiGzDecoder::new(file));
         parse_pairs_header(&mut buf_reader)
     } else {
         let file = File::open(file_path)?;
@@ -89,7 +97,7 @@ pub async fn new_local_reader(
             Ok(PairsLocalReader::BGZF(BufReader::new(bgzf_reader)))
         }
         CompressionType::GZIP => {
-            let gz_reader = GzDecoder::new(file);
+            let gz_reader = MultiGzDecoder::new(file);
             Ok(PairsLocalReader::GZIP(Box::new(BufReader::new(gz_reader))))
         }
         _ => Ok(PairsLocalReader::PLAIN(BufReader::new(file))),
