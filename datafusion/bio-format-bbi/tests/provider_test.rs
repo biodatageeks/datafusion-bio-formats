@@ -605,3 +605,53 @@ async fn pushes_bigbed_genomic_filter_into_scan_regions() -> TestResult<()> {
 
     Ok(())
 }
+
+// COUNT(*) / empty-projection smoke tests — verify the BBI providers handle
+// the zero-column projection consistently (audit follow-up to #208).
+
+fn count_star_value(batch: &datafusion::arrow::record_batch::RecordBatch) -> i64 {
+    batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0)
+}
+
+#[tokio::test]
+async fn count_star_bigwig() -> TestResult<()> {
+    let fixture = write_bigwig_fixture()?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+    let ctx = SessionContext::new();
+    ctx.register_table("bw", Arc::new(table))?;
+
+    let batches = ctx
+        .sql("SELECT count(*) AS c FROM bw")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(batches.len(), 1);
+    assert_eq!(count_star_value(&batches[0]), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn count_star_bigbed() -> TestResult<()> {
+    let fixture = write_bigbed_fixture()?;
+    let table = BigBedTableProvider::new(
+        fixture.path().to_string_lossy().to_string(),
+        true,
+        BigBedSchemaMode::Auto,
+    )?;
+    let ctx = SessionContext::new();
+    ctx.register_table("bb", Arc::new(table))?;
+
+    let batches = ctx
+        .sql("SELECT count(*) AS c FROM bb")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(batches.len(), 1);
+    assert_eq!(count_star_value(&batches[0]), 3);
+    Ok(())
+}
