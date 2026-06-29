@@ -111,24 +111,12 @@ impl TableProvider for FastqTableProvider {
             FastqPartitionStrategy::Sequential
         };
 
-        // For empty projections (e.g. COUNT(*)), the thread+channel strategies (Bgzf/ByteRange)
-        // produce zero-column batches with row count, so they need a zero-field schema.
-        // The Sequential strategy uses the stream-based path which needs a dummy Null column.
-        let uses_threaded_path = !matches!(strategy, FastqPartitionStrategy::Sequential);
-
-        fn project_schema(
-            schema: &SchemaRef,
-            projection: Option<&Vec<usize>>,
-            uses_threaded_path: bool,
-        ) -> SchemaRef {
+        // For empty projections (e.g. COUNT(*)), every strategy's batch builder
+        // produces zero-column batches with an explicit row count, so the schema
+        // must be a zero-field schema to match (Arrow requires columns == fields).
+        fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
             match projection {
-                Some(indices) if indices.is_empty() => {
-                    if uses_threaded_path {
-                        Arc::new(Schema::empty())
-                    } else {
-                        Arc::new(Schema::new(vec![Field::new("dummy", DataType::Null, true)]))
-                    }
-                }
+                Some(indices) if indices.is_empty() => Arc::new(Schema::empty()),
                 Some(indices) => {
                     let projected_fields: Vec<Field> =
                         indices.iter().map(|&i| schema.field(i).clone()).collect();
@@ -138,7 +126,7 @@ impl TableProvider for FastqTableProvider {
             }
         }
 
-        let schema = project_schema(&self.schema, projection, uses_threaded_path);
+        let schema = project_schema(&self.schema, projection);
 
         let num_partitions = match &strategy {
             FastqPartitionStrategy::Bgzf { partitions, .. } => partitions.len(),

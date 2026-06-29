@@ -6,8 +6,8 @@
 
 use crate::storage::{IndexedPairsReader, new_local_reader};
 use async_stream::try_stream;
-use datafusion::arrow::array::{NullArray, RecordBatch, StringArray, UInt32Array};
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datafusion::arrow::array::{RecordBatch, StringArray, UInt32Array};
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::Expr;
@@ -249,14 +249,11 @@ fn build_record_batch(
     if let Some(proj) = projection
         && proj.is_empty()
     {
-        let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> =
-            vec![Arc::new(NullArray::new(record_count))];
-        let null_field = Field::new("__null", DataType::Null, true);
-        let null_schema = Arc::new(Schema::new_with_metadata(
-            vec![null_field],
-            schema.metadata().clone(),
-        ));
-        return RecordBatch::try_new(null_schema, arrays)
+        // Emit a zero-column batch with an explicit row count so it matches the
+        // zero-field schema produced by `scan()` for empty projections.
+        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(Some(record_count));
+        return RecordBatch::try_new_with_options(schema.clone(), vec![], &options)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
     }
 
@@ -628,14 +625,11 @@ fn build_indexed_batch(
     if let Some(proj) = projection
         && proj.is_empty()
     {
-        let arrays: Vec<Arc<dyn datafusion::arrow::array::Array>> =
-            vec![Arc::new(NullArray::new(record_count))];
-        let null_field = Field::new("__null", DataType::Null, true);
-        let null_schema = Arc::new(Schema::new_with_metadata(
-            vec![null_field],
-            schema.metadata().clone(),
-        ));
-        return RecordBatch::try_new(null_schema, arrays)
+        // Emit a zero-column batch with an explicit row count so it matches the
+        // zero-field schema produced by `scan()` for empty projections.
+        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
+            .with_row_count(Some(record_count));
+        return RecordBatch::try_new_with_options(schema.clone(), vec![], &options)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
     }
 
