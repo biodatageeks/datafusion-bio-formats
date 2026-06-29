@@ -48,15 +48,22 @@ pub fn get_local_pairs_header(
 ) -> std::io::Result<PairsHeader> {
     // Detect compression by reading magic bytes (avoids async runtime dependency).
     // BGZF and plain gzip share the 0x1f 0x8b magic, so distinguish them by the
-    // gzip FEXTRA flag (bit 2 of FLG): BGZF always sets it, plain gzip (gzip/pigz)
-    // does not. Misclassifying plain gzip as BGZF would fail to read the header.
+    // BGZF-specific `BC` extra subfield (bytes 12-13), not merely the FEXTRA flag:
+    // a plain gzip stream may also set FEXTRA (e.g. gzip --rsyncable). Mirrors the
+    // is_bgzf() check in bio-format-gtf. Misclassifying plain gzip as BGZF would
+    // fail to read the header.
     let (is_gzip, is_bgzf) = {
         use std::io::Read;
         let mut f = File::open(file_path)?;
-        let mut magic = [0u8; 4];
-        let n = f.read(&mut magic)?;
-        let is_gzip = n >= 2 && magic[0] == 0x1f && magic[1] == 0x8b;
-        let is_bgzf = is_gzip && n >= 4 && magic[2] == 0x08 && (magic[3] & 0x04) != 0;
+        let mut buf = [0u8; 18];
+        let n = f.read(&mut buf)?;
+        let is_gzip = n >= 2 && buf[0] == 0x1f && buf[1] == 0x8b;
+        let is_bgzf = is_gzip
+            && n >= 18
+            && buf[2] == 0x08
+            && (buf[3] & 0x04) != 0
+            && buf[12] == b'B'
+            && buf[13] == b'C';
         (is_gzip, is_bgzf)
     };
 

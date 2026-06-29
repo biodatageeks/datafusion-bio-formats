@@ -277,7 +277,7 @@ impl FastaLocalReader {
                 Ok(FastaLocalReader::BGZF(reader))
             }
             CompressionType::GZIP => {
-                // GZIP is treated as BGZF for local files
+                // Multi-member aware: decodes every concatenated gzip member.
                 let reader = get_local_fasta_gz_reader(file_path).await?;
                 Ok(FastaLocalReader::GZIP(reader))
             }

@@ -17,9 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-member gzip files (follow-up to the FASTQ fix). The async local gz
   readers (FASTA/VCF/GFF/BED) use `gzip_multi_member_decoder` and the sync gz
   readers (GFF/GTF/Pairs) use `flate2::read::MultiGzDecoder`. As part of this,
-  BED's local reader gained the previously-missing GZIP branch, and the Pairs
-  header reader now distinguishes plain gzip from BGZF so plain-gzip Pairs files
-  load correctly. Each format has multi-member gzip regression tests.
+  BED's local and remote readers gained the previously-missing (and unwired)
+  GZIP branch, and the Pairs header reader now distinguishes plain gzip from
+  BGZF (by the BGZF `BC` extra subfield) so plain-gzip Pairs files load
+  correctly. Each format has multi-member gzip regression tests.
 
 ### Added
 

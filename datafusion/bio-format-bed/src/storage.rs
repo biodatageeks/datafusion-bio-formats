@@ -50,7 +50,7 @@ pub async fn get_remote_bed_bgzf_reader<const N: usize>(
 /// # Type Parameters
 ///
 /// * `N` - Number of BED columns (3-6)
-pub async fn get_remote_fastq_gz_reader<const N: usize>(
+pub async fn get_remote_bed_gz_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<
@@ -60,6 +60,7 @@ pub async fn get_remote_fastq_gz_reader<const N: usize>(
     >,
     Error,
 > {
+    // get_remote_stream_gz_async is multi-member aware (sets multiple_members(true)).
     let stream = tokio::io::BufReader::new(
         get_remote_stream_gz_async(file_path.clone(), object_storage_options).await?,
     );
@@ -201,6 +202,10 @@ macro_rules! impl_bed_remote_reader {
                         CompressionType::BGZF => {
                             let reader = get_remote_bed_bgzf_reader::<$n>(file_path, object_storage_options).await.unwrap();
                             BedRemoteReader::BGZF(reader)
+                        }
+                        CompressionType::GZIP => {
+                            let reader = get_remote_bed_gz_reader::<$n>(file_path, object_storage_options).await.unwrap();
+                            BedRemoteReader::GZIP(reader)
                         }
                         CompressionType::NONE => {
                             let reader = get_remote_bed_reader::<$n>(file_path, object_storage_options).await.unwrap();
