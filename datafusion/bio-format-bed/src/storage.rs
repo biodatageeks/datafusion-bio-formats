@@ -4,7 +4,7 @@ use async_stream::try_stream;
 use bytes::Bytes;
 use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, get_compression_type, get_remote_stream,
-    get_remote_stream_bgzf_async, get_remote_stream_gz_async,
+    get_remote_stream_bgzf_async, get_remote_stream_gz_async, gzip_multi_member_decoder,
 };
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
@@ -50,7 +50,7 @@ pub async fn get_remote_bed_bgzf_reader<const N: usize>(
 /// # Type Parameters
 ///
 /// * `N` - Number of BED columns (3-6)
-pub async fn get_remote_fastq_gz_reader<const N: usize>(
+pub async fn get_remote_bed_gz_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<
@@ -60,6 +60,7 @@ pub async fn get_remote_fastq_gz_reader<const N: usize>(
     >,
     Error,
 > {
+    // get_remote_stream_gz_async is multi-member aware (sets multiple_members(true)).
     let stream = tokio::io::BufReader::new(
         get_remote_stream_gz_async(file_path.clone(), object_storage_options).await?,
     );
@@ -133,7 +134,7 @@ pub async fn get_local_bed_gz_reader<const N: usize>(
     tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
-        .map(GzipDecoder::new)
+        .map(gzip_multi_member_decoder)
         .map(tokio::io::BufReader::new)
         .map(async_reader::Reader::new)
 }
@@ -202,6 +203,10 @@ macro_rules! impl_bed_remote_reader {
                             let reader = get_remote_bed_bgzf_reader::<$n>(file_path, object_storage_options).await.unwrap();
                             BedRemoteReader::BGZF(reader)
                         }
+                        CompressionType::GZIP => {
+                            let reader = get_remote_bed_gz_reader::<$n>(file_path, object_storage_options).await.unwrap();
+                            BedRemoteReader::GZIP(reader)
+                        }
                         CompressionType::NONE => {
                             let reader = get_remote_bed_reader::<$n>(file_path, object_storage_options).await.unwrap();
                             BedRemoteReader::PLAIN(reader)
@@ -247,6 +252,15 @@ impl_bed_remote_reader!(3, 4, 5, 6);
 pub enum BedLocalReader<const N: usize> {
     /// BGZF-compressed BED reader
     BGZF(noodles_bed::io::Reader<N, BgzfReader<File>>),
+    /// GZIP-compressed BED reader (multi-member aware)
+    GZIP(
+        Box<
+            async_reader::Reader<
+                tokio::io::BufReader<GzipDecoder<tokio::io::BufReader<tokio::fs::File>>>,
+                N,
+            >,
+        >,
+    ),
     /// Uncompressed BED reader
     PLAIN(noodles_bed::io::Reader<N, std::io::BufReader<File>>),
 }
@@ -271,6 +285,10 @@ macro_rules! impl_bed_local_reader {
                             let reader = get_local_bed_bgzf_reader::<$n>(file_path)?;
                             Ok(BedLocalReader::BGZF(reader))
                         }
+                        CompressionType::GZIP => {
+                            let reader = get_local_bed_gz_reader::<$n>(file_path).await?;
+                            Ok(BedLocalReader::GZIP(Box::new(reader)))
+                        }
                         CompressionType::NONE => {
                             let reader = get_local_bed_reader::<$n>(file_path)?;
                             Ok(BedLocalReader::PLAIN(reader))
@@ -294,6 +312,7 @@ macro_rules! impl_bed_local_reader {
                                 }
                             }.boxed()
                         },
+                        BedLocalReader::GZIP(reader) => reader.records().boxed(),
                         BedLocalReader::PLAIN(reader) => {
                             try_stream! {
                                 loop{

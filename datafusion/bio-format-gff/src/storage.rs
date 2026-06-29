@@ -2,7 +2,7 @@ use async_compression::tokio::bufread::GzipDecoder;
 use bytes::Bytes;
 use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, get_compression_type, get_remote_stream,
-    get_remote_stream_bgzf_async, get_remote_stream_gz_async,
+    get_remote_stream_bgzf_async, get_remote_stream_gz_async, gzip_multi_member_decoder,
 };
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
@@ -495,9 +495,10 @@ impl GffRemoteReader {
 /// A synchronous GFF reader configured for GZIP-compressed files
 pub fn get_local_gff_gz_sync_reader(
     file_path: String,
-) -> Result<gff::io::Reader<std::io::BufReader<flate2::read::GzDecoder<std::fs::File>>>, Error> {
+) -> Result<gff::io::Reader<std::io::BufReader<flate2::read::MultiGzDecoder<std::fs::File>>>, Error>
+{
     let file = std::fs::File::open(file_path)?;
-    let decoder = flate2::read::GzDecoder::new(file);
+    let decoder = flate2::read::MultiGzDecoder::new(file);
     let reader = gff::io::Reader::new(std::io::BufReader::new(decoder));
     Ok(reader)
 }
@@ -550,7 +551,7 @@ pub async fn get_local_gff_gz_reader(
     tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
-        .map(GzipDecoder::new)
+        .map(gzip_multi_member_decoder)
         .map(tokio::io::BufReader::new)
         .map(gff::r#async::io::Reader::new)
 }
@@ -598,21 +599,21 @@ pub async fn get_local_gff_async_reader(
 /// to provide optimal performance for different use cases with blocking I/O.
 pub enum GffLocalReader {
     /// Standard parser with GZIP compression
-    GZIP(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    GZIP(gff::io::Reader<BufReader<flate2::read::MultiGzDecoder<File>>>),
     /// Standard parser with BGZF compression
     BGZF(gff::io::Reader<bgzf::Reader<File>>),
     /// Standard parser with no compression
     PLAIN(gff::io::Reader<BufReader<File>>),
 
     /// Fast parser with GZIP compression
-    GzipFast(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    GzipFast(gff::io::Reader<BufReader<flate2::read::MultiGzDecoder<File>>>),
     /// Fast parser with BGZF compression
     BgzfFast(gff::io::Reader<bgzf::Reader<File>>),
     /// Fast parser with no compression
     PlainFast(gff::io::Reader<BufReader<File>>),
 
     /// SIMD parser with GZIP compression
-    GzipSimd(gff::io::Reader<BufReader<flate2::read::GzDecoder<File>>>),
+    GzipSimd(gff::io::Reader<BufReader<flate2::read::MultiGzDecoder<File>>>),
     /// SIMD parser with BGZF compression
     BgzfSimd(gff::io::Reader<bgzf::Reader<File>>),
     /// SIMD parser with no compression
