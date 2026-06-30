@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-gff"
-version = "1.8.5"
+version = "1.8.6"
 description = "GFF file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true

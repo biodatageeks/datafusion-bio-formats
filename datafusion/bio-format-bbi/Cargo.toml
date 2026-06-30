@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-bbi"
-version = "1.6.4"
+version = "1.6.5"
 description = "BigWig and BigBed file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
