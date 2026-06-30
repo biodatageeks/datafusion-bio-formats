@@ -193,11 +193,12 @@ async fn get_remote_bed_stream(
             // For 1-based output: use as-is (noodles already returns 1-based)
             let start_pos = record.feature_start()?.get() as u32;
             poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
-            // End position: noodles returns 1-based exclusive end
-            // For 0-based half-open: subtract 1 to get 0-based exclusive end
-            // For 1-based closed: use as-is
+            // End position: noodles returns the 1-based *inclusive* end (the last
+            // covered base). Numerically this equals the 0-based half-open exclusive
+            // end, so the end coordinate is identical in both coordinate systems:
+            // only the start differs by 1. (fixes #413)
             let end_pos = record.feature_end().unwrap()?.get() as u32;
-            pose.push(if coordinate_system_zero_based { end_pos - 1 } else { end_pos });
+            pose.push(end_pos);
             name.push(record.name().map(|n| n.to_string()));
 
             record_num += 1;
@@ -284,11 +285,12 @@ async fn get_local_bed(
             // For 1-based output: use as-is (noodles already returns 1-based)
             let start_pos = record.feature_start()?.get() as u32;
             poss.push(if coordinate_system_zero_based { start_pos - 1 } else { start_pos });
-            // End position: noodles returns 1-based exclusive end
-            // For 0-based half-open: subtract 1 to get 0-based exclusive end
-            // For 1-based closed: use as-is
+            // End position: noodles returns the 1-based *inclusive* end (the last
+            // covered base). Numerically this equals the 0-based half-open exclusive
+            // end, so the end coordinate is identical in both coordinate systems:
+            // only the start differs by 1. (fixes #413)
             let end_pos = record.feature_end().unwrap()?.get() as u32;
-            pose.push(if coordinate_system_zero_based { end_pos - 1 } else { end_pos });
+            pose.push(end_pos);
             name.push(record.name().map(|n| n.to_string()));
 
             record_num += 1;
