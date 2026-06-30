@@ -17,6 +17,6 @@ tokio = { version = "1.43", features = ["full"] }
 chrono = { version = "0.4", features = ["serde"] }
 sysinfo = "0.32"
 anyhow = "1.0"
-indicatif = "0.17"
+indicatif = "0.18"
 hex = "0.4"
 dirs = "5.0"
