@@ -19,7 +19,7 @@ use datafusion_bio_format_core::{
     partition_balancer::PartitionAssignment,
     record_filter::{RecordFieldAccessor, evaluate_record_filters},
 };
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use log::{debug, info};
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
@@ -432,177 +432,155 @@ async fn get_indexed_pairs_stream(
     coord_zero_based: bool,
     residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
-    use datafusion::arrow::error::ArrowError;
-
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    std::thread::spawn(move || {
-        let mut read_and_send = || -> Result<(), DataFusionError> {
-            let mut indexed_reader =
-                IndexedPairsReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed Pairs: {e}"))
+    let stream = try_stream! {
+        let mut indexed_reader =
+            IndexedPairsReader::new(&file_path, &index_path).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to open indexed Pairs: {e}"))
+            })?;
+
+        let num_columns = columns.len();
+
+        // Determine which columns are needed
+        let needs: Vec<bool> = (0..num_columns)
+            .map(|i| projection.as_ref().is_none_or(|proj| proj.contains(&i)))
+            .collect();
+
+        // Accumulator vectors per column (owned strings)
+        let mut string_cols: Vec<Vec<String>> = (0..num_columns)
+            .map(|_| Vec::with_capacity(batch_size))
+            .collect();
+        let mut u32_cols: Vec<Vec<Option<u32>>> = (0..num_columns)
+            .map(|_| Vec::with_capacity(batch_size))
+            .collect();
+
+        let mut total_records = 0usize;
+
+        for region in &regions {
+            if region.unmapped_tail {
+                continue;
+            }
+
+            let region_start_1based = region.start.map(|s| s as u32);
+            let region_end_1based = region.end.map(|e| e as u32);
+
+            let noodles_region = build_noodles_region(region)?;
+            let records = indexed_reader.query(&noodles_region).map_err(|e| {
+                DataFusionError::Execution(format!("Pairs region query failed: {e}"))
+            })?;
+
+            for result in records {
+                let raw_record = result.map_err(|e| {
+                    DataFusionError::Execution(format!("Pairs indexed record read error: {e}"))
                 })?;
 
-            let num_columns = columns.len();
-
-            // Determine which columns are needed
-            let needs: Vec<bool> = (0..num_columns)
-                .map(|i| projection.as_ref().is_none_or(|proj| proj.contains(&i)))
-                .collect();
-
-            // Accumulator vectors per column (owned strings)
-            let mut string_cols: Vec<Vec<String>> = (0..num_columns)
-                .map(|_| Vec::with_capacity(batch_size))
-                .collect();
-            let mut u32_cols: Vec<Vec<Option<u32>>> = (0..num_columns)
-                .map(|_| Vec::with_capacity(batch_size))
-                .collect();
-
-            let mut total_records = 0usize;
-
-            for region in &regions {
-                if region.unmapped_tail {
+                let line: &str = raw_record.as_ref();
+                if line.starts_with('#') {
+                    continue;
+                }
+                let fields: Vec<&str> = line.split('\t').collect();
+                if fields.len() < num_columns.min(2) {
                     continue;
                 }
 
-                let region_start_1based = region.start.map(|s| s as u32);
-                let region_end_1based = region.end.map(|e| e as u32);
-
-                let noodles_region = build_noodles_region(region)?;
-                let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("Pairs region query failed: {e}"))
-                })?;
-
-                for result in records {
-                    let raw_record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("Pairs indexed record read error: {e}"))
-                    })?;
-
-                    let line: &str = raw_record.as_ref();
-                    if line.starts_with('#') {
-                        continue;
-                    }
-                    let fields: Vec<&str> = line.split('\t').collect();
-                    if fields.len() < num_columns.min(2) {
-                        continue;
-                    }
-
-                    // Get pos1 for sub-region dedup (pos1 is typically column index 2)
-                    let pos1_idx = columns.iter().position(|c| c == "pos1");
-                    if let Some(idx) = pos1_idx
-                        && idx < fields.len()
-                        && let Ok(pos1_val) = fields[idx].parse::<u32>()
+                // Get pos1 for sub-region dedup (pos1 is typically column index 2)
+                let pos1_idx = columns.iter().position(|c| c == "pos1");
+                if let Some(idx) = pos1_idx
+                    && idx < fields.len()
+                    && let Ok(pos1_val) = fields[idx].parse::<u32>()
+                {
+                    if let Some(rs) = region_start_1based
+                        && pos1_val < rs
                     {
-                        if let Some(rs) = region_start_1based
-                            && pos1_val < rs
-                        {
-                            continue;
-                        }
-                        if let Some(re) = region_end_1based
-                            && pos1_val > re
-                        {
-                            continue;
-                        }
+                        continue;
                     }
-
-                    // Apply residual filters
-                    if !residual_filters.is_empty() {
-                        let record_fields = PairsRecordFields::new(&columns, &fields);
-                        if !evaluate_record_filters(&record_fields, &residual_filters) {
-                            continue;
-                        }
+                    if let Some(re) = region_end_1based
+                        && pos1_val > re
+                    {
+                        continue;
                     }
+                }
 
-                    // Accumulate values
-                    for (i, col) in columns.iter().enumerate() {
-                        if !needs[i] {
-                            continue;
-                        }
-                        let raw = if i < fields.len() { fields[i] } else { "" };
-                        match col.as_str() {
-                            "pos1" | "pos2" => {
-                                let parsed = raw.parse::<u32>().ok().map(|v| {
-                                    if coord_zero_based {
-                                        v.saturating_sub(1)
-                                    } else {
-                                        v
-                                    }
-                                });
-                                u32_cols[i].push(parsed);
-                            }
-                            "frag1" | "frag2" | "mapq1" | "mapq2" => {
-                                u32_cols[i].push(raw.parse().ok());
-                            }
-                            _ => {
-                                string_cols[i].push(raw.to_string());
-                            }
-                        }
+                // Apply residual filters
+                if !residual_filters.is_empty() {
+                    let record_fields = PairsRecordFields::new(&columns, &fields);
+                    if !evaluate_record_filters(&record_fields, &residual_filters) {
+                        continue;
                     }
+                }
 
-                    total_records += 1;
-
-                    if total_records.is_multiple_of(batch_size) {
-                        let batch = build_indexed_batch(
-                            &schema,
-                            &string_cols,
-                            &u32_cols,
-                            &columns,
-                            &projection,
-                            &needs,
-                            batch_size,
-                        )?;
-
-                        loop {
-                            match tx.try_send(Ok(batch.clone())) {
-                                Ok(()) => break,
-                                Err(e) if e.is_disconnected() => return Ok(()),
-                                Err(_) => std::thread::yield_now(),
-                            }
+                // Accumulate values
+                for (i, col) in columns.iter().enumerate() {
+                    if !needs[i] {
+                        continue;
+                    }
+                    let raw = if i < fields.len() { fields[i] } else { "" };
+                    match col.as_str() {
+                        "pos1" | "pos2" => {
+                            let parsed = raw.parse::<u32>().ok().map(|v| {
+                                if coord_zero_based {
+                                    v.saturating_sub(1)
+                                } else {
+                                    v
+                                }
+                            });
+                            u32_cols[i].push(parsed);
                         }
-
-                        for i in 0..num_columns {
-                            string_cols[i].clear();
-                            u32_cols[i].clear();
+                        "frag1" | "frag2" | "mapq1" | "mapq2" => {
+                            u32_cols[i].push(raw.parse().ok());
+                        }
+                        _ => {
+                            string_cols[i].push(raw.to_string());
                         }
                     }
                 }
-            }
 
-            // Remaining records
-            let remaining = total_records % batch_size;
-            if remaining > 0 {
-                let batch = build_indexed_batch(
-                    &schema,
-                    &string_cols,
-                    &u32_cols,
-                    &columns,
-                    &projection,
-                    &needs,
-                    remaining,
-                )?;
-                loop {
-                    match tx.try_send(Ok(batch.clone())) {
-                        Ok(()) => break,
-                        Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
+                total_records += 1;
+
+                if total_records.is_multiple_of(batch_size) {
+                    let batch = build_indexed_batch(
+                        &schema,
+                        &string_cols,
+                        &u32_cols,
+                        &columns,
+                        &projection,
+                        &needs,
+                        batch_size,
+                    )?;
+
+                    yield batch;
+
+                    for i in 0..num_columns {
+                        string_cols[i].clear();
+                        u32_cols[i].clear();
                     }
                 }
             }
-
-            debug!(
-                "Indexed Pairs scan: {} records for {} regions",
-                total_records,
-                regions.len()
-            );
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
         }
-    });
 
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+        // Remaining records
+        let remaining = total_records % batch_size;
+        if remaining > 0 {
+            let batch = build_indexed_batch(
+                &schema,
+                &string_cols,
+                &u32_cols,
+                &columns,
+                &projection,
+                &needs,
+                remaining,
+            )?;
+            yield batch;
+        }
+
+        debug!(
+            "Indexed Pairs scan: {} records for {} regions",
+            total_records,
+            regions.len()
+        );
+    };
+
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
 

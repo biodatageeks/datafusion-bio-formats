@@ -18,7 +18,7 @@ use datafusion_bio_format_core::{
     partition_balancer::PartitionAssignment,
     table_utils::{Attribute, OptionalField, builders_to_arrays},
 };
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use log::debug;
 use std::any::Any;
 use std::collections::HashMap;
@@ -708,7 +708,8 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
 /// Get a streaming RecordBatch stream from an indexed GTF file for one or more regions.
 ///
-/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
+/// Batches are produced by an `async_stream::try_stream!` generator that decodes
+/// inline on the consuming tokio worker (no per-partition reader thread).
 #[allow(clippy::too_many_arguments)]
 async fn get_indexed_gtf_stream(
     file_path: String,
@@ -721,114 +722,92 @@ async fn get_indexed_gtf_stream(
     attr_fields: Option<Vec<String>>,
     residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
-    use datafusion::arrow::error::ArrowError;
-
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    std::thread::spawn(move || {
-        let read_and_send = || -> Result<(), DataFusionError> {
-            let mut indexed_reader =
-                IndexedGtfReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed GTF: {e}"))
+    let stream = try_stream! {
+        let mut indexed_reader =
+            IndexedGtfReader::new(&file_path, &index_path).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to open indexed GTF: {e}"))
+            })?;
+
+        let mut collector = GtfBatchCollector::new(
+            schema.clone(),
+            batch_size,
+            projection,
+            attr_fields.as_deref(),
+            coordinate_system_zero_based,
+        )?;
+
+        for region in &regions {
+            if region.unmapped_tail {
+                continue;
+            }
+
+            let region_start_1based = region.start.map(|s| s as u32);
+            let region_end_1based = region.end.map(|e| e as u32);
+
+            let noodles_region = build_noodles_region(region)?;
+
+            let records = indexed_reader.query(&noodles_region).map_err(|e| {
+                DataFusionError::Execution(format!("GTF region query failed: {e}"))
+            })?;
+
+            for result in records {
+                let raw_record = result.map_err(|e| {
+                    DataFusionError::Execution(format!("GTF indexed record read error: {e}"))
                 })?;
 
-            let mut collector = GtfBatchCollector::new(
-                schema.clone(),
-                batch_size,
-                projection,
-                attr_fields.as_deref(),
-                coordinate_system_zero_based,
-            )?;
+                let line: &str = raw_record.as_ref();
+                let record = parse_gtf_line(line)
+                    .map_err(|e| DataFusionError::Execution(format!("GTF parse error: {e}")))?;
 
-            for region in &regions {
-                if region.unmapped_tail {
+                // Skip records outside the sub-region bounds
+                if let Some(rs) = region_start_1based
+                    && record.start < rs
+                {
+                    continue;
+                }
+                if let Some(re) = region_end_1based
+                    && record.start > re
+                {
                     continue;
                 }
 
-                let region_start_1based = region.start.map(|s| s as u32);
-                let region_end_1based = region.end.map(|e| e as u32);
+                // Apply residual filters
+                if !residual_filters.is_empty()
+                    && !crate::filter_utils::evaluate_filters_against_record(
+                        &record,
+                        &residual_filters,
+                        &record.attributes,
+                        coordinate_system_zero_based,
+                    )
+                {
+                    continue;
+                }
 
-                let noodles_region = build_noodles_region(region)?;
+                collector
+                    .push_record(&record)
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
 
-                let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("GTF region query failed: {e}"))
-                })?;
-
-                for result in records {
-                    let raw_record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("GTF indexed record read error: {e}"))
-                    })?;
-
-                    let line: &str = raw_record.as_ref();
-                    let record = parse_gtf_line(line)
-                        .map_err(|e| DataFusionError::Execution(format!("GTF parse error: {e}")))?;
-
-                    // Skip records outside the sub-region bounds
-                    if let Some(rs) = region_start_1based
-                        && record.start < rs
-                    {
-                        continue;
-                    }
-                    if let Some(re) = region_end_1based
-                        && record.start > re
-                    {
-                        continue;
-                    }
-
-                    // Apply residual filters
-                    if !residual_filters.is_empty()
-                        && !crate::filter_utils::evaluate_filters_against_record(
-                            &record,
-                            &residual_filters,
-                            &record.attributes,
-                            coordinate_system_zero_based,
-                        )
-                    {
-                        continue;
-                    }
-
-                    collector
-                        .push_record(&record)
-                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-
-                    if collector.is_full() {
-                        let batch = collector.take_batch()?;
-                        loop {
-                            match tx.try_send(Ok(batch.clone())) {
-                                Ok(()) => break,
-                                Err(e) if e.is_disconnected() => return Ok(()),
-                                Err(_) => std::thread::yield_now(),
-                            }
-                        }
-                    }
+                if collector.is_full() {
+                    let batch = collector.take_batch()?;
+                    yield batch;
                 }
             }
-
-            if collector.has_pending() {
-                let batch = collector.take_batch()?;
-                loop {
-                    match tx.try_send(Ok(batch.clone())) {
-                        Ok(()) => break,
-                        Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
-                    }
-                }
-            }
-
-            debug!(
-                "Indexed GTF scan: {} records for {} regions",
-                collector.record_num,
-                regions.len()
-            );
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
         }
-    });
 
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+        if collector.has_pending() {
+            let batch = collector.take_batch()?;
+            yield batch;
+        }
+
+        debug!(
+            "Indexed GTF scan: {} records for {} regions",
+            collector.record_num,
+            regions.len()
+        );
+    };
+
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
 

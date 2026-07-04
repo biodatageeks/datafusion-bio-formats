@@ -845,8 +845,9 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
 /// Get a streaming RecordBatch stream from an indexed CRAM file for one or more regions.
 ///
-/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
-/// Each partition processes its assigned regions sequentially, keeping only ~3 batches
+/// Decodes inline on the consuming tokio worker via an `async_stream::try_stream!`
+/// generator (no per-partition reader thread).
+/// Each partition processes its assigned regions sequentially, keeping only ~1 batch
 /// in memory at a time (constant memory regardless of data volume).
 #[allow(clippy::too_many_arguments)]
 async fn get_indexed_stream(
@@ -862,10 +863,8 @@ async fn get_indexed_stream(
     residual_filters: Vec<datafusion::logical_expr::Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    std::thread::spawn(move || {
-        let read_and_send = || -> Result<(), DataFusionError> {
+    let stream = async_stream::try_stream! {
             let mut indexed_reader =
                 IndexedCramReader::new(&file_path, &index_path, reference_path.as_deref())
                     .map_err(|e| {
@@ -1107,14 +1106,7 @@ async fn get_indexed_stream(
                             name.len(),
                         )?;
 
-                        // Send batch with backpressure
-                        loop {
-                            match tx.try_send(Ok(batch.clone())) {
-                                Ok(()) => break,
-                                Err(e) if e.is_disconnected() => return Ok(()),
-                                Err(_) => std::thread::yield_now(),
-                            }
-                        }
+                        yield batch;
 
                         name.clear();
                         chrom.clear();
@@ -1165,13 +1157,7 @@ async fn get_indexed_stream(
                     &projection,
                     name.len(),
                 )?;
-                loop {
-                    match tx.try_send(Ok(batch.clone())) {
-                        Ok(()) => break,
-                        Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
-                    }
-                }
+                yield batch;
             }
 
             debug!(
@@ -1179,14 +1165,6 @@ async fn get_indexed_stream(
                 total_records,
                 regions.len()
             );
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
-        }
-    });
-
-    // Stream batches from the channel
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+    };
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
