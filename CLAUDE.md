@@ -112,10 +112,11 @@ Reader scans decode each partition **inline on the tokio worker that consumes it
 - Decompression parallelism is bounded by the caller's tokio runtime worker-thread
   count; if `target_partitions` exceeds the worker count, concurrent decode is capped there.
 
-Status: FASTQ implements this contract. The remaining reader crates (VCF, BAM, CRAM,
-GFF, GTF, pairs, FASTA) are being migrated to the same `sync_batch_stream` helper;
-BED already executes fully async and satisfies the contract. See
-`openspec/changes/refactor-single-thread-partition-reads/`.
+Status: implemented across all reader crates — FASTQ and FASTA use the
+`sync_batch_stream` helper (linear readers); VCF, BAM, CRAM, GFF, GTF, and pairs use
+`async_stream::try_stream!` generators (region-iterating readers). Both decode inline
+on the consuming worker. BED already executes fully async and satisfies the contract.
+See `openspec/changes/refactor-single-thread-partition-reads/`.
 
 ### Key Dependencies
 - DataFusion 52.1.0 - SQL query engine

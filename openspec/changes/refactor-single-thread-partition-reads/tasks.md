@@ -31,7 +31,7 @@
 - [x] 7.2 Parity test; `cargo test -p datafusion-bio-format-pairs` green; commit; STOP
 
 ## 8. FASTA + BED + repo-wide docs (Phase 8)
-- [ ] 8.1 Convert FASTA `get_local_fasta_sync` (`:291`, single partition) to `sync_batch_stream`
-- [ ] 8.2 Verify BED needs no change (already fully async)
-- [ ] 8.3 Add repo-wide "Thread usage" contract section to `CLAUDE.md` + `README`
-- [ ] 8.4 Workspace-wide `cargo test` + `clippy` + `fmt` green; commit; STOP
+- [x] 8.1 Convert FASTA `get_local_fasta_sync` (`:291`, single partition) to `sync_batch_stream`
+- [x] 8.2 Verify BED needs no change (already fully async)
+- [x] 8.3 Add repo-wide "Thread usage" contract section to `CLAUDE.md` + `README`
+- [x] 8.4 Workspace-wide `cargo test` + `clippy` + `fmt` green; commit; STOP
