@@ -19,16 +19,16 @@
 - [x] 4.2 Parity test; `cargo test -p datafusion-bio-format-cram` green; commit; STOP
 
 ## 5. GFF (Phase 5)
-- [ ] 5.1 Convert `get_indexed_gff_stream` (`:1284`) to `sync_batch_stream`
-- [ ] 5.2 Parity test; `cargo test -p datafusion-bio-format-gff` green; commit; STOP
+- [x] 5.1 Convert `get_indexed_gff_stream` (`:1284`) to `sync_batch_stream`
+- [x] 5.2 Parity test; `cargo test -p datafusion-bio-format-gff` green; commit; STOP
 
 ## 6. GTF (Phase 6)
-- [ ] 6.1 Convert `get_indexed_gtf_stream` (`:729`) to `sync_batch_stream`
-- [ ] 6.2 Parity test; `cargo test -p datafusion-bio-format-gtf` green; commit; STOP
+- [x] 6.1 Convert `get_indexed_gtf_stream` (`:729`) to `sync_batch_stream`
+- [x] 6.2 Parity test; `cargo test -p datafusion-bio-format-gtf` green; commit; STOP
 
 ## 7. Pairs (Phase 7)
-- [ ] 7.1 Convert `get_indexed_pairs_stream` (`:440`) to `sync_batch_stream`
-- [ ] 7.2 Parity test; `cargo test -p datafusion-bio-format-pairs` green; commit; STOP
+- [x] 7.1 Convert `get_indexed_pairs_stream` (`:440`) to `sync_batch_stream`
+- [x] 7.2 Parity test; `cargo test -p datafusion-bio-format-pairs` green; commit; STOP
 
 ## 8. FASTA + BED + repo-wide docs (Phase 8)
 - [ ] 8.1 Convert FASTA `get_local_fasta_sync` (`:291`, single partition) to `sync_batch_stream`
