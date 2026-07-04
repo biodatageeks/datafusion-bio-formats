@@ -76,6 +76,8 @@ pub mod record_filter;
 pub mod sam_record_serializer;
 /// Shared SAM/BAM/CRAM optional tag IO helpers
 pub mod sam_tag_io;
+/// Single-thread-per-partition batch stream helper (issue #212)
+pub mod sync_stream;
 /// Table utilities for building DataFusion table providers
 pub mod table_utils;
 /// Tag registry for BAM/CRAM alignment tags
