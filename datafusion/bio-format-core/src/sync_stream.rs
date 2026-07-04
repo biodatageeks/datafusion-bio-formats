@@ -15,6 +15,22 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 /// `next_batch` returns `Some(Ok(batch))` for each batch, `Some(Err(_))` to
 /// surface an error (after which it should return `None`), and `None` when the
 /// partition is exhausted.
+///
+/// # Runtime expectations
+///
+/// Decode is **intentionally blocking on the consuming worker** — that is what
+/// bounds a scan to one OS thread per partition (`target_partitions`) instead of
+/// escaping the runtime with a dedicated reader thread. This suits the
+/// scan-oriented runtimes these providers target (DataFusion executes CPU-bound
+/// operators on its tokio workers anyway). If a caller shares one runtime between
+/// these scans and latency-sensitive async work, it should use a multi-threaded
+/// runtime sized for the scan parallelism it wants; wrapping the decode in
+/// `spawn_blocking`/`block_in_place` is deliberately avoided here because it would
+/// reintroduce the unbounded off-runtime threads this design removes.
+///
+/// For region-iterating readers, an `async_stream` generator (`try_stream!`) that
+/// yields batches from the same synchronous loop is an equivalent alternative to
+/// this helper — it decodes inline on the consuming worker in the same way.
 pub fn sync_batch_stream<F>(schema: SchemaRef, next_batch: F) -> SendableRecordBatchStream
 where
     F: FnMut() -> Option<Result<RecordBatch, DataFusionError>> + Send + 'static,

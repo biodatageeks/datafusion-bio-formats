@@ -1024,17 +1024,26 @@ async fn get_indexed_stream(
                 };
             }
 
+            // Lazily read the BAI at most once per partition — only if an
+            // unmapped-tail region is actually encountered — and reuse it across
+            // all such regions (avoids re-reading the full index per region while
+            // not penalizing the common no-unmapped-tail case).
+            let mut bai_index: Option<bam::bai::Index> = None;
+
             for region in &regions {
                 // Handle unmapped tail regions via direct BGZF seek —
                 // stream records one-by-one instead of collecting into Vec.
                 if region.unmapped_tail {
                     // Dedicated partition for global no-coor records (n_no_coor).
                     if region.chrom == UNPLACED_UNMAPPED_SENTINEL_CHROM {
-                        let no_coor_index = bam::bai::fs::read(&index_path).map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to read BAI for unplaced/unmapped tail: {e}"
-                            ))
-                        })?;
+                        if bai_index.is_none() {
+                            bai_index = Some(bam::bai::fs::read(&index_path).map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "Failed to read BAI for unplaced/unmapped tail: {e}"
+                                ))
+                            })?);
+                        }
+                        let no_coor_index = bai_index.as_ref().unwrap();
                         let no_coor_hint =
                             no_coor_index.unplaced_unmapped_record_count().unwrap_or(0);
                         if no_coor_hint == 0 {
@@ -1121,11 +1130,14 @@ async fn get_indexed_stream(
 
                     // Per-reference unmapped tail (reference_sequence_id set,
                     // alignment_start absent).
-                    let unmapped_index = bam::bai::fs::read(&index_path).map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Failed to read BAI for unmapped tail: {e}"
-                        ))
-                    })?;
+                    if bai_index.is_none() {
+                        bai_index = Some(bam::bai::fs::read(&index_path).map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Failed to read BAI for unmapped tail: {e}"
+                            ))
+                        })?);
+                    }
+                    let unmapped_index = bai_index.as_ref().unwrap();
 
                     let ref_idx =
                         names
