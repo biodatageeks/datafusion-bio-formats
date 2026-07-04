@@ -262,10 +262,17 @@ impl SamReader {
 
 /// A local indexed BAM reader for region-based queries.
 ///
-/// Uses noodles' `IndexedReader::Builder` to support random-access queries using BAI indexes.
-/// This is used when an index file is available and genomic region filters are present.
+/// Holds a plain BGZF-backed BAM reader plus a concrete BAI index to support
+/// random-access queries. This is used when an index file is available and genomic
+/// region filters are present.
+///
+/// Unlike noodles' `IndexedReader` (which stores the index as a non-`Send`
+/// `Box<dyn BinningIndex>`), this keeps the concrete `noodles_bam::bai::Index` so the
+/// reader is `Send`. That lets the indexed scan decode inline on the consuming tokio
+/// worker via `async_stream::try_stream!` instead of a dedicated reader thread.
 pub struct IndexedBamReader {
-    reader: bam::io::IndexedReader<noodles_bgzf::io::Reader<File>>,
+    reader: bam::io::Reader<noodles_bgzf::io::Reader<File>>,
+    index: bam::bai::Index,
     header: sam::Header,
 }
 
@@ -276,12 +283,15 @@ impl IndexedBamReader {
     /// * `file_path` - Path to the BAM file
     /// * `index_path` - Path to the BAI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, Error> {
-        let mut reader = bam::io::indexed_reader::Builder::default()
-            .set_index(bam::bai::fs::read(index_path)?)
-            .build_from_path(file_path)
-            .map_err(Error::other)?;
+        let index = bam::bai::fs::read(index_path)?;
+        let inner = BgzfReader::new(File::open(file_path)?);
+        let mut reader = bam::io::Reader::from(inner);
         let header = reader.read_header()?;
-        Ok(Self { reader, header })
+        Ok(Self {
+            reader,
+            index,
+            header,
+        })
     }
 
     /// Returns a reference to the SAM header.
@@ -306,7 +316,7 @@ impl IndexedBamReader {
         &mut self,
         region: &noodles_core::Region,
     ) -> Result<impl Iterator<Item = Result<Record, Error>> + '_, Error> {
-        self.reader.query(&self.header, region)
+        self.reader.query(&self.header, &self.index, region)
     }
 }
 

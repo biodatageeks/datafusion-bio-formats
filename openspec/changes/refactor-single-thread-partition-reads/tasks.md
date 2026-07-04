@@ -11,8 +11,8 @@
 - [x] 2.2 4-partition == 1-partition parity test; `cargo test -p datafusion-bio-format-vcf` green; commit; STOP
 
 ## 3. BAM (Phase 3)
-- [ ] 3.1 Convert `get_indexed_stream` (`:888`) and `get_local_bam_sync` (`:383`) to `sync_batch_stream`
-- [ ] 3.2 Parity test; `cargo test -p datafusion-bio-format-bam` green; commit; STOP
+- [x] 3.1 Convert `get_indexed_stream` (`:888`) and `get_local_bam_sync` (`:383`) to `sync_batch_stream`
+- [x] 3.2 Parity test; `cargo test -p datafusion-bio-format-bam` green; commit; STOP
 
 ## 4. CRAM (Phase 4)
 - [ ] 4.1 Convert `get_indexed_stream` (`:867`) to `sync_batch_stream` (leave already-async full scan; preserve `no_ref` decode)
