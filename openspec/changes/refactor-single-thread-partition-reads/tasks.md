@@ -15,8 +15,8 @@
 - [x] 3.2 Parity test; `cargo test -p datafusion-bio-format-bam` green; commit; STOP
 
 ## 4. CRAM (Phase 4)
-- [ ] 4.1 Convert `get_indexed_stream` (`:867`) to `sync_batch_stream` (leave already-async full scan; preserve `no_ref` decode)
-- [ ] 4.2 Parity test; `cargo test -p datafusion-bio-format-cram` green; commit; STOP
+- [x] 4.1 Convert `get_indexed_stream` (`:867`) to `sync_batch_stream` (leave already-async full scan; preserve `no_ref` decode)
+- [x] 4.2 Parity test; `cargo test -p datafusion-bio-format-cram` green; commit; STOP
 
 ## 5. GFF (Phase 5)
 - [ ] 5.1 Convert `get_indexed_gff_stream` (`:1284`) to `sync_batch_stream`
