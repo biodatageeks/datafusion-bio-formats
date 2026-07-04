@@ -1,10 +1,10 @@
 ## 1. Core helper + FASTQ (Phase 1)
-- [ ] 1.1 Add `sync_batch_stream(schema, next_batch)` in `bio-format-core/src/sync_stream.rs` with a unit test; export from `lib.rs`
-- [ ] 1.2 Add a FASTQ multi-partition correctness test (4-partition scan == 1-partition scan) against current code
-- [ ] 1.3 Replace FASTQ `execute_bgzf_partition` / `execute_byte_range_partition` with a synchronous `batch_producer` closure driven by `sync_batch_stream`; remove `thread::spawn` + `mpsc`
-- [ ] 1.4 Remove benchmark scaffolding: `FASTQ_EXEC_MODE`/`FASTQ_READER_POOL` modes, `libc` dev-dep, `examples/thread_model_bench.rs`
-- [ ] 1.5 `cargo fmt` + `cargo clippy` + `cargo test -p datafusion-bio-format-fastq` green
-- [ ] 1.6 Document the thread-usage contract in FASTQ module doc + `CLAUDE.md`; commit; STOP for review
+- [x] 1.1 Add `sync_batch_stream(schema, next_batch)` in `bio-format-core/src/sync_stream.rs` with a unit test; export from `lib.rs`
+- [x] 1.2 Add a FASTQ multi-partition correctness test (4-partition scan == 1-partition scan) against current code
+- [x] 1.3 Replace FASTQ `execute_bgzf_partition` / `execute_byte_range_partition` with a synchronous `batch_producer` closure driven by `sync_batch_stream`; remove `thread::spawn` + `mpsc`
+- [x] 1.4 Remove benchmark scaffolding: `FASTQ_EXEC_MODE`/`FASTQ_READER_POOL` modes, `libc` dev-dep, `examples/thread_model_bench.rs`
+- [x] 1.5 `cargo fmt` + `cargo clippy` + `cargo test -p datafusion-bio-format-fastq` green
+- [x] 1.6 Document the thread-usage contract in FASTQ module doc + `CLAUDE.md`; commit; STOP for review
 
 ## 2. VCF (Phase 2)
 - [ ] 2.1 Convert `get_indexed_vcf_stream` (`:2659`) and `get_local_vcf_sync` (`:819`) to `sync_batch_stream`; remove channel/thread

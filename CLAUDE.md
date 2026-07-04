@@ -97,9 +97,25 @@ INSERT OVERWRITE cram_output SELECT * FROM bam_input WHERE chrom = 'chr1'
 ### Object Storage Support
 The `bio-format-core` crate provides cloud storage integration via OpenDAL with support for:
 - Google Cloud Storage (GCS)
-- Amazon S3 
+- Amazon S3
 - Azure Blob Storage
 - Compression detection (GZIP, BGZF, AUTO)
+
+### Thread Usage / `target_partitions` Contract (issue #212)
+
+Reader scans decode each partition **inline on the tokio worker that consumes it**
+(via `bio-format-core`'s `sync_stream::sync_batch_stream`) — no dedicated
+`std::thread` reader per partition and no `mpsc` handoff. Consequences:
+
+- A scan uses **one OS thread per partition**, i.e. `target_partitions` threads (not `~2×`).
+- To use N cores for a scan, set `target_partitions = N`.
+- Decompression parallelism is bounded by the caller's tokio runtime worker-thread
+  count; if `target_partitions` exceeds the worker count, concurrent decode is capped there.
+
+Status: FASTQ implements this contract. The remaining reader crates (VCF, BAM, CRAM,
+GFF, GTF, pairs, FASTA) are being migrated to the same `sync_batch_stream` helper;
+BED already executes fully async and satisfies the contract. See
+`openspec/changes/refactor-single-thread-partition-reads/`.
 
 ### Key Dependencies
 - DataFusion 52.1.0 - SQL query engine
@@ -116,7 +132,7 @@ The `bio-format-core` crate provides cloud storage integration via OpenDAL with 
 
 ### FASTQ Schema
 - `name`: String (required) - Sequence identifier
-- `description`: String (optional) - Sequence description  
+- `description`: String (optional) - Sequence description
 - `sequence`: String (required) - DNA/RNA sequence
 - `quality_scores`: String (required) - Quality scores
 
