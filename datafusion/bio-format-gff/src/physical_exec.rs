@@ -1261,8 +1261,9 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
 /// Get a streaming RecordBatch stream from an indexed GFF file for one or more regions.
 ///
-/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
-/// Each partition processes its assigned regions sequentially, keeping only ~3 batches
+/// Decodes inline on the consuming tokio worker via an `async_stream::try_stream!`
+/// generator (no per-partition reader thread).
+/// Each partition processes its assigned regions sequentially, keeping only ~1 batch
 /// in memory at a time (constant memory regardless of data volume).
 #[allow(clippy::too_many_arguments)]
 async fn get_indexed_gff_stream(
@@ -1276,247 +1277,188 @@ async fn get_indexed_gff_stream(
     attr_fields: Option<Vec<String>>,
     residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
-    use datafusion::arrow::error::ArrowError;
-
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    std::thread::spawn(move || {
-        let mut read_and_send = || -> Result<(), DataFusionError> {
-            let mut indexed_reader =
-                IndexedGffReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed GFF: {e}"))
-                })?;
+    let stream = try_stream! {
+        let mut indexed_reader =
+            IndexedGffReader::new(&file_path, &index_path).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to open indexed GFF: {e}"))
+            })?;
 
-            // Determine which fields are needed
-            let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
-            let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
-            let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
-            let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
-            let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
-            let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
-            let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
-            let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
+        // Determine which fields are needed
+        let needs_chrom = projection.as_ref().is_none_or(|proj| proj.contains(&0));
+        let needs_start = projection.as_ref().is_none_or(|proj| proj.contains(&1));
+        let needs_end = projection.as_ref().is_none_or(|proj| proj.contains(&2));
+        let needs_type = projection.as_ref().is_none_or(|proj| proj.contains(&3));
+        let needs_source = projection.as_ref().is_none_or(|proj| proj.contains(&4));
+        let needs_score = projection.as_ref().is_none_or(|proj| proj.contains(&5));
+        let needs_strand = projection.as_ref().is_none_or(|proj| proj.contains(&6));
+        let needs_phase = projection.as_ref().is_none_or(|proj| proj.contains(&7));
 
-            // Initialize accumulators
-            let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
-            let mut poss: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut pose: Vec<u32> = Vec::with_capacity(batch_size);
-            let mut types: Vec<String> = Vec::with_capacity(batch_size);
-            let mut sources: Vec<String> = Vec::with_capacity(batch_size);
-            let mut scores: Vec<Option<f32>> = Vec::with_capacity(batch_size);
-            let mut strands: Vec<String> = Vec::with_capacity(batch_size);
-            let mut phases: Vec<Option<u32>> = Vec::with_capacity(batch_size);
+        // Initialize accumulators
+        let mut chroms: Vec<String> = Vec::with_capacity(batch_size);
+        let mut poss: Vec<u32> = Vec::with_capacity(batch_size);
+        let mut pose: Vec<u32> = Vec::with_capacity(batch_size);
+        let mut types: Vec<String> = Vec::with_capacity(batch_size);
+        let mut sources: Vec<String> = Vec::with_capacity(batch_size);
+        let mut scores: Vec<Option<f32>> = Vec::with_capacity(batch_size);
+        let mut strands: Vec<String> = Vec::with_capacity(batch_size);
+        let mut phases: Vec<Option<u32>> = Vec::with_capacity(batch_size);
 
-            // Initialize attribute builders
-            let unnest_enable = attr_fields.is_some();
-            let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
-                (Vec::new(), Vec::new(), Vec::new());
-            if let Some(ref attrs) = attr_fields {
-                set_attribute_builders(batch_size, attrs, &mut attribute_builders);
+        // Initialize attribute builders
+        let unnest_enable = attr_fields.is_some();
+        let mut attribute_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>) =
+            (Vec::new(), Vec::new(), Vec::new());
+        if let Some(ref attrs) = attr_fields {
+            set_attribute_builders(batch_size, attrs, &mut attribute_builders);
+        }
+
+        let builder_field = OptionalField::new(
+            &DataType::List(FieldRef::new(Field::new(
+                "attribute",
+                DataType::Struct(Fields::from(vec![
+                    Field::new("tag", DataType::Utf8, false),
+                    Field::new("value", DataType::Utf8, true),
+                ])),
+                true,
+            ))),
+            batch_size,
+        )
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        let mut builder = vec![builder_field];
+
+        let mut total_records = 0usize;
+
+        for region in &regions {
+            // Skip unmapped_tail regions — not applicable to GFF
+            if region.unmapped_tail {
+                continue;
             }
 
-            let mut builder = vec![
-                OptionalField::new(
-                    &DataType::List(FieldRef::new(Field::new(
-                        "attribute",
-                        DataType::Struct(Fields::from(vec![
-                            Field::new("tag", DataType::Utf8, false),
-                            Field::new("value", DataType::Utf8, true),
-                        ])),
-                        true,
-                    ))),
-                    batch_size,
-                )
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-            ];
+            // Sub-region bounds for deduplication (1-based, from partition balancer)
+            let region_start_1based = region.start.map(|s| s as u32);
+            let region_end_1based = region.end.map(|e| e as u32);
 
-            let mut total_records = 0usize;
+            let noodles_region = build_noodles_region(region)?;
 
-            for region in &regions {
-                // Skip unmapped_tail regions — not applicable to GFF
-                if region.unmapped_tail {
+            let records = indexed_reader.query(&noodles_region).map_err(|e| {
+                DataFusionError::Execution(format!("GFF region query failed: {e}"))
+            })?;
+
+            for result in records {
+                let raw_record = result.map_err(|e| {
+                    DataFusionError::Execution(format!("GFF indexed record read error: {e}"))
+                })?;
+
+                // Parse the raw GFF line (tab-separated, 9 fields)
+                let line: &str = raw_record.as_ref();
+                let fields: Vec<&str> = line.split('\t').collect();
+                if fields.len() < 9 {
+                    continue; // Skip malformed lines
+                }
+
+                let chrom = fields[0].to_string();
+                let source_str = fields[1].to_string();
+                let type_str = fields[2].to_string();
+                let start_1based: u32 = fields[3].parse().unwrap_or(0);
+                let end_1based: u32 = fields[4].parse().unwrap_or(0);
+
+                // Skip records outside the sub-region bounds (TBI/CSI bins may return
+                // overlapping records at sub-region boundaries)
+                if let Some(rs) = region_start_1based
+                    && start_1based < rs
+                {
                     continue;
                 }
+                if let Some(re) = region_end_1based
+                    && start_1based > re
+                {
+                    continue;
+                }
+                let score_val: Option<f32> = if fields[5] == "." {
+                    None
+                } else {
+                    fields[5].parse().ok()
+                };
+                let strand_str = fields[6].to_string();
+                let phase_val: Option<u8> = if fields[7] == "." {
+                    None
+                } else {
+                    fields[7].parse().ok()
+                };
+                let attributes_str = fields[8].to_string();
 
-                // Sub-region bounds for deduplication (1-based, from partition balancer)
-                let region_start_1based = region.start.map(|s| s as u32);
-                let region_end_1based = region.end.map(|e| e as u32);
-
-                let noodles_region = build_noodles_region(region)?;
-
-                let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("GFF region query failed: {e}"))
-                })?;
-
-                for result in records {
-                    let raw_record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("GFF indexed record read error: {e}"))
-                    })?;
-
-                    // Parse the raw GFF line (tab-separated, 9 fields)
-                    let line: &str = raw_record.as_ref();
-                    let fields: Vec<&str> = line.split('\t').collect();
-                    if fields.len() < 9 {
-                        continue; // Skip malformed lines
-                    }
-
-                    let chrom = fields[0].to_string();
-                    let source_str = fields[1].to_string();
-                    let type_str = fields[2].to_string();
-                    let start_1based: u32 = fields[3].parse().unwrap_or(0);
-                    let end_1based: u32 = fields[4].parse().unwrap_or(0);
-
-                    // Skip records outside the sub-region bounds (TBI/CSI bins may return
-                    // overlapping records at sub-region boundaries)
-                    if let Some(rs) = region_start_1based
-                        && start_1based < rs
-                    {
+                // Apply residual filters
+                if !residual_filters.is_empty() {
+                    let temp_record = RemoteGffRecordWrapper {
+                        chrom: chrom.clone(),
+                        start: start_1based,
+                        end: end_1based,
+                        ty: type_str.clone(),
+                        source: source_str.clone(),
+                        score: score_val,
+                        strand: strand_str.clone(),
+                        phase: phase_val,
+                        attributes: attributes_str.clone(),
+                    };
+                    if !crate::filter_utils::evaluate_filters_against_record(
+                        &temp_record,
+                        &residual_filters,
+                        &attributes_str,
+                    ) {
                         continue;
-                    }
-                    if let Some(re) = region_end_1based
-                        && start_1based > re
-                    {
-                        continue;
-                    }
-                    let score_val: Option<f32> = if fields[5] == "." {
-                        None
-                    } else {
-                        fields[5].parse().ok()
-                    };
-                    let strand_str = fields[6].to_string();
-                    let phase_val: Option<u8> = if fields[7] == "." {
-                        None
-                    } else {
-                        fields[7].parse().ok()
-                    };
-                    let attributes_str = fields[8].to_string();
-
-                    // Apply residual filters
-                    if !residual_filters.is_empty() {
-                        let temp_record = RemoteGffRecordWrapper {
-                            chrom: chrom.clone(),
-                            start: start_1based,
-                            end: end_1based,
-                            ty: type_str.clone(),
-                            source: source_str.clone(),
-                            score: score_val,
-                            strand: strand_str.clone(),
-                            phase: phase_val,
-                            attributes: attributes_str.clone(),
-                        };
-                        if !crate::filter_utils::evaluate_filters_against_record(
-                            &temp_record,
-                            &residual_filters,
-                            &attributes_str,
-                        ) {
-                            continue;
-                        }
-                    }
-
-                    // Convert coordinates
-                    let start_val = if coordinate_system_zero_based {
-                        start_1based - 1
-                    } else {
-                        start_1based
-                    };
-
-                    if needs_chrom {
-                        chroms.push(chrom);
-                    }
-                    if needs_start {
-                        poss.push(start_val);
-                    }
-                    if needs_end {
-                        pose.push(end_1based);
-                    }
-                    if needs_type {
-                        types.push(type_str);
-                    }
-                    if needs_source {
-                        sources.push(source_str);
-                    }
-                    if needs_score {
-                        scores.push(score_val);
-                    }
-                    if needs_strand {
-                        strands.push(strand_str);
-                    }
-                    if needs_phase {
-                        phases.push(phase_val.map(|p| p as u32));
-                    }
-
-                    // Handle attributes
-                    if unnest_enable && !attribute_builders.0.is_empty() {
-                        load_attributes_unnest_from_string(
-                            &attributes_str,
-                            &mut attribute_builders,
-                            projection.clone(),
-                        )
-                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                    } else if !unnest_enable {
-                        let attributes = parse_gff_attributes_to_vec(&attributes_str);
-                        load_attributes_from_vec(attributes, &mut builder)
-                            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-                    }
-
-                    total_records += 1;
-
-                    if total_records.is_multiple_of(batch_size) {
-                        let batch = build_record_batch_optimized(
-                            Arc::clone(&schema),
-                            &chroms,
-                            &poss,
-                            &pose,
-                            &types,
-                            &sources,
-                            &scores,
-                            &strands,
-                            &phases,
-                            Some(&builders_to_arrays(if unnest_enable {
-                                &mut attribute_builders.2
-                            } else {
-                                &mut builder
-                            })),
-                            projection.clone(),
-                            needs_chrom,
-                            needs_start,
-                            needs_end,
-                            needs_type,
-                            needs_source,
-                            needs_score,
-                            needs_strand,
-                            needs_phase,
-                            batch_size,
-                        )?;
-
-                        // Send batch with backpressure
-                        loop {
-                            match tx.try_send(Ok(batch.clone())) {
-                                Ok(()) => break,
-                                Err(e) if e.is_disconnected() => return Ok(()),
-                                Err(_) => std::thread::yield_now(),
-                            }
-                        }
-
-                        chroms.clear();
-                        poss.clear();
-                        pose.clear();
-                        types.clear();
-                        sources.clear();
-                        scores.clear();
-                        strands.clear();
-                        phases.clear();
                     }
                 }
-            }
 
-            // Remaining records
-            if !chroms.is_empty()
-                || (!total_records.is_multiple_of(batch_size) && total_records > 0)
-            {
-                let remaining = total_records % batch_size;
-                if remaining > 0 {
+                // Convert coordinates
+                let start_val = if coordinate_system_zero_based {
+                    start_1based - 1
+                } else {
+                    start_1based
+                };
+
+                if needs_chrom {
+                    chroms.push(chrom);
+                }
+                if needs_start {
+                    poss.push(start_val);
+                }
+                if needs_end {
+                    pose.push(end_1based);
+                }
+                if needs_type {
+                    types.push(type_str);
+                }
+                if needs_source {
+                    sources.push(source_str);
+                }
+                if needs_score {
+                    scores.push(score_val);
+                }
+                if needs_strand {
+                    strands.push(strand_str);
+                }
+                if needs_phase {
+                    phases.push(phase_val.map(|p| p as u32));
+                }
+
+                // Handle attributes
+                if unnest_enable && !attribute_builders.0.is_empty() {
+                    load_attributes_unnest_from_string(
+                        &attributes_str,
+                        &mut attribute_builders,
+                        projection.clone(),
+                    )
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                } else if !unnest_enable {
+                    let attributes = parse_gff_attributes_to_vec(&attributes_str);
+                    load_attributes_from_vec(attributes, &mut builder)
+                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                }
+
+                total_records += 1;
+
+                if total_records.is_multiple_of(batch_size) {
                     let batch = build_record_batch_optimized(
                         Arc::clone(&schema),
                         &chroms,
@@ -1541,31 +1483,64 @@ async fn get_indexed_gff_stream(
                         needs_score,
                         needs_strand,
                         needs_phase,
-                        remaining,
+                        batch_size,
                     )?;
-                    loop {
-                        match tx.try_send(Ok(batch.clone())) {
-                            Ok(()) => break,
-                            Err(e) if e.is_disconnected() => break,
-                            Err(_) => std::thread::yield_now(),
-                        }
-                    }
+
+                    yield batch;
+
+                    chroms.clear();
+                    poss.clear();
+                    pose.clear();
+                    types.clear();
+                    sources.clear();
+                    scores.clear();
+                    strands.clear();
+                    phases.clear();
                 }
             }
-
-            debug!(
-                "Indexed GFF scan: {} records for {} regions",
-                total_records,
-                regions.len()
-            );
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
         }
-    });
 
-    // Stream batches from the channel
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+        // Remaining records
+        if !chroms.is_empty()
+            || (!total_records.is_multiple_of(batch_size) && total_records > 0)
+        {
+            let remaining = total_records % batch_size;
+            if remaining > 0 {
+                let batch = build_record_batch_optimized(
+                    Arc::clone(&schema),
+                    &chroms,
+                    &poss,
+                    &pose,
+                    &types,
+                    &sources,
+                    &scores,
+                    &strands,
+                    &phases,
+                    Some(&builders_to_arrays(if unnest_enable {
+                        &mut attribute_builders.2
+                    } else {
+                        &mut builder
+                    })),
+                    projection.clone(),
+                    needs_chrom,
+                    needs_start,
+                    needs_end,
+                    needs_type,
+                    needs_source,
+                    needs_score,
+                    needs_strand,
+                    needs_phase,
+                    remaining,
+                )?;
+                yield batch;
+            }
+        }
+
+        debug!(
+            "Indexed GFF scan: {} records for {} regions",
+            total_records,
+            regions.len()
+        );
+    };
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
