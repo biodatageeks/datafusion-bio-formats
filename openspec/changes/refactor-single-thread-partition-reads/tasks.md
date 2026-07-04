@@ -7,8 +7,8 @@
 - [x] 1.6 Document the thread-usage contract in FASTQ module doc + `CLAUDE.md`; commit; STOP for review
 
 ## 2. VCF (Phase 2)
-- [ ] 2.1 Convert `get_indexed_vcf_stream` (`:2659`) and `get_local_vcf_sync` (`:819`) to `sync_batch_stream`; remove channel/thread
-- [ ] 2.2 4-partition == 1-partition parity test; `cargo test -p datafusion-bio-format-vcf` green; commit; STOP
+- [x] 2.1 Convert `get_indexed_vcf_stream` (`:2659`) and `get_local_vcf_sync` (`:819`) to `sync_batch_stream`; remove channel/thread
+- [x] 2.2 4-partition == 1-partition parity test; `cargo test -p datafusion-bio-format-vcf` green; commit; STOP
 
 ## 3. BAM (Phase 3)
 - [ ] 3.1 Convert `get_indexed_stream` (`:888`) and `get_local_bam_sync` (`:383`) to `sync_batch_stream`

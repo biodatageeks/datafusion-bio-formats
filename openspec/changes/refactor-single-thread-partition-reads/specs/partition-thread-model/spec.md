@@ -13,17 +13,22 @@ Format scans SHALL decode each DataFusion physical partition on the Tokio worker
 - **WHEN** a file is read through a single-partition fallback path (non-seekable compression, remote store, or `target_partitions = 1`)
 - **THEN** the scan uses at most one OS thread for that partition's read and decode.
 
-### Requirement: Shared Synchronous Batch Stream Helper
+### Requirement: Inline Decode Mechanisms
 
-`bio-format-core` SHALL provide `sync_batch_stream(schema, next_batch)` that adapts a synchronous batch-producing closure into a `SendableRecordBatchStream`. Each poll SHALL invoke `next_batch` exactly once; `Some(Ok(batch))` yields a batch, `Some(Err(_))` surfaces an error, and `None` ends the stream. Every affected format crate SHALL construct its partition streams through this helper.
+`bio-format-core` SHALL provide `sync_batch_stream(schema, next_batch)` that adapts a synchronous batch-producing closure into a `SendableRecordBatchStream`. Each poll SHALL invoke `next_batch` exactly once; `Some(Ok(batch))` yields a batch, `Some(Err(_))` surfaces an error, and `None` ends the stream. Format crates with a linear record reader SHALL construct their partition streams through this helper. Format crates whose partition read iterates multiple genomic regions MAY instead use an `async_stream` generator (`try_stream!`/`stream!`) that yields batches from the same synchronous loop; both mechanisms decode inline on the consuming worker with no per-partition reader thread and satisfy the single-thread-per-partition contract.
 
-#### Scenario: Yields batches then terminates
+#### Scenario: Helper yields batches then terminates
 - **WHEN** `next_batch` returns two batches followed by `None`
 - **THEN** the resulting stream yields exactly those two batches and then completes.
 
-#### Scenario: Error propagation
+#### Scenario: Helper error propagation
 - **WHEN** `next_batch` returns `Some(Err(e))`
 - **THEN** the stream yields that error to the consumer.
+
+#### Scenario: Generator form for region-iterating readers
+- **WHEN** a region-iterating partition read is expressed as an `async_stream` generator that yields one batch per completed batch buffer
+- **THEN** its decode work runs on the consuming worker with no spawned reader thread
+- **AND** it produces the same batches the channel-based reader produced.
 
 ### Requirement: Target-Partition Core Contract
 
@@ -58,9 +63,9 @@ The threading change SHALL NOT alter query results. Row set, column values, empt
 
 The single-thread-per-partition contract SHALL apply uniformly to every format crate that reads records: FASTQ, VCF, BAM, CRAM, GFF, GTF, pairs, and FASTA. BED, which already executes fully asynchronously without a reader thread, SHALL remain unchanged and already satisfies the contract.
 
-#### Scenario: Indexed readers use the shared helper
+#### Scenario: Indexed readers decode inline
 - **WHEN** any of FASTQ, VCF, BAM, CRAM, GFF, GTF, pairs, or FASTA executes a partition read
-- **THEN** it produces its stream via `sync_batch_stream` with no per-partition `std::thread` reader.
+- **THEN** it produces its stream via `sync_batch_stream` or an `async_stream` generator, with no per-partition `std::thread` reader.
 
 #### Scenario: BED already compliant
 - **WHEN** a BED table is scanned
