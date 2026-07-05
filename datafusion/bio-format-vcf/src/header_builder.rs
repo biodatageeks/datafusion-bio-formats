@@ -126,10 +126,15 @@ pub fn build_vcf_header_lines(
         }
     }
 
-    // Add FORMAT field definitions
-    let unique_format_fields: HashSet<_> = format_fields.iter().collect();
-
-    for format_name in unique_format_fields {
+    // Add FORMAT field definitions. Deduplicate by name while preserving
+    // first-occurrence order: iterating a HashSet directly would emit the
+    // ##FORMAT lines in a per-process-randomized order, making VCF output
+    // non-byte-reproducible run to run.
+    let mut seen = HashSet::new();
+    for format_name in format_fields
+        .iter()
+        .filter(|name| seen.insert(name.as_str()))
+    {
         // Find the first occurrence to get the type (try both naming conventions)
         if let Some(field) = find_format_field(schema, format_name, sample_names) {
             let (vcf_type, number, description) = get_format_field_metadata(field, format_name);
@@ -322,6 +327,36 @@ mod tests {
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn format_header_lines_preserve_input_order_and_dedup() {
+        // FORMAT header lines must be emitted in the deterministic first-occurrence
+        // order of `format_fields`, not HashSet iteration order (randomized per
+        // process), so VCF output is byte-reproducible run to run. Duplicates
+        // collapse to their first occurrence.
+        let format_in = [
+            "GT", "GQ", "DP", "GT", "AD", "ADALL", "DP", "PS", "PL", "MIN_DP", "SB",
+        ];
+        let expected = ["GT", "GQ", "DP", "AD", "ADALL", "PS", "PL", "MIN_DP", "SB"];
+
+        let mut fields = vec![Field::new("chrom", DataType::Utf8, false)];
+        for id in ["GT", "GQ", "DP", "AD", "ADALL", "PS", "PL", "MIN_DP", "SB"] {
+            let mut md = HashMap::new();
+            md.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), id.to_string());
+            fields.push(Field::new(id, DataType::Utf8, true).with_metadata(md));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let format_fields: Vec<String> = format_in.iter().map(|s| s.to_string()).collect();
+
+        let lines =
+            build_vcf_header_lines(&schema, &[], &format_fields, &["S".to_string()]).unwrap();
+        let got: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("##FORMAT=<ID="))
+            .map(|l| l.split(',').next().unwrap())
+            .collect();
+        assert_eq!(got, expected);
+    }
 
     #[test]
     fn test_build_vcf_header_lines_basic() {
