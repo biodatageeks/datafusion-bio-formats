@@ -6,6 +6,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion_bio_format_core::object_storage::{
     CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_remote_stream,
     get_remote_stream_bgzf_async, get_remote_stream_gz_async, get_storage_type,
+    gzip_multi_member_decoder,
 };
 use datafusion_bio_format_core::record_filter::RecordFieldAccessor;
 use futures::stream::BoxStream;
@@ -144,7 +145,7 @@ pub async fn get_local_vcf_gz_reader(
     tokio::fs::File::open(file_path)
         .await
         .map(tokio::io::BufReader::new)
-        .map(GzipDecoder::new)
+        .map(gzip_multi_member_decoder)
         .map(tokio::io::BufReader::new)
         .map(vcf::r#async::io::Reader::new)
 }
@@ -728,10 +729,17 @@ impl VcfReader {
 
 /// A local indexed VCF reader for region-based queries.
 ///
-/// Uses noodles' `IndexedReader::Builder` to support random-access queries using TBI/CSI indexes.
-/// This is used when an index file is available and genomic region filters are present.
+/// Holds a plain BGZF-backed VCF reader plus a concrete tabix index to support
+/// random-access queries. This is used when an index file is available and genomic
+/// region filters are present.
+///
+/// Unlike noodles' `IndexedReader` (which stores the index as a non-`Send`
+/// `Box<dyn BinningIndex>`), this keeps the concrete `noodles_tabix::Index` so the
+/// reader is `Send`. That lets the indexed scan decode inline on the consuming tokio
+/// worker via `async_stream::try_stream!` instead of a dedicated reader thread.
 pub struct IndexedVcfReader {
-    reader: vcf::io::IndexedReader<noodles_bgzf_vcf::io::Reader<File>>,
+    reader: vcf::io::Reader<noodles_bgzf_vcf::io::Reader<File>>,
+    index: noodles_tabix::Index,
     header: vcf::Header,
 }
 
@@ -743,12 +751,14 @@ impl IndexedVcfReader {
     /// * `index_path` - Path to the TBI or CSI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, std::io::Error> {
         let index = noodles_tabix::fs::read(index_path)?;
-        let mut reader = vcf::io::indexed_reader::Builder::default()
-            .set_index(index)
-            .build_from_path(file_path)
-            .map_err(std::io::Error::other)?;
+        let inner = noodles_bgzf_vcf::io::Reader::new(File::open(file_path)?);
+        let mut reader = vcf::io::Reader::new(inner);
         let header = reader.read_header()?;
-        Ok(Self { reader, header })
+        Ok(Self {
+            reader,
+            index,
+            header,
+        })
     }
 
     /// Returns a reference to the VCF header.
@@ -770,7 +780,7 @@ impl IndexedVcfReader {
         &mut self,
         region: &noodles_core::Region,
     ) -> Result<impl Iterator<Item = Result<Record, std::io::Error>> + '_, std::io::Error> {
-        self.reader.query(&self.header, region)
+        self.reader.query(&self.header, &self.index, region)
     }
 }
 

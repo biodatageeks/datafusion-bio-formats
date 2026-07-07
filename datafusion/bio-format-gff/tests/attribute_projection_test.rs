@@ -248,3 +248,119 @@ async fn test_attribute_projection_all_attributes() -> Result<(), Box<dyn std::e
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_attributes_sentinel_with_flattened_field() -> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::array::{ListArray, StringArray};
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::datasource::TableProvider;
+
+    let file_path = create_test_gff_file_with_attributes().await?;
+    let table = GffTableProvider::new(
+        file_path.clone(),
+        Some(vec!["ID".to_string(), "attributes".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    // Schema: 8 static + ID(Utf8) + attributes(List<Struct>)
+    let schema = table.schema();
+    assert_eq!(schema.fields().len(), 10);
+    assert_eq!(schema.field(8).name(), "ID");
+    assert_eq!(schema.field(8).data_type(), &DataType::Utf8);
+    assert_eq!(schema.field(9).name(), "attributes");
+    assert!(matches!(schema.field(9).data_type(), DataType::List(_)));
+
+    let ctx = SessionContext::new();
+    ctx.register_table("g", Arc::new(table))?;
+    let results = ctx
+        .sql("SELECT \"ID\", attributes FROM g")
+        .await?
+        .collect()
+        .await?;
+    let batch = &results[0];
+
+    let id = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(id.value(0), "gene1");
+
+    let attrs = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    // Row 0 has a non-null, non-empty nested attributes list
+    assert!(attrs.is_valid(0));
+    assert!(attrs.value(0).len() >= 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_attributes_sentinel_only() -> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::array::ListArray;
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::datasource::TableProvider;
+
+    // Mode 2 with the sentinel as the only requested attribute field.
+    let file_path = create_test_gff_file_with_attributes().await?;
+    let table = GffTableProvider::new(
+        file_path.clone(),
+        Some(vec!["attributes".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let schema = table.schema();
+    assert_eq!(schema.fields().len(), 9);
+    assert_eq!(schema.field(8).name(), "attributes");
+    assert!(matches!(schema.field(8).data_type(), DataType::List(_)));
+
+    let ctx = SessionContext::new();
+    ctx.register_table("g", Arc::new(table))?;
+    let results = ctx.sql("SELECT attributes FROM g").await?.collect().await?;
+    let batch = &results[0];
+
+    let attrs = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(attrs.is_valid(0));
+    assert!(!attrs.value(0).is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_attributes_sentinel_registered_but_not_projected()
+-> Result<(), Box<dyn std::error::Error>> {
+    use datafusion::arrow::array::StringArray;
+
+    // Sentinel is registered in attr_fields, but the query projects only the
+    // flattened field — the nested column must not be required, and the
+    // flattened value must still be correct (exercises the projection fast path).
+    let file_path = create_test_gff_file_with_attributes().await?;
+    let table = GffTableProvider::new(
+        file_path.clone(),
+        Some(vec!["ID".to_string(), "attributes".to_string()]),
+        Some(create_object_storage_options()),
+        true,
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_table("g", Arc::new(table))?;
+    let results = ctx.sql("SELECT \"ID\" FROM g").await?.collect().await?;
+    let batch = &results[0];
+
+    assert_eq!(batch.num_columns(), 1);
+    assert_eq!(batch.schema().field(0).name(), "ID");
+    let id = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(id.value(0), "gene1");
+    Ok(())
+}

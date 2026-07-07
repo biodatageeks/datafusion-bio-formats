@@ -188,6 +188,57 @@ async fn test_gff_region_with_positions() -> datafusion::error::Result<()> {
     Ok(())
 }
 
+/// Test: the "attributes" sentinel works on the indexed read path — a region
+/// query returns both a flattened field (ID) and the nested attributes column.
+#[tokio::test]
+async fn test_gff_indexed_attributes_sentinel() -> datafusion::error::Result<()> {
+    use datafusion::arrow::array::{ListArray, StringArray};
+
+    let ctx = SessionContext::new();
+    let provider = GffTableProvider::new(
+        "tests/multi_chrom.gff3.gz".to_string(),
+        Some(vec!["ID".to_string(), "attributes".to_string()]),
+        None,
+        true,
+    )?;
+    ctx.register_table("gff", Arc::new(provider))?;
+
+    // chrom = 'chr1' triggers the TBI-indexed stream.
+    let df = ctx
+        .sql("SELECT \"ID\", attributes FROM gff WHERE chrom = 'chr1'")
+        .await?;
+    let batches = df.collect().await?;
+
+    let total: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(total, 150, "Expected 150 features on chr1");
+
+    let mut saw_attributes = false;
+    for batch in &batches {
+        // Column 0 is the flattened ID (Utf8), column 1 is nested attributes (List<Struct>).
+        let _id = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("ID should be a StringArray");
+        let attrs = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("attributes should be a ListArray");
+        for i in 0..attrs.len() {
+            if attrs.is_valid(i) && !attrs.value(i).is_empty() {
+                saw_attributes = true;
+            }
+        }
+    }
+    assert!(
+        saw_attributes,
+        "Expected at least one row with a non-empty nested attributes list"
+    );
+
+    Ok(())
+}
+
 /// Test: correctness of indexed vs full scan results.
 #[tokio::test]
 async fn test_gff_indexed_correctness() -> datafusion::error::Result<()> {

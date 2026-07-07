@@ -33,7 +33,7 @@ pub(crate) struct VcfZarrExec {
     pruning_method: PruningMethod,
     deferred_pruning: Option<DeferredPositionPruning>,
     codec_options: CodecOptions,
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 pub(crate) struct VcfZarrExecConfig {
@@ -61,12 +61,12 @@ impl VcfZarrExec {
         } = config;
         let partition_count = partition_selections.len();
         let codec_options = zarr_read_options();
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
             Partitioning::UnknownPartitioning(partition_count),
             EmissionType::Incremental,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             schema,
@@ -152,7 +152,7 @@ impl ExecutionPlan for VcfZarrExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

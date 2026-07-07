@@ -635,6 +635,22 @@ async fn transcript_schema_contains_vep_columns() -> datafusion::common::Result<
         .field_with_name("ncrna_structure")
         .expect("ncrna_structure column missing");
     assert_eq!(ncrna_structure.data_type(), &DataType::Utf8);
+    for col in [
+        "display_xref_id",
+        "source_cache",
+        "refseq_match",
+        "refseq_edits",
+        "is_gencode_basic",
+        "is_gencode_primary",
+    ] {
+        assert!(schema.field_with_name(col).is_ok(), "missing column: {col}");
+    }
+    let refseq_edits = schema.field_with_name("refseq_edits").unwrap();
+    assert!(
+        matches!(refseq_edits.data_type(), DataType::List(_)),
+        "refseq_edits should be List<Struct>, got {:?}",
+        refseq_edits.data_type()
+    );
 
     Ok(())
 }
@@ -800,6 +816,97 @@ async fn transcript_promoted_metadata_columns_queryable() -> datafusion::common:
     assert!(
         first_i64(&metadata_present) > 0,
         "expected at least one transcript row with promoted CSQ metadata"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_issue_190_columns_queryable_for_storable_and_merged()
+-> datafusion::common::Result<()> {
+    for fixture in ["transcript_storable", "transcript_merged_layout"] {
+        let provider = TranscriptTableProvider::new(ensembl_options(fixture_path(fixture)))?;
+
+        let ctx = SessionContext::new();
+        ctx.register_table("tx", Arc::new(provider))?;
+
+        let batches = ctx
+            .sql(
+                "SELECT display_xref_id, source_cache, refseq_match, refseq_edits, \
+                 is_gencode_basic, is_gencode_primary FROM tx",
+            )
+            .await?
+            .collect()
+            .await?;
+
+        assert!(
+            !batches.is_empty(),
+            "expected transcript batches for {fixture}"
+        );
+        assert_eq!(batches[0].num_columns(), 6);
+        assert!(
+            batches[0]
+                .column_by_name("refseq_edits")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .is_some(),
+            "refseq_edits should be a ListArray for {fixture}"
+        );
+
+        let null_counts = ctx
+            .sql(
+                "SELECT COUNT(*) FROM tx \
+                 WHERE is_gencode_basic IS NULL OR is_gencode_primary IS NULL",
+            )
+            .await?
+            .collect()
+            .await?;
+        assert_eq!(
+            first_i64(&null_counts),
+            0,
+            "gencode booleans should be non-null for {fixture}"
+        );
+
+        for col in ["is_gencode_basic", "is_gencode_primary"] {
+            assert!(
+                batches[0]
+                    .column_by_name(col)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<BooleanArray>()
+                    .is_some(),
+                "{col} should be a BooleanArray for {fixture}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn transcript_raw_free_existing_columns_remain_queryable() -> datafusion::common::Result<()> {
+    let provider =
+        TranscriptTableProvider::new(ensembl_options(fixture_path("transcript_storable")))?;
+    let ctx = SessionContext::new();
+    ctx.register_table("tx", Arc::new(provider))?;
+
+    let batches = ctx
+        .sql(
+            "SELECT gene_stable_id, gene_hgnc_id_native, cdna_mapper_segments, spliced_seq, \
+             five_prime_utr_seq, three_prime_utr_seq, translateable_seq, flags_str, \
+             cds_start_nf, cds_end_nf, bam_edit_status, has_non_polya_rna_edit, \
+             mature_mirna_regions, ncrna_structure FROM tx LIMIT 5",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    assert!(!batches.is_empty());
+    assert_eq!(batches[0].num_columns(), 14);
+    assert!(
+        batches[0].column_by_name("raw_object_json").is_none(),
+        "raw_object_json must not be projected by the raw-free contract query"
     );
 
     Ok(())

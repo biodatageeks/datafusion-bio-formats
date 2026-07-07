@@ -601,3 +601,42 @@ async fn test_indexed_zero_based_pos_values() {
     // File values: [25000, 65000, 95000, 140000, 200000, 300000] → 0-based: subtract 1
     assert_eq!(all_pos2, vec![24999, 64999, 94999, 139999, 199999, 299999]);
 }
+
+// ============================================================
+// COUNT(*) / empty-projection regression tests
+//
+// scan() advertised a zero-field projected schema for empty projections
+// while the physical exec emitted a one-column "__null" NullArray batch,
+// producing the mirror of the FASTQ bug:
+// "number of columns(1) must match number of fields(0)".
+// ============================================================
+
+#[tokio::test]
+async fn test_count_star_plain_text() {
+    // test_small.pairs — plain text (no index) -> sequential scan path.
+    let ctx = create_context(&test_file("test_small.pairs")).await;
+    let df = ctx.sql("SELECT count(*) AS c FROM pairs").await.unwrap();
+    let batches = df.collect().await.unwrap();
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(count, 10);
+}
+
+#[tokio::test]
+async fn test_count_star_indexed_gz() {
+    // test_spec.pairs.gz — BGZF + tabix -> indexed scan path.
+    let ctx = create_context_with_coord_system(&test_file("test_spec.pairs.gz"), false).await;
+    let df = ctx.sql("SELECT count(*) AS c FROM pairs").await.unwrap();
+    let batches = df.collect().await.unwrap();
+    let count = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .unwrap()
+        .value(0);
+    assert_eq!(count, 30);
+}

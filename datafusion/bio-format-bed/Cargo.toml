@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-bed"
-version = "1.7.0"
+version = "1.8.8"
 description = "BED file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
@@ -14,7 +14,6 @@ datafusion.workspace = true
 datafusion-execution.workspace = true
 async-trait.workspace = true
 opendal.workspace = true
-noodles.workspace = true
 noodles-bgzf.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true

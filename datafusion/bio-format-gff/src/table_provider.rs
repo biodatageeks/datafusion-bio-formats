@@ -69,11 +69,28 @@ fn determine_schema_on_demand(
             // Mode 2: Projection - add requested attributes as individual columns
             // All GFF attributes are treated as nullable strings for simplicity
             for attr_name in &attrs {
-                fields.push(Field::new(
-                    attr_name,
-                    DataType::Utf8, // All GFF attributes are strings
-                    true,           // Attributes can be null
-                ));
+                if attr_name == "attributes" {
+                    // Sentinel: emit the nested attributes column alongside
+                    // flattened fields (identical to Mode 1's attributes field).
+                    fields.push(Field::new(
+                        "attributes",
+                        DataType::List(FieldRef::from(Box::new(Field::new(
+                            "item",
+                            DataType::Struct(Fields::from(vec![
+                                Field::new("tag", DataType::Utf8, false),
+                                Field::new("value", DataType::Utf8, true),
+                            ])),
+                            true,
+                        )))),
+                        true,
+                    ));
+                } else {
+                    fields.push(Field::new(
+                        attr_name,
+                        DataType::Utf8, // All GFF attributes are strings
+                        true,           // Attributes can be null
+                    ));
+                }
             }
             debug!(
                 "GFF Schema Mode 2 (Projection): 8 static fields + {} attribute fields = {} columns total",
@@ -336,12 +353,12 @@ impl TableProvider for GffTableProvider {
                 );
 
                 return Ok(Arc::new(GffExec {
-                    cache: PlanProperties::new(
+                    cache: Arc::new(PlanProperties::new(
                         EquivalenceProperties::new(projected_schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
                         EmissionType::Final,
                         Boundedness::Bounded,
-                    ),
+                    )),
                     file_path: self.file_path.clone(),
                     attr_fields: self.attr_fields.clone(),
                     schema: projected_schema.clone(),
@@ -359,12 +376,12 @@ impl TableProvider for GffTableProvider {
 
         // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(GffExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             attr_fields: self.attr_fields.clone(),
             schema: projected_schema.clone(),

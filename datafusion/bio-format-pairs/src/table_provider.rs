@@ -294,12 +294,12 @@ impl TableProvider for PairsTableProvider {
                 );
 
                 return Ok(Arc::new(PairsExec {
-                    cache: PlanProperties::new(
+                    cache: Arc::new(PlanProperties::new(
                         EquivalenceProperties::new(projected_schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
                         EmissionType::Final,
                         Boundedness::Bounded,
-                    ),
+                    )),
                     file_path: self.file_path.clone(),
                     schema: projected_schema,
                     columns: self.header.columns.clone(),
@@ -316,12 +316,12 @@ impl TableProvider for PairsTableProvider {
 
         // Fallback: sequential full scan
         Ok(Arc::new(PairsExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             schema: projected_schema,
             columns: self.header.columns.clone(),
