@@ -65,7 +65,24 @@ fn determine_schema_on_demand(
         }
         Some(attrs) => {
             for attr_name in &attrs {
-                fields.push(Field::new(attr_name, DataType::Utf8, true));
+                if attr_name == "attributes" {
+                    // Sentinel: emit the nested attributes column alongside
+                    // flattened fields (identical to Mode 1's attributes field).
+                    fields.push(Field::new(
+                        "attributes",
+                        DataType::List(FieldRef::from(Box::new(Field::new(
+                            "item",
+                            DataType::Struct(Fields::from(vec![
+                                Field::new("tag", DataType::Utf8, false),
+                                Field::new("value", DataType::Utf8, true),
+                            ])),
+                            true,
+                        )))),
+                        true,
+                    ));
+                } else {
+                    fields.push(Field::new(attr_name, DataType::Utf8, true));
+                }
             }
             debug!(
                 "GTF Schema Mode 2 (Projection): 8 static fields + {} attribute fields = {} columns total",
@@ -296,12 +313,12 @@ impl TableProvider for GtfTableProvider {
                 );
 
                 return Ok(Arc::new(GtfExec {
-                    cache: PlanProperties::new(
+                    cache: Arc::new(PlanProperties::new(
                         EquivalenceProperties::new(projected_schema.clone()),
                         Partitioning::UnknownPartitioning(num_partitions),
                         EmissionType::Final,
                         Boundedness::Bounded,
-                    ),
+                    )),
                     file_path: self.file_path.clone(),
                     attr_fields: self.attr_fields.clone(),
                     schema: projected_schema,
@@ -318,12 +335,12 @@ impl TableProvider for GtfTableProvider {
 
         // Fallback: sequential full scan (no index or no regions)
         Ok(Arc::new(GtfExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(projected_schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             attr_fields: self.attr_fields.clone(),
             schema: projected_schema,

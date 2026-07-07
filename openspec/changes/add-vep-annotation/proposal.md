@@ -58,6 +58,9 @@ does not support a legacy `merged=true` compatibility option.
 - `datafusion/bio-format-ensembl-cache/src/util.rs` — Add `List<Struct>` builder support
 - `datafusion/bio-format-ensembl-cache/tests/integration_tests.rs` — Cover promoted transcript and motif columns
 - `datafusion/bio-format-ensembl-cache/README.md` — Document the expanded schema contract
+- Complete issue #190 raw-free transcript schema contract by promoting
+  `display_xref_id`, `source_cache`, `refseq_match`, `refseq_edits`,
+  `is_gencode_basic`, and `is_gencode_primary` from transcript objects.
 
 **Separate repo (`datafusion-bio-functions`):**
 - New crate `datafusion/bio-function-vep/` with consequence engine, index layer, execution layer, source-mode handling, and UDFs

@@ -3,7 +3,6 @@ use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
 use datafusion::arrow::array::{Array, RecordBatch, StringBuilder};
 use datafusion::arrow::datatypes::SchemaRef;
-use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatchOptions;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -13,7 +12,7 @@ use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, StorageType, get_storage_type,
 };
 
-use futures::channel::mpsc;
+use datafusion_bio_format_core::sync_stream::sync_batch_stream;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
 use noodles_bgzf::{IndexedReader, gzi};
@@ -22,12 +21,6 @@ use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::sync::Arc;
-use std::thread;
-
-/// Number of RecordBatch items buffered in the mpsc channel between the reader thread
-/// and the async stream consumer. A small buffer (2) keeps memory usage low while still
-/// allowing the reader thread to stay ahead of the consumer by one batch.
-const PARTITION_CHANNEL_BUFFER: usize = 2;
 
 /// Strategy for partitioning a FASTQ file across multiple execution partitions.
 ///
@@ -254,12 +247,23 @@ fn synchronize_plain_reader<R: BufRead>(reader: &mut R) -> io::Result<()> {
     }
 }
 
+/// Physical execution plan for FASTQ scans.
+///
+/// # Thread usage (issue #212)
+///
+/// Each partition decodes (decompress + parse + build Arrow batches) **inline on
+/// the tokio worker that consumes it**, via [`sync_batch_stream`]. There is no
+/// dedicated reader thread and no channel, so a scan uses **one OS thread per
+/// partition** — i.e. `target_partitions` threads, not `~2×`. To use N cores,
+/// set `target_partitions = N`. Decompression parallelism is bounded by the
+/// caller's tokio runtime worker-thread count: if `target_partitions` exceeds
+/// the worker count, concurrent decode is capped at the worker count.
 #[allow(dead_code)]
 pub struct FastqExec {
     pub(crate) file_path: String,
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) limit: Option<usize>,
     pub(crate) strategy: FastqPartitionStrategy,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
@@ -300,7 +304,7 @@ impl ExecutionPlan for FastqExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -353,7 +357,6 @@ impl ExecutionPlan for FastqExec {
                     end_comp,
                     self.limit,
                     batch_size,
-                    partition,
                 )
             }
             FastqPartitionStrategy::ByteRange { partitions } => {
@@ -366,7 +369,6 @@ impl ExecutionPlan for FastqExec {
                     end_byte,
                     self.limit,
                     batch_size,
-                    partition,
                 )
             }
             FastqPartitionStrategy::Sequential => {
@@ -384,87 +386,42 @@ impl ExecutionPlan for FastqExec {
     }
 }
 
-/// Read FASTQ records from a reader, build Arrow RecordBatches, and send them
-/// through an mpsc channel. This is the shared core loop used by both BGZF and
-/// byte-range partition strategies.
-///
-/// # Arguments
-///
-/// * `fastq_reader` - A FASTQ reader already positioned at the first record to read
-/// * `is_past_end` - Closure that returns `true` when the reader has passed the partition boundary
-/// * `schema` - Arrow schema for the output batches
-/// * `projection` - Optional column projection indices
-/// * `limit` - Optional row limit
-/// * `batch_size` - Maximum rows per RecordBatch
-/// * `tx` - Channel sender for dispatching completed batches
-fn read_and_send_batches<R: BufRead>(
-    fastq_reader: &mut fastq::io::Reader<R>,
-    is_past_end: &mut dyn FnMut(&mut fastq::io::Reader<R>) -> bool,
-    schema: &SchemaRef,
-    projection: &Option<Vec<usize>>,
+/// Build a closure that decodes one `RecordBatch` per call from a positioned
+/// FASTQ reader. All work is synchronous; the closure is driven by
+/// [`sync_batch_stream`], so it runs on the consuming tokio worker — one OS
+/// thread per partition, no reader thread, no channel (issue #212).
+fn batch_producer<R: BufRead + Send + 'static>(
+    mut fastq_reader: fastq::io::Reader<R>,
+    mut is_past_end: impl FnMut(&mut fastq::io::Reader<R>) -> bool + Send + 'static,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
     limit: Option<usize>,
     batch_size: usize,
-    tx: &mut mpsc::Sender<(Result<RecordBatch, ArrowError>, usize)>,
-) -> Result<(), ArrowError> {
+) -> impl FnMut() -> Option<Result<RecordBatch, DataFusionError>> + Send + 'static {
     let mut record = fastq::Record::default();
-    let mut total_records = 0;
-
-    // Fast path for empty projection (COUNT(*) queries)
-    if let Some(proj) = projection
-        && proj.is_empty()
-    {
-        let mut num_rows = 0;
-        loop {
-            if limit.is_some_and(|l| num_rows >= l) {
-                break;
-            }
-            if is_past_end(fastq_reader) {
-                break;
-            }
-            match fastq_reader.read_record(&mut record) {
-                Ok(0) => break,
-                Ok(_) => num_rows += 1,
-                Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
-            }
+    let mut total: usize = 0;
+    let mut done = false;
+    move || {
+        if done {
+            return None;
         }
-        let options = datafusion::arrow::record_batch::RecordBatchOptions::new()
-            .with_row_count(Some(num_rows));
-        let batch = RecordBatch::try_new_with_options(schema.clone(), vec![], &options)?;
-        tx.try_send((Ok(batch), num_rows)).ok();
-        return Ok(());
-    }
+        let proj = projection.as_ref();
+        let mut names = proj.is_none_or(|p| p.contains(&0)).then(StringBuilder::new);
+        let mut descriptions = proj.is_none_or(|p| p.contains(&1)).then(StringBuilder::new);
+        let mut sequences = proj.is_none_or(|p| p.contains(&2)).then(StringBuilder::new);
+        let mut quality_scores = proj.is_none_or(|p| p.contains(&3)).then(StringBuilder::new);
 
-    loop {
-        if limit.is_some_and(|l| total_records >= l) {
-            break;
-        }
-
-        let proj_indices = projection.as_ref();
-        let mut names = proj_indices
-            .is_none_or(|p| p.contains(&0))
-            .then(StringBuilder::new);
-        let mut descriptions = proj_indices
-            .is_none_or(|p| p.contains(&1))
-            .then(StringBuilder::new);
-        let mut sequences = proj_indices
-            .is_none_or(|p| p.contains(&2))
-            .then(StringBuilder::new);
-        let mut quality_scores = proj_indices
-            .is_none_or(|p| p.contains(&3))
-            .then(StringBuilder::new);
-
-        let mut count = 0;
+        let mut count = 0usize;
         while count < batch_size {
-            if limit.is_some_and(|l| total_records >= l) {
+            if limit.is_some_and(|l| total >= l) || is_past_end(&mut fastq_reader) {
+                done = true;
                 break;
             }
-
-            if is_past_end(fastq_reader) {
-                break;
-            }
-
             match fastq_reader.read_record(&mut record) {
-                Ok(0) => break,
+                Ok(0) => {
+                    done = true;
+                    break;
+                }
                 Ok(_) => {
                     if let Some(b) = &mut names {
                         b.append_value(std::str::from_utf8(record.name()).unwrap());
@@ -483,52 +440,32 @@ fn read_and_send_batches<R: BufRead>(
                         b.append_value(std::str::from_utf8(record.quality_scores()).unwrap());
                     }
                     count += 1;
-                    total_records += 1;
+                    total += 1;
                 }
-                Err(e) => return Err(ArrowError::ExternalError(Box::new(e))),
+                Err(e) => {
+                    done = true;
+                    return Some(Err(DataFusionError::External(Box::new(e))));
+                }
             }
         }
 
         if count == 0 {
-            break;
+            return None;
         }
-
-        let mut arrays: Vec<Arc<dyn Array>> = vec![];
-        if let Some(proj) = projection {
-            for &col_idx in proj.iter() {
-                match col_idx {
-                    0 => arrays.push(Arc::new(names.as_mut().unwrap().finish())),
-                    1 => arrays.push(Arc::new(descriptions.as_mut().unwrap().finish())),
-                    2 => arrays.push(Arc::new(sequences.as_mut().unwrap().finish())),
-                    3 => arrays.push(Arc::new(quality_scores.as_mut().unwrap().finish())),
-                    _ => unreachable!(),
-                }
-            }
-        } else {
-            arrays.push(Arc::new(names.unwrap().finish()));
-            arrays.push(Arc::new(descriptions.unwrap().finish()));
-            arrays.push(Arc::new(sequences.unwrap().finish()));
-            arrays.push(Arc::new(quality_scores.unwrap().finish()));
-        }
-
-        let batch = RecordBatch::try_new(schema.clone(), arrays)?;
-        let num_rows = batch.num_rows();
-        let mut msg = (Ok(batch), num_rows);
-        loop {
-            match tx.try_send(msg) {
-                Ok(()) => break,
-                Err(e) if e.is_disconnected() => return Ok(()),
-                Err(e) => {
-                    msg = e.into_inner();
-                    thread::yield_now();
-                }
-            }
-        }
+        Some(build_batch_from_builders(
+            &schema,
+            &projection,
+            &mut names,
+            &mut descriptions,
+            &mut sequences,
+            &mut quality_scores,
+            count,
+        ))
     }
-    Ok(())
 }
 
-/// Execute a BGZF partition using a background thread + mpsc channel.
+/// Execute a BGZF partition by decoding inline on the consuming tokio worker:
+/// one OS thread per partition, no reader thread, no channel (issue #212).
 #[allow(clippy::too_many_arguments)]
 fn execute_bgzf_partition(
     path: String,
@@ -539,60 +476,36 @@ fn execute_bgzf_partition(
     end_comp: u64,
     limit: Option<usize>,
     batch_size: usize,
-    partition: usize,
 ) -> datafusion::common::Result<SendableRecordBatchStream> {
-    let (mut tx, rx) =
-        mpsc::channel::<(Result<RecordBatch, ArrowError>, usize)>(PARTITION_CHANNEL_BUFFER);
+    let file = std::fs::File::open(&path)
+        .map_err(|e| DataFusionError::Execution(format!("open {path}: {e}")))?;
+    let mut reader = IndexedReader::new(BufReader::new(file), index);
+    reader
+        .seek(SeekFrom::Start(start_uncomp))
+        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    if start_uncomp > 0 {
+        synchronize_bgzf_reader(&mut reader, end_comp)
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    }
 
-    let schema_clone = schema.clone();
-    let _handle = thread::spawn(move || {
-        let read_and_send = || -> Result<(), ArrowError> {
-            let file =
-                std::fs::File::open(&path).map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-            let mut reader = IndexedReader::new(BufReader::new(file), index);
+    let fastq_reader = fastq::io::Reader::new(reader);
+    let is_past_end = move |r: &mut fastq::io::Reader<IndexedReader<BufReader<std::fs::File>>>| {
+        r.get_ref().virtual_position().compressed() >= end_comp
+    };
 
-            reader
-                .seek(SeekFrom::Start(start_uncomp))
-                .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-
-            if start_uncomp > 0 {
-                synchronize_bgzf_reader(&mut reader, end_comp)
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-            }
-
-            let mut fastq_reader = fastq::io::Reader::new(reader);
-            let mut is_past_end =
-                |r: &mut fastq::io::Reader<IndexedReader<BufReader<std::fs::File>>>| {
-                    r.get_ref().virtual_position().compressed() >= end_comp
-                };
-
-            read_and_send_batches(
-                &mut fastq_reader,
-                &mut is_past_end,
-                &schema_clone,
-                &projection,
-                limit,
-                batch_size,
-                &mut tx,
-            )
-        };
-
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send((Err(e), 0));
-        }
-    });
-
-    Ok(Box::pin(RecordBatchStreamAdapter::new(
+    let producer = batch_producer(
+        fastq_reader,
+        is_past_end,
         schema.clone(),
-        rx.map(move |(item, count)| {
-            debug!("Partition {partition}: processed {count} rows");
-            item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
-        }),
-    )))
+        projection,
+        limit,
+        batch_size,
+    );
+    Ok(sync_batch_stream(schema, producer))
 }
 
-/// Execute a byte-range partition of an uncompressed FASTQ file.
-#[allow(clippy::too_many_arguments)]
+/// Execute a byte-range partition of an uncompressed FASTQ file, decoding
+/// inline on the consuming tokio worker (issue #212).
 fn execute_byte_range_partition(
     path: String,
     schema: SchemaRef,
@@ -601,58 +514,35 @@ fn execute_byte_range_partition(
     end_byte: u64,
     limit: Option<usize>,
     batch_size: usize,
-    partition: usize,
 ) -> datafusion::common::Result<SendableRecordBatchStream> {
-    let (mut tx, rx) =
-        mpsc::channel::<(Result<RecordBatch, ArrowError>, usize)>(PARTITION_CHANNEL_BUFFER);
+    let file = std::fs::File::open(&path)
+        .map_err(|e| DataFusionError::Execution(format!("open {path}: {e}")))?;
+    let mut reader = BufReader::new(file);
+    reader
+        .seek(SeekFrom::Start(start_byte))
+        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    if start_byte > 0 {
+        synchronize_plain_reader(&mut reader)
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    }
 
-    let schema_clone = schema.clone();
-    let _handle = thread::spawn(move || {
-        let mut read_and_send = || -> Result<(), ArrowError> {
-            let file =
-                std::fs::File::open(&path).map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-            let mut reader = BufReader::new(file);
+    let fastq_reader = fastq::io::Reader::new(reader);
+    let is_past_end = move |r: &mut fastq::io::Reader<BufReader<std::fs::File>>| {
+        r.get_mut()
+            .stream_position()
+            .map(|pos| pos >= end_byte)
+            .unwrap_or(true)
+    };
 
-            reader
-                .seek(SeekFrom::Start(start_byte))
-                .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-
-            if start_byte > 0 {
-                synchronize_plain_reader(&mut reader)
-                    .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-            }
-
-            let mut fastq_reader = fastq::io::Reader::new(reader);
-            let mut is_past_end = |r: &mut fastq::io::Reader<BufReader<std::fs::File>>| {
-                r.get_mut()
-                    .stream_position()
-                    .map(|pos| pos >= end_byte)
-                    .unwrap_or(true)
-            };
-
-            read_and_send_batches(
-                &mut fastq_reader,
-                &mut is_past_end,
-                &schema_clone,
-                &projection,
-                limit,
-                batch_size,
-                &mut tx,
-            )
-        };
-
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send((Err(e), 0));
-        }
-    });
-
-    Ok(Box::pin(RecordBatchStreamAdapter::new(
+    let producer = batch_producer(
+        fastq_reader,
+        is_past_end,
         schema.clone(),
-        rx.map(move |(item, count)| {
-            debug!("Partition {partition}: processed {count} rows");
-            item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
-        }),
-    )))
+        projection,
+        limit,
+        batch_size,
+    );
+    Ok(sync_batch_stream(schema, producer))
 }
 
 /// Build a RecordBatch from optional StringBuilder columns.

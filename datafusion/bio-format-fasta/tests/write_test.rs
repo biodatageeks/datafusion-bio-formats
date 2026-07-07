@@ -4,7 +4,7 @@
 //! INSERT OVERWRITE path and that data round-trips properly through
 //! read -> write -> read cycles across all compression formats.
 
-use datafusion::arrow::array::{Array, StringArray, UInt64Array};
+use datafusion::arrow::array::{Array, LargeStringArray, StringArray, UInt64Array};
 use datafusion::prelude::*;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_fasta::FastaTableProvider;
@@ -267,7 +267,7 @@ async fn test_write_preserves_all_fields() {
     let sequences = batch
         .column(2)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
 
     // Row 0: seq_alpha (sorted first)
@@ -405,7 +405,7 @@ async fn test_write_plain_to_bgzf_round_trip() {
         let seq_array = batch
             .column(2)
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<LargeStringArray>()
             .unwrap();
         for i in 0..batch.num_rows() {
             names.insert(name_array.value(i).to_string());
@@ -675,7 +675,7 @@ async fn test_write_preserves_long_sequences() {
     let sequences = batch
         .column(1)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert_eq!(sequences.value(0).len(), 200);
     assert_eq!(sequences.value(0), "A".repeat(200));
@@ -735,7 +735,7 @@ async fn test_write_with_no_description() {
     let sequences = batch
         .column(2)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert_eq!(names.value(0), "seq_no_desc");
     assert_eq!(sequences.value(0), "MKTLLIFLAG");

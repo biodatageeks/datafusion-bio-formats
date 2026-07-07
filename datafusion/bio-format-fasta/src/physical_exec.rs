@@ -1,7 +1,9 @@
 use crate::storage::{FastaLocalReader, FastaRemoteReader, open_local_fasta_sync};
 use async_stream::__private::AsyncStream;
 use async_stream::try_stream;
-use datafusion::arrow::array::{Array, NullArray, RecordBatch, StringArray, StringBuilder};
+use datafusion::arrow::array::{
+    Array, LargeStringArray, NullArray, RecordBatch, StringArray, StringBuilder,
+};
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::DataFusionError;
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -41,7 +43,7 @@ pub struct FastaExec {
     /// Optional column projection indices.
     pub(crate) projection: Option<Vec<usize>>,
     /// Cached plan properties.
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     /// Optional record limit.
     pub(crate) limit: Option<usize>,
     /// Cloud storage configuration options.
@@ -83,7 +85,7 @@ impl ExecutionPlan for FastaExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -270,11 +272,12 @@ async fn get_local_fasta(
     Ok(stream)
 }
 
-/// Reads a local FASTA file using a synchronous thread with buffer reuse.
+/// Reads a local FASTA file with buffer reuse, decoding inline on the consuming task.
 ///
-/// Uses `read_record(&mut record)` to reuse a single record buffer across reads,
-/// avoiding per-record clone allocations. Sends batches via a bounded channel for
-/// backpressure. Falls back to the async `get_local_fasta` for GZIP compression.
+/// Uses `read_definition`/`read_sequence` with reused buffers across reads,
+/// avoiding per-record clone allocations. Batches are produced by an
+/// `async_stream::try_stream!` generator that runs on the consuming tokio worker.
+/// Falls back to the async `get_local_fasta` for GZIP compression.
 async fn get_local_fasta_sync(
     file_path: String,
     schema_ref: SchemaRef,
@@ -283,111 +286,88 @@ async fn get_local_fasta_sync(
     compression_type: CompressionType,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<
-        Result<RecordBatch, datafusion::arrow::error::ArrowError>,
-    >(2);
-    std::thread::spawn(move || {
-        let read_and_send = || -> Result<(), DataFusionError> {
-            let mut reader = open_local_fasta_sync(&file_path, compression_type)
-                .map_err(|e| DataFusionError::Execution(format!("Failed to open FASTA: {e}")))?;
+    let stream = try_stream! {
+        let mut reader = open_local_fasta_sync(&file_path, compression_type)
+            .map_err(|e| DataFusionError::Execution(format!("Failed to open FASTA: {e}")))?;
 
-            let mut name: Vec<String> = Vec::with_capacity(batch_size);
-            let mut description: Vec<Option<String>> = Vec::with_capacity(batch_size);
-            let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
+        let mut name: Vec<String> = Vec::with_capacity(batch_size);
+        let mut description: Vec<Option<String>> = Vec::with_capacity(batch_size);
+        let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
 
-            let mut def_buf = String::new();
-            let mut seq_buf = Vec::new();
-            let mut record_num = 0usize;
+        let mut def_buf = String::new();
+        let mut seq_buf = Vec::new();
+        let mut record_num = 0usize;
 
-            loop {
-                def_buf.clear();
-                match reader.read_definition(&mut def_buf) {
-                    Ok(0) => break, // EOF
-                    Ok(_) => {
-                        seq_buf.clear();
-                        reader.read_sequence(&mut seq_buf).map_err(|e| {
-                            DataFusionError::Execution(format!("FASTA sequence read error: {e}"))
+        loop {
+            def_buf.clear();
+            match reader.read_definition(&mut def_buf) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    seq_buf.clear();
+                    reader.read_sequence(&mut seq_buf).map_err(|e| {
+                        DataFusionError::Execution(format!("FASTA sequence read error: {e}"))
+                    })?;
+
+                    let definition: noodles_fasta::record::Definition =
+                        def_buf.parse().map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "FASTA definition parse error: {e}"
+                            ))
                         })?;
 
-                        let definition: noodles_fasta::record::Definition =
-                            def_buf.parse().map_err(|e| {
-                                DataFusionError::Execution(format!(
-                                    "FASTA definition parse error: {e}"
-                                ))
-                            })?;
+                    name.push(
+                        std::str::from_utf8(definition.name())
+                            .unwrap_or("")
+                            .to_string(),
+                    );
+                    description.push(
+                        definition
+                            .description()
+                            .map(|s| std::str::from_utf8(s).unwrap_or("").to_string()),
+                    );
+                    sequence.push(std::str::from_utf8(&seq_buf).unwrap_or("").to_string());
 
-                        name.push(
-                            std::str::from_utf8(definition.name())
-                                .unwrap_or("")
-                                .to_string(),
-                        );
-                        description.push(
-                            definition
-                                .description()
-                                .map(|s| std::str::from_utf8(s).unwrap_or("").to_string()),
-                        );
-                        sequence.push(std::str::from_utf8(&seq_buf).unwrap_or("").to_string());
+                    record_num += 1;
 
-                        record_num += 1;
+                    if record_num.is_multiple_of(batch_size) {
+                        debug!("Record number: {record_num}");
+                        let batch = build_record_batch(
+                            Arc::clone(&schema),
+                            &name,
+                            &description,
+                            &sequence,
+                            projection.clone(),
+                        )?;
 
-                        if record_num.is_multiple_of(batch_size) {
-                            debug!("Record number: {record_num}");
-                            let batch = build_record_batch(
-                                Arc::clone(&schema),
-                                &name,
-                                &description,
-                                &sequence,
-                                projection.clone(),
-                            )?;
+                        yield batch;
 
-                            loop {
-                                match tx.try_send(Ok(batch.clone())) {
-                                    Ok(()) => break,
-                                    Err(e) if e.is_disconnected() => return Ok(()),
-                                    Err(_) => std::thread::yield_now(),
-                                }
-                            }
-
-                            name.clear();
-                            description.clear();
-                            sequence.clear();
-                        }
-                    }
-                    Err(e) => {
-                        return Err(DataFusionError::Execution(format!("FASTA read error: {e}")));
+                        name.clear();
+                        description.clear();
+                        sequence.clear();
                     }
                 }
-            }
-
-            // Remaining records
-            if !name.is_empty() {
-                let batch = build_record_batch(
-                    Arc::clone(&schema),
-                    &name,
-                    &description,
-                    &sequence,
-                    projection.clone(),
-                )?;
-                loop {
-                    match tx.try_send(Ok(batch.clone())) {
-                        Ok(()) => break,
-                        Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
-                    }
+                Err(e) => {
+                    Err::<(), DataFusionError>(DataFusionError::Execution(format!(
+                        "FASTA read error: {e}"
+                    )))?;
                 }
             }
-
-            debug!("Local FASTA sync scan: {record_num} records");
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(datafusion::arrow::error::ArrowError::ExternalError(
-                Box::new(e),
-            )));
         }
-    });
 
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+        // Remaining records
+        if !name.is_empty() {
+            let batch = build_record_batch(
+                Arc::clone(&schema),
+                &name,
+                &description,
+                &sequence,
+                projection.clone(),
+            )?;
+            yield batch;
+        }
+
+        debug!("Local FASTA sync scan: {record_num} records");
+    };
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
 
@@ -399,7 +379,7 @@ fn build_record_batch(
     projection: Option<Vec<usize>>,
 ) -> datafusion::error::Result<RecordBatch> {
     let name_array = Arc::new(StringArray::from(name.to_vec())) as Arc<dyn Array>;
-    let sequence_array = Arc::new(StringArray::from(sequence.to_vec())) as Arc<dyn Array>;
+    let sequence_array = Arc::new(LargeStringArray::from(sequence.to_vec())) as Arc<dyn Array>;
     let description_array = Arc::new({
         let mut builder = StringBuilder::new();
         for s in description {

@@ -4,7 +4,7 @@ use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, get_compression_type, get_remote_stream, get_remote_stream_bgzf_async,
     get_remote_stream_gz_async,
 };
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use noodles_csi::BinningIndex;
 use opendal::FuturesBytesStream;
 use std::fs::File;
@@ -102,7 +102,7 @@ pub enum GtfLocalReader {
     /// Plain text reader
     Plain(BufReader<File>),
     /// GZIP compressed reader
-    Gzip(Box<BufReader<GzDecoder<File>>>),
+    Gzip(Box<BufReader<MultiGzDecoder<File>>>),
     /// BGZF compressed reader (block-gzipped, used with tabix indexes)
     Bgzf(Box<BufReader<noodles_bgzf::Reader<File>>>),
 }
@@ -122,7 +122,7 @@ impl GtfLocalReader {
                 Ok(GtfLocalReader::Bgzf(Box::new(BufReader::new(bgzf_reader))))
             } else {
                 let file = File::open(path)?;
-                let decoder = GzDecoder::new(file);
+                let decoder = MultiGzDecoder::new(file);
                 Ok(GtfLocalReader::Gzip(Box::new(BufReader::new(decoder))))
             }
         } else {

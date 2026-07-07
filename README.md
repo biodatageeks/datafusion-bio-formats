@@ -473,24 +473,24 @@ When an index is available, the query engine uses a three-stage execution model:
 - Result: `min(target_partitions, num_regions)` partitions with roughly equal work
 
 **3. Streaming I/O** — Each partition processes its assigned regions using constant-memory streaming:
-- Dedicated OS thread per partition (not tokio's blocking pool)
-- `mpsc::channel(2)` provides backpressure between producer and consumer
-- At most ~3 RecordBatches in flight per partition (~3-8 MB)
-- Total memory: ~3 batches x `target_partitions` (constant regardless of file size)
+- Decode (decompress + parse + build Arrow batches) runs **inline on the tokio worker that consumes the partition** — no dedicated reader thread and no channel (issue #212)
+- A scan therefore uses **one OS thread per partition** (`target_partitions`), not `~2×`; to use N cores, set `target_partitions = N`
+- Decode parallelism is bounded by the caller's tokio runtime worker-thread count; if `target_partitions` exceeds the worker count, concurrent decode is capped there
+- Only one RecordBatch is built at a time per partition (constant memory regardless of file size)
 
 ```
-                     target_partitions = 4
+                     target_partitions = 4        (one OS thread per partition)
                      ┌──────────────────┐
-Partition 0 (thread) │ chr1:1-125M      │ ─── sequential within partition
-                     │ chr1:125M-249M   │     streaming via channel(2)
+Partition 0 (worker) │ chr1:1-125M      │ ─── sequential within partition
+                     │ chr1:125M-249M   │     decode inline on the worker
                      ├──────────────────┤
-Partition 1 (thread) │ chr2             │ ─── concurrent across partitions
-                     │ chr3             │     max 4 threads active
+Partition 1 (worker) │ chr2             │ ─── concurrent across partitions
+                     │ chr3             │     ~4 threads active (== target_partitions)
                      ├──────────────────┤
-Partition 2 (thread) │ chr4             │
+Partition 2 (worker) │ chr4             │
                      │ chr5, chr6       │
                      ├──────────────────┤
-Partition 3 (thread) │ chrX             │
+Partition 3 (worker) │ chrX             │
                      │ chrY, chrM       │
                      └──────────────────┘
 ```

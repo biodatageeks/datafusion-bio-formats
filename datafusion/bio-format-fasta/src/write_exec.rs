@@ -32,7 +32,7 @@ pub struct FastaWriteExec {
     input: Arc<dyn ExecutionPlan>,
     output_path: String,
     compression: FastaCompressionType,
-    cache: PlanProperties,
+    cache: Arc<PlanProperties>,
 }
 
 impl FastaWriteExec {
@@ -51,12 +51,12 @@ impl FastaWriteExec {
             false,
         )]));
 
-        let cache = PlanProperties::new(
+        let cache = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema),
             Partitioning::UnknownPartitioning(1),
             EmissionType::Final,
             Boundedness::Bounded,
-        );
+        ));
 
         Self {
             input,
@@ -109,7 +109,7 @@ impl ExecutionPlan for FastaWriteExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 

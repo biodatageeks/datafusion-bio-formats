@@ -184,6 +184,53 @@ async fn test_bgzf_no_gzi_falls_back_to_sequential() {
     );
 }
 
+/// Guard for the issue #212 fold refactor: the exact set of (name, sequence,
+/// quality_scores) rows must be identical regardless of `target_partitions`.
+#[tokio::test]
+async fn test_bgzf_values_identical_across_partition_counts() {
+    let file_path = format!("{}/data/sample.fastq.bgz", env!("CARGO_MANIFEST_DIR"));
+
+    async fn read_rows(file_path: &str, partitions: usize) -> Vec<(String, String, String)> {
+        let config = SessionConfig::new().with_target_partitions(partitions);
+        let ctx = SessionContext::new_with_config(config);
+        let provider = FastqTableProvider::new(file_path.to_string(), None).expect("provider");
+        ctx.register_table("fastq", Arc::new(provider))
+            .expect("register");
+        let batches = ctx
+            .sql("SELECT name, sequence, quality_scores FROM fastq")
+            .await
+            .expect("sql")
+            .collect()
+            .await
+            .expect("collect");
+        let mut rows = Vec::new();
+        for batch in &batches {
+            let col = |i: usize| {
+                batch
+                    .column(i)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::StringArray>()
+                    .unwrap()
+            };
+            let (n, s, q) = (col(0), col(1), col(2));
+            for i in 0..batch.num_rows() {
+                rows.push((
+                    n.value(i).to_string(),
+                    s.value(i).to_string(),
+                    q.value(i).to_string(),
+                ));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    let one = read_rows(&file_path, 1).await;
+    let four = read_rows(&file_path, 4).await;
+    assert_eq!(one.len(), 2000);
+    assert_eq!(one, four, "row values differ between 1 and 4 partitions");
+}
+
 // ---- Uncompressed parallel read tests ----
 
 #[tokio::test]

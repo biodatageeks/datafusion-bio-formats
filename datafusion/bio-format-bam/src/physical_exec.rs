@@ -26,7 +26,6 @@ use datafusion_bio_format_core::record_filter::evaluate_record_filters;
 use datafusion_bio_format_core::sam_tag_io::{TagBuilders, build_tag_to_index, load_record_tags};
 use datafusion_bio_format_core::table_utils::OptionalField;
 
-use futures::SinkExt;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
 use noodles_bam as bam;
@@ -41,7 +40,7 @@ pub struct BamExec {
     pub(crate) file_path: String,
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) limit: Option<usize>,
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
     /// If true, output 0-based half-open coordinates; if false, 1-based closed coordinates
@@ -91,7 +90,7 @@ impl ExecutionPlan for BamExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -363,11 +362,11 @@ async fn get_remote_bam_stream(
     Ok(stream)
 }
 
-/// Reads a local BAM file using a synchronous thread with buffer reuse.
+/// Reads a local BAM file with buffer reuse, decoding inline on the consuming task.
 ///
 /// Uses `read_record(&mut record)` to reuse a single record buffer across reads,
-/// avoiding per-record clone allocations. Sends batches via a bounded channel for
-/// backpressure.
+/// avoiding per-record clone allocations. Batches are produced by an
+/// `async_stream::try_stream!` generator that runs on the consuming tokio worker.
 #[allow(clippy::too_many_arguments)]
 async fn get_local_bam_sync(
     file_path: String,
@@ -378,10 +377,8 @@ async fn get_local_bam_sync(
     tag_fields: Option<Vec<String>>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    std::thread::spawn(move || {
-        let read_and_send = || -> Result<(), DataFusionError> {
+    let stream = async_stream::try_stream! {
             let (mut reader, header) = open_local_bam_sync(&file_path)
                 .map_err(|e| DataFusionError::Execution(format!("Failed to open BAM: {e}")))?;
 
@@ -562,16 +559,15 @@ async fn get_local_bam_sync(
                                 batch_row_count,
                             )?;
 
-                            match futures::executor::block_on(tx.send(Ok(batch))) {
-                                Ok(()) => {}
-                                Err(_) => return Ok(()),
-                            }
+                            yield batch;
 
                             batch_row_count = 0;
                         }
                     }
                     Err(e) => {
-                        return Err(DataFusionError::Execution(format!("BAM read error: {e}")));
+                        Err::<(), DataFusionError>(DataFusionError::Execution(format!(
+                            "BAM read error: {e}"
+                        )))?;
                     }
                 }
             }
@@ -593,18 +589,11 @@ async fn get_local_bam_sync(
                     &projection,
                     batch_row_count,
                 )?;
-                let _ = futures::executor::block_on(tx.send(Ok(batch)));
+                yield batch;
             }
 
             debug!("Local BAM sync scan: {total_records} records");
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
-        }
-    });
-
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+    };
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
 
@@ -867,8 +856,9 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
 /// Get a streaming RecordBatch stream from an indexed BAM file for one or more regions.
 ///
-/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
-/// Each partition processes its assigned regions sequentially, keeping only ~3 batches
+/// Decodes inline on the consuming tokio worker via an `async_stream::try_stream!`
+/// generator (no per-partition reader thread).
+/// Each partition processes its assigned regions sequentially, keeping only ~1 batch
 /// in memory at a time (constant memory regardless of data volume).
 #[allow(clippy::too_many_arguments)]
 async fn get_indexed_stream(
@@ -883,10 +873,8 @@ async fn get_indexed_stream(
     residual_filters: Vec<datafusion::logical_expr::Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    std::thread::spawn(move || {
-        let read_and_send = || -> Result<(), DataFusionError> {
+    let stream = async_stream::try_stream! {
             let mut indexed_reader =
                 IndexedBamReader::new(&file_path, &index_path).map_err(|e| {
                     DataFusionError::Execution(format!("Failed to open indexed BAM: {e}"))
@@ -917,35 +905,40 @@ async fn get_indexed_stream(
             let mut total_records = 0usize;
             let mut batch_row_count = 0usize;
 
-            /// Helper macro to flush the current batch via the channel.
-            macro_rules! flush_batch {
-                ($batch_row_count:expr, $disconnect_action:expr) => {{
-                    let tag_arrays = if num_tag_fields > 0 {
-                        Some(
-                            builders_to_arrays(tag_builders.builders_mut())
-                                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-                        )
-                    } else {
-                        None
-                    };
-                    let batch = build_record_batch_from_builders(
-                        Arc::clone(&schema),
-                        builders.finish(),
-                        tag_arrays.as_ref(),
-                        &projection,
-                        $batch_row_count,
-                    )?;
+            // NOTE: These helper macros wrap their fallible bodies in
+            // immediately-invoked closures so any `?` stays inside a `Result`-returning
+            // scope. `async_stream::try_stream!` only rewrites `?` it can see directly in
+            // the generator body, not `?` hidden inside macro expansions, so callers apply
+            // `?` to the macro result at the (visible) call site instead.
 
-                    match futures::executor::block_on(tx.send(Ok(batch))) {
-                        Ok(()) => {}
-                        Err(_) => $disconnect_action,
-                    }
-                }};
+            /// Helper macro to build the current batch from the accumulated builders.
+            macro_rules! build_batch {
+                ($batch_row_count:expr) => {
+                    (|| -> Result<RecordBatch, DataFusionError> {
+                        let tag_arrays = if num_tag_fields > 0 {
+                            Some(
+                                builders_to_arrays(tag_builders.builders_mut())
+                                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+                            )
+                        } else {
+                            None
+                        };
+                        let batch = build_record_batch_from_builders(
+                            Arc::clone(&schema),
+                            builders.finish(),
+                            tag_arrays.as_ref(),
+                            &projection,
+                            $batch_row_count,
+                        )?;
+                        Ok(batch)
+                    })()
+                };
             }
 
             /// Helper macro to accumulate fields from a record into builders.
             macro_rules! accumulate_record_fields {
-                ($record:expr, $chrom_name:expr, $start_val:expr, $end_val:expr, $mq:expr) => {{
+                ($record:expr, $chrom_name:expr, $start_val:expr, $end_val:expr, $mq:expr) => {
+                    (|| -> Result<(), DataFusionError> {
                     if flags.name {
                         match $record.name() {
                             Some(read_name) => builders.append_name(Some(&read_name.to_string())),
@@ -1026,8 +1019,16 @@ async fn get_indexed_stream(
                         )
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     }
-                }};
+                    Ok(())
+                    })()
+                };
             }
+
+            // Lazily read the BAI at most once per partition — only if an
+            // unmapped-tail region is actually encountered — and reuse it across
+            // all such regions (avoids re-reading the full index per region while
+            // not penalizing the common no-unmapped-tail case).
+            let mut bai_index: Option<bam::bai::Index> = None;
 
             for region in &regions {
                 // Handle unmapped tail regions via direct BGZF seek —
@@ -1035,26 +1036,26 @@ async fn get_indexed_stream(
                 if region.unmapped_tail {
                     // Dedicated partition for global no-coor records (n_no_coor).
                     if region.chrom == UNPLACED_UNMAPPED_SENTINEL_CHROM {
-                        let no_coor_index = bam::bai::fs::read(&index_path).map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "Failed to read BAI for unplaced/unmapped tail: {e}"
-                            ))
-                        })?;
+                        if bai_index.is_none() {
+                            bai_index = Some(bam::bai::fs::read(&index_path).map_err(|e| {
+                                DataFusionError::Execution(format!(
+                                    "Failed to read BAI for unplaced/unmapped tail: {e}"
+                                ))
+                            })?);
+                        }
+                        let no_coor_index = bai_index.as_ref().unwrap();
                         let no_coor_hint =
                             no_coor_index.unplaced_unmapped_record_count().unwrap_or(0);
                         if no_coor_hint == 0 {
                             continue;
                         }
 
-                        let mut no_coor_reader = bam::io::indexed_reader::Builder::default()
-                            .set_index(no_coor_index)
-                            .build_from_path(&file_path)
+                        // Open a plain (Send) reader; the concrete BAI index above is only
+                        // needed for the no-coor hint, not for the record scan.
+                        let (mut no_coor_reader, _no_coor_header) = open_local_bam_sync(&file_path)
                             .map_err(|e| {
                                 DataFusionError::Execution(format!("Failed to open BAM file: {e}"))
                             })?;
-                        let _no_coor_header = no_coor_reader.read_header().map_err(|e| {
-                            DataFusionError::Execution(format!("Failed to read BAM header: {e}"))
-                        })?;
 
                         // Do not seek for no-coor partition. Some all-no-coor BAI files
                         // do not provide a safe seek hint for starting record reads.
@@ -1101,21 +1102,22 @@ async fn get_indexed_stream(
                                         start_val,
                                         end_val,
                                         mq
-                                    );
+                                    )?;
 
                                     total_records += 1;
                                     batch_row_count += 1;
                                     no_coor_count += 1;
 
                                     if batch_row_count == batch_size {
-                                        flush_batch!(batch_row_count, return Ok(()));
+                                        let batch = build_batch!(batch_row_count)?;
+                                        yield batch;
                                         batch_row_count = 0;
                                     }
                                 }
                                 Err(e) => {
-                                    return Err(DataFusionError::Execution(format!(
-                                        "Error reading unplaced/unmapped BAM records: {e}"
-                                    )));
+                                    Err::<(), DataFusionError>(DataFusionError::Execution(
+                                        format!("Error reading unplaced/unmapped BAM records: {e}"),
+                                    ))?;
                                 }
                             }
                         }
@@ -1128,11 +1130,14 @@ async fn get_indexed_stream(
 
                     // Per-reference unmapped tail (reference_sequence_id set,
                     // alignment_start absent).
-                    let unmapped_index = bam::bai::fs::read(&index_path).map_err(|e| {
-                        DataFusionError::Execution(format!(
-                            "Failed to read BAI for unmapped tail: {e}"
-                        ))
-                    })?;
+                    if bai_index.is_none() {
+                        bai_index = Some(bam::bai::fs::read(&index_path).map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "Failed to read BAI for unmapped tail: {e}"
+                            ))
+                        })?);
+                    }
+                    let unmapped_index = bai_index.as_ref().unwrap();
 
                     let ref_idx =
                         names
@@ -1165,15 +1170,12 @@ async fn get_indexed_stream(
                     .or_else(|| unmapped_index.last_first_record_start_position())
                     .unwrap_or_default();
 
-                    let mut unmapped_reader = bam::io::indexed_reader::Builder::default()
-                        .set_index(unmapped_index)
-                        .build_from_path(&file_path)
+                    // Open a plain (Send) reader; the concrete BAI index above is only
+                    // needed to compute the seek position, not for the record scan.
+                    let (mut unmapped_reader, _unmapped_header) = open_local_bam_sync(&file_path)
                         .map_err(|e| {
                             DataFusionError::Execution(format!("Failed to open BAM file: {e}"))
                         })?;
-                    let _unmapped_header = unmapped_reader.read_header().map_err(|e| {
-                        DataFusionError::Execution(format!("Failed to read BAM header: {e}"))
-                    })?;
                     unmapped_reader.get_mut().seek(seek_pos).map_err(|e| {
                         DataFusionError::Execution(format!("BGZF seek failed: {e}"))
                     })?;
@@ -1228,21 +1230,22 @@ async fn get_indexed_stream(
                                     start_val,
                                     end_val,
                                     mq
-                                );
+                                )?;
 
                                 total_records += 1;
                                 batch_row_count += 1;
                                 unmapped_count += 1;
 
                                 if batch_row_count == batch_size {
-                                    flush_batch!(batch_row_count, return Ok(()));
+                                    let batch = build_batch!(batch_row_count)?;
+                                    yield batch;
                                     batch_row_count = 0;
                                 }
                             }
                             Err(e) => {
-                                return Err(DataFusionError::Execution(format!(
+                                Err::<(), DataFusionError>(DataFusionError::Execution(format!(
                                     "Error reading unmapped BAM records: {e}"
-                                )));
+                                )))?;
                             }
                         }
                     }
@@ -1340,13 +1343,14 @@ async fn get_indexed_stream(
                         }
                     }
 
-                    accumulate_record_fields!(record, chrom_name, start_val, end_val, mq);
+                    accumulate_record_fields!(record, chrom_name, start_val, end_val, mq)?;
 
                     total_records += 1;
                     batch_row_count += 1;
 
                     if batch_row_count == batch_size {
-                        flush_batch!(batch_row_count, return Ok(()));
+                        let batch = build_batch!(batch_row_count)?;
+                        yield batch;
                         batch_row_count = 0;
                     }
                 }
@@ -1354,7 +1358,8 @@ async fn get_indexed_stream(
 
             // Remaining records
             if batch_row_count > 0 {
-                flush_batch!(batch_row_count, {});
+                let batch = build_batch!(batch_row_count)?;
+                yield batch;
             }
 
             debug!(
@@ -1362,14 +1367,6 @@ async fn get_indexed_stream(
                 total_records,
                 regions.len()
             );
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
-        }
-    });
-
-    // Stream batches from the channel
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+    };
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }

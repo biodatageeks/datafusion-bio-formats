@@ -191,12 +191,12 @@ impl TableProvider for BedTableProvider {
         let schema = project_schema(&self.schema, projection);
 
         Ok(Arc::new(BedExec {
-            cache: PlanProperties::new(
+            cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
                 EmissionType::Final,
                 Boundedness::Bounded,
-            ),
+            )),
             file_path: self.file_path.clone(),
             bed_fields: self.bed_fields.clone(),
             schema: schema.clone(),

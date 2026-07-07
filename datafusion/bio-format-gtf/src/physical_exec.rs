@@ -18,7 +18,7 @@ use datafusion_bio_format_core::{
     partition_balancer::PartitionAssignment,
     table_utils::{Attribute, OptionalField, builders_to_arrays},
 };
-use futures_util::{StreamExt, TryStreamExt};
+use futures_util::TryStreamExt;
 use log::debug;
 use std::any::Any;
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ pub struct GtfExec {
     pub(crate) schema: SchemaRef,
     pub(crate) projection: Option<Vec<usize>>,
     pub(crate) filters: Vec<Expr>,
-    pub(crate) cache: PlanProperties,
+    pub(crate) cache: Arc<PlanProperties>,
     pub(crate) coordinate_system_zero_based: bool,
     /// Optional cloud storage configuration for remote files
     pub(crate) object_storage_options: Option<ObjectStorageOptions>,
@@ -78,7 +78,7 @@ impl ExecutionPlan for GtfExec {
         self
     }
 
-    fn properties(&self) -> &PlanProperties {
+    fn properties(&self) -> &Arc<PlanProperties> {
         &self.cache
     }
 
@@ -369,7 +369,23 @@ fn set_attribute_builders(
     attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
 ) {
     for attr_name in attr_fields {
-        let field = OptionalField::new(&DataType::Utf8, batch_size).unwrap();
+        let field = if attr_name == "attributes" {
+            // Sentinel: a nested List<Struct> builder (matches the Mode 1 builder).
+            OptionalField::new(
+                &DataType::List(FieldRef::new(Field::new(
+                    "item",
+                    DataType::Struct(Fields::from(vec![
+                        Field::new("tag", DataType::Utf8, false),
+                        Field::new("value", DataType::Utf8, true),
+                    ])),
+                    true,
+                ))),
+                batch_size,
+            )
+            .unwrap()
+        } else {
+            OptionalField::new(&DataType::Utf8, batch_size).unwrap()
+        };
         attribute_builders.0.push(attr_name.clone());
         attribute_builders.1.push(field);
     }
@@ -406,29 +422,65 @@ fn load_attributes_unnest_from_string(
     attribute_builders: &mut (Vec<String>, Vec<OptionalField>),
     projection: Option<Vec<usize>>,
 ) -> Result<(), datafusion::arrow::error::ArrowError> {
-    let mut attributes_map = HashMap::new();
+    // Wanted flattened keys (O(1) lookup). The "attributes" sentinel is the raw
+    // nested column and is handled separately, so it is excluded here.
+    let wanted: std::collections::HashSet<&str> = attribute_builders
+        .0
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|s| *s != "attributes")
+        .collect();
 
-    if !attributes_str.is_empty() && attributes_str != "." {
-        let wanted: std::collections::HashSet<&str> =
-            attribute_builders.0.iter().map(|s| s.as_str()).collect();
+    let projected_attribute_indices: Option<Vec<usize>> =
+        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
+
+    // Only do the full (parse-everything) parse when the nested "attributes"
+    // column is both requested AND actually projected by this query — otherwise
+    // a query like `SELECT "gene_id"` would pay for parsing every attribute even
+    // though the nested column is never emitted. The sentinel appears at most
+    // once in attr_fields, so `position` is sufficient.
+    let sentinel_index = attribute_builders.0.iter().position(|n| n == "attributes");
+    let sentinel_projected = sentinel_index.is_some_and(|si| {
+        projected_attribute_indices
+            .as_ref()
+            .is_none_or(|idx| idx.contains(&si))
+    });
+
+    // For duplicate keys, concatenate values with commas (consistent with GFF3
+    // multi-value handling).
+    let accumulate = |map: &mut HashMap<String, String>, key: &str, value: &str| {
+        map.entry(key.to_string())
+            .and_modify(|existing: &mut String| {
+                existing.push(',');
+                existing.push_str(value);
+            })
+            .or_insert_with(|| value.to_string());
+    };
+
+    // When the sentinel column will be emitted we must parse every attribute
+    // anyway (for the nested column), so parse once and reuse that for both the
+    // flattened map and the nested slot. Otherwise scan only for the wanted keys.
+    let mut attributes_map: HashMap<String, String> = HashMap::new();
+    let mut sentinel_attrs: Option<Vec<Attribute>> = None;
+    if sentinel_projected {
+        let parsed = parse_gtf_attributes_to_vec(attributes_str);
+        for attr in &parsed {
+            if wanted.contains(attr.tag.as_str())
+                && let Some(v) = &attr.value
+            {
+                accumulate(&mut attributes_map, &attr.tag, v);
+            }
+        }
+        sentinel_attrs = Some(parsed);
+    } else if !attributes_str.is_empty() && attributes_str != "." {
         for pair in attributes_str.split(';') {
             if let Some((key, value)) = parse_gtf_pair(pair)
                 && wanted.contains(key)
             {
-                // For duplicate keys, concatenate values with commas (consistent with GFF3 multi-value handling)
-                attributes_map
-                    .entry(key.to_string())
-                    .and_modify(|existing: &mut String| {
-                        existing.push(',');
-                        existing.push_str(value);
-                    })
-                    .or_insert_with(|| value.to_string());
+                accumulate(&mut attributes_map, key, value);
             }
         }
     }
-
-    let projected_attribute_indices: Option<Vec<usize>> =
-        projection.map(|p| p.into_iter().filter(|i| *i >= 8).map(|i| i - 8).collect());
 
     for i in 0..attribute_builders.1.len() {
         if let Some(indices) = &projected_attribute_indices
@@ -438,13 +490,19 @@ fn load_attributes_unnest_from_string(
             continue;
         }
 
-        let name = &attribute_builders.0[i];
-        let builder = &mut attribute_builders.1[i];
+        if attribute_builders.0[i] == "attributes" {
+            // Sentinel slot: append the already-parsed nested attributes struct.
+            // `take()` is correct because the sentinel appears at most once; a
+            // (malformed) second occurrence would get an empty list.
+            let attributes = sentinel_attrs.take().unwrap_or_default();
+            attribute_builders.1[i].append_array_struct(attributes)?;
+            continue;
+        }
 
-        if let Some(value) = attributes_map.get(name) {
-            builder.append_string(value)?;
+        if let Some(value) = attributes_map.get(&attribute_builders.0[i]) {
+            attribute_builders.1[i].append_string(value)?;
         } else {
-            builder.append_null()?;
+            attribute_builders.1[i].append_null()?;
         }
     }
     Ok(())
@@ -650,7 +708,8 @@ fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, 
 
 /// Get a streaming RecordBatch stream from an indexed GTF file for one or more regions.
 ///
-/// Uses `thread::spawn` + `mpsc::channel(2)` for streaming I/O with backpressure.
+/// Batches are produced by an `async_stream::try_stream!` generator that decodes
+/// inline on the consuming tokio worker (no per-partition reader thread).
 #[allow(clippy::too_many_arguments)]
 async fn get_indexed_gtf_stream(
     file_path: String,
@@ -663,114 +722,92 @@ async fn get_indexed_gtf_stream(
     attr_fields: Option<Vec<String>>,
     residual_filters: Vec<Expr>,
 ) -> datafusion::error::Result<SendableRecordBatchStream> {
-    use datafusion::arrow::error::ArrowError;
-
     let schema = schema_ref.clone();
-    let (mut tx, rx) = futures::channel::mpsc::channel::<Result<RecordBatch, ArrowError>>(2);
 
-    std::thread::spawn(move || {
-        let read_and_send = || -> Result<(), DataFusionError> {
-            let mut indexed_reader =
-                IndexedGtfReader::new(&file_path, &index_path).map_err(|e| {
-                    DataFusionError::Execution(format!("Failed to open indexed GTF: {e}"))
+    let stream = try_stream! {
+        let mut indexed_reader =
+            IndexedGtfReader::new(&file_path, &index_path).map_err(|e| {
+                DataFusionError::Execution(format!("Failed to open indexed GTF: {e}"))
+            })?;
+
+        let mut collector = GtfBatchCollector::new(
+            schema.clone(),
+            batch_size,
+            projection,
+            attr_fields.as_deref(),
+            coordinate_system_zero_based,
+        )?;
+
+        for region in &regions {
+            if region.unmapped_tail {
+                continue;
+            }
+
+            let region_start_1based = region.start.map(|s| s as u32);
+            let region_end_1based = region.end.map(|e| e as u32);
+
+            let noodles_region = build_noodles_region(region)?;
+
+            let records = indexed_reader.query(&noodles_region).map_err(|e| {
+                DataFusionError::Execution(format!("GTF region query failed: {e}"))
+            })?;
+
+            for result in records {
+                let raw_record = result.map_err(|e| {
+                    DataFusionError::Execution(format!("GTF indexed record read error: {e}"))
                 })?;
 
-            let mut collector = GtfBatchCollector::new(
-                schema.clone(),
-                batch_size,
-                projection,
-                attr_fields.as_deref(),
-                coordinate_system_zero_based,
-            )?;
+                let line: &str = raw_record.as_ref();
+                let record = parse_gtf_line(line)
+                    .map_err(|e| DataFusionError::Execution(format!("GTF parse error: {e}")))?;
 
-            for region in &regions {
-                if region.unmapped_tail {
+                // Skip records outside the sub-region bounds
+                if let Some(rs) = region_start_1based
+                    && record.start < rs
+                {
+                    continue;
+                }
+                if let Some(re) = region_end_1based
+                    && record.start > re
+                {
                     continue;
                 }
 
-                let region_start_1based = region.start.map(|s| s as u32);
-                let region_end_1based = region.end.map(|e| e as u32);
+                // Apply residual filters
+                if !residual_filters.is_empty()
+                    && !crate::filter_utils::evaluate_filters_against_record(
+                        &record,
+                        &residual_filters,
+                        &record.attributes,
+                        coordinate_system_zero_based,
+                    )
+                {
+                    continue;
+                }
 
-                let noodles_region = build_noodles_region(region)?;
+                collector
+                    .push_record(&record)
+                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
 
-                let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("GTF region query failed: {e}"))
-                })?;
-
-                for result in records {
-                    let raw_record = result.map_err(|e| {
-                        DataFusionError::Execution(format!("GTF indexed record read error: {e}"))
-                    })?;
-
-                    let line: &str = raw_record.as_ref();
-                    let record = parse_gtf_line(line)
-                        .map_err(|e| DataFusionError::Execution(format!("GTF parse error: {e}")))?;
-
-                    // Skip records outside the sub-region bounds
-                    if let Some(rs) = region_start_1based
-                        && record.start < rs
-                    {
-                        continue;
-                    }
-                    if let Some(re) = region_end_1based
-                        && record.start > re
-                    {
-                        continue;
-                    }
-
-                    // Apply residual filters
-                    if !residual_filters.is_empty()
-                        && !crate::filter_utils::evaluate_filters_against_record(
-                            &record,
-                            &residual_filters,
-                            &record.attributes,
-                            coordinate_system_zero_based,
-                        )
-                    {
-                        continue;
-                    }
-
-                    collector
-                        .push_record(&record)
-                        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-
-                    if collector.is_full() {
-                        let batch = collector.take_batch()?;
-                        loop {
-                            match tx.try_send(Ok(batch.clone())) {
-                                Ok(()) => break,
-                                Err(e) if e.is_disconnected() => return Ok(()),
-                                Err(_) => std::thread::yield_now(),
-                            }
-                        }
-                    }
+                if collector.is_full() {
+                    let batch = collector.take_batch()?;
+                    yield batch;
                 }
             }
-
-            if collector.has_pending() {
-                let batch = collector.take_batch()?;
-                loop {
-                    match tx.try_send(Ok(batch.clone())) {
-                        Ok(()) => break,
-                        Err(e) if e.is_disconnected() => break,
-                        Err(_) => std::thread::yield_now(),
-                    }
-                }
-            }
-
-            debug!(
-                "Indexed GTF scan: {} records for {} regions",
-                collector.record_num,
-                regions.len()
-            );
-            Ok(())
-        };
-        if let Err(e) = read_and_send() {
-            let _ = tx.try_send(Err(ArrowError::ExternalError(Box::new(e))));
         }
-    });
 
-    let stream = rx.map(|item| item.map_err(|e| DataFusionError::ArrowError(Box::new(e), None)));
+        if collector.has_pending() {
+            let batch = collector.take_batch()?;
+            yield batch;
+        }
+
+        debug!(
+            "Indexed GTF scan: {} records for {} regions",
+            collector.record_num,
+            regions.len()
+        );
+    };
+
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema_ref, stream)))
 }
 
