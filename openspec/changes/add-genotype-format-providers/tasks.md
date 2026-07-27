@@ -160,7 +160,7 @@
 
 ## 7. GRG Provider
 
-- [ ] 7.1 Record the supported GRG on-disk versions and complete an independent
+- [x] 7.1 Record the supported GRG on-disk versions and complete an independent
   implementation/license review.
 - [ ] 7.2 Create the `bio-format-grg` crate behind an explicit workspace feature
   until compatibility gates pass.
