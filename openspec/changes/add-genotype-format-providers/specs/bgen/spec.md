@@ -212,8 +212,10 @@ local cache when the BGI object is remote.
 
 ### Requirement: Exact BGI Predicate Pushdown
 
-The system SHALL evaluate supported predicates over chromosome, position,
-variant identifier, and RS identifier through BGI before BGEN block reads.
+The system SHALL evaluate supported predicates over standard BGI chromosome,
+position, and RS identifier columns through SQLite before BGEN block reads,
+then apply variant-identifier predicates to the transient BGEN metadata catalog
+because standard BGI does not store the BGEN variant identifier.
 
 #### Scenario: Indexed RS identifier query
 - **WHEN** an equality or `IN` predicate selects RS identifiers
@@ -223,6 +225,11 @@ variant identifier, and RS identifier through BGI before BGEN block reads.
 #### Scenario: Indexed genomic query
 - **WHEN** supported chromosome and position predicates are supplied
 - **THEN** BGI selects the exact site rows under the requested coordinate mode.
+
+#### Scenario: Variant identifier query
+- **WHEN** an exact predicate selects the BGEN variant identifier
+- **THEN** the provider evaluates it against parsed BGEN identifying metadata
+- **AND** does not claim that the standard BGI schema contains that identifier.
 
 #### Scenario: BGI filtered limit
 - **WHEN** an exact BGI predicate and safe limit are supplied
