@@ -1,5 +1,9 @@
-use crate::object_storage::{CompressionType, ObjectStorageOptions, get_compression_type};
-use std::io::Write;
+use crate::object_storage::{
+    CompressionType, ObjectStorageOptions, RemoteObject, get_compression_type,
+};
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 
 #[tokio::test]
@@ -44,4 +48,85 @@ async fn test_get_compression_type_empty() {
 
     let compression_type = get_compression_type(path, None, ObjectStorageOptions::default()).await;
     assert_eq!(compression_type.unwrap(), CompressionType::NONE);
+}
+
+#[tokio::test]
+async fn remote_http_object_supports_size_full_and_range_reads() {
+    const BODY: &[u8] = b"0123456789abcdef";
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut handled = 0;
+        while handled < 3 && Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("HTTP test server failed: {error}"),
+            };
+
+            let mut request = [0u8; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            let is_head = request.starts_with("HEAD ");
+            let range = request.lines().find_map(|line| {
+                line.strip_prefix("Range: bytes=")
+                    .or_else(|| line.strip_prefix("range: bytes="))
+                    .and_then(|value| value.split_once('-'))
+                    .map(|(start, end)| {
+                        (
+                            start.parse::<usize>().unwrap(),
+                            end.parse::<usize>().unwrap(),
+                        )
+                    })
+            });
+
+            if is_head {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                    BODY.len()
+                )
+                .unwrap();
+            } else if let Some((start, end)) = range {
+                let bytes = &BODY[start..=end];
+                write!(
+                    stream,
+                    "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                    bytes.len(),
+                    start,
+                    end,
+                    BODY.len()
+                )
+                .unwrap();
+                stream.write_all(bytes).unwrap();
+            } else {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    BODY.len()
+                )
+                .unwrap();
+                stream.write_all(BODY).unwrap();
+            }
+            handled += 1;
+        }
+        assert_eq!(handled, 3, "HTTP test server timed out");
+    });
+
+    let object = RemoteObject::open(
+        format!("http://{address}/fixture.bin"),
+        ObjectStorageOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(object.size().await.unwrap(), BODY.len() as u64);
+    assert_eq!(object.read_all().await.unwrap().as_ref(), BODY);
+    assert_eq!(object.read_range(4..9).await.unwrap().as_ref(), b"45678");
+    server.join().unwrap();
 }
