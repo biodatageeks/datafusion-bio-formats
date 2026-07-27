@@ -1,7 +1,10 @@
 use std::fs::File;
 use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use datafusion::arrow::array::{Int32Array, ListArray, StringArray, StructArray, UInt32Array};
 use datafusion::arrow::util::pretty::pretty_format_batches;
@@ -47,6 +50,128 @@ fn create_equivalent_vcf_and_bcf() -> Result<(TempDir, String, String), Box<dyn 
         vcf_path.to_string_lossy().into_owned(),
         bcf_path.to_string_lossy().into_owned(),
     ))
+}
+
+#[derive(Clone, Debug)]
+struct HttpRequest {
+    path: String,
+    range: Option<(usize, usize)>,
+}
+
+struct RangeServer {
+    address: std::net::SocketAddr,
+    requests: Arc<Mutex<Vec<HttpRequest>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl RangeServer {
+    fn start(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_requests = Arc::clone(&requests);
+        let server_stop = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !server_stop.load(Ordering::Relaxed) && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("range server failed: {error}"),
+                };
+
+                let mut request = [0u8; 8192];
+                let size = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..size]);
+                let mut lines = request.lines();
+                let first_line = lines.next().unwrap();
+                let mut parts = first_line.split_whitespace();
+                let method = parts.next().unwrap();
+                let path = parts.next().unwrap().to_string();
+                let range = lines.find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if !name.eq_ignore_ascii_case("range") {
+                        return None;
+                    }
+                    let value = value.trim().strip_prefix("bytes=")?;
+                    let (start, end) = value.split_once('-')?;
+                    Some((
+                        start.parse::<usize>().unwrap(),
+                        end.parse::<usize>().unwrap(),
+                    ))
+                });
+                server_requests.lock().unwrap().push(HttpRequest {
+                    path: path.clone(),
+                    range,
+                });
+
+                let body = if path.starts_with("/remote.bcf.csi") {
+                    &csi
+                } else if path.starts_with("/remote.bcf") {
+                    &bcf
+                } else {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    continue;
+                };
+
+                if method == "HEAD" {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                } else if let Some((start, end)) = range {
+                    let end = end.min(body.len() - 1);
+                    let bytes = &body[start..=end];
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                        bytes.len(),
+                        start,
+                        end,
+                        body.len()
+                    );
+                    let _ = stream.write_all(bytes);
+                } else {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                }
+            }
+        });
+
+        Self {
+            address,
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}/remote.bcf", self.address)
+    }
+}
+
+impl Drop for RangeServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().unwrap();
+        }
+    }
 }
 
 async fn query(
@@ -144,6 +269,45 @@ async fn bcf_uses_csi_for_region_queries() -> Result<(), Box<dyn std::error::Err
     assert!(rows.contains("rs3"));
     assert!(!rows.contains("rs1"));
     assert!(!rows.contains("rs2"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_bcf_uses_csi_range_requests() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server = RangeServer::start(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT id FROM variants WHERE chrom = 'chr2'")
+        .await?
+        .collect()
+        .await?;
+    let rows = pretty_format_batches(&batches)?.to_string();
+    assert!(rows.contains("rs3"));
+    assert!(!rows.contains("rs1"));
+
+    let requests = server.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.path.starts_with("/remote.bcf.csi")),
+        "CSI companion was not requested: {requests:?}"
+    );
+    assert!(
+        requests.iter().any(|request| {
+            request.path.starts_with("/remote.bcf")
+                && !request.path.starts_with("/remote.bcf.csi")
+                && request.range.is_some()
+        }),
+        "BCF payload was not read with a byte range: {requests:?}"
+    );
     Ok(())
 }
 

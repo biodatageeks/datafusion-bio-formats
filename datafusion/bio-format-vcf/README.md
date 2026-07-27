@@ -125,7 +125,9 @@ automatically; `new_with_samples_and_format` accepts an explicit CSI path.
 Unindexed BCF uses one streaming partition with a reusable record buffer.
 
 BCF support is read-only. Remote BCF objects stream through the configured
-object store, while remote CSI range planning is not yet supported.
+object store. When a remote CSI companion is available, genomic predicates
+are planned as coalesced BGZF byte ranges instead of downloading the complete
+BCF payload.
 
 ### With Sample Selection
 

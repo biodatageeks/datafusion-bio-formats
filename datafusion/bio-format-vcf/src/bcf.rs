@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
+use std::io::Cursor;
 use std::sync::Arc;
 
 use async_stream::try_stream;
@@ -12,7 +13,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
-    ObjectStorageOptions, StorageType, get_remote_stream_bgzf_async, get_storage_type,
+    ObjectStorageOptions, RemoteObject, StorageType, get_remote_stream_bgzf_async, get_storage_type,
 };
 use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
 use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
@@ -116,13 +117,39 @@ pub(crate) async fn read_header(
     }
 }
 
-pub(crate) fn estimate_region_sizes(
+async fn read_csi_index(
+    index_path: &str,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> Result<noodles_csi::Index> {
+    match get_storage_type(index_path.to_string()) {
+        StorageType::LOCAL => noodles_csi::fs::read(local_path(index_path))
+            .map_err(|error| execution_error("failed to read BCF CSI index", error)),
+        _ => {
+            let object = RemoteObject::open(
+                index_path.to_string(),
+                object_storage_options.unwrap_or_default(),
+            )
+            .await
+            .map_err(|error| execution_error("failed to open remote BCF CSI index", error))?;
+            let bytes = object.read_all().await.map_err(|error| {
+                execution_error("failed to download remote BCF CSI index", error)
+            })?;
+            let mut reader = noodles_csi::io::Reader::new(Cursor::new(bytes));
+            reader
+                .read_index()
+                .map_err(|error| execution_error("failed to parse remote BCF CSI index", error))
+        }
+    }
+}
+
+pub(crate) async fn estimate_region_sizes(
     index_path: &str,
     regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
     contig_names: &[String],
     contig_lengths: &[u64],
+    object_storage_options: Option<ObjectStorageOptions>,
 ) -> Vec<RegionSizeEstimate> {
-    let index = match noodles_csi::fs::read(local_path(index_path)) {
+    let index = match read_csi_index(index_path, object_storage_options).await {
         Ok(index) => index,
         Err(error) => {
             log::debug!("failed to read BCF CSI for size estimation: {error}");
@@ -185,6 +212,99 @@ pub(crate) fn estimate_region_sizes(
             }
         })
         .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RemoteChunkSpan {
+    start: noodles_bgzf_vcf::VirtualPosition,
+    end: noodles_bgzf_vcf::VirtualPosition,
+}
+
+fn plan_remote_chunks(
+    index: &noodles_csi::Index,
+    header: &Header,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+) -> Result<Vec<RemoteChunkSpan>> {
+    use noodles_csi::BinningIndex;
+
+    const MAX_COALESCED_BYTES: u64 = 8 * 1024 * 1024;
+    const MAX_COALESCING_GAP: u64 = 64 * 1024;
+
+    let mut chunks = Vec::new();
+    for region in regions {
+        let query_region = build_noodles_region(region)?;
+        let reference_id = header
+            .string_maps()
+            .contigs()
+            .get_index_of(region.chrom.as_str())
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "BCF CSI region references an unknown contig: {}",
+                    region.chrom
+                ))
+            })?;
+        chunks.extend(
+            index
+                .query(reference_id, query_region.interval())
+                .map_err(|error| execution_error("failed to query remote BCF CSI index", error))?
+                .into_iter()
+                .map(|chunk| RemoteChunkSpan {
+                    start: chunk.start(),
+                    end: chunk.end(),
+                }),
+        );
+    }
+
+    chunks.sort_unstable_by_key(|chunk| chunk.start);
+    let mut merged: Vec<RemoteChunkSpan> = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        if let Some(current) = merged.last_mut() {
+            let overlaps = chunk.start <= current.end;
+            let gap = chunk
+                .start
+                .compressed()
+                .saturating_sub(current.end.compressed());
+            let merged_bytes = chunk
+                .end
+                .compressed()
+                .saturating_sub(current.start.compressed());
+            if overlaps || (gap <= MAX_COALESCING_GAP && merged_bytes <= MAX_COALESCED_BYTES) {
+                current.end = current.end.max(chunk.end);
+                continue;
+            }
+        }
+        merged.push(chunk);
+    }
+
+    Ok(merged)
+}
+
+fn record_intersects_regions(
+    record: &BcfRecord,
+    header: &Header,
+    regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
+) -> Result<bool> {
+    let chrom = VariantRecord::reference_sequence_name(record, header)
+        .map_err(|error| execution_error("invalid BCF contig dictionary index", error))?;
+    let Some(start) = record
+        .variant_start()
+        .transpose()
+        .map_err(|error| execution_error("invalid BCF position", error))?
+    else {
+        return Ok(false);
+    };
+    let end = record
+        .variant_end(header)
+        .map_err(|error| execution_error("invalid BCF variant span", error))?;
+    let start = start.get() as u64;
+    let end = end.get() as u64;
+
+    Ok(regions.iter().any(|region| {
+        !region.unmapped_tail
+            && region.chrom == chrom
+            && start <= region.end.unwrap_or(u64::MAX)
+            && end >= region.start.unwrap_or(1)
+    }))
 }
 
 struct BcfBatchDecoder {
@@ -686,6 +806,124 @@ fn indexed_local_stream(
     Box::pin(RecordBatchStreamAdapter::new(output_schema, stream))
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn indexed_remote_stream(
+    file_path: String,
+    index_path: String,
+    regions: Vec<datafusion_bio_format_core::genomic_filter::GenomicRegion>,
+    schema: SchemaRef,
+    batch_size: usize,
+    info_fields: Option<Vec<String>>,
+    format_fields: Option<Vec<String>>,
+    sample_names: Vec<String>,
+    source_sample_names: Vec<String>,
+    projection: Option<Vec<usize>>,
+    object_storage_options: Option<ObjectStorageOptions>,
+    coordinate_system_zero_based: bool,
+    residual_filters: Vec<Expr>,
+    limit: Option<usize>,
+) -> Result<SendableRecordBatchStream> {
+    const BGZF_MAX_COMPRESSED_BLOCK_SIZE: u64 = 64 * 1024;
+
+    let options = object_storage_options.unwrap_or_default();
+    let header = read_header(&file_path, Some(options.clone())).await?;
+    let index = read_csi_index(&index_path, Some(options.clone())).await?;
+    let chunks = plan_remote_chunks(&index, &header, &regions)?;
+    let object = RemoteObject::open(file_path, options)
+        .await
+        .map_err(|error| execution_error("failed to open indexed remote BCF", error))?;
+    let object_size = object
+        .size()
+        .await
+        .map_err(|error| execution_error("failed to stat indexed remote BCF", error))?;
+    let output_schema = schema.clone();
+
+    let stream = try_stream! {
+        let mut decoder = BcfBatchDecoder::new(
+            &header,
+            schema,
+            batch_size,
+            info_fields,
+            format_fields,
+            &sample_names,
+            source_sample_names,
+            projection,
+            coordinate_system_zero_based,
+            residual_filters,
+        )?;
+        let mut emitted = 0usize;
+
+        'chunks: for chunk in chunks {
+            let compressed_start = chunk.start.compressed();
+            let compressed_end = if chunk.end.uncompressed() == 0 {
+                chunk.end.compressed()
+            } else {
+                chunk
+                    .end
+                    .compressed()
+                    .saturating_add(BGZF_MAX_COMPRESSED_BLOCK_SIZE)
+            }
+            .min(object_size);
+            if compressed_end <= compressed_start {
+                continue;
+            }
+
+            let bytes = object
+                .read_range(compressed_start..compressed_end)
+                .await
+                .map_err(|error| execution_error("failed to read remote BCF CSI range", error))?;
+            let inner = noodles_bgzf_vcf::io::Reader::new(Cursor::new(bytes));
+            let mut reader = bcf::io::Reader::from(inner);
+            let local_start =
+                noodles_bgzf_vcf::VirtualPosition::new(0, chunk.start.uncompressed())
+                    .expect("zero compressed offset is valid");
+            let local_end = noodles_bgzf_vcf::VirtualPosition::new(
+                chunk.end.compressed().saturating_sub(compressed_start),
+                chunk.end.uncompressed(),
+            )
+            .ok_or_else(|| {
+                DataFusionError::Execution("remote BCF CSI virtual offset overflow".into())
+            })?;
+            reader
+                .get_mut()
+                .seek(local_start)
+                .map_err(|error| execution_error("failed to seek remote BCF CSI range", error))?;
+            let mut record = BcfRecord::default();
+
+            while reader.get_ref().virtual_position() < local_end {
+                let record_size = reader
+                    .read_record(&mut record)
+                    .map_err(|error| {
+                        execution_error("failed to decode remote indexed BCF record", error)
+                    })?;
+                if record_size == 0 {
+                    break;
+                }
+                if !record_intersects_regions(&record, &header, &regions)? {
+                    continue;
+                }
+                if let Some(batch) = decoder.append_record(&record, &header)? {
+                    emitted += batch.num_rows();
+                    yield batch;
+                }
+                let accepted = emitted + decoder.batch_row_count;
+                if limit.is_some_and(|value| accepted >= value) {
+                    break 'chunks;
+                }
+            }
+        }
+
+        if let Some(batch) = decoder.finish()? {
+            yield batch;
+        }
+    };
+
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        output_schema,
+        stream,
+    )))
+}
+
 pub(crate) struct BcfExec {
     pub(crate) file_path: String,
     pub(crate) schema: SchemaRef,
@@ -757,13 +995,25 @@ impl ExecutionPlan for BcfExec {
             (&self.partition_assignments, &self.index_path)
             && let Some(assignment) = assignments.get(partition)
         {
-            if !matches!(get_storage_type(self.file_path.clone()), StorageType::LOCAL) {
-                return Err(DataFusionError::NotImplemented(
-                    "remote indexed BCF scans require range-backed CSI support".into(),
+            if matches!(get_storage_type(self.file_path.clone()), StorageType::LOCAL) {
+                return Ok(indexed_local_stream(
+                    self.file_path.clone(),
+                    index_path.clone(),
+                    assignment.regions.clone(),
+                    self.schema.clone(),
+                    batch_size,
+                    self.info_fields.clone(),
+                    self.format_fields.clone(),
+                    self.sample_names.clone(),
+                    self.source_sample_names.clone(),
+                    self.projection.clone(),
+                    self.coordinate_system_zero_based,
+                    self.residual_filters.clone(),
+                    self.limit,
                 ));
             }
 
-            return Ok(indexed_local_stream(
+            let future = indexed_remote_stream(
                 self.file_path.clone(),
                 index_path.clone(),
                 assignment.regions.clone(),
@@ -774,10 +1024,16 @@ impl ExecutionPlan for BcfExec {
                 self.sample_names.clone(),
                 self.source_sample_names.clone(),
                 self.projection.clone(),
+                self.object_storage_options.clone(),
                 self.coordinate_system_zero_based,
                 self.residual_filters.clone(),
                 self.limit,
-            ));
+            );
+            let stream = futures::stream::once(future).try_flatten();
+            return Ok(Box::pin(RecordBatchStreamAdapter::new(
+                self.schema.clone(),
+                stream,
+            )));
         }
 
         match get_storage_type(self.file_path.clone()) {

@@ -52,14 +52,14 @@
   ploidy, multiallelic alleles, and case-sensitive INFO/FORMAT names.
 - [x] 3.5 Add streaming BGZF BCF decoding with reusable record and value buffers.
 - [x] 3.6 Apply INFO, FORMAT, and sample projection before Arrow conversion.
-- [ ] 3.7 Discover explicit and conventional CSI companions locally and through
+- [x] 3.7 Discover explicit and conventional CSI companions locally and through
   the configured object store.
-- [ ] 3.8 Plan CSI regions, merge overlapping chunks, and balance compressed
+- [x] 3.8 Plan CSI regions, merge overlapping chunks, and balance compressed
   byte ranges across target partitions.
-- [ ] 3.9 Apply record-level validation after inexact CSI pruning and remove
+- [x] 3.9 Apply record-level validation after inexact CSI pruning and remove
   duplicate chunk records.
 - [x] 3.10 Add a one-partition sequential fallback for unindexed BCF.
-- [ ] 3.11 Support local, HTTP, S3, GCS, and Azure range reads through existing
+- [x] 3.11 Support local, HTTP, S3, GCS, and Azure range reads through existing
   storage abstractions.
 - [ ] 3.12 Add BCF corruption, truncation, invalid dictionary, and allocation
   limit tests.

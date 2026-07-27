@@ -5,6 +5,7 @@ use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion};
 use datafusion_bio_format_core::genomic_filter::{
     build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
 };
@@ -32,7 +33,7 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::object_storage::{ObjectStorageOptions, RemoteObject};
 use futures::executor::block_on;
 use log::{debug, warn};
 use noodles_vcf::header::Formats;
@@ -670,7 +671,7 @@ impl VcfTableProvider {
         explicit_index_path: Option<String>,
         missing_sample_policy: Option<MissingSamplePolicy>,
     ) -> datafusion::common::Result<Self> {
-        use datafusion_bio_format_core::index_utils::{IndexFormat, discover_index_path};
+        use datafusion_bio_format_core::index_utils::IndexFormat;
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
 
         let input_format = input_format.resolve(&file_path);
@@ -709,31 +710,70 @@ impl VcfTableProvider {
 
         // Auto-discover index file for local BGZF-compressed files
         let storage_type = get_storage_type(file_path.clone());
-        let (index_path, index_format) = if let Some(path) = explicit_index_path {
-            let format = if input_format == VcfInputFormat::Bcf
-                || path.to_ascii_lowercase().ends_with(".csi")
-            {
-                IndexFormat::CSI
-            } else {
-                IndexFormat::TBI
-            };
-            (Some(path), Some(format))
-        } else if matches!(storage_type, StorageType::LOCAL) {
-            let discovered = match input_format {
-                VcfInputFormat::Bcf => discover_index_path(&file_path, IndexFormat::CSI)
-                    .map(|path| (path, IndexFormat::CSI)),
-                VcfInputFormat::Vcf => discover_vcf_index(&file_path),
-                VcfInputFormat::Auto => unreachable!("input format is resolved"),
-            };
-            match discovered {
-                Some((path, format)) => {
-                    debug!("Discovered variant index: {path} (format: {format:?})");
-                    (Some(path), Some(format))
+        let (index_path, index_format) = match input_format {
+            VcfInputFormat::Bcf => {
+                let options = object_storage_options.clone().unwrap_or_default();
+                let resolved = block_on(resolve_companion(
+                    &file_path,
+                    "BCF CSI",
+                    explicit_index_path.as_deref(),
+                    &[CompanionRule::AppendSuffix(".csi".to_string())],
+                    false,
+                    |candidate| {
+                        let options = options.clone();
+                        async move {
+                            if matches!(get_storage_type(candidate.clone()), StorageType::LOCAL) {
+                                let path = candidate.strip_prefix("file://").unwrap_or(&candidate);
+                                return Ok(std::path::Path::new(path).exists());
+                            }
+                            let object =
+                                RemoteObject::open(candidate, options)
+                                    .await
+                                    .map_err(|error| {
+                                        datafusion::common::DataFusionError::External(Box::new(
+                                            error,
+                                        ))
+                                    })?;
+                            match object.size().await {
+                                Ok(_) => Ok(true),
+                                Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+                                    Ok(false)
+                                }
+                                Err(error) => Err(datafusion::common::DataFusionError::External(
+                                    Box::new(error),
+                                )),
+                            }
+                        }
+                    },
+                ))?;
+                if let Some(path) = resolved {
+                    debug!("Discovered BCF CSI index: {path}");
+                    (Some(path), Some(IndexFormat::CSI))
+                } else {
+                    (None, None)
                 }
-                None => (None, None),
             }
-        } else {
-            (None, None)
+            VcfInputFormat::Vcf => {
+                if let Some(path) = explicit_index_path {
+                    let format = if path.to_ascii_lowercase().ends_with(".csi") {
+                        IndexFormat::CSI
+                    } else {
+                        IndexFormat::TBI
+                    };
+                    (Some(path), Some(format))
+                } else if matches!(storage_type, StorageType::LOCAL) {
+                    match discover_vcf_index(&file_path) {
+                        Some((path, format)) => {
+                            debug!("Discovered variant index: {path} (format: {format:?})");
+                            (Some(path), Some(format))
+                        }
+                        None => (None, None),
+                    }
+                } else {
+                    (None, None)
+                }
+            }
+            VcfInputFormat::Auto => unreachable!("input format is resolved"),
         };
 
         // Prefer index header reference names for indexed full scans and size
@@ -1048,12 +1088,16 @@ impl TableProvider for VcfTableProvider {
                 // Use balanced partitioning with index size estimates
                 let target_partitions = state.config().target_partitions();
                 let estimates = match self.input_format {
-                    VcfInputFormat::Bcf => crate::bcf::estimate_region_sizes(
-                        index_path,
-                        &regions,
-                        &self.contig_names,
-                        &self.contig_lengths,
-                    ),
+                    VcfInputFormat::Bcf => {
+                        crate::bcf::estimate_region_sizes(
+                            index_path,
+                            &regions,
+                            &self.contig_names,
+                            &self.contig_lengths,
+                            self.object_storage_options.clone(),
+                        )
+                        .await
+                    }
                     VcfInputFormat::Vcf => crate::storage::estimate_sizes_from_tbi(
                         index_path,
                         &regions,
