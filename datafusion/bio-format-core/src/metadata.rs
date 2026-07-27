@@ -23,6 +23,28 @@ pub const BIO_COMPRESSION_TYPE_KEY: &str = "bio.compression_type";
 pub const BIO_SOURCE_URI_KEY: &str = "bio.source_uri";
 
 // ============================================================================
+// Genotype Metadata Keys
+// ============================================================================
+
+/// Selected sample names stored as a JSON array on a genotype field.
+pub const GENOTYPE_SAMPLE_NAMES_KEY: &str = "bio.genotype.sample_names";
+
+/// Allele counted by a genotype dosage or hardcall-count field.
+pub const GENOTYPE_COUNTED_ALLELE_KEY: &str = "bio.genotype.counted_allele";
+
+/// Source allele order used by integer allele indices.
+pub const GENOTYPE_ALLELE_ORDER_KEY: &str = "bio.genotype.allele_order";
+
+/// Format-defined probability or genotype state ordering.
+pub const GENOTYPE_STATE_ORDER_KEY: &str = "bio.genotype.state_order";
+
+/// Format-specific genotype output mode.
+pub const GENOTYPE_OUTPUT_MODE_KEY: &str = "bio.genotype.output_mode";
+
+/// Source probability bit precision.
+pub const GENOTYPE_SOURCE_BIT_PRECISION_KEY: &str = "bio.genotype.source_bit_precision";
+
+// ============================================================================
 // VCF-Specific Metadata Keys
 // ============================================================================
 
