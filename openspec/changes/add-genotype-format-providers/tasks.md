@@ -70,28 +70,28 @@
 
 ## 4. PLINK 1 Provider
 
-- [ ] 4.1 Create the `bio-format-plink1` crate and public read options.
-- [ ] 4.2 Resolve explicit and conventional BED/BIM/FAM filesets.
-- [ ] 4.3 Parse FAM sample IDs with an explicit documented identifier policy.
-- [ ] 4.4 Parse BIM columns, chromosome values, positions, IDs, centimorgan
+- [x] 4.1 Create the `bio-format-plink1` crate and public read options.
+- [x] 4.2 Resolve explicit and conventional BED/BIM/FAM filesets.
+- [x] 4.3 Parse FAM sample IDs with an explicit documented identifier policy.
+- [x] 4.4 Parse BIM columns, chromosome values, positions, IDs, centimorgan
   values, `A1`, and `A2` without assigning reference semantics.
-- [ ] 4.5 Validate BED magic bytes and require current variant-major mode.
-- [ ] 4.6 Validate BIM/FAM counts against exact BED length with checked
+- [x] 4.5 Validate BED magic bytes and require current variant-major mode.
+- [x] 4.6 Validate BIM/FAM counts against exact BED length with checked
   arithmetic.
-- [ ] 4.7 Reject non-zero unused padding bits in each variant's final BED byte.
-- [ ] 4.8 Decode two-bit calls to documented A1 dosage and null missingness.
-- [ ] 4.9 Apply sample selection directly to packed calls without materializing
+- [x] 4.7 Reject non-zero unused padding bits in each variant's final BED byte.
+- [x] 4.8 Decode two-bit calls to documented A1 dosage and null missingness.
+- [x] 4.9 Apply sample selection directly to packed calls without materializing
   unselected genotypes.
-- [ ] 4.10 Apply exact variant filters and limits to BIM rows before BED I/O.
-- [ ] 4.11 Skip BED entirely for metadata-only and empty-sample queries.
-- [ ] 4.12 Plan contiguous fixed-offset variant ranges and coalesce adjacent
+- [x] 4.10 Apply exact variant filters and limits to BIM rows before BED I/O.
+- [x] 4.11 Skip BED entirely for metadata-only and empty-sample queries.
+- [x] 4.12 Plan contiguous fixed-offset variant ranges and coalesce adjacent
   object-store requests.
-- [ ] 4.13 Partition selected variants by payload bytes up to target partitions.
-- [ ] 4.14 Add local and object-store fileset consistency tests.
-- [ ] 4.15 Add differential tests against PLINK and `bed-reader`.
-- [ ] 4.16 Add malformed BIM/FAM, sample-major, legacy BED, truncation, padding,
+- [x] 4.13 Partition selected variants by payload bytes up to target partitions.
+- [x] 4.14 Add local and object-store fileset consistency tests.
+- [x] 4.15 Add differential tests against PLINK and `bed-reader`.
+- [x] 4.16 Add malformed BIM/FAM, sample-major, legacy BED, truncation, padding,
   and overflow tests.
-- [ ] 4.17 Benchmark dense and sparse variants, sparse samples, metadata-only
+- [x] 4.17 Benchmark dense and sparse variants, sparse samples, metadata-only
   queries, range coalescing, and parallel scans.
 
 ## 5. BGEN Provider
