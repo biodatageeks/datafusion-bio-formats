@@ -1,3 +1,4 @@
+use crate::bcf::BcfExec;
 use crate::physical_exec::VcfExec;
 use crate::storage::get_header;
 use crate::write_exec::VcfWriteExec;
@@ -7,6 +8,7 @@ use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::genomic_filter::{
     build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
 };
+use datafusion_bio_format_core::genotype::{MissingSamplePolicy, resolve_samples};
 use datafusion_bio_format_core::index_utils::discover_vcf_index;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
@@ -17,7 +19,7 @@ use datafusion_bio_format_core::metadata::{
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
@@ -99,6 +101,7 @@ fn resolve_selected_samples(
 /// # Errors
 ///
 /// Returns an error if the file cannot be read or the header is invalid
+#[allow(clippy::too_many_arguments)]
 async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
@@ -106,8 +109,18 @@ async fn determine_schema_from_header(
     samples_to_include: &Option<Vec<String>>,
     object_storage_options: &Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
+    input_format: VcfInputFormat,
+    missing_sample_policy: MissingSamplePolicy,
 ) -> datafusion::common::Result<(SchemaRef, Vec<String>, Vec<String>)> {
-    let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
+    let header = match input_format {
+        VcfInputFormat::Vcf => {
+            get_header(file_path.to_string(), object_storage_options.clone()).await?
+        }
+        VcfInputFormat::Bcf => {
+            crate::bcf::read_header(file_path, object_storage_options.clone()).await?
+        }
+        VcfInputFormat::Auto => unreachable!("input format must be resolved before reading"),
+    };
     let header_infos = header.infos();
     let header_formats = header.formats();
     let source_sample_names: Vec<String> = header
@@ -115,7 +128,17 @@ async fn determine_schema_from_header(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let sample_names = resolve_selected_samples(&source_sample_names, samples_to_include);
+    let sample_names = match input_format {
+        VcfInputFormat::Bcf => resolve_samples(
+            &source_sample_names,
+            samples_to_include.as_deref(),
+            missing_sample_policy,
+        )?
+        .names()
+        .to_vec(),
+        VcfInputFormat::Vcf => resolve_selected_samples(&source_sample_names, samples_to_include),
+        VcfInputFormat::Auto => unreachable!("input format must be resolved before reading"),
+    };
 
     // Extract header metadata for schema storage
     let file_format_obj = header.file_format();
@@ -201,7 +224,7 @@ async fn determine_schema_from_header(
         Some(tags) => tags.clone(),
         None => header_formats.keys().map(|k| k.to_string()).collect(),
     };
-    let mut format_field_metadata: HashMap<String, VcfFieldMetadata> = HashMap::new();
+    let mut format_field_metadata: BTreeMap<String, VcfFieldMetadata> = BTreeMap::new();
     for tag in &format_tags {
         if let Some(format_info) = header_formats.get(tag.as_str()) {
             format_field_metadata.insert(
@@ -387,7 +410,35 @@ pub fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
     }
 }
 
-/// A DataFusion table provider for reading VCF files.
+/// Input encoding accepted by [`VcfTableProvider`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VcfInputFormat {
+    /// Select BCF for `.bcf` paths and text VCF otherwise.
+    #[default]
+    Auto,
+    /// VCF text, optionally compressed with GZIP or BGZF.
+    Vcf,
+    /// BGZF-compressed BCF 2.2.
+    Bcf,
+}
+
+impl VcfInputFormat {
+    fn resolve(self, file_path: &str) -> Self {
+        match self {
+            Self::Auto => {
+                let path_without_query = file_path.split('?').next().unwrap_or(file_path);
+                if path_without_query.to_ascii_lowercase().ends_with(".bcf") {
+                    Self::Bcf
+                } else {
+                    Self::Vcf
+                }
+            }
+            explicit => explicit,
+        }
+    }
+}
+
+/// A DataFusion table provider for reading VCF or BCF files.
 ///
 /// This provider enables SQL queries on VCF files by implementing the DataFusion
 /// TableProvider interface. It supports local and remote files, multiple compression formats,
@@ -416,6 +467,8 @@ pub struct VcfTableProvider {
     contig_names: Vec<String>,
     /// Contig lengths from the file header (for balanced partitioning)
     contig_lengths: Vec<u64>,
+    /// Physical input encoding.
+    input_format: VcfInputFormat,
 }
 
 impl VcfTableProvider {
@@ -516,13 +569,36 @@ impl VcfTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
-        Self::new_with_samples(
+        Self::new_with_samples_and_format(
             file_path,
             info_fields,
             format_fields,
             None,
             object_storage_options,
             coordinate_system_zero_based,
+            VcfInputFormat::Auto,
+            None,
+        )
+    }
+
+    /// Creates a table provider with an explicit VCF or BCF input encoding.
+    pub fn new_with_format(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        input_format: VcfInputFormat,
+    ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples_and_format(
+            file_path,
+            info_fields,
+            format_fields,
+            None,
+            object_storage_options,
+            coordinate_system_zero_based,
+            input_format,
+            None,
         )
     }
 
@@ -538,8 +614,71 @@ impl VcfTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples_and_format(
+            file_path,
+            info_fields,
+            format_fields,
+            samples_to_include,
+            object_storage_options,
+            coordinate_system_zero_based,
+            VcfInputFormat::Auto,
+            None,
+        )
+    }
+
+    /// Creates a table provider with explicit samples, input encoding, and index.
+    ///
+    /// BCF accepts CSI indexes. The explicit index path takes precedence over
+    /// conventional local discovery.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_samples_and_format(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        samples_to_include: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        input_format: VcfInputFormat,
+        explicit_index_path: Option<String>,
+    ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples_and_format_and_policy(
+            file_path,
+            info_fields,
+            format_fields,
+            samples_to_include,
+            object_storage_options,
+            coordinate_system_zero_based,
+            input_format,
+            explicit_index_path,
+            None,
+        )
+    }
+
+    /// Creates a provider with an explicit missing-sample policy.
+    ///
+    /// BCF defaults to [`MissingSamplePolicy::Error`]. Text VCF keeps its
+    /// historical ignore behavior unless a policy is supplied here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_samples_and_format_and_policy(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        samples_to_include: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        input_format: VcfInputFormat,
+        explicit_index_path: Option<String>,
+        missing_sample_policy: Option<MissingSamplePolicy>,
+    ) -> datafusion::common::Result<Self> {
+        use datafusion_bio_format_core::index_utils::{IndexFormat, discover_index_path};
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
 
+        let input_format = input_format.resolve(&file_path);
+        let missing_sample_policy = missing_sample_policy.unwrap_or(match input_format {
+            VcfInputFormat::Bcf => MissingSamplePolicy::Error,
+            VcfInputFormat::Vcf => MissingSamplePolicy::Ignore,
+            VcfInputFormat::Auto => unreachable!("input format is resolved"),
+        });
         let (mut schema, sample_names, source_sample_names) =
             block_on(determine_schema_from_header(
                 &file_path,
@@ -548,6 +687,8 @@ impl VcfTableProvider {
                 &samples_to_include,
                 &object_storage_options,
                 coordinate_system_zero_based,
+                input_format,
+                missing_sample_policy,
             ))?;
 
         // Extract contig names and lengths from schema metadata
@@ -568,11 +709,26 @@ impl VcfTableProvider {
 
         // Auto-discover index file for local BGZF-compressed files
         let storage_type = get_storage_type(file_path.clone());
-        let (index_path, index_format) = if matches!(storage_type, StorageType::LOCAL) {
-            match discover_vcf_index(&file_path) {
-                Some((path, fmt)) => {
-                    debug!("Discovered VCF index: {path} (format: {fmt:?})");
-                    (Some(path), Some(fmt))
+        let (index_path, index_format) = if let Some(path) = explicit_index_path {
+            let format = if input_format == VcfInputFormat::Bcf
+                || path.to_ascii_lowercase().ends_with(".csi")
+            {
+                IndexFormat::CSI
+            } else {
+                IndexFormat::TBI
+            };
+            (Some(path), Some(format))
+        } else if matches!(storage_type, StorageType::LOCAL) {
+            let discovered = match input_format {
+                VcfInputFormat::Bcf => discover_index_path(&file_path, IndexFormat::CSI)
+                    .map(|path| (path, IndexFormat::CSI)),
+                VcfInputFormat::Vcf => discover_vcf_index(&file_path),
+                VcfInputFormat::Auto => unreachable!("input format is resolved"),
+            };
+            match discovered {
+                Some((path, format)) => {
+                    debug!("Discovered variant index: {path} (format: {format:?})");
+                    (Some(path), Some(format))
                 }
                 None => (None, None),
             }
@@ -674,6 +830,7 @@ impl VcfTableProvider {
             index_path,
             contig_names,
             contig_lengths,
+            input_format,
         })
     }
 
@@ -717,6 +874,7 @@ impl VcfTableProvider {
             index_path: None,
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
+            input_format: VcfInputFormat::Vcf,
         }
     }
 
@@ -757,6 +915,7 @@ impl VcfTableProvider {
             index_path: None,
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
+            input_format: VcfInputFormat::Vcf,
         }
     }
 }
@@ -839,6 +998,19 @@ impl TableProvider for VcfTableProvider {
         }
 
         let schema = project_schema(&self.schema, projection);
+        if limit == Some(0) {
+            return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                schema,
+            )));
+        }
+        let bcf_limit = if filters
+            .iter()
+            .all(|filter| can_push_down_record_filter(filter, &self.schema))
+        {
+            limit
+        } else {
+            None
+        };
 
         // Determine regions and partitioning when index is available
         if let Some(ref index_path) = self.index_path {
@@ -875,12 +1047,21 @@ impl TableProvider for VcfTableProvider {
             if !regions.is_empty() {
                 // Use balanced partitioning with index size estimates
                 let target_partitions = state.config().target_partitions();
-                let estimates = crate::storage::estimate_sizes_from_tbi(
-                    index_path,
-                    &regions,
-                    &self.contig_names,
-                    &self.contig_lengths,
-                );
+                let estimates = match self.input_format {
+                    VcfInputFormat::Bcf => crate::bcf::estimate_region_sizes(
+                        index_path,
+                        &regions,
+                        &self.contig_names,
+                        &self.contig_lengths,
+                    ),
+                    VcfInputFormat::Vcf => crate::storage::estimate_sizes_from_tbi(
+                        index_path,
+                        &regions,
+                        &self.contig_names,
+                        &self.contig_lengths,
+                    ),
+                    VcfInputFormat::Auto => unreachable!("input format is resolved"),
+                };
                 let assignments = balance_partitions(estimates, target_partitions);
                 let num_partitions = assignments.len();
 
@@ -899,13 +1080,67 @@ impl TableProvider for VcfTableProvider {
                     record_filters.len()
                 );
 
-                return Ok(Arc::new(VcfExec {
-                    cache: Arc::new(PlanProperties::new(
-                        EquivalenceProperties::new(schema.clone()),
-                        Partitioning::UnknownPartitioning(num_partitions),
-                        EmissionType::Incremental,
-                        Boundedness::Bounded,
-                    )),
+                let cache = Arc::new(PlanProperties::new(
+                    EquivalenceProperties::new(schema.clone()),
+                    Partitioning::UnknownPartitioning(num_partitions),
+                    EmissionType::Incremental,
+                    Boundedness::Bounded,
+                ));
+                let plan: Arc<dyn ExecutionPlan> = match self.input_format {
+                    VcfInputFormat::Bcf => Arc::new(BcfExec {
+                        cache,
+                        file_path: self.file_path.clone(),
+                        schema: schema.clone(),
+                        info_fields: self.info_fields.clone(),
+                        format_fields: self.format_fields.clone(),
+                        sample_names: self.sample_names.clone(),
+                        source_sample_names: self.source_sample_names.clone(),
+                        projection: projection.cloned(),
+                        limit: bcf_limit,
+                        object_storage_options: self.object_storage_options.clone(),
+                        coordinate_system_zero_based: self.coordinate_system_zero_based,
+                        partition_assignments: Some(assignments),
+                        index_path: Some(index_path.clone()),
+                        residual_filters: record_filters,
+                    }),
+                    VcfInputFormat::Vcf => Arc::new(VcfExec {
+                        cache,
+                        file_path: self.file_path.clone(),
+                        schema: schema.clone(),
+                        info_fields: self.info_fields.clone(),
+                        format_fields: self.format_fields.clone(),
+                        sample_names: self.sample_names.clone(),
+                        source_sample_names: self.source_sample_names.clone(),
+                        projection: projection.cloned(),
+                        limit,
+                        object_storage_options: self.object_storage_options.clone(),
+                        coordinate_system_zero_based: self.coordinate_system_zero_based,
+                        partition_assignments: Some(assignments),
+                        index_path: Some(index_path.clone()),
+                        residual_filters: record_filters,
+                    }),
+                    VcfInputFormat::Auto => unreachable!("input format is resolved"),
+                };
+                return Ok(plan);
+            }
+        }
+
+        // Fallback: sequential full scan (no index or no regions)
+        let cache = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        match self.input_format {
+            VcfInputFormat::Bcf => {
+                let record_filters = filters
+                    .iter()
+                    .filter(|expr| can_push_down_record_filter(expr, &self.schema))
+                    .cloned()
+                    .collect();
+                Ok(Arc::new(BcfExec {
+                    cache,
                     file_path: self.file_path.clone(),
                     schema: schema.clone(),
                     info_fields: self.info_fields.clone(),
@@ -913,38 +1148,32 @@ impl TableProvider for VcfTableProvider {
                     sample_names: self.sample_names.clone(),
                     source_sample_names: self.source_sample_names.clone(),
                     projection: projection.cloned(),
-                    limit,
+                    limit: bcf_limit,
                     object_storage_options: self.object_storage_options.clone(),
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
-                    partition_assignments: Some(assignments),
-                    index_path: Some(index_path.clone()),
+                    partition_assignments: None,
+                    index_path: None,
                     residual_filters: record_filters,
-                }));
+                }))
             }
+            VcfInputFormat::Vcf => Ok(Arc::new(VcfExec {
+                cache,
+                file_path: self.file_path.clone(),
+                schema: schema.clone(),
+                info_fields: self.info_fields.clone(),
+                format_fields: self.format_fields.clone(),
+                sample_names: self.sample_names.clone(),
+                source_sample_names: self.source_sample_names.clone(),
+                projection: projection.cloned(),
+                limit,
+                object_storage_options: self.object_storage_options.clone(),
+                coordinate_system_zero_based: self.coordinate_system_zero_based,
+                partition_assignments: None,
+                index_path: None,
+                residual_filters: Vec::new(),
+            })),
+            VcfInputFormat::Auto => unreachable!("input format is resolved"),
         }
-
-        // Fallback: sequential full scan (no index or no regions)
-        Ok(Arc::new(VcfExec {
-            cache: Arc::new(PlanProperties::new(
-                EquivalenceProperties::new(schema.clone()),
-                Partitioning::UnknownPartitioning(1),
-                EmissionType::Incremental,
-                Boundedness::Bounded,
-            )),
-            file_path: self.file_path.clone(),
-            schema: schema.clone(),
-            info_fields: self.info_fields.clone(),
-            format_fields: self.format_fields.clone(),
-            sample_names: self.sample_names.clone(),
-            source_sample_names: self.source_sample_names.clone(),
-            projection: projection.cloned(),
-            limit,
-            object_storage_options: self.object_storage_options.clone(),
-            coordinate_system_zero_based: self.coordinate_system_zero_based,
-            partition_assignments: None,
-            index_path: None,
-            residual_filters: Vec::new(),
-        }))
     }
 
     async fn insert_into(

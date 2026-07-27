@@ -46,7 +46,7 @@ use std::str;
 
 /// Joins an iterator of displayable items into a reusable buffer with a separator,
 /// avoiding intermediate Vec allocation.
-fn join_into<I, D>(buf: &mut String, iter: I, sep: char)
+pub(crate) fn join_into<I, D>(buf: &mut String, iter: I, sep: char)
 where
     I: Iterator<Item = D>,
     D: std::fmt::Display,
@@ -78,7 +78,7 @@ fn count_requested_format_fields(format_fields: &Option<Vec<String>>, formats: &
     }
 }
 
-fn choose_effective_batch_size(
+pub(crate) fn choose_effective_batch_size(
     requested_batch_size: usize,
     any_format_projected: bool,
     format_fields: &Option<Vec<String>>,
@@ -136,7 +136,7 @@ fn choose_effective_batch_size(
     effective.max(1)
 }
 
-fn choose_initial_builder_batch_size(
+pub(crate) fn choose_initial_builder_batch_size(
     effective_batch_size: usize,
     any_format_projected: bool,
     source_sample_names: &[String],
@@ -148,7 +148,7 @@ fn choose_initial_builder_batch_size(
     }
 }
 
-fn adjust_effective_batch_size_by_observed_format_bytes(
+pub(crate) fn adjust_effective_batch_size_by_observed_format_bytes(
     requested_batch_size: usize,
     current_effective_batch_size: usize,
     any_format_projected: bool,
@@ -195,21 +195,21 @@ fn adjust_effective_batch_size_by_observed_format_bytes(
 }
 
 /// Precomputed flags indicating which core VCF columns are needed based on projection.
-struct ProjectionFlags {
-    chrom: bool,
-    start: bool,
-    end: bool,
-    id: bool,
-    reference: bool,
-    alt: bool,
-    qual: bool,
-    filter: bool,
-    any_info: bool,
-    any_format: bool,
+pub(crate) struct ProjectionFlags {
+    pub(crate) chrom: bool,
+    pub(crate) start: bool,
+    pub(crate) end: bool,
+    pub(crate) id: bool,
+    pub(crate) reference: bool,
+    pub(crate) alt: bool,
+    pub(crate) qual: bool,
+    pub(crate) filter: bool,
+    pub(crate) any_info: bool,
+    pub(crate) any_format: bool,
 }
 
 impl ProjectionFlags {
-    fn new(projection: &Option<Vec<usize>>, num_info_fields: usize) -> Self {
+    pub(crate) fn new(projection: &Option<Vec<usize>>, num_info_fields: usize) -> Self {
         let contains = |idx: usize| {
             projection
                 .as_ref()
@@ -236,7 +236,7 @@ impl ProjectionFlags {
 
 /// Arrow builders for the 8 core VCF columns, replacing Vec<T> accumulators
 /// to eliminate double-buffering (Vec → Arrow copy at batch boundary).
-struct CoreBatchBuilders {
+pub(crate) struct CoreBatchBuilders {
     chrom: Option<StringBuilder>,
     start: Option<UInt32Builder>,
     end: Option<UInt32Builder>,
@@ -248,7 +248,7 @@ struct CoreBatchBuilders {
 }
 
 impl CoreBatchBuilders {
-    fn new(flags: &ProjectionFlags, batch_size: usize) -> Self {
+    pub(crate) fn new(flags: &ProjectionFlags, batch_size: usize) -> Self {
         Self {
             chrom: if flags.chrom {
                 Some(StringBuilder::with_capacity(batch_size, batch_size * 8))
@@ -294,49 +294,49 @@ impl CoreBatchBuilders {
     }
 
     #[inline]
-    fn append_chrom(&mut self, value: &str) {
+    pub(crate) fn append_chrom(&mut self, value: &str) {
         if let Some(b) = &mut self.chrom {
             b.append_value(value);
         }
     }
 
     #[inline]
-    fn append_start(&mut self, value: u32) {
+    pub(crate) fn append_start(&mut self, value: u32) {
         if let Some(b) = &mut self.start {
             b.append_value(value);
         }
     }
 
     #[inline]
-    fn append_end(&mut self, value: u32) {
+    pub(crate) fn append_end(&mut self, value: u32) {
         if let Some(b) = &mut self.end {
             b.append_value(value);
         }
     }
 
     #[inline]
-    fn append_id(&mut self, value: &str) {
+    pub(crate) fn append_id(&mut self, value: &str) {
         if let Some(b) = &mut self.id {
             b.append_value(value);
         }
     }
 
     #[inline]
-    fn append_ref(&mut self, value: &str) {
+    pub(crate) fn append_ref(&mut self, value: &str) {
         if let Some(b) = &mut self.reference {
             b.append_value(value);
         }
     }
 
     #[inline]
-    fn append_alt(&mut self, value: &str) {
+    pub(crate) fn append_alt(&mut self, value: &str) {
         if let Some(b) = &mut self.alt {
             b.append_value(value);
         }
     }
 
     #[inline]
-    fn append_qual(&mut self, value: Option<f64>) {
+    pub(crate) fn append_qual(&mut self, value: Option<f64>) {
         if let Some(b) = &mut self.qual {
             match value {
                 Some(v) => b.append_value(v),
@@ -346,14 +346,14 @@ impl CoreBatchBuilders {
     }
 
     #[inline]
-    fn append_filter(&mut self, value: &str) {
+    pub(crate) fn append_filter(&mut self, value: &str) {
         if let Some(b) = &mut self.filter {
             b.append_value(value);
         }
     }
 
     /// Finishes all active builders and returns the 8 core arrays.
-    fn finish(&mut self) -> [Option<Arc<dyn Array>>; 8] {
+    pub(crate) fn finish(&mut self) -> [Option<Arc<dyn Array>>; 8] {
         [
             self.chrom
                 .as_mut()
@@ -387,7 +387,7 @@ impl CoreBatchBuilders {
 ///
 /// Unlike `build_record_batch` which copies from Vec<T> into Arrow arrays, this function
 /// takes pre-built Arrow arrays from `CoreBatchBuilders::finish()`.
-fn build_record_batch_from_builders(
+pub(crate) fn build_record_batch_from_builders(
     schema: SchemaRef,
     core_arrays: [Option<Arc<dyn Array>>; 8],
     infos: Option<&Vec<Arc<dyn Array>>>,
@@ -450,7 +450,7 @@ fn build_record_batch_from_builders(
 
 /// Iterates all INFO fields in a single pass using `info.iter(header)` and dispatches
 /// via HashMap, avoiding the O(N*M) cost of calling `info.get(header, key)` per field.
-fn load_infos_single_pass(
+pub(crate) fn load_infos_single_pass(
     record: &dyn Record,
     header: &Header,
     info_data_types: &[DataType],
@@ -1294,7 +1294,7 @@ async fn get_remote_vcf_stream(
     Ok(stream)
 }
 
-fn set_info_builders(
+pub(crate) fn set_info_builders(
     batch_size: usize,
     info_fields: Option<Vec<String>>,
     infos: &Infos,
@@ -1343,7 +1343,7 @@ fn pool_slice<T>(pool: &[Option<T>], start: usize, len: usize) -> Option<&[Optio
 /// Multisample FORMAT builder that emits a single columnar `genotypes` column:
 /// `Struct<GT: List<Utf8>, GQ: List<Int32>, DP: List<Int32>, ...>`.
 /// Each list has N elements (one per selected sample) in sample order.
-struct MultiSampleFormatBuilder {
+pub(crate) struct MultiSampleFormatBuilder {
     sample_names: Vec<String>,
     header_index_to_output_index: Vec<Option<usize>>,
     /// Schema fields for the genotypes struct (each is List<T>).
@@ -1916,7 +1916,7 @@ fn append_list_of_samples(
     Ok(())
 }
 
-enum FormatMode {
+pub(crate) enum FormatMode {
     None,
     Single {
         format_builders: FormatBuilders,
@@ -1931,11 +1931,11 @@ enum FormatMode {
 }
 
 impl FormatMode {
-    fn has_fields(&self) -> bool {
+    pub(crate) fn has_fields(&self) -> bool {
         !matches!(self, Self::None)
     }
 
-    fn append_record(
+    pub(crate) fn append_record(
         &mut self,
         record: &dyn Record,
         header: &Header,
@@ -1962,7 +1962,7 @@ impl FormatMode {
         }
     }
 
-    fn finish_arrays(
+    pub(crate) fn finish_arrays(
         &mut self,
     ) -> Result<Vec<Arc<dyn Array>>, datafusion::arrow::error::ArrowError> {
         match self {
@@ -1997,7 +1997,7 @@ fn resolve_selected_sample_indices(
         .collect()
 }
 
-fn init_format_mode(
+pub(crate) fn init_format_mode(
     batch_size: usize,
     format_fields: Option<Vec<String>>,
     sample_names: &[String],
@@ -2554,7 +2554,9 @@ impl ExecutionPlan for VcfExec {
 }
 
 /// Build a noodles Region from a GenomicRegion.
-fn build_noodles_region(region: &GenomicRegion) -> Result<noodles_core::Region, DataFusionError> {
+pub(crate) fn build_noodles_region(
+    region: &GenomicRegion,
+) -> Result<noodles_core::Region, DataFusionError> {
     let to_position =
         |label: &str, value: u64| -> Result<noodles_core::Position, DataFusionError> {
             let n = usize::try_from(value).map_err(|_| {
