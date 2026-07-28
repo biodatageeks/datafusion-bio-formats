@@ -111,9 +111,11 @@ fn json_binding_matrix_transcription_factors(value: Option<&serde_json::Value>) 
         let Some(inner) = json_unwrap_blessed(complex) else {
             continue;
         };
+        // Filter the placeholder on each candidate *before* falling back, so a
+        // complex with `display_name: "-"` still resolves via `production_name`.
         if let Some(name) = json_str(inner.get("display_name"))
-            .or_else(|| json_str(inner.get("production_name")))
             .filter(|value| value != "-")
+            .or_else(|| json_str(inner.get("production_name")).filter(|value| value != "-"))
             && !names.contains(&name)
         {
             names.push(name);
@@ -160,9 +162,10 @@ fn sv_binding_matrix_transcription_factors(value: Option<&SValue>) -> Option<Str
         let Some(inner) = sv_unwrap_blessed(complex) else {
             continue;
         };
+        // Same placeholder-before-fallback ordering as the JSON path.
         if let Some(name) = sv_str(inner.get("display_name"))
-            .or_else(|| sv_str(inner.get("production_name")))
             .filter(|value| value != "-")
+            .or_else(|| sv_str(inner.get("production_name")).filter(|value| value != "-"))
             && !names.contains(&name)
         {
             names.push(name);
@@ -866,6 +869,64 @@ mod tests {
         assert_eq!(
             sv_binding_matrix_id(Some(&value)).as_deref(),
             Some("MA0001.1")
+        );
+    }
+
+    /// A complex whose `display_name` is the `-` placeholder must fall back to
+    /// `production_name` rather than discarding the whole entry.
+    #[test]
+    fn json_transcription_factors_falls_back_to_production_name_over_placeholder() {
+        let payload = json!({
+            "binding_matrix": {
+                "associated_transcription_factor_complexes": [{
+                    "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex",
+                    "__value": { "display_name": "-", "production_name": "TBX21" }
+                }]
+            }
+        });
+        let object = payload.as_object().unwrap();
+        assert_eq!(json_transcription_factors(object).as_deref(), Some("TBX21"));
+    }
+
+    /// Both names being placeholders yields no transcription factors.
+    #[test]
+    fn json_transcription_factors_skips_complexes_with_only_placeholders() {
+        let payload = json!({
+            "binding_matrix": {
+                "associated_transcription_factor_complexes": [{
+                    "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex",
+                    "__value": { "display_name": "-", "production_name": "-" }
+                }]
+            }
+        });
+        let object = payload.as_object().unwrap();
+        assert_eq!(json_transcription_factors(object), None);
+    }
+
+    /// Storable mirror of the placeholder fallback.
+    #[test]
+    fn sv_transcription_factors_falls_back_to_production_name_over_placeholder() {
+        let mut complex = HashMap::new();
+        complex.insert("display_name".to_string(), SValue::String(Arc::from("-")));
+        complex.insert(
+            "production_name".to_string(),
+            SValue::String(Arc::from("TBX21")),
+        );
+        let complex = SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex"),
+            value: Arc::new(SValue::Hash(Arc::new(complex))),
+        };
+        let mut matrix = HashMap::new();
+        matrix.insert(
+            "associated_transcription_factor_complexes".to_string(),
+            SValue::Array(Arc::new(vec![complex])),
+        );
+        let mut object = HashMap::new();
+        object.insert("binding_matrix".to_string(), SValue::Hash(Arc::new(matrix)));
+
+        assert_eq!(
+            storable_transcription_factors(&object).as_deref(),
+            Some("TBX21")
         );
     }
 }
