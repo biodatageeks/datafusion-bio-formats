@@ -12,7 +12,7 @@ use log::{debug, error, info};
 use noodles_bed;
 use noodles_bed::Record;
 use noodles_bgzf as bgzf;
-use noodles_bgzf::Reader as BgzfReader;
+use noodles_bgzf::io::Reader as BgzfReader;
 use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::Error;
@@ -32,7 +32,7 @@ pub async fn get_remote_bed_bgzf_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<
-    async_reader::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>, N>,
+    async_reader::Reader<bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>, N>,
     Error,
 > {
     let inner = get_remote_stream_bgzf_async(file_path.clone(), object_storage_options).await?;
@@ -171,7 +171,9 @@ pub fn get_local_bed_reader<const N: usize>(
 /// * `N` - Number of BED columns (3-6)
 pub enum BedRemoteReader<const N: usize> {
     /// BGZF-compressed BED reader
-    BGZF(async_reader::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>, N>),
+    BGZF(
+        async_reader::Reader<bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>, N>,
+    ),
     /// GZIP-compressed BED reader
     GZIP(
         async_reader::Reader<

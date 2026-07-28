@@ -26,7 +26,7 @@ pub async fn get_remote_fastq_bgzf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<
-    fastq::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
+    fastq::r#async::io::Reader<bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
     Error,
 > {
     let inner = get_remote_stream_bgzf_async(file_path.clone(), object_storage_options).await?;
@@ -69,9 +69,9 @@ pub async fn get_remote_fastq_gz_reader(
 /// Parallel reading is handled at the partition level by the execution plan.
 pub fn get_local_fastq_bgzf_reader(
     file_path: String,
-) -> Result<fastq::io::Reader<bgzf::Reader<std::fs::File>>, Error> {
+) -> Result<fastq::io::Reader<bgzf::io::Reader<std::fs::File>>, Error> {
     std::fs::File::open(file_path)
-        .map(bgzf::Reader::new)
+        .map(bgzf::io::Reader::new)
         .map(fastq::io::Reader::new)
 }
 
@@ -103,7 +103,9 @@ pub async fn get_local_fastq_gz_reader(
 pub enum FastqRemoteReader {
     /// BGZF-compressed remote FASTQ file reader
     BGZF(
-        fastq::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
+        fastq::r#async::io::Reader<
+            bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>,
+        >,
     ),
     /// GZIP-compressed remote FASTQ file reader
     GZIP(
@@ -164,7 +166,7 @@ impl FastqRemoteReader {
 #[allow(clippy::large_enum_variant)]
 pub enum FastqLocalReader {
     /// BGZF-compressed local FASTQ file reader
-    BGZF(fastq::io::Reader<bgzf::Reader<std::fs::File>>),
+    BGZF(fastq::io::Reader<bgzf::io::Reader<std::fs::File>>),
     /// GZIP-compressed local FASTQ file reader
     GZIP(
         fastq::r#async::io::Reader<

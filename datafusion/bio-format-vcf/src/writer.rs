@@ -67,7 +67,7 @@ pub enum VcfLocalWriter {
     /// Writer for GZIP-compressed VCF files
     Gzip(GzEncoder<BufWriter<File>>),
     /// Writer for BGZF-compressed VCF files (recommended)
-    Bgzf(bgzf::Writer<BufWriter<File>>),
+    Bgzf(bgzf::io::Writer<BufWriter<File>>),
 }
 
 impl VcfLocalWriter {
@@ -119,7 +119,7 @@ impl VcfLocalWriter {
                 Ok(VcfLocalWriter::Gzip(encoder))
             }
             VcfCompressionType::Bgzf => {
-                let bgzf_writer = bgzf::Writer::new(buf_writer);
+                let bgzf_writer = bgzf::io::Writer::new(buf_writer);
                 Ok(VcfLocalWriter::Bgzf(bgzf_writer))
             }
         }

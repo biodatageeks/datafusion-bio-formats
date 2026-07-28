@@ -29,7 +29,7 @@ pub async fn get_remote_fasta_bgzf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<
-    fasta::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
+    fasta::r#async::io::Reader<bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
     Error,
 > {
     let inner = get_remote_stream_bgzf_async(file_path.clone(), object_storage_options).await?;
@@ -96,9 +96,9 @@ pub async fn get_remote_fasta_gz_reader(
 /// Parallel reading is handled at the partition level.
 pub fn get_local_fasta_bgzf_reader(
     file_path: String,
-) -> Result<fasta::io::Reader<bgzf::Reader<std::fs::File>>, Error> {
+) -> Result<fasta::io::Reader<bgzf::io::Reader<std::fs::File>>, Error> {
     std::fs::File::open(file_path)
-        .map(bgzf::Reader::new)
+        .map(bgzf::io::Reader::new)
         .map(fasta::io::Reader::new)
 }
 
@@ -155,7 +155,9 @@ pub async fn get_local_fasta_gz_reader(
 pub enum FastaRemoteReader {
     /// BGZF-compressed reader variant
     BGZF(
-        fasta::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
+        fasta::r#async::io::Reader<
+            bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>,
+        >,
     ),
     /// GZIP-compressed reader variant
     GZIP(
@@ -238,7 +240,7 @@ impl FastaRemoteReader {
 #[allow(clippy::large_enum_variant)]
 pub enum FastaLocalReader {
     /// BGZF-compressed reader variant
-    BGZF(fasta::io::Reader<bgzf::Reader<std::fs::File>>),
+    BGZF(fasta::io::Reader<bgzf::io::Reader<std::fs::File>>),
     /// GZIP-compressed reader variant
     GZIP(
         fasta::r#async::io::Reader<
@@ -310,18 +312,21 @@ impl FastaLocalReader {
 /// Used by the buffer-reuse read path to avoid per-record clone allocations.
 pub enum FastaSyncReader {
     /// BGZF-compressed reader.
-    Bgzf(fasta::io::Reader<bgzf::Reader<std::fs::File>>),
+    Bgzf(fasta::io::Reader<bgzf::io::Reader<std::fs::File>>),
     /// Uncompressed reader with buffered I/O.
     Plain(fasta::io::Reader<BufReader<File>>),
 }
 
 impl FastaSyncReader {
-    /// Reads a raw definition line into the buffer.
+    /// Reads a definition into the given record definition.
     /// Returns 0 at EOF.
-    pub fn read_definition(&mut self, buf: &mut String) -> std::io::Result<usize> {
+    pub fn read_definition(
+        &mut self,
+        definition: &mut fasta::record::Definition,
+    ) -> std::io::Result<usize> {
         match self {
-            FastaSyncReader::Bgzf(r) => r.read_definition(buf),
-            FastaSyncReader::Plain(r) => r.read_definition(buf),
+            FastaSyncReader::Bgzf(r) => r.read_definition(definition),
+            FastaSyncReader::Plain(r) => r.read_definition(definition),
         }
     }
 

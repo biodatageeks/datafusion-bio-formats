@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let stream_time = stream_start.elapsed();
     println!("Stream setup time: {stream_time:?}");
 
-    let inner = bgzf::r#async::Reader::new(StreamReader::new(stream));
+    let inner = bgzf::r#async::io::Reader::new(StreamReader::new(stream));
     let mut reader = vcf::r#async::io::Reader::new(inner);
 
     println!("Reading header");
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // println!("{:?}", buf);
 
 // let mut blocking_reader = SyncIoBridge::new(async_reader);
-// let bgzf_reader = bgzf::Reader::new(&mut blocking_reader);
+// let bgzf_reader = bgzf::io::Reader::new(&mut blocking_reader);
 // let mut vcf_reader = vcf::io::Reader::new(bgzf_reader);
 
 // let mut vcf_reader = vcf::io::Reader::new(reader);
@@ -146,5 +146,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // let mut raw_header = String::new();
 // header_reader.read_to_string(&mut raw_header).await?;
 // println!("{:}", raw_header);
-// let mut reader = bgzf::MultithreadedReader::new(stream);
+// let mut reader = bgzf::io::MultithreadedReader::new(stream);
 // let _inner = reader.get_mut();

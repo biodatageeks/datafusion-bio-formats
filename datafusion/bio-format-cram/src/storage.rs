@@ -374,7 +374,7 @@ fn fetch_reference_region_impl(
             match repo.get(ref_name.as_ref()) {
                 Some(Ok(seq)) => {
                     // Extract the requested region (convert to 0-based indexing)
-                    let seq_bytes = seq.as_ref();
+                    let seq_bytes: &[u8] = (*seq).as_ref();
                     let start_idx = (start - 1).min(seq_bytes.len());
                     let end_idx = end.min(seq_bytes.len());
                     Some(seq_bytes[start_idx..end_idx].to_vec())
@@ -409,7 +409,7 @@ fn load_all_references_impl(
                 match repo.get(ref_name.as_ref()) {
                     Some(Ok(seq)) => {
                         // Convert Sequence to Vec<u8>
-                        references.push(seq.as_ref().to_vec());
+                        references.push(AsRef::<[u8]>::as_ref(&*seq).to_vec());
                     }
                     Some(Err(_)) | None => {
                         // If we can't load a reference, return None for the whole set
@@ -488,7 +488,7 @@ impl IndexedCramReader {
         &mut self,
         region: &noodles_core::Region,
     ) -> Result<impl Iterator<Item = Result<RecordBuf, io::Error>> + '_, io::Error> {
-        self.reader.query(&self.header, region)
+        self.reader.query(&self.header, region).map(|q| q.records())
     }
 }
 
