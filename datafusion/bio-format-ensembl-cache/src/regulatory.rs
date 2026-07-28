@@ -70,6 +70,111 @@ impl RegulatoryColumnIndices {
     }
 }
 
+/// Unwraps Storable blessed-object wrappers (`{"__class":..,"__value":..}`)
+/// until the underlying JSON map is reached.
+fn json_unwrap_blessed(
+    value: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    let mut current = value;
+    for _ in 0..4 {
+        let obj = current.as_object()?;
+        match obj.get("__value") {
+            Some(inner) => current = inner,
+            None => return Some(obj),
+        }
+    }
+    None
+}
+
+/// Extracts the BindingMatrix stable id from a MotifFeature `binding_matrix`.
+///
+/// Ensembl >= 116 serialises `binding_matrix` as a nested BindingMatrix object
+/// (`{"stable_id":"ENSPFM0510", ..}`), while older caches stored a scalar id.
+/// `json_str` yields `None` for objects, which silently emptied the column and
+/// therefore VEP's `MOTIF_NAME` field.
+fn json_binding_matrix_id(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    match json_unwrap_blessed(value) {
+        Some(obj) => json_str(obj.get("stable_id")),
+        None => json_str(Some(value)),
+    }
+}
+
+/// Collects transcription factor names from a nested BindingMatrix.
+fn json_binding_matrix_transcription_factors(value: Option<&serde_json::Value>) -> Option<String> {
+    let obj = json_unwrap_blessed(value?)?;
+    let complexes = obj
+        .get("associated_transcription_factor_complexes")?
+        .as_array()?;
+    let mut names: Vec<String> = Vec::new();
+    for complex in complexes {
+        let Some(inner) = json_unwrap_blessed(complex) else {
+            continue;
+        };
+        if let Some(name) = json_str(inner.get("display_name"))
+            .or_else(|| json_str(inner.get("production_name")))
+            .filter(|value| value != "-")
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(","))
+    }
+}
+
+/// Storable counterpart of [`json_unwrap_blessed`].
+fn sv_unwrap_blessed(value: &SValue) -> Option<&HashMap<String, SValue>> {
+    let mut current = value;
+    for _ in 0..4 {
+        match current {
+            SValue::Blessed { value, .. } => current = value.as_ref(),
+            SValue::Hash(map) => return Some(map.as_ref()),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Storable counterpart of [`json_binding_matrix_id`].
+fn sv_binding_matrix_id(value: Option<&SValue>) -> Option<String> {
+    let value = value?;
+    match sv_unwrap_blessed(value) {
+        Some(map) => sv_str(map.get("stable_id")),
+        None => sv_str(Some(value)),
+    }
+}
+
+/// Storable counterpart of [`json_binding_matrix_transcription_factors`].
+fn sv_binding_matrix_transcription_factors(value: Option<&SValue>) -> Option<String> {
+    let map = sv_unwrap_blessed(value?)?;
+    let complexes = match map.get("associated_transcription_factor_complexes")? {
+        SValue::Array(items) => items,
+        _ => return None,
+    };
+    let mut names: Vec<String> = Vec::new();
+    for complex in complexes.iter() {
+        let Some(inner) = sv_unwrap_blessed(complex) else {
+            continue;
+        };
+        if let Some(name) = sv_str(inner.get("display_name"))
+            .or_else(|| sv_str(inner.get("production_name")))
+            .filter(|value| value != "-")
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(","))
+    }
+}
+
 fn json_transcription_factors(
     object: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<String> {
@@ -81,6 +186,7 @@ fn json_transcription_factors(
     ]
     .into_iter()
     .find_map(|key| json_str(object.get(key)).filter(|value| value != "-"))
+    .or_else(|| json_binding_matrix_transcription_factors(object.get("binding_matrix")))
 }
 
 fn storable_transcription_factors(
@@ -94,6 +200,7 @@ fn storable_transcription_factors(
     ]
     .into_iter()
     .find_map(|key| sv_str(object.get(key)).filter(|value| value != "-"))
+    .or_else(|| sv_binding_matrix_transcription_factors(object.get("binding_matrix")))
 }
 
 struct RegulatoryRowCore {
@@ -273,7 +380,10 @@ pub(crate) fn parse_regulatory_line_into(
                 batch.set_opt_f64(idx, json_f64(object.get("score")));
             }
             if let Some(idx) = col_idx.binding_matrix {
-                batch.set_opt_utf8_owned(idx, json_str(object.get("binding_matrix")).as_ref());
+                batch.set_opt_utf8_owned(
+                    idx,
+                    json_binding_matrix_id(object.get("binding_matrix")).as_ref(),
+                );
             }
             if let Some(idx) = col_idx.transcription_factors {
                 let value = json_transcription_factors(object);
@@ -564,7 +674,7 @@ fn append_regulatory_storable_row_into(
                 batch.set_opt_f64(idx, sv_f64(object.get("score")));
             }
             if let Some(idx) = col_idx.binding_matrix {
-                let value = sv_str(object.get("binding_matrix"));
+                let value = sv_binding_matrix_id(object.get("binding_matrix"));
                 batch.set_opt_utf8_owned(idx, value.as_ref());
             }
             if let Some(idx) = col_idx.transcription_factors {
@@ -643,6 +753,119 @@ mod tests {
         assert_eq!(
             storable_transcription_factors(&object).as_deref(),
             Some("CTCF")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // MotifFeature binding matrix (Ensembl >= 116 nested BindingMatrix)
+    // ------------------------------------------------------------------
+
+    /// Real release-116 shape: `binding_matrix` is a nested BindingMatrix
+    /// object, not a scalar id.
+    fn binding_matrix_payload() -> serde_json::Value {
+        json!({
+            "associated_transcription_factor_complexes": [{
+                "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex",
+                "__value": {
+                    "components": [{
+                        "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactor",
+                        "__value": { "gene_stable_id": "ENSG00000073861", "name": "TBX21" }
+                    }],
+                    "display_name": "TBX21",
+                    "production_name": "TBX21"
+                }
+            }],
+            "length": "23",
+            "name": "TBX1_AI_TACGGA40NGGC_TYTCACACCTNNNAGGTGTGARA_m2_c4_Cell2013",
+            "source": "SELEX",
+            "stable_id": "ENSPFM0510",
+            "threshold": "4.4",
+            "unit": "Frequencies"
+        })
+    }
+
+    #[test]
+    fn json_binding_matrix_id_reads_stable_id_from_nested_object() {
+        let value = binding_matrix_payload();
+        assert_eq!(
+            json_binding_matrix_id(Some(&value)).as_deref(),
+            Some("ENSPFM0510")
+        );
+    }
+
+    #[test]
+    fn json_binding_matrix_id_accepts_scalar_for_older_caches() {
+        let value = json!("MA0001.1");
+        assert_eq!(
+            json_binding_matrix_id(Some(&value)).as_deref(),
+            Some("MA0001.1")
+        );
+    }
+
+    #[test]
+    fn json_binding_matrix_id_is_none_when_absent() {
+        assert_eq!(json_binding_matrix_id(None), None);
+        assert_eq!(json_binding_matrix_id(Some(&json!(null))), None);
+        assert_eq!(json_binding_matrix_id(Some(&json!({}))), None);
+    }
+
+    #[test]
+    fn json_transcription_factors_reads_nested_binding_matrix_complexes() {
+        let payload = json!({ "binding_matrix": binding_matrix_payload() });
+        let object = payload.as_object().unwrap();
+        assert_eq!(json_transcription_factors(object).as_deref(), Some("TBX21"));
+    }
+
+    #[test]
+    fn json_transcription_factors_prefers_top_level_aliases() {
+        let payload = json!({
+            "transcription_factors": ["TFAP2A", "GATA3"],
+            "binding_matrix": binding_matrix_payload()
+        });
+        let object = payload.as_object().unwrap();
+        assert_eq!(
+            json_transcription_factors(object).as_deref(),
+            Some("TFAP2A,GATA3")
+        );
+    }
+
+    #[test]
+    fn sv_binding_matrix_id_reads_stable_id_from_hash() {
+        let mut matrix = HashMap::new();
+        matrix.insert(
+            "stable_id".to_string(),
+            SValue::String(Arc::from("ENSPFM0510")),
+        );
+        let value = SValue::Hash(Arc::new(matrix));
+        assert_eq!(
+            sv_binding_matrix_id(Some(&value)).as_deref(),
+            Some("ENSPFM0510")
+        );
+    }
+
+    #[test]
+    fn sv_binding_matrix_id_unwraps_blessed_matrix() {
+        let mut matrix = HashMap::new();
+        matrix.insert(
+            "stable_id".to_string(),
+            SValue::String(Arc::from("ENSPFM0510")),
+        );
+        let value = SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::Funcgen::BindingMatrix"),
+            value: Arc::new(SValue::Hash(Arc::new(matrix))),
+        };
+        assert_eq!(
+            sv_binding_matrix_id(Some(&value)).as_deref(),
+            Some("ENSPFM0510")
+        );
+    }
+
+    #[test]
+    fn sv_binding_matrix_id_accepts_scalar_for_older_caches() {
+        let value = SValue::String(Arc::from("MA0001.1"));
+        assert_eq!(
+            sv_binding_matrix_id(Some(&value)).as_deref(),
+            Some("MA0001.1")
         );
     }
 }
