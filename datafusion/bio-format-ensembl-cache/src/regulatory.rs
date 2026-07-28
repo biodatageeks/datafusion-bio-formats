@@ -39,6 +39,7 @@ pub(crate) struct RegulatoryColumnIndices {
     // MotifFeature-specific
     score: Option<usize>,
     binding_matrix: Option<usize>,
+    binding_matrix_length: Option<usize>,
     overlapping_regulatory_feature: Option<usize>,
     transcription_factors: Option<usize>,
     // Shared
@@ -61,6 +62,7 @@ impl RegulatoryColumnIndices {
             regulatory_build_id: col_map.get("regulatory_build_id"),
             score: col_map.get("score"),
             binding_matrix: col_map.get("binding_matrix"),
+            binding_matrix_length: col_map.get("binding_matrix_length"),
             overlapping_regulatory_feature: col_map.get("overlapping_regulatory_feature"),
             transcription_factors: col_map.get("transcription_factors"),
             cell_types: col_map.get("cell_types"),
@@ -84,6 +86,19 @@ fn json_unwrap_blessed(
         }
     }
     None
+}
+
+/// Extracts the BindingMatrix length. Ensembl VEP uses it to place a variant
+/// within a reverse-strand motif and to bounds-check MOTIF_POS.
+fn json_binding_matrix_length(value: Option<&serde_json::Value>) -> Option<i32> {
+    let obj = json_unwrap_blessed(value?)?;
+    json_str(obj.get("length"))?.parse().ok()
+}
+
+/// Storable counterpart of [`json_binding_matrix_length`].
+fn sv_binding_matrix_length(value: Option<&SValue>) -> Option<i32> {
+    let map = sv_unwrap_blessed(value?)?;
+    sv_str(map.get("length"))?.parse().ok()
 }
 
 /// Extracts the BindingMatrix stable id from a MotifFeature `binding_matrix`.
@@ -388,6 +403,12 @@ pub(crate) fn parse_regulatory_line_into(
                     json_binding_matrix_id(object.get("binding_matrix")).as_ref(),
                 );
             }
+            if let Some(idx) = col_idx.binding_matrix_length {
+                batch.set_opt_i32(
+                    idx,
+                    json_binding_matrix_length(object.get("binding_matrix")),
+                );
+            }
             if let Some(idx) = col_idx.transcription_factors {
                 let value = json_transcription_factors(object);
                 batch.set_opt_utf8_owned(idx, value.as_ref());
@@ -680,6 +701,9 @@ fn append_regulatory_storable_row_into(
                 let value = sv_binding_matrix_id(object.get("binding_matrix"));
                 batch.set_opt_utf8_owned(idx, value.as_ref());
             }
+            if let Some(idx) = col_idx.binding_matrix_length {
+                batch.set_opt_i32(idx, sv_binding_matrix_length(object.get("binding_matrix")));
+            }
             if let Some(idx) = col_idx.transcription_factors {
                 let value = storable_transcription_factors(object);
                 batch.set_opt_utf8_owned(idx, value.as_ref());
@@ -928,5 +952,23 @@ mod tests {
             storable_transcription_factors(&object).as_deref(),
             Some("TBX21")
         );
+    }
+
+    #[test]
+    fn json_binding_matrix_length_reads_nested_length() {
+        assert_eq!(
+            json_binding_matrix_length(Some(&binding_matrix_payload())),
+            Some(23)
+        );
+        assert_eq!(json_binding_matrix_length(Some(&json!("MA0001.1"))), None);
+        assert_eq!(json_binding_matrix_length(None), None);
+    }
+
+    #[test]
+    fn sv_binding_matrix_length_reads_nested_length() {
+        let mut matrix = HashMap::new();
+        matrix.insert("length".to_string(), SValue::String(Arc::from("23")));
+        let value = SValue::Hash(Arc::new(matrix));
+        assert_eq!(sv_binding_matrix_length(Some(&value)), Some(23));
     }
 }

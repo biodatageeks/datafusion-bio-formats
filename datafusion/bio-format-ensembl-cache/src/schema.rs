@@ -282,6 +282,7 @@ pub(crate) fn motif_feature_schema(
         Field::new("db_id", DataType::Int64, true),
         Field::new("score", DataType::Float64, true),
         Field::new("binding_matrix", DataType::Utf8, true),
+        Field::new("binding_matrix_length", DataType::Int32, true),
         Field::new("cell_types", DataType::Utf8, true),
         Field::new("overlapping_regulatory_feature", DataType::Utf8, true),
         Field::new("transcription_factors", DataType::Utf8, true),
