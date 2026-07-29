@@ -125,6 +125,16 @@
 - [ ] 2.10.7 Guard existing promoted transcript-object columns required by raw-free downstream VEP annotation
 - [ ] 2.10.8 Document the complete raw-free transcript schema contract in the `bio-format-ensembl-cache` README
 
+### 2.11 Mandatory Cache Release Metadata
+- [ ] 2.11.1 Define the shared `bio.vep.cache_version` schema metadata key and strict decimal release parser
+- [ ] 2.11.2 Parse authoritative release identity from raw Ensembl cache metadata and require the cache builder's expected release assertion to match it
+- [ ] 2.11.3 Add the verified cache release to transcript, variation, regulatory, motif, exon, and translation schemas
+- [ ] 2.11.4 Preserve the complete Arrow schema metadata map through projected schemas, transformed record batches, and Parquet export
+- [ ] 2.11.5 Add tests proving every entity schema and representative Parquet round trip retains `bio.vep.cache_version`
+- [ ] 2.11.6 Add negative tests for absent, malformed, and expected-versus-raw mismatched releases without path or sidecar fallback
+- [ ] 2.11.7 Export complete caches through staging, eagerly verify every produced shard's embedded release metadata, and publish only after verification
+- [ ] 2.11.8 Document that metadata-less generated caches must be rebuilt and that paths/manifests do not establish cache identity
+
 ## 3. Phase 3: Consequence Engine (bio-functions)
 
 ### 3.1 Implement Genetic Code Tables (`codon.rs`)
@@ -212,6 +222,16 @@
 - [ ] 4.6.6 Extend RefSeq hydration helpers to recognize RefSeq mitochondrial transcript IDs accepted by Ensembl VEP
 - [ ] 4.6.7 Add tests covering `NM_`, `NR_`, `XM_`, `XR_`, numeric mitochondrial IDs, `rna-*` IDs, and rejected `merged = true`
 - [ ] 4.6.8 Add RefSeq cache comparison tests against Ensembl VEP output for representative chr22 and MT variants
+
+### 4.7 Cache Release Support Matrix and Lazy Validation
+- [ ] 4.7.1 Define one native support matrix mapping cache release `115` to VEP `115.2` semantics and cache release `116` to VEP `116.0` semantics, including exact API/core/variation identities
+- [ ] 4.7.2 Expose the support matrix to bindings and comparison tooling without duplicating a second release-to-codebase map
+- [ ] 4.7.3 Resolve all participating entity shards for one requested contig and read only their Parquet schema metadata before annotation data
+- [ ] 4.7.4 Reject missing, malformed, mixed, or unsupported `bio.vep.cache_version` values with contig and shard diagnostics
+- [ ] 4.7.5 Memoize successful validation by cache root and contig, and require later contigs in the same invocation to match the identity established by the first contig
+- [ ] 4.7.6 Treat any caller-provided expected cache release as an assertion against embedded metadata, never as replacement identity
+- [ ] 4.7.7 Add instrumentation tests proving a `chr1` request does not open unrelated contig footers and that a later mismatched contig fails before data reads
+- [ ] 4.7.8 Add release-qualified integration tests for supported 115 and 116 caches plus missing-metadata migration errors
 
 ## 5. Phase 5: Polish (deferred)
 

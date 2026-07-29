@@ -1,5 +1,5 @@
 use crate::errors::{Result, exec_err};
-use crate::info::CacheInfo;
+use crate::info::{CacheInfo, VEP_CACHE_VERSION_METADATA_KEY};
 use crate::source_type::{CacheSourceType, VEP_CACHE_SOURCE_TYPE_METADATA_KEY};
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
@@ -164,6 +164,7 @@ pub(crate) fn variation_schema(
         fields,
         coordinate_system_zero_based,
         cache_source_type,
+        Some(&cache_info.cache_version),
     ))
 }
 
@@ -242,7 +243,12 @@ pub(crate) fn transcript_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based, cache_source_type)
+    new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+        Some(&cache_info.cache_version),
+    )
 }
 
 pub(crate) fn regulatory_feature_schema(
@@ -265,7 +271,12 @@ pub(crate) fn regulatory_feature_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based, cache_source_type)
+    new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+        Some(&cache_info.cache_version),
+    )
 }
 
 pub(crate) fn motif_feature_schema(
@@ -293,7 +304,12 @@ pub(crate) fn motif_feature_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based, cache_source_type)
+    new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+        Some(&cache_info.cache_version),
+    )
 }
 
 pub(crate) fn exon_schema(
@@ -319,7 +335,12 @@ pub(crate) fn exon_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based, cache_source_type)
+    new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+        Some(&cache_info.cache_version),
+    )
 }
 
 pub(crate) fn translation_schema(
@@ -355,7 +376,12 @@ pub(crate) fn translation_schema(
         Field::new("object_hash", DataType::Utf8, false),
     ];
     fields.extend(provenance_fields(cache_info));
-    new_schema(fields, coordinate_system_zero_based, cache_source_type)
+    new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+        Some(&cache_info.cache_version),
+    )
 }
 
 /// Schema for the `translation_core` split file: identity, sequence, and protein features.
@@ -379,7 +405,12 @@ pub fn translation_core_schema(
         Field::new("cds_sequence_canonical", DataType::Utf8, true),
         Field::new("protein_features", protein_feature_list_data_type(), true),
     ];
-    new_schema(fields, coordinate_system_zero_based, cache_source_type)
+    new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+        None,
+    )
 }
 
 /// Schema for the `translation_sift` split file: position-range sift/polyphen data.
@@ -396,7 +427,12 @@ pub fn translation_sift_schema(
         Field::new("sift_predictions", prediction_list_data_type(), true),
         Field::new("polyphen_predictions", prediction_list_data_type(), true),
     ];
-    new_schema(fields, coordinate_system_zero_based, cache_source_type)
+    new_schema(
+        fields,
+        coordinate_system_zero_based,
+        cache_source_type,
+        None,
+    )
 }
 
 fn provenance_fields(cache_info: &CacheInfo) -> Vec<Field> {
@@ -420,6 +456,7 @@ fn new_schema(
     fields: Vec<Field>,
     coordinate_system_zero_based: bool,
     cache_source_type: CacheSourceType,
+    cache_version: Option<&str>,
 ) -> SchemaRef {
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -430,6 +467,12 @@ fn new_schema(
         VEP_CACHE_SOURCE_TYPE_METADATA_KEY.to_string(),
         cache_source_type.as_str().to_string(),
     );
+    if let Some(cache_version) = cache_version {
+        metadata.insert(
+            VEP_CACHE_VERSION_METADATA_KEY.to_string(),
+            cache_version.to_string(),
+        );
+    }
     Arc::new(Schema::new_with_metadata(fields, metadata))
 }
 
@@ -569,6 +612,19 @@ mod tests {
     }
 
     #[test]
+    fn variation_schema_exposes_optional_clin_sig_ref_allele_when_declared() {
+        let mut info = test_cache_info();
+        info.variation_cols.push("clin_sig_ref_allele".to_string());
+        let schema = variation_schema(&info, false, CacheSourceType::Merged).unwrap();
+        let field = schema.field_with_name("clin_sig_ref_allele").unwrap();
+        assert_eq!(field.data_type(), &DataType::Utf8);
+        assert!(field.is_nullable());
+
+        let old = variation_schema(&test_cache_info(), false, CacheSourceType::Merged).unwrap();
+        assert!(old.field_with_name("clin_sig_ref_allele").is_err());
+    }
+
+    #[test]
     fn variation_schema_coordinate_metadata() {
         let info = test_cache_info();
         let schema_1based = variation_schema(&info, false, CacheSourceType::Ensembl).unwrap();
@@ -581,6 +637,10 @@ mod tests {
                 .metadata()
                 .get(VEP_CACHE_SOURCE_TYPE_METADATA_KEY),
             Some(&"ensembl".to_string())
+        );
+        assert_eq!(
+            schema_1based.metadata().get(VEP_CACHE_VERSION_METADATA_KEY),
+            Some(&"115".to_string())
         );
 
         let schema_0based = variation_schema(&info, true, CacheSourceType::RefSeq).unwrap();
@@ -691,6 +751,25 @@ mod tests {
             let f = schema.field_with_name(col).unwrap();
             assert_eq!(f.data_type(), &DataType::Utf8);
             assert!(f.is_nullable());
+        }
+    }
+
+    #[test]
+    fn every_raw_provider_entity_schema_carries_cache_version_metadata() {
+        let info = test_cache_info();
+        let schemas = [
+            variation_schema(&info, false, CacheSourceType::Merged).unwrap(),
+            transcript_schema(&info, false, CacheSourceType::Merged),
+            exon_schema(&info, false, CacheSourceType::Merged),
+            translation_schema(&info, false, CacheSourceType::Merged),
+            regulatory_feature_schema(&info, false, CacheSourceType::Merged),
+            motif_feature_schema(&info, false, CacheSourceType::Merged),
+        ];
+        for schema in schemas {
+            assert_eq!(
+                schema.metadata().get(VEP_CACHE_VERSION_METADATA_KEY),
+                Some(&"115".to_string())
+            );
         }
     }
 

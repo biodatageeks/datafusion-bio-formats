@@ -4,6 +4,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+/// Arrow/Parquet schema metadata key containing the Ensembl VEP cache release.
+///
+/// This is annotation identity metadata. Downstream annotators must read it
+/// from each requested Parquet shard rather than infer it from generated-cache
+/// directory names or from the row-level `cache_version` provenance column.
+pub const VEP_CACHE_VERSION_METADATA_KEY: &str = "bio.vep.cache_version";
+
 #[derive(Debug, Clone)]
 pub(crate) struct SourceDescriptor {
     /// Normalized source name without `source_` prefix, e.g. `dbsnp`, `hgmd_public`.
@@ -107,13 +114,28 @@ impl CacheInfo {
             }
         }
 
+        let basename_version = cache_version_from_raw_root_name(cache_root);
+        let cache_version = match (cache_version, basename_version) {
+            (Some(explicit), Some(from_name)) if explicit != from_name => {
+                return Err(exec_err(format!(
+                    "VEP cache version conflict for '{}': info.txt declares '{}' but raw cache root basename declares '{}'",
+                    cache_root.display(),
+                    explicit,
+                    from_name
+                )));
+            }
+            (Some(explicit), _) => explicit,
+            (None, Some(from_name)) => from_name,
+            (None, None) => "unknown".to_string(),
+        };
+
         let source_cache_path = cache_root.to_string_lossy().to_string();
         Ok(Self {
             cache_root: cache_root.to_path_buf(),
             source_cache_path,
             species: species.unwrap_or_else(|| "unknown".to_string()),
             assembly: assembly.unwrap_or_else(|| "unknown".to_string()),
-            cache_version: cache_version.unwrap_or_else(|| "unknown".to_string()),
+            cache_version,
             // Some merged/tabix cache bundles omit serializer metadata entirely.
             // VEP transcript/regulatory caches are storable in that layout.
             serializer_type: serializer_type.or_else(|| Some("storable".to_string())),
@@ -122,6 +144,34 @@ impl CacheInfo {
             variation_cols,
             source_descriptors: source_by_column.into_values().collect(),
         })
+    }
+}
+
+/// Recover a release only from a canonical raw VEP cache-root basename.
+///
+/// Ensembl's shipped 115/116 `info.txt` files omit an explicit version, while
+/// the raw root itself is canonically named `{release}_{assembly}` with an
+/// optional `_merged` or `_refseq` suffix. This deliberately examines only the
+/// final path component and accepts only an all-decimal release plus a non-empty
+/// assembly token. It is conversion-time provenance recovery, never a generated
+/// Parquet annotation fallback.
+fn cache_version_from_raw_root_name(cache_root: &Path) -> Option<String> {
+    let basename = cache_root.file_name()?.to_str()?;
+    let mut parts = basename.split('_');
+    let release = parts.next()?;
+    let assembly = parts.next()?;
+    let suffix = parts.next();
+
+    if release.is_empty()
+        || !release.bytes().all(|byte| byte.is_ascii_digit())
+        || assembly.is_empty()
+    {
+        return None;
+    }
+
+    match (suffix, parts.next()) {
+        (None, None) | (Some("merged" | "refseq"), None) => Some(release.to_string()),
+        _ => None,
     }
 }
 
@@ -358,6 +408,14 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
     }
 
+    fn named_cache_root(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join(name);
+        std::fs::create_dir(&root).unwrap();
+        write_info_file(&root, content);
+        (parent, root)
+    }
+
     #[test]
     fn cache_info_full_parse() {
         let dir = tempfile::tempdir().unwrap();
@@ -441,6 +499,57 @@ mod tests {
         write_info_file(dir.path(), "version 110\n");
         let info = CacheInfo::from_root(dir.path()).unwrap();
         assert_eq!(info.cache_version, "110");
+    }
+
+    #[test]
+    fn cache_info_recovers_versions_from_canonical_raw_root_names() {
+        for (name, expected) in [
+            ("115_GRCh38", "115"),
+            ("116_GRCh38", "116"),
+            ("116_GRCh38_merged", "116"),
+            ("115_GRCh38_refseq", "115"),
+        ] {
+            let (_parent, root) = named_cache_root(name, "species homo_sapiens\nassembly GRCh38\n");
+            let info = CacheInfo::from_root(&root).unwrap();
+            assert_eq!(info.cache_version, expected, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cache_info_does_not_infer_version_from_noncanonical_or_parent_names() {
+        for name in [
+            "raw_115_GRCh38",
+            "115",
+            "115_GRCh38_unknown",
+            "v115_GRCh38",
+            "115_GRCh38_merged_extra",
+        ] {
+            let (_parent, root) = named_cache_root(name, "assembly GRCh38\n");
+            let info = CacheInfo::from_root(&root).unwrap();
+            assert_eq!(info.cache_version, "unknown", "failed for {name}");
+        }
+
+        let parent = tempfile::Builder::new()
+            .prefix("115_GRCh38")
+            .tempdir()
+            .unwrap();
+        let root = parent.path().join("arbitrary");
+        std::fs::create_dir(&root).unwrap();
+        write_info_file(&root, "assembly GRCh38\n");
+        assert_eq!(
+            CacheInfo::from_root(&root).unwrap().cache_version,
+            "unknown"
+        );
+    }
+
+    #[test]
+    fn cache_info_rejects_explicit_and_basename_version_conflict() {
+        let (_parent, root) =
+            named_cache_root("116_GRCh38", "cache_version 115\nassembly GRCh38\n");
+        let error = CacheInfo::from_root(&root).unwrap_err().to_string();
+        assert!(error.contains("version conflict"));
+        assert!(error.contains("115"));
+        assert!(error.contains("116"));
     }
 
     #[test]
