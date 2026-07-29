@@ -24,16 +24,12 @@
 //!    only by `read_unmapped_read`; mapped records reconstruct their sequence
 //!    from features instead. A fixture of mapped reads alone never reaches
 //!    `decode_take` and so cannot catch this regression.
-//! 2. **The fixture ships without a `.crai` on purpose.** The indexed read path
-//!    skips unmapped reads (see the `unmapped_tail` handling in
-//!    `physical_exec.rs`, since a CRAM index cannot seek to them), so an indexed
-//!    scan returns only the 300 mapped reads and never decodes the Huffman
-//!    block. Adding an index next to this file would silently defeat these
-//!    tests.
+//! 2. **The fixture ships without a `.crai`**, which keeps these tests on the
+//!    sequential read path. The indexed path over the same data is covered by
+//!    `indexed_unmapped_test.rs`, which uses `unmapped_indexed.cram`.
 //!
-//! Both properties were confirmed against a pre-fix baseline: an unindexed scan
-//! panics there with `not yet implemented`, while an indexed scan of the same
-//! file quietly returns 300 rows.
+//! The first property was confirmed against a pre-fix baseline, where an
+//! unindexed scan panics with `not yet implemented`.
 
 use datafusion::arrow::array::{Array, StringArray};
 use datafusion::prelude::*;

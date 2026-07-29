@@ -27,6 +27,33 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Append a partition dedicated to the unplaced, unmapped records at the end of a CRAM.
+///
+/// Returns whether a partition was added; `unplaced_unmapped_bytes` of zero means the
+/// index describes no unmapped slice, so there is nothing to read.
+fn append_unplaced_unmapped_partition(
+    assignments: &mut Vec<datafusion_bio_format_core::partition_balancer::PartitionAssignment>,
+    unplaced_unmapped_bytes: u64,
+) -> bool {
+    if unplaced_unmapped_bytes == 0 {
+        return false;
+    }
+
+    assignments.push(
+        datafusion_bio_format_core::partition_balancer::PartitionAssignment {
+            regions: vec![datafusion_bio_format_core::genomic_filter::GenomicRegion {
+                chrom: crate::storage::UNPLACED_UNMAPPED_SENTINEL_CHROM.to_string(),
+                start: None,
+                end: None,
+                unmapped_tail: true,
+            }],
+            total_estimated_bytes: unplaced_unmapped_bytes.max(1),
+        },
+    );
+
+    true
+}
+
 /// Build the Arrow schema for CRAM records.
 ///
 /// Tag type resolution priority (highest to lowest):
@@ -818,6 +845,10 @@ impl TableProvider for CramTableProvider {
                 )));
             }
 
+            // A full scan must also return the unplaced, unmapped records, which no
+            // region query covers. A filter-derived scan asks for placed reads only.
+            let is_full_scan = analysis.regions.is_empty() && !self.reference_names.is_empty();
+
             let regions = if !analysis.regions.is_empty() {
                 debug!(
                     "CRAM scan: using {} filter-derived region(s)",
@@ -847,7 +878,23 @@ impl TableProvider for CramTableProvider {
                     &self.reference_names,
                     &self.reference_lengths,
                 );
-                let assignments = balance_partitions(estimates, target_partitions);
+                let mut assignments = balance_partitions(estimates, target_partitions);
+
+                // Region queries only cover placed reads, so an indexed full scan would
+                // otherwise silently omit the unplaced, unmapped records that a
+                // sequential scan returns. Give them their own partition.
+                if is_full_scan {
+                    let unplaced_unmapped_bytes =
+                        crate::storage::unplaced_unmapped_bytes_from_crai(index_path);
+
+                    if append_unplaced_unmapped_partition(&mut assignments, unplaced_unmapped_bytes)
+                    {
+                        debug!(
+                            "CRAM indexed full scan: added unplaced/unmapped partition ({unplaced_unmapped_bytes} bytes)"
+                        );
+                    }
+                }
+
                 let num_partitions = assignments.len();
 
                 // Collect filters for record-level evaluation

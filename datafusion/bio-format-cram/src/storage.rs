@@ -490,6 +490,42 @@ impl IndexedCramReader {
     ) -> Result<impl Iterator<Item = Result<RecordBuf, io::Error>> + '_, io::Error> {
         self.reader.query(&self.header, region).map(|q| q.records())
     }
+
+    /// Query the unplaced, unmapped records at the end of the file.
+    ///
+    /// A CRAI records the unmapped slice with a reference sequence ID of -1, so these
+    /// records are reachable by seeking to it. They are not returned by any region
+    /// query, which is why an indexed full scan has to ask for them separately.
+    pub fn query_unmapped(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Result<RecordBuf, io::Error>> + '_, io::Error> {
+        self.reader.query_unmapped(&self.header)
+    }
+}
+
+/// Chromosome name used to mark the partition that reads unplaced, unmapped records.
+///
+/// This is not a real reference name; it only tags the region so the execution side
+/// knows to call [`IndexedCramReader::query_unmapped`] instead of a region query.
+pub const UNPLACED_UNMAPPED_SENTINEL_CHROM: &str = "__unplaced_unmapped__";
+
+/// Returns the total compressed size of the unmapped slices described by a CRAI.
+///
+/// Zero means the index describes no unmapped slice, so there is nothing to read
+/// beyond the placed regions. The value is only used to size a partition, so an
+/// unreadable index degrades to zero rather than failing the scan.
+pub fn unplaced_unmapped_bytes_from_crai(index_path: &str) -> u64 {
+    match cram::crai::fs::read(index_path) {
+        Ok(records) => records
+            .iter()
+            .filter(|record| record.reference_sequence_id().is_none())
+            .map(|record| record.slice_length())
+            .sum(),
+        Err(e) => {
+            log::debug!("Failed to read CRAI while looking for unmapped slices: {e}");
+            0
+        }
+    }
 }
 
 /// Estimate compressed byte sizes per region from a CRAI index.
