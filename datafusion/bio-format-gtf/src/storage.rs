@@ -148,6 +148,7 @@ impl GtfLocalReader {
 }
 
 /// Async remote GTF file reader supporting plain, GZIP, and BGZF compressed streams
+#[allow(clippy::large_enum_variant)]
 pub enum GtfRemoteReader {
     /// Plain text remote reader
     Plain(tokio::io::BufReader<StreamReader<FuturesBytesStream, Bytes>>),

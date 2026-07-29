@@ -152,6 +152,7 @@ pub async fn get_local_fasta_gz_reader(
 /// - `BGZF`: Reads BGZF-compressed FASTA files
 /// - `GZIP`: Reads GZIP-compressed FASTA files
 /// - `PLAIN`: Reads uncompressed FASTA files
+#[allow(clippy::large_enum_variant)]
 pub enum FastaRemoteReader {
     /// BGZF-compressed reader variant
     BGZF(

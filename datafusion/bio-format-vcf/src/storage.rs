@@ -292,6 +292,7 @@ pub async fn get_header(
 ///
 /// This enum handles BGZF, GZIP, and uncompressed remote VCF files from cloud storage.
 /// The appropriate variant is created based on the detected compression type.
+#[allow(clippy::large_enum_variant)]
 pub enum VcfRemoteReader {
     /// Reader for BGZF-compressed remote VCF files.
     BGZF(vcf::r#async::io::Reader<AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>),
@@ -651,6 +652,7 @@ pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
 ///
 /// This is the primary entry point for reading VCF files from any source (local, S3, GCS, etc).
 /// It automatically detects the storage type and compression format.
+#[allow(clippy::large_enum_variant)]
 pub enum VcfReader {
     /// Reader for local VCF files.
     Local(VcfLocalReader),

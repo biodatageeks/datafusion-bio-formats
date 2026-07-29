@@ -100,6 +100,7 @@ pub async fn get_local_fastq_gz_reader(
 }
 
 /// An async FASTQ reader that automatically detects and handles remote file compression
+#[allow(clippy::large_enum_variant)]
 pub enum FastqRemoteReader {
     /// BGZF-compressed remote FASTQ file reader
     BGZF(

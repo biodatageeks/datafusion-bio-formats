@@ -169,6 +169,7 @@ pub fn get_local_bed_reader<const N: usize>(
 /// # Type Parameters
 ///
 /// * `N` - Number of BED columns (3-6)
+#[allow(clippy::large_enum_variant)]
 pub enum BedRemoteReader<const N: usize> {
     /// BGZF-compressed BED reader
     BGZF(
