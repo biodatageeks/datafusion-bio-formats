@@ -42,12 +42,14 @@ does not support a legacy `merged=true` compatibility option.
 
 Every VEP cache Arrow schema must carry `bio.vep.cache_version` and every
 Parquet shard must preserve it in Parquet-embedded Arrow schema metadata. Cache
-builders receive an expected release, verify it against the raw Ensembl cache
-metadata, and stamp the verified value on every entity schema. Annotation never
-infers release identity from a directory or filename and never accepts a
-sidecar identity file. The annotation engine validates only the shards for a
-contig when that contig is first requested, while enforcing one supported cache
-release across an annotation invocation.
+builders receive an expected release and verify it against release provenance
+recovered from an explicit `info.txt` value or, because official 115/116 caches
+omit that value, the final canonical raw-cache root basename. The verified value
+is stamped on every entity schema, including split translation schemas.
+Annotation never infers release identity from a generated-cache directory or
+filename and never accepts a sidecar identity file. The annotation engine
+validates only the shards for a contig when that contig is first requested,
+while enforcing one supported cache release across an annotation invocation.
 
 ### Two Annotation Modes
 

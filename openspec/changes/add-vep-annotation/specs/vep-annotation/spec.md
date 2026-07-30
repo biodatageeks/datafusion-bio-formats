@@ -158,13 +158,14 @@ The system SHALL require every VEP cache entity schema and exported Parquet shar
 
 #### Scenario: Raw cache release is verified during conversion
 - **WHEN** a cache build requests release `116` from raw Ensembl cache input
-- **THEN** the builder parses the raw cache's own release metadata
+- **THEN** the builder parses an explicit decimal release in `info.txt`, or strictly recovers it from the final canonical raw-cache root basename when the official cache omits that field
 - **AND** fails before export if the raw release is absent, malformed, or differs from `116`
 - **AND** treats the requested release only as an assertion, not as replacement identity
+- **AND** does not inspect arbitrary parent directories to recover a release
 
 #### Scenario: Every exported shard embeds cache release metadata
 - **WHEN** a verified raw cache is exported to chromosome-partitioned Parquet
-- **THEN** every transcript, variation, regulatory, motif, exon, and translation shard carries `bio.vep.cache_version` in its embedded Arrow schema metadata
+- **THEN** every transcript, variation, regulatory, motif, exon, translation, translation-core, and translation-SIFT shard carries `bio.vep.cache_version` in its embedded Arrow schema metadata
 - **AND** schema metadata survives projection, batch transformation, and Parquet writing
 - **AND** no sidecar or cache-level marker file is required to establish cache identity
 

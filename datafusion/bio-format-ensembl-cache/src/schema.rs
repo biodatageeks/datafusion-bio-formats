@@ -389,6 +389,7 @@ pub(crate) fn translation_schema(
 pub fn translation_core_schema(
     coordinate_system_zero_based: bool,
     cache_source_type: CacheSourceType,
+    cache_version: &str,
 ) -> SchemaRef {
     let fields = vec![
         Field::new("transcript_id", DataType::Utf8, false),
@@ -409,7 +410,7 @@ pub fn translation_core_schema(
         fields,
         coordinate_system_zero_based,
         cache_source_type,
-        None,
+        Some(cache_version),
     )
 }
 
@@ -418,6 +419,7 @@ pub fn translation_core_schema(
 pub fn translation_sift_schema(
     coordinate_system_zero_based: bool,
     cache_source_type: CacheSourceType,
+    cache_version: &str,
 ) -> SchemaRef {
     let fields = vec![
         Field::new("transcript_id", DataType::Utf8, false),
@@ -431,7 +433,7 @@ pub fn translation_sift_schema(
         fields,
         coordinate_system_zero_based,
         cache_source_type,
-        None,
+        Some(cache_version),
     )
 }
 
@@ -779,7 +781,7 @@ mod tests {
 
     #[test]
     fn translation_core_schema_fields() {
-        let schema = translation_core_schema(false, CacheSourceType::Ensembl);
+        let schema = translation_core_schema(false, CacheSourceType::Ensembl, "115");
         assert!(schema.column_with_name("transcript_id").is_some());
         assert!(schema.column_with_name("stable_id").is_some());
         assert!(schema.column_with_name("cds_len").is_some());
@@ -813,7 +815,7 @@ mod tests {
 
     #[test]
     fn translation_sift_schema_fields() {
-        let schema = translation_sift_schema(false, CacheSourceType::Ensembl);
+        let schema = translation_sift_schema(false, CacheSourceType::Ensembl, "115");
         assert!(schema.column_with_name("transcript_id").is_some());
         assert!(schema.column_with_name("chrom").is_some());
         assert!(schema.column_with_name("start").is_some());
@@ -827,12 +829,12 @@ mod tests {
 
     #[test]
     fn translation_split_schemas_coordinate_metadata() {
-        let core_0 = translation_core_schema(true, CacheSourceType::Ensembl);
+        let core_0 = translation_core_schema(true, CacheSourceType::Ensembl, "115");
         assert_eq!(
             core_0.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
             Some(&"true".to_string())
         );
-        let sift_1 = translation_sift_schema(false, CacheSourceType::Ensembl);
+        let sift_1 = translation_sift_schema(false, CacheSourceType::Ensembl, "115");
         assert_eq!(
             sift_1.metadata().get(COORDINATE_SYSTEM_METADATA_KEY),
             Some(&"false".to_string())
@@ -841,17 +843,30 @@ mod tests {
 
     #[test]
     fn translation_split_schemas_accept_explicit_cache_source_metadata() {
-        let core = translation_core_schema(false, CacheSourceType::RefSeq);
+        let core = translation_core_schema(false, CacheSourceType::RefSeq, "115");
         assert_eq!(
             core.metadata().get(VEP_CACHE_SOURCE_TYPE_METADATA_KEY),
             Some(&"refseq".to_string())
         );
 
-        let sift = translation_sift_schema(false, CacheSourceType::Merged);
+        let sift = translation_sift_schema(false, CacheSourceType::Merged, "116");
         assert_eq!(
             sift.metadata().get(VEP_CACHE_SOURCE_TYPE_METADATA_KEY),
             Some(&"merged".to_string())
         );
+    }
+
+    #[test]
+    fn translation_split_schemas_carry_cache_version_metadata() {
+        for schema in [
+            translation_core_schema(false, CacheSourceType::Ensembl, "115"),
+            translation_sift_schema(false, CacheSourceType::Ensembl, "115"),
+        ] {
+            assert_eq!(
+                schema.metadata().get(VEP_CACHE_VERSION_METADATA_KEY),
+                Some(&"115".to_string())
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

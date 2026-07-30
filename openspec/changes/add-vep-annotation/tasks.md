@@ -127,11 +127,11 @@
 
 ### 2.11 Mandatory Cache Release Metadata
 - [ ] 2.11.1 Define the shared `bio.vep.cache_version` schema metadata key and strict decimal release parser
-- [ ] 2.11.2 Parse authoritative release identity from raw Ensembl cache metadata and require the cache builder's expected release assertion to match it
+- [ ] 2.11.2 Parse release identity from explicit raw Ensembl cache metadata or the strict final canonical raw-root basename, and require the cache builder's expected release assertion to match it
 - [ ] 2.11.3 Add the verified cache release to transcript, variation, regulatory, motif, exon, and translation schemas
 - [ ] 2.11.4 Preserve the complete Arrow schema metadata map through projected schemas, transformed record batches, and Parquet export
 - [ ] 2.11.5 Add tests proving every entity schema and representative Parquet round trip retains `bio.vep.cache_version`
-- [ ] 2.11.6 Add negative tests for absent, malformed, and expected-versus-raw mismatched releases without path or sidecar fallback
+- [ ] 2.11.6 Add negative tests for absent, malformed, and expected-versus-raw mismatched releases without generated-cache path, arbitrary-parent, or sidecar fallback
 - [ ] 2.11.7 Export complete caches through staging, eagerly verify every produced shard's embedded release metadata, and publish only after verification
 - [ ] 2.11.8 Document that metadata-less generated caches must be rebuilt and that paths/manifests do not establish cache identity
 

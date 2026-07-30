@@ -204,11 +204,18 @@ shard. There is no cache-level marker, sidecar identity file, provenance column,
 or annotation-time basename fallback. Manifests may locate entity shards but
 do not establish their identity.
 
-The raw Ensembl cache's own metadata is authoritative during conversion. A
-builder receives an expected release as an assertion, parses the raw cache
-metadata, fails if the values disagree, and passes the verified release into
-every entity schema constructor. Parquet export must preserve the complete
-Arrow schema metadata map rather than reconstructing selected keys.
+The raw Ensembl cache's own provenance is authoritative during conversion. An
+explicit decimal `cache_version` or `version` in `info.txt` is preferred.
+Official 115/116 caches omit that field, so conversion may recover it only from
+the final canonical raw-cache root basename
+`<release>_<assembly>[_merged|_refseq]`; arbitrary parents and noncanonical
+names are never consulted. A builder receives an expected decimal release as
+an assertion, fails if it disagrees with the independently recovered value,
+and passes the verified release into every entity schema constructor. Missing
+or malformed provenance is an error rather than an `unknown` metadata value.
+Parquet export must preserve the complete Arrow schema metadata map rather than
+reconstructing selected keys, including for `translation_core` and
+`translation_sift` split shards.
 
 The downstream annotation engine owns the support matrix because compatibility
 is an executable semantic property, not a cache-format property. Initially:
