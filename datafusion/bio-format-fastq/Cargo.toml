@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-fastq"
-version = "1.8.8"
+version = "1.9.0"
 description = "FASTQ file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
