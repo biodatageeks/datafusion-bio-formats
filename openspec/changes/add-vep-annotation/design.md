@@ -191,14 +191,66 @@ The native cache provider does not use `cache_source_type` to discover files.
 File discovery remains layout-based; source mode controls schema metadata and
 downstream annotation semantics only.
 
+### Cache Release Identity and Validation Boundary
+
+Cache release is a separate, mandatory identity dimension:
+
+```
+bio.vep.cache_version = <Ensembl integer release, for example "115" or "116">
+```
+
+The authoritative value is Arrow schema metadata embedded in every Parquet
+shard. There is no cache-level marker, sidecar identity file, provenance column,
+or annotation-time basename fallback. Manifests may locate entity shards but
+do not establish their identity.
+
+The raw Ensembl cache's own provenance is authoritative during conversion. An
+explicit decimal `cache_version` or `version` in `info.txt` is preferred.
+Official 115/116 caches omit that field, so conversion may recover it only from
+the final canonical raw-cache root basename
+`<release>_<assembly>[_merged|_refseq]`; arbitrary parents and noncanonical
+names are never consulted. A builder receives an expected decimal release as
+an assertion, fails if it disagrees with the independently recovered value,
+and passes the verified release into every entity schema constructor. Missing
+or malformed provenance is an error rather than an `unknown` metadata value.
+Parquet export must preserve the complete Arrow schema metadata map rather than
+reconstructing selected keys, including for `translation_core` and
+`translation_sift` split shards.
+
+The downstream annotation engine owns the support matrix because compatibility
+is an executable semantic property, not a cache-format property. Initially:
+
+| Cache release | VEP codebase | VEP API | Core revision | Variation revision |
+|---|---|---|---|---|
+| `115` | `115.2` | `115` | `266b84d` | `b7c2637` |
+| `116` | `116.0` | `116` | `c0cf13d` | `2fb834b` |
+
+Validation is lazy at the contig boundary:
+
+1. Before annotating a requested contig, resolve every entity shard that will
+   participate for that contig.
+2. Read only those Parquet footers/Arrow schemas and require one present,
+   well-formed `bio.vep.cache_version` value across them.
+3. Reject an unsupported value before reading annotation data.
+4. Memoize successful validation for `(cache root, contig)`.
+5. The first validated contig establishes the invocation cache identity; a
+   later contig must match it.
+
+This boundary permits a `chr1` run to avoid opening `chr2` through `chr22`
+footers while still detecting mixed or partially rebuilt caches as soon as an
+affected contig is requested. Full cache publication is stricter: builders
+write into staging, verify every produced shard has the expected metadata, and
+only then publish the completed cache.
+
 ### Schema Contracts
 
-The VEP crate depends on column names, types, and the explicit source-mode
+The VEP crate depends on column names, types, and explicit source and release
 metadata:
 
 **Required schema metadata:**
 ```
 bio.vep.cache_source_type: Utf8 enum value ("ensembl", "merged", or "refseq")
+bio.vep.cache_version: Utf8 decimal Ensembl cache release
 ```
 
 **Transcript table contract:**
