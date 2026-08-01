@@ -374,7 +374,7 @@ fn fetch_reference_region_impl(
             match repo.get(ref_name.as_ref()) {
                 Some(Ok(seq)) => {
                     // Extract the requested region (convert to 0-based indexing)
-                    let seq_bytes = seq.as_ref();
+                    let seq_bytes: &[u8] = (*seq).as_ref();
                     let start_idx = (start - 1).min(seq_bytes.len());
                     let end_idx = end.min(seq_bytes.len());
                     Some(seq_bytes[start_idx..end_idx].to_vec())
@@ -409,7 +409,7 @@ fn load_all_references_impl(
                 match repo.get(ref_name.as_ref()) {
                     Some(Ok(seq)) => {
                         // Convert Sequence to Vec<u8>
-                        references.push(seq.as_ref().to_vec());
+                        references.push(AsRef::<[u8]>::as_ref(&*seq).to_vec());
                     }
                     Some(Err(_)) | None => {
                         // If we can't load a reference, return None for the whole set
@@ -488,36 +488,81 @@ impl IndexedCramReader {
         &mut self,
         region: &noodles_core::Region,
     ) -> Result<impl Iterator<Item = Result<RecordBuf, io::Error>> + '_, io::Error> {
-        self.reader.query(&self.header, region)
+        self.reader.query(&self.header, region).map(|q| q.records())
+    }
+
+    /// Query the unplaced, unmapped records at the end of the file.
+    ///
+    /// A CRAI records the unmapped slice with a reference sequence ID of -1, so these
+    /// records are reachable by seeking to it. They are not returned by any region
+    /// query, which is why an indexed full scan has to ask for them separately.
+    pub fn query_unmapped(
+        &mut self,
+    ) -> Result<impl Iterator<Item = Result<RecordBuf, io::Error>> + '_, io::Error> {
+        self.reader.query_unmapped(&self.header)
     }
 }
 
-/// Estimate compressed byte sizes per region from a CRAI index.
-pub fn estimate_sizes_from_crai(
+/// Chromosome name used to mark the partition that reads unplaced, unmapped records.
+///
+/// This is a debug label, not a lookup key: nothing resolves it against the header's
+/// reference names. The execution side dispatches on [`GenomicRegion::unmapped_tail`]
+/// alone and calls [`IndexedCramReader::query_unmapped`] instead of a region query.
+///
+/// [`GenomicRegion::unmapped_tail`]: datafusion_bio_format_core::genomic_filter::GenomicRegion::unmapped_tail
+pub const UNPLACED_UNMAPPED_SENTINEL_CHROM: &str = "__unplaced_unmapped__";
+
+/// What an indexed scan needs from a CRAI: how big each region is, and how big the
+/// unplaced/unmapped tail is.
+///
+/// Both come from a single read of the index, since a scan needs them together.
+pub struct CraiScanLayout {
+    /// Per-region compressed size estimates, in the order the regions were given.
+    pub estimates: Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate>,
+    /// Total compressed size of the unmapped slices, or zero if the index describes
+    /// none — in which case there is nothing to read beyond the placed regions.
+    pub unplaced_unmapped_bytes: u64,
+}
+
+/// Read a CRAI once and derive per-region size estimates plus the unmapped tail size.
+///
+/// The values only size partitions, so an unreadable index degrades to a flat estimate
+/// and a zero-length tail rather than failing the scan.
+pub fn read_crai_scan_layout(
     index_path: &str,
     regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
     reference_names: &[String],
     reference_lengths: &[u64],
-) -> Vec<datafusion_bio_format_core::partition_balancer::RegionSizeEstimate> {
+) -> CraiScanLayout {
     use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
 
     let records = match cram::crai::fs::read(index_path) {
         Ok(recs) => recs,
         Err(e) => {
             log::debug!("Failed to read CRAI index for size estimation: {e}");
-            return regions
-                .iter()
-                .map(|r| RegionSizeEstimate {
-                    region: r.clone(),
-                    estimated_bytes: 1,
-                    contig_length: None,
-                    unmapped_count: 0,
-                    nonempty_bin_positions: Vec::new(),
-                    leaf_bin_span: 0,
-                })
-                .collect();
+            return CraiScanLayout {
+                estimates: regions
+                    .iter()
+                    .map(|r| RegionSizeEstimate {
+                        region: r.clone(),
+                        estimated_bytes: 1,
+                        contig_length: None,
+                        unmapped_count: 0,
+                        nonempty_bin_positions: Vec::new(),
+                        leaf_bin_span: 0,
+                    })
+                    .collect(),
+                unplaced_unmapped_bytes: 0,
+            };
         }
     };
+
+    // Slices with no reference sequence id are the unplaced, unmapped tail.
+    let unplaced_unmapped_bytes = records
+        .iter()
+        .filter(|record| record.reference_sequence_id().is_none())
+        .map(|record| record.slice_length())
+        .sum();
 
     // Group slice lengths by reference sequence id
     let mut bytes_by_ref: std::collections::HashMap<usize, u64> = std::collections::HashMap::new();
@@ -533,7 +578,7 @@ pub fn estimate_sizes_from_crai(
         .map(|(i, n)| (n.as_str(), i))
         .collect();
 
-    regions
+    let estimates = regions
         .iter()
         .map(|region| {
             let ref_idx = ref_name_to_idx.get(region.chrom.as_str()).copied();
@@ -547,12 +592,20 @@ pub fn estimate_sizes_from_crai(
                 region: region.clone(),
                 estimated_bytes,
                 contig_length,
+                // Always zero: unmapped records are not spread across the placed
+                // regions, they live in the tail and get their own partition from
+                // `unplaced_unmapped_bytes` above.
                 unmapped_count: 0,
                 nonempty_bin_positions: Vec::new(),
                 leaf_bin_span: 0,
             }
         })
-        .collect()
+        .collect();
+
+    CraiScanLayout {
+        estimates,
+        unplaced_unmapped_bytes,
+    }
 }
 
 /// Record field accessor for CRAM records, used for record-level filter evaluation.

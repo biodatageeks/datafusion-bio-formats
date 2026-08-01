@@ -316,7 +316,9 @@ impl IndexedBamReader {
         &mut self,
         region: &noodles_core::Region,
     ) -> Result<impl Iterator<Item = Result<Record, Error>> + '_, Error> {
-        self.reader.query(&self.header, &self.index, region)
+        self.reader
+            .query(&self.header, &self.index, region)
+            .map(|q| q.records())
     }
 }
 

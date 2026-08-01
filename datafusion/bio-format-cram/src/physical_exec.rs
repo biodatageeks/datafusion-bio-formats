@@ -26,6 +26,7 @@ use datafusion_bio_format_core::table_utils::OptionalField;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
 use noodles_sam::alignment::Record;
+use noodles_sam::alignment::RecordBuf;
 use noodles_sam::alignment::record::data::field::Tag;
 use std::any::Any;
 use std::fmt::{Debug, Formatter};
@@ -912,22 +913,28 @@ async fn get_indexed_stream(
             let mut total_records = 0usize;
 
             for region in &regions {
-                // Skip unmapped_tail regions — CRAM index doesn't support direct
-                // unmapped seek. No unmapped_tail regions should be emitted for CRAM
-                // since estimate_sizes_from_crai sets unmapped_count: 0.
-                if region.unmapped_tail {
-                    debug!("Skipping unmapped_tail region for CRAM (not supported)");
-                    continue;
-                }
-
                 // Sub-region bounds for deduplication (1-based, from partition balancer)
+                // The unmapped tail carries no bounds, so these stay None for it.
                 let region_start_1based = region.start.map(|s| s as u32);
                 let region_end_1based = region.end.map(|e| e as u32);
 
-                let noodles_region = build_noodles_region(region)?;
-                let records = indexed_reader.query(&noodles_region).map_err(|e| {
-                    DataFusionError::Execution(format!("CRAM region query failed: {e}"))
-                })?;
+                // The unplaced, unmapped records live past every placed slice and are
+                // reached by seeking to the CRAI entry whose reference sequence ID is -1.
+                // No region query returns them, so a full scan asks for them separately.
+                let records: Box<dyn Iterator<Item = Result<RecordBuf, std::io::Error>> + Send + '_> =
+                    if region.unmapped_tail {
+                        debug!("Reading unplaced/unmapped CRAM records");
+                        Box::new(indexed_reader.query_unmapped().map_err(|e| {
+                            DataFusionError::Execution(format!(
+                                "CRAM unmapped query failed: {e}"
+                            ))
+                        })?)
+                    } else {
+                        let noodles_region = build_noodles_region(region)?;
+                        Box::new(indexed_reader.query(&noodles_region).map_err(|e| {
+                            DataFusionError::Execution(format!("CRAM region query failed: {e}"))
+                        })?)
+                    };
 
                 for result in records {
                     let record = result.map_err(|e| {

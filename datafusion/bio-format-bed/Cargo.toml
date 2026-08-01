@@ -24,7 +24,7 @@ futures = "0.3.31"
 log = "0.4.27"
 async-stream = "0.3.6"
 env_logger = "0.11.8"
-noodles-bed = "0.26.0"
+noodles-bed = { git = "https://github.com/biodatageeks/noodles.git", rev = "42a3c0165617b7b8f9f5c5905287968eef92e31e" }
 futures-util = "0.3.31"
 
 [[example]]

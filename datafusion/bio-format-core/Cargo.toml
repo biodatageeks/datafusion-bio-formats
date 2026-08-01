@@ -14,7 +14,7 @@ datafusion-execution.workspace = true
 datafusion.workspace = true
 opendal.workspace = true
 noodles-bgzf.workspace = true
-noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "e2b53501afd9d327735355db68dfb33d3e6ce9db" }
+noodles-core = { git = "https://github.com/biodatageeks/noodles.git", rev = "42a3c0165617b7b8f9f5c5905287968eef92e31e" }
 noodles-sam.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
