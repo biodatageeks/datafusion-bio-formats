@@ -66,13 +66,34 @@ async fn test_indexed_full_scan_includes_unmapped_reads() -> datafusion::error::
     Ok(())
 }
 
-/// The unmapped records are the ones with no reference sequence.
+/// The unmapped records are the ones with no reference sequence, and being unplaced
+/// they carry no alignment position either. Asserting the coordinates stay null guards
+/// against a regression that hands the tail a position from whatever came before it.
 #[tokio::test]
 async fn test_unmapped_reads_have_no_chrom() -> datafusion::error::Result<()> {
     let ctx = setup_ctx().await?;
 
     let count = count_rows(&ctx, "SELECT chrom FROM cram WHERE chrom IS NULL").await;
     assert_eq!(count, UNMAPPED_READS);
+
+    let positioned = count_rows(
+        &ctx,
+        "SELECT chrom FROM cram WHERE chrom IS NULL AND (start IS NOT NULL OR end IS NOT NULL)",
+    )
+    .await;
+    assert_eq!(
+        positioned, 0,
+        "unplaced records must not be given an alignment position"
+    );
+
+    // Guards the assertion above against being vacuously true: the same predicate on
+    // the placed reads has to match all of them.
+    let placed_positioned = count_rows(
+        &ctx,
+        "SELECT chrom FROM cram WHERE chrom IS NOT NULL AND start IS NOT NULL AND end IS NOT NULL",
+    )
+    .await;
+    assert_eq!(placed_positioned, TOTAL_READS - UNMAPPED_READS);
 
     Ok(())
 }

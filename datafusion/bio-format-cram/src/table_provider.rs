@@ -872,27 +872,24 @@ impl TableProvider for CramTableProvider {
             if !regions.is_empty() {
                 // Use balanced partitioning with index size estimates
                 let target_partitions = state.config().target_partitions();
-                let estimates = crate::storage::estimate_sizes_from_crai(
+                let layout = crate::storage::read_crai_scan_layout(
                     index_path,
                     &regions,
                     &self.reference_names,
                     &self.reference_lengths,
                 );
-                let mut assignments = balance_partitions(estimates, target_partitions);
+                let unplaced_unmapped_bytes = layout.unplaced_unmapped_bytes;
+                let mut assignments = balance_partitions(layout.estimates, target_partitions);
 
                 // Region queries only cover placed reads, so an indexed full scan would
                 // otherwise silently omit the unplaced, unmapped records that a
                 // sequential scan returns. Give them their own partition.
-                if is_full_scan {
-                    let unplaced_unmapped_bytes =
-                        crate::storage::unplaced_unmapped_bytes_from_crai(index_path);
-
-                    if append_unplaced_unmapped_partition(&mut assignments, unplaced_unmapped_bytes)
-                    {
-                        debug!(
-                            "CRAM indexed full scan: added unplaced/unmapped partition ({unplaced_unmapped_bytes} bytes)"
-                        );
-                    }
+                if is_full_scan
+                    && append_unplaced_unmapped_partition(&mut assignments, unplaced_unmapped_bytes)
+                {
+                    debug!(
+                        "CRAM indexed full scan: added unplaced/unmapped partition ({unplaced_unmapped_bytes} bytes)"
+                    );
                 }
 
                 let num_partitions = assignments.len();
