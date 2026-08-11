@@ -25,6 +25,7 @@ use log::info;
 use noodles_bcf::{self as bcf, Record as BcfRecord};
 use noodles_vcf::Header;
 use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
+use noodles_vcf::header::record::value::map::info::{Number as InfoNumber, Type as InfoType};
 use noodles_vcf::variant::Record as VariantRecord;
 use noodles_vcf::variant::record::Samples as _;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, Info as _, ReferenceBases};
@@ -160,14 +161,26 @@ fn validate_bcf_info_dictionary_references(
                     "invalid BCF INFO dictionary index {key_index} in record"
                 ))
             })?;
-        if !header.infos().contains_key(key) {
-            return Err(DataFusionError::Execution(format!(
+        let info = header.infos().get(key).ok_or_else(|| {
+            DataFusionError::Execution(format!(
                 "BCF INFO dictionary index {key_index} resolves to '{key}', which has no INFO \
                  header definition"
+            ))
+        })?;
+
+        let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
+        let scalar_requires_one_encoded_value = matches!(info.number(), InfoNumber::Count(1))
+            && matches!(
+                info.ty(),
+                InfoType::Integer | InfoType::Float | InfoType::Character
+            );
+        if scalar_requires_one_encoded_value && value_count != 1 {
+            return Err(DataFusionError::Execution(format!(
+                "INFO field '{key}' is declared scalar but the BCF record encodes \
+                 {value_count} values"
             )));
         }
 
-        let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
         let payload_len = encoded_type
             .width()
             .checked_mul(value_count)

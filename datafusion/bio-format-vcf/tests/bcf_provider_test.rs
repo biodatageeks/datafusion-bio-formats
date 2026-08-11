@@ -1082,6 +1082,48 @@ async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_rejects_excess_values_for_unprojected_scalar_info_field()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=DP,Number=2,Type=Integer,Description=\"Read depth\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tDP=5,7\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "scalar-info-extra", body)?;
+
+    // Keep the two-integer record payload intact and corrupt only the
+    // same-width header declaration from an array into a scalar.
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let declaration = b"##INFO=<ID=DP,Number=2";
+    let declaration_start = decompressed
+        .windows(declaration.len())
+        .position(|window| window == declaration)
+        .expect("DP INFO declaration should be present in the BCF header");
+    decompressed[declaration_start + declaration.len() - 1] = b'1';
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("excess values for an unprojected scalar INFO field must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("INFO field 'DP' is declared scalar") && error.contains("encodes 2 values"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_excess_values_for_scalar_format_field()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
