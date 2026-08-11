@@ -1,6 +1,6 @@
 use crate::bcf::BcfExec;
 use crate::physical_exec::VcfExec;
-use crate::storage::get_header;
+use crate::storage::{VcfRecordFields, get_header};
 use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
@@ -409,6 +409,21 @@ pub fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
             DataType::Utf8
         }
     }
+}
+
+/// Returns true when the record-level decoder can fully evaluate `filter`.
+///
+/// `can_push_down_record_filter` accepts any scalar column in the schema, but
+/// [`VcfRecordFields`] only resolves `chrom`/`start`/`end`; filters on other
+/// columns pass every record. A limit may only stop the scan early when every
+/// filter is genuinely enforced by the decoder, otherwise rows matching the
+/// residual filter could be cut off.
+fn decoder_evaluates_filter(filter: &Expr, schema: &SchemaRef) -> bool {
+    can_push_down_record_filter(filter, schema)
+        && filter
+            .column_refs()
+            .iter()
+            .all(|column| VcfRecordFields::FILTER_COLUMNS.contains(&column.name.as_str()))
 }
 
 /// Input encoding accepted by [`VcfTableProvider`].
@@ -1045,7 +1060,7 @@ impl TableProvider for VcfTableProvider {
         }
         let bcf_limit = if filters
             .iter()
-            .all(|filter| can_push_down_record_filter(filter, &self.schema))
+            .all(|filter| decoder_evaluates_filter(filter, &self.schema))
         {
             limit
         } else {
@@ -1412,5 +1427,53 @@ fn format_type_to_string(ty: &FormatType) -> String {
         FormatType::Float => "Float".to_string(),
         FormatType::Character => "Character".to_string(),
         FormatType::String => "String".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::prelude::{col, lit};
+
+    fn test_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("af", DataType::Float32, true),
+        ]))
+    }
+
+    #[test]
+    fn limit_pushdown_requires_decoder_evaluable_filters() {
+        let schema = test_schema();
+
+        // Coordinate filters are enforced by the decoder, so a limit may stop
+        // the scan early.
+        assert!(decoder_evaluates_filter(
+            &col("chrom").eq(lit("chr1")),
+            &schema
+        ));
+        assert!(decoder_evaluates_filter(
+            &col("start").gt_eq(lit(100u32)),
+            &schema
+        ));
+
+        // These pass `can_push_down_record_filter`, but `VcfRecordFields` cannot
+        // resolve the columns — every record would pass, so an early stop could
+        // drop rows the residual filter would have matched.
+        assert!(!decoder_evaluates_filter(
+            &col("id").eq(lit("rs1")),
+            &schema
+        ));
+        assert!(!decoder_evaluates_filter(
+            &col("af").gt(lit(0.5_f32)),
+            &schema
+        ));
+        assert!(!decoder_evaluates_filter(
+            &col("chrom").eq(lit("chr1")).and(col("id").eq(lit("rs1"))),
+            &schema
+        ));
     }
 }

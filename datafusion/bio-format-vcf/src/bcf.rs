@@ -279,7 +279,13 @@ fn plan_remote_chunks(
     Ok(merged)
 }
 
-fn record_intersects_regions(
+/// Returns true when the record's start position falls inside one of `regions`.
+///
+/// Ownership is decided by variant start (not interval overlap) so that a record
+/// spanning the boundary between two adjacent partition sub-regions is emitted by
+/// exactly one partition. This mirrors the indexed VCF path, which applies the
+/// same start-containment check after each region query.
+fn record_starts_in_regions(
     record: &BcfRecord,
     header: &Header,
     regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
@@ -293,17 +299,13 @@ fn record_intersects_regions(
     else {
         return Ok(false);
     };
-    let end = record
-        .variant_end(header)
-        .map_err(|error| execution_error("invalid BCF variant span", error))?;
     let start = start.get() as u64;
-    let end = end.get() as u64;
 
     Ok(regions.iter().any(|region| {
         !region.unmapped_tail
             && region.chrom == chrom
+            && start >= region.start.unwrap_or(1)
             && start <= region.end.unwrap_or(u64::MAX)
-            && end >= region.start.unwrap_or(1)
     }))
 }
 
@@ -778,14 +780,20 @@ fn indexed_local_stream(
         let mut emitted = 0usize;
 
         'regions: for region in regions {
-            let region = build_noodles_region(&region)?;
+            let noodles_region = build_noodles_region(&region)?;
             let query = reader
-                .query(&header, &index, &region)
+                .query(&header, &index, &noodles_region)
                 .map_err(|e| execution_error("failed to query BCF CSI index", e))?;
 
             for result in query {
                 let record =
                     result.map_err(|e| execution_error("failed to decode indexed BCF record", e))?;
+                // The CSI query matches by interval overlap; keep only records that
+                // start inside this partition's sub-region so records spanning a
+                // partition boundary are not emitted twice.
+                if !record_starts_in_regions(&record, &header, std::slice::from_ref(&region))? {
+                    continue;
+                }
                 if let Some(batch) = decoder.append_record(&record, &header)? {
                     emitted += batch.num_rows();
                     yield batch;
@@ -899,7 +907,7 @@ async fn indexed_remote_stream(
                 if record_size == 0 {
                     break;
                 }
-                if !record_intersects_regions(&record, &header, &regions)? {
+                if !record_starts_in_regions(&record, &header, &regions)? {
                     continue;
                 }
                 if let Some(batch) = decoder.append_record(&record, &header)? {
@@ -1078,11 +1086,69 @@ impl ExecutionPlan for BcfExec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datafusion_bio_format_core::genomic_filter::GenomicRegion;
+    use noodles_vcf as vcf;
+    use noodles_vcf::variant::io::Write as _;
 
     #[test]
     fn validates_only_bcf_2_2() {
         assert!(validate_version((2, 2)).is_ok());
         assert!(validate_version((2, 1)).is_err());
         assert!(validate_version((3, 0)).is_err());
+    }
+
+    fn region(start: Option<u64>, end: Option<u64>) -> GenomicRegion {
+        GenomicRegion {
+            chrom: "chr1".to_string(),
+            start,
+            end,
+            unmapped_tail: false,
+        }
+    }
+
+    #[test]
+    fn spanning_record_is_owned_by_exactly_one_sub_region() {
+        // One record at chr1:400 with a 201 bp REF, i.e. spanning [400, 600].
+        let long_ref = "A".repeat(201);
+        let vcf_text = format!(
+            "##fileformat=VCFv4.3\n##contig=<ID=chr1,length=10000>\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+             chr1\t400\t.\t{long_ref}\tA\t.\tPASS\t.\n"
+        );
+        let mut vcf_reader = vcf::io::Reader::new(vcf_text.as_bytes());
+        let vcf_header = vcf_reader.read_header().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("span.bcf");
+        let mut writer = bcf::io::Writer::new(File::create(&path).unwrap());
+        writer.write_header(&vcf_header).unwrap();
+        for result in vcf_reader.records() {
+            writer
+                .write_variant_record(&vcf_header, &result.unwrap())
+                .unwrap();
+        }
+        writer.try_finish().unwrap();
+
+        let mut reader = bcf::io::Reader::new(File::open(&path).unwrap());
+        let header = reader.read_header().unwrap();
+        let mut record = BcfRecord::default();
+        assert!(reader.read_record(&mut record).unwrap() > 0);
+
+        // Splitting chr1 at 500 assigns the record to the first sub-region only,
+        // even though its interval overlaps both.
+        assert!(record_starts_in_regions(&record, &header, &[region(Some(1), Some(500))]).unwrap());
+        assert!(
+            !record_starts_in_regions(&record, &header, &[region(Some(501), Some(1000))]).unwrap()
+        );
+        // Overlap without start containment does not confer ownership.
+        assert!(
+            !record_starts_in_regions(&record, &header, &[region(Some(450), Some(460))]).unwrap()
+        );
+        // Open-ended bounds contain every start on the contig.
+        assert!(record_starts_in_regions(&record, &header, &[region(None, None)]).unwrap());
+        // Boundary inclusivity: 1-based start 400 is inside [400, 400].
+        assert!(
+            record_starts_in_regions(&record, &header, &[region(Some(400), Some(400))]).unwrap()
+        );
     }
 }

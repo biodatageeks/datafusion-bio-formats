@@ -482,3 +482,72 @@ async fn truncated_bcf_fails_during_scan() -> Result<(), Box<dyn std::error::Err
     assert!(result.unwrap_err().to_string().contains("BCF"));
     Ok(())
 }
+
+#[tokio::test]
+async fn bcf_partition_splits_do_not_duplicate_spanning_records()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Enough data on a single contig that balanced partitioning splits chr1 into
+    // adjacent coordinate sub-regions, with 2000 bp REF alleles every 500 bp so
+    // records straddle any split boundary the balancer picks.
+    let dir = tempfile::tempdir()?;
+    let vcf_path = dir.path().join("span.vcf");
+    let bcf_path_buf = dir.path().join("span.bcf");
+    let bcf_path = bcf_path_buf.to_string_lossy().into_owned();
+
+    let mut vcf_text = String::from(
+        "##fileformat=VCFv4.3\n\
+         ##contig=<ID=chr1,length=1000000>\n\
+         ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n",
+    );
+    let long_ref = "A".repeat(2000);
+    let total_records = 800usize;
+    for record_index in 0..total_records {
+        let pos = 1 + record_index * 500;
+        vcf_text.push_str(&format!(
+            "chr1\t{pos}\trs{record_index}\t{long_ref}\tC\t50\tPASS\t.\tGT\t0/1\n"
+        ));
+    }
+    std::fs::write(&vcf_path, &vcf_text)?;
+
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(&vcf_path)?;
+    let header = reader.read_header()?;
+    let mut writer = bcf::io::Writer::new(File::create(&bcf_path_buf)?);
+    writer.write_header(&header)?;
+    for result in reader.records() {
+        writer.write_variant_record(&header, &result?)?;
+    }
+    writer.try_finish()?;
+
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        Some(index_path),
+    )?;
+
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let state = context.state();
+    let plan = provider.scan(&state, None, &[], None).await?;
+    let partition_count = plan.properties().output_partitioning().partition_count();
+    assert!(
+        partition_count > 1,
+        "expected chr1 to be split across partitions, got {partition_count}"
+    );
+
+    let batches = datafusion::physical_plan::collect(plan, context.task_ctx()).await?;
+    let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(
+        total_rows, total_records,
+        "records spanning a partition boundary must be emitted exactly once"
+    );
+    Ok(())
+}
