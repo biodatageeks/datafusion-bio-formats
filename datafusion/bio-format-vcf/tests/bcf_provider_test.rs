@@ -551,3 +551,122 @@ async fn bcf_partition_splits_do_not_duplicate_spanning_records()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn bcf_unknown_contig_filter_returns_empty_locally() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        Some(index_path),
+    )?;
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
+    context.register_table("variants", Arc::new(provider))?;
+
+    let batches = context
+        .sql("SELECT chrom, start FROM variants WHERE chrom = 'chrMissing'")
+        .await?
+        .collect()
+        .await?;
+    let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(total_rows, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_bcf_unknown_contig_filter_returns_empty() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server = RangeServer::start(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
+    context.register_table("variants", Arc::new(provider))?;
+
+    let batches = context
+        .sql("SELECT chrom, start FROM variants WHERE chrom = 'chrMissing'")
+        .await?
+        .collect()
+        .await?;
+    let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(total_rows, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_info_array_missing_elements_decode_as_nulls() -> Result<(), Box<dyn std::error::Error>>
+{
+    // BCF encodes missing array elements as a typed sentinel; checked error
+    // propagation must still map them to nulls, not fail the scan.
+    let dir = tempfile::tempdir()?;
+    let vcf_path = dir.path().join("missing.vcf");
+    let bcf_path_buf = dir.path().join("missing.bcf");
+    let bcf_path = bcf_path_buf.to_string_lossy().into_owned();
+
+    let vcf_text = "##fileformat=VCFv4.3\n\
+        ##contig=<ID=chr1,length=1000>\n\
+        ##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count\">\n\
+        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+        chr1\t10\trs1\tA\tC,T\t50\tPASS\tAC=5,.\n";
+    std::fs::write(&vcf_path, vcf_text)?;
+
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(&vcf_path)?;
+    let header = reader.read_header()?;
+    let mut writer = bcf::io::Writer::new(File::create(&bcf_path_buf)?);
+    writer.write_header(&header)?;
+    for result in reader.records() {
+        writer.write_variant_record(&header, &result?)?;
+    }
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(vec!["AC".to_string()]),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+
+    let batches = context
+        .sql("SELECT \"AC\" FROM variants")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    let list = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("AC should be a list array");
+    let values = list.value(0);
+    let ints = values
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("AC elements should be Int32");
+    assert_eq!(ints.len(), 2);
+    assert_eq!(ints.value(0), 5);
+    assert!(
+        datafusion::arrow::array::Array::is_null(ints, 1),
+        "missing array element must decode as null"
+    );
+    Ok(())
+}

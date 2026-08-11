@@ -450,6 +450,16 @@ pub(crate) fn build_record_batch_from_builders(
 
 /// Iterates all INFO fields in a single pass using `info.iter(header)` and dispatches
 /// via HashMap, avoiding the O(N*M) cost of calling `info.get(header, key)` per field.
+/// Error for a malformed INFO array element. Missing elements (`.` in text VCF,
+/// the missing sentinel in BCF) decode as `Ok(None)` and become nulls; only
+/// genuinely undecodable elements reach this path, and silently mapping them to
+/// null would present corrupt data as merely absent.
+fn info_array_error(key: &str, error: std::io::Error) -> datafusion::arrow::error::ArrowError {
+    datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
+        "Error reading INFO array field '{key}': {error}"
+    ))
+}
+
 pub(crate) fn load_infos_single_pass(
     record: &dyn Record,
     header: &Header,
@@ -488,12 +498,17 @@ pub(crate) fn load_infos_single_pass(
                     builder.append_int(v)?;
                 }
                 Some(Value::Array(ValueArray::Integer(values))) => {
-                    let ints: Vec<Option<i32>> = values.iter().map(|v| v.ok().flatten()).collect();
+                    let ints: Vec<Option<i32>> = values
+                        .iter()
+                        .collect::<std::io::Result<_>>()
+                        .map_err(|e| info_array_error(key, e))?;
                     builder.append_array_int_nullable(ints)?;
                 }
                 Some(Value::Array(ValueArray::Float(values))) => {
-                    let floats: Vec<Option<f32>> =
-                        values.iter().map(|v| v.ok().flatten()).collect();
+                    let floats: Vec<Option<f32>> = values
+                        .iter()
+                        .collect::<std::io::Result<_>>()
+                        .map_err(|e| info_array_error(key, e))?;
                     builder.append_array_float_nullable(floats)?;
                 }
                 Some(Value::Float(v)) => {
@@ -505,8 +520,9 @@ pub(crate) fn load_infos_single_pass(
                 Some(Value::Array(ValueArray::String(values))) => {
                     let strings: Vec<Option<String>> = values
                         .iter()
-                        .map(|v| v.ok().flatten().map(|s| s.to_string()))
-                        .collect();
+                        .map(|result| result.map(|value| value.map(|s| s.to_string())))
+                        .collect::<std::io::Result<_>>()
+                        .map_err(|e| info_array_error(key, e))?;
                     builder.append_array_string_nullable(strings)?;
                 }
                 Some(Value::Flag) => {

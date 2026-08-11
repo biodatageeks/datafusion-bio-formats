@@ -233,16 +233,20 @@ fn plan_remote_chunks(
     let mut chunks = Vec::new();
     for region in regions {
         let query_region = build_noodles_region(region)?;
-        let reference_id = header
+        // A filter such as `chrom = 'chrMissing'` legitimately produces a region
+        // for a contig absent from this file; that matches no rows rather than
+        // being an error (the indexed text-VCF path skips these the same way).
+        let Some(reference_id) = header
             .string_maps()
             .contigs()
             .get_index_of(region.chrom.as_str())
-            .ok_or_else(|| {
-                DataFusionError::Execution(format!(
-                    "BCF CSI region references an unknown contig: {}",
-                    region.chrom
-                ))
-            })?;
+        else {
+            log::debug!(
+                "skipping BCF region {}: contig not present in header dictionary",
+                region.chrom
+            );
+            continue;
+        };
         chunks.extend(
             index
                 .query(reference_id, query_region.interval())
@@ -780,6 +784,21 @@ fn indexed_local_stream(
         let mut emitted = 0usize;
 
         'regions: for region in regions {
+            // A filter on a contig absent from this file matches no rows; skip it
+            // instead of letting the query fail (the indexed text-VCF path skips
+            // unknown contigs the same way).
+            if header
+                .string_maps()
+                .contigs()
+                .get_index_of(region.chrom.as_str())
+                .is_none()
+            {
+                log::debug!(
+                    "skipping BCF region {}: contig not present in header dictionary",
+                    region.chrom
+                );
+                continue;
+            }
             let noodles_region = build_noodles_region(&region)?;
             let query = reader
                 .query(&header, &index, &noodles_region)
