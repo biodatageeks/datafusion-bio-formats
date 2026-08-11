@@ -10,6 +10,7 @@ use datafusion::arrow::array::{Int32Array, ListArray, StringArray, StructArray, 
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion_bio_format_core::genotype::MissingSamplePolicy;
 use datafusion_bio_format_vcf::table_provider::{VcfInputFormat, VcfTableProvider};
 use noodles_bcf as bcf;
 use noodles_vcf as vcf;
@@ -483,6 +484,82 @@ fn bcf_rejects_unknown_samples_by_default() -> Result<(), Box<dyn std::error::Er
     .unwrap_err();
 
     assert!(error.to_string().contains("absent"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn text_vcf_honors_explicit_missing_sample_policy() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (_dir, vcf_path, _bcf_path) = create_equivalent_vcf_and_bcf()?;
+
+    let error = VcfTableProvider::new_with_samples_and_format_and_policy(
+        vcf_path.clone(),
+        None,
+        Some(vec!["GT".to_string()]),
+        Some(vec!["absent".to_string()]),
+        None,
+        true,
+        VcfInputFormat::Vcf,
+        None,
+        Some(MissingSamplePolicy::Error),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("absent"));
+
+    VcfTableProvider::new_with_samples_and_format(
+        vcf_path,
+        None,
+        Some(vec!["GT".to_string()]),
+        Some(vec!["absent".to_string()]),
+        None,
+        true,
+        VcfInputFormat::Vcf,
+        None,
+    )?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_rejects_record_sample_count_mismatch() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+
+    // BCF starts with magic/version (5 bytes), followed by the little-endian
+    // header-text length (4 bytes). Each record then starts with l_shared and
+    // l_indiv (8 bytes), and n_sample occupies bytes 20..23 of the shared data.
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let first_record_shared_start = 9 + header_len + 8;
+    let sample_count = first_record_shared_start + 20;
+    assert_eq!(&decompressed[sample_count..sample_count + 3], &[2, 0, 0]);
+    decompressed[sample_count..sample_count + 3].copy_from_slice(&[0, 0, 0]);
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        true,
+    )?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT genotypes FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("a BCF record/header sample-count mismatch must fail the scan")
+        .to_string();
+
+    assert!(
+        error.contains("BCF record sample count 0 does not match header sample count 2"),
+        "unexpected error: {error}"
+    );
     Ok(())
 }
 

@@ -25,6 +25,7 @@ use log::info;
 use noodles_bcf::{self as bcf, Record as BcfRecord};
 use noodles_vcf::Header;
 use noodles_vcf::variant::Record as VariantRecord;
+use noodles_vcf::variant::record::Samples as _;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
 
 use crate::physical_exec::{
@@ -432,6 +433,17 @@ impl BcfBatchDecoder {
         record: &BcfRecord,
         header: &Header,
     ) -> Result<Option<RecordBatch>> {
+        let record_sample_count = record
+            .samples()
+            .map_err(|e| execution_error("invalid BCF sample count", e))?
+            .len();
+        if record_sample_count != self.source_sample_names.len() {
+            return Err(DataFusionError::Execution(format!(
+                "BCF record sample count {record_sample_count} does not match header sample count {}",
+                self.source_sample_names.len()
+            )));
+        }
+
         let has_filters = !self.residual_filters.is_empty();
         let needs_start = self.flags.start || has_filters;
         let needs_end = self.flags.end || has_filters;

@@ -67,30 +67,27 @@ use std::sync::Arc;
 fn resolve_selected_samples(
     header_sample_names: &[String],
     samples_to_include: &Option<Vec<String>>,
-) -> Vec<String> {
-    match samples_to_include {
-        None => header_sample_names.to_vec(),
-        Some(requested) => {
-            let available: HashSet<&str> = header_sample_names.iter().map(|s| s.as_str()).collect();
-            let mut seen = HashSet::with_capacity(requested.len());
-            let mut selected = Vec::with_capacity(requested.len());
+    missing_sample_policy: MissingSamplePolicy,
+) -> datafusion::common::Result<Vec<String>> {
+    if missing_sample_policy == MissingSamplePolicy::Ignore
+        && let Some(requested) = samples_to_include
+    {
+        let available: HashSet<&str> = header_sample_names.iter().map(|s| s.as_str()).collect();
+        let mut seen = HashSet::with_capacity(requested.len());
 
-            for sample in requested {
-                if !available.contains(sample.as_str()) {
-                    warn!(
-                        "Requested VCF sample '{sample}' not found in header; skipping this sample"
-                    );
-                    continue;
-                }
-
-                if seen.insert(sample.as_str()) {
-                    selected.push(sample.clone());
-                }
+        for sample in requested {
+            if seen.insert(sample.as_str()) && !available.contains(sample.as_str()) {
+                warn!("Requested VCF sample '{sample}' not found in header; skipping this sample");
             }
-
-            selected
         }
     }
+
+    resolve_samples(
+        header_sample_names,
+        samples_to_include.as_deref(),
+        missing_sample_policy,
+    )
+    .map(|selection| selection.names().to_vec())
 }
 
 /// # Returns
@@ -134,17 +131,11 @@ async fn determine_schema_from_header(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let sample_names = match input_format {
-        VcfInputFormat::Bcf => resolve_samples(
-            &source_sample_names,
-            samples_to_include.as_deref(),
-            missing_sample_policy,
-        )?
-        .names()
-        .to_vec(),
-        VcfInputFormat::Vcf => resolve_selected_samples(&source_sample_names, samples_to_include),
-        VcfInputFormat::Auto => unreachable!("input format must be resolved before reading"),
-    };
+    let sample_names = resolve_selected_samples(
+        &source_sample_names,
+        samples_to_include,
+        missing_sample_policy,
+    )?;
 
     // Extract header metadata for schema storage
     let file_format_obj = header.file_format();
