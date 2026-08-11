@@ -308,6 +308,15 @@ async fn remote_bcf_uses_csi_range_requests() -> Result<(), Box<dyn std::error::
         }),
         "BCF payload was not read with a byte range: {requests:?}"
     );
+    let csi_requests = requests
+        .iter()
+        .filter(|request| request.path.starts_with("/remote.bcf.csi"))
+        .count();
+    assert!(
+        csi_requests <= 3,
+        "the CSI should be fetched once at planning time and shared across \
+         partitions, got {csi_requests} index requests: {requests:?}"
+    );
     Ok(())
 }
 

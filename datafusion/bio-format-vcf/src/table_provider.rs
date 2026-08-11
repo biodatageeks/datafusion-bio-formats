@@ -5,7 +5,7 @@ use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
-use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion};
+use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion, sanitize_location};
 use datafusion_bio_format_core::genomic_filter::{
     build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
 };
@@ -747,22 +747,37 @@ impl VcfTableProvider {
                                 let path = candidate.strip_prefix("file://").unwrap_or(&candidate);
                                 return Ok(std::path::Path::new(path).exists());
                             }
-                            let object =
-                                RemoteObject::open(candidate, options)
-                                    .await
-                                    .map_err(|error| {
-                                        datafusion::common::DataFusionError::External(Box::new(
-                                            error,
-                                        ))
-                                    })?;
+                            // The CSI companion is optional: any probe failure
+                            // (NotFound, but also PermissionDenied — common when
+                            // the primary is a pre-signed URL whose query string
+                            // does not authorize the derived companion path) must
+                            // not make the primary BCF unusable. The scan falls
+                            // back to the unindexed sequential read instead.
+                            let object = match RemoteObject::open(candidate.clone(), options).await
+                            {
+                                Ok(object) => object,
+                                Err(error) => {
+                                    warn!(
+                                        "BCF CSI companion probe failed for {}; \
+                                         falling back to unindexed scan: {error}",
+                                        sanitize_location(&candidate)
+                                    );
+                                    return Ok(false);
+                                }
+                            };
                             match object.size().await {
                                 Ok(_) => Ok(true),
                                 Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
                                     Ok(false)
                                 }
-                                Err(error) => Err(datafusion::common::DataFusionError::External(
-                                    Box::new(error),
-                                )),
+                                Err(error) => {
+                                    warn!(
+                                        "BCF CSI companion probe failed for {}; \
+                                         falling back to unindexed scan: {error}",
+                                        sanitize_location(&candidate)
+                                    );
+                                    Ok(false)
+                                }
                             }
                         }
                     },
@@ -1106,16 +1121,20 @@ impl TableProvider for VcfTableProvider {
             if !regions.is_empty() {
                 // Use balanced partitioning with index size estimates
                 let target_partitions = state.config().target_partitions();
+                let mut bcf_shared_index = None;
                 let estimates = match self.input_format {
                     VcfInputFormat::Bcf => {
-                        crate::bcf::estimate_region_sizes(
+                        bcf_shared_index = crate::bcf::load_csi_index(
                             index_path,
+                            self.object_storage_options.clone(),
+                        )
+                        .await;
+                        crate::bcf::estimate_region_sizes(
+                            bcf_shared_index.as_deref(),
                             &regions,
                             &self.contig_names,
                             &self.contig_lengths,
-                            self.object_storage_options.clone(),
                         )
-                        .await
                     }
                     VcfInputFormat::Vcf => crate::storage::estimate_sizes_from_tbi(
                         index_path,
@@ -1164,6 +1183,7 @@ impl TableProvider for VcfTableProvider {
                         coordinate_system_zero_based: self.coordinate_system_zero_based,
                         partition_assignments: Some(assignments),
                         index_path: Some(index_path.clone()),
+                        index: bcf_shared_index,
                         residual_filters: record_filters,
                     }),
                     VcfInputFormat::Vcf => Arc::new(VcfExec {
@@ -1216,6 +1236,7 @@ impl TableProvider for VcfTableProvider {
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
                     partition_assignments: None,
                     index_path: None,
+                    index: None,
                     residual_filters: record_filters,
                 }))
             }

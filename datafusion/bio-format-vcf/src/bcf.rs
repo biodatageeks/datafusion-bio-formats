@@ -142,30 +142,40 @@ async fn read_csi_index(
     }
 }
 
-pub(crate) async fn estimate_region_sizes(
+/// Reads and parses the CSI once at planning time so that scan partitions can
+/// share it instead of each re-downloading the full index.
+pub(crate) async fn load_csi_index(
     index_path: &str,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> Option<Arc<noodles_csi::Index>> {
+    match read_csi_index(index_path, object_storage_options).await {
+        Ok(index) => Some(Arc::new(index)),
+        Err(error) => {
+            log::debug!("failed to read BCF CSI index at planning time: {error}");
+            None
+        }
+    }
+}
+
+pub(crate) fn estimate_region_sizes(
+    index: Option<&noodles_csi::Index>,
     regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
     contig_names: &[String],
     contig_lengths: &[u64],
-    object_storage_options: Option<ObjectStorageOptions>,
 ) -> Vec<RegionSizeEstimate> {
-    let index = match read_csi_index(index_path, object_storage_options).await {
-        Ok(index) => index,
-        Err(error) => {
-            log::debug!("failed to read BCF CSI for size estimation: {error}");
-            return regions
-                .iter()
-                .cloned()
-                .map(|region| RegionSizeEstimate {
-                    region,
-                    estimated_bytes: 1,
-                    contig_length: None,
-                    unmapped_count: 0,
-                    nonempty_bin_positions: Vec::new(),
-                    leaf_bin_span: 0,
-                })
-                .collect();
-        }
+    let Some(index) = index else {
+        return regions
+            .iter()
+            .cloned()
+            .map(|region| RegionSizeEstimate {
+                region,
+                estimated_bytes: 1,
+                contig_length: None,
+                unmapped_count: 0,
+                nonempty_bin_positions: Vec::new(),
+                leaf_bin_span: 0,
+            })
+            .collect();
     };
 
     let name_to_index: HashMap<&str, usize> = contig_names
@@ -750,6 +760,7 @@ async fn full_remote_stream(
 fn indexed_local_stream(
     file_path: String,
     index_path: String,
+    shared_index: Option<Arc<noodles_csi::Index>>,
     regions: Vec<datafusion_bio_format_core::genomic_filter::GenomicRegion>,
     schema: SchemaRef,
     batch_size: usize,
@@ -764,8 +775,13 @@ fn indexed_local_stream(
 ) -> SendableRecordBatchStream {
     let output_schema = schema.clone();
     let stream = try_stream! {
-        let index = noodles_csi::fs::read(local_path(&index_path))
-            .map_err(|e| execution_error("failed to read BCF CSI index", e))?;
+        let index = match shared_index {
+            Some(index) => index,
+            None => Arc::new(
+                noodles_csi::fs::read(local_path(&index_path))
+                    .map_err(|e| execution_error("failed to read BCF CSI index", e))?,
+            ),
+        };
         let file = File::open(local_path(&file_path))
             .map_err(|e| execution_error("failed to open indexed BCF", e))?;
         let mut reader = bcf::io::Reader::new(file);
@@ -804,7 +820,7 @@ fn indexed_local_stream(
             }
             let noodles_region = build_noodles_region(&region)?;
             let query = reader
-                .query(&header, &index, &noodles_region)
+                .query(&header, index.as_ref(), &noodles_region)
                 .map_err(|e| execution_error("failed to query BCF CSI index", e))?;
 
             for result in query {
@@ -840,6 +856,7 @@ fn indexed_local_stream(
 async fn indexed_remote_stream(
     file_path: String,
     index_path: String,
+    shared_index: Option<Arc<noodles_csi::Index>>,
     regions: Vec<datafusion_bio_format_core::genomic_filter::GenomicRegion>,
     schema: SchemaRef,
     batch_size: usize,
@@ -857,8 +874,13 @@ async fn indexed_remote_stream(
 
     let options = object_storage_options.unwrap_or_default();
     let header = read_header(&file_path, Some(options.clone())).await?;
-    let index = read_csi_index(&index_path, Some(options.clone())).await?;
-    let chunks = plan_remote_chunks(&index, &header, &regions)?;
+    // Reuse the CSI parsed at planning time; each partition re-downloading the
+    // full index would transfer it N+1 times for an N-partition scan.
+    let index = match shared_index {
+        Some(index) => index,
+        None => Arc::new(read_csi_index(&index_path, Some(options.clone())).await?),
+    };
+    let chunks = plan_remote_chunks(index.as_ref(), &header, &regions)?;
     let object = RemoteObject::open(file_path, options)
         .await
         .map_err(|error| execution_error("failed to open indexed remote BCF", error))?;
@@ -988,6 +1010,8 @@ pub(crate) struct BcfExec {
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) partition_assignments: Option<Vec<PartitionAssignment>>,
     pub(crate) index_path: Option<String>,
+    /// CSI parsed once at planning time and shared by all scan partitions.
+    pub(crate) index: Option<Arc<noodles_csi::Index>>,
     pub(crate) residual_filters: Vec<Expr>,
 }
 
@@ -1049,6 +1073,7 @@ impl ExecutionPlan for BcfExec {
                 return Ok(indexed_local_stream(
                     self.file_path.clone(),
                     index_path.clone(),
+                    self.index.clone(),
                     assignment.regions.clone(),
                     self.schema.clone(),
                     batch_size,
@@ -1066,6 +1091,7 @@ impl ExecutionPlan for BcfExec {
             let future = indexed_remote_stream(
                 self.file_path.clone(),
                 index_path.clone(),
+                self.index.clone(),
                 assignment.regions.clone(),
                 self.schema.clone(),
                 batch_size,
