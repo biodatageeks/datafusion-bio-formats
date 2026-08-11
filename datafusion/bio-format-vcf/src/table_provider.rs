@@ -112,7 +112,12 @@ async fn determine_schema_from_header(
     coordinate_system_zero_based: bool,
     input_format: VcfInputFormat,
     missing_sample_policy: MissingSamplePolicy,
-) -> datafusion::common::Result<(SchemaRef, Vec<String>, Vec<String>)> {
+) -> datafusion::common::Result<(
+    SchemaRef,
+    Vec<String>,
+    Vec<String>,
+    Arc<noodles_vcf::Header>,
+)> {
     let header = match input_format {
         VcfInputFormat::Vcf => {
             get_header(file_path.to_string(), object_storage_options.clone()).await?
@@ -356,7 +361,12 @@ async fn determine_schema_from_header(
     );
 
     let schema = Schema::new_with_metadata(fields, metadata);
-    Ok((Arc::new(schema), sample_names, source_sample_names))
+    Ok((
+        Arc::new(schema),
+        sample_names,
+        source_sample_names,
+        Arc::new(header),
+    ))
 }
 
 /// Determines if a VCF INFO field type is nullable.
@@ -491,6 +501,9 @@ pub struct VcfTableProvider {
     contig_lengths: Vec<u64>,
     /// Physical input encoding.
     input_format: VcfInputFormat,
+    /// Header parsed once at construction; shared with BCF scan partitions so
+    /// remote scans do not re-download and re-parse it per partition.
+    bcf_header: Option<Arc<noodles_vcf::Header>>,
 }
 
 impl VcfTableProvider {
@@ -701,7 +714,7 @@ impl VcfTableProvider {
             VcfInputFormat::Vcf => MissingSamplePolicy::Ignore,
             VcfInputFormat::Auto => unreachable!("input format is resolved"),
         });
-        let (mut schema, sample_names, source_sample_names) =
+        let (mut schema, sample_names, source_sample_names, header) =
             block_on(determine_schema_from_header(
                 &file_path,
                 &info_fields,
@@ -907,6 +920,10 @@ impl VcfTableProvider {
             contig_names,
             contig_lengths,
             input_format,
+            bcf_header: match input_format {
+                VcfInputFormat::Bcf => Some(header),
+                _ => None,
+            },
         })
     }
 
@@ -951,6 +968,7 @@ impl VcfTableProvider {
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
             input_format: VcfInputFormat::Vcf,
+            bcf_header: None,
         }
     }
 
@@ -992,6 +1010,7 @@ impl VcfTableProvider {
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
             input_format: VcfInputFormat::Vcf,
+            bcf_header: None,
         }
     }
 }
@@ -1184,6 +1203,7 @@ impl TableProvider for VcfTableProvider {
                         partition_assignments: Some(assignments),
                         index_path: Some(index_path.clone()),
                         index: bcf_shared_index,
+                        header: self.bcf_header.clone(),
                         residual_filters: record_filters,
                     }),
                     VcfInputFormat::Vcf => Arc::new(VcfExec {
@@ -1237,6 +1257,7 @@ impl TableProvider for VcfTableProvider {
                     partition_assignments: None,
                     index_path: None,
                     index: None,
+                    header: self.bcf_header.clone(),
                     residual_filters: record_filters,
                 }))
             }

@@ -857,6 +857,7 @@ async fn indexed_remote_stream(
     file_path: String,
     index_path: String,
     shared_index: Option<Arc<noodles_csi::Index>>,
+    shared_header: Option<Arc<Header>>,
     regions: Vec<datafusion_bio_format_core::genomic_filter::GenomicRegion>,
     schema: SchemaRef,
     batch_size: usize,
@@ -873,7 +874,12 @@ async fn indexed_remote_stream(
     const BGZF_MAX_COMPRESSED_BLOCK_SIZE: u64 = 64 * 1024;
 
     let options = object_storage_options.unwrap_or_default();
-    let header = read_header(&file_path, Some(options.clone())).await?;
+    // Reuse the header parsed at provider construction; re-reading it here
+    // would download and parse it once per partition.
+    let header = match shared_header {
+        Some(header) => header,
+        None => Arc::new(read_header(&file_path, Some(options.clone())).await?),
+    };
     // Reuse the CSI parsed at planning time; each partition re-downloading the
     // full index would transfer it N+1 times for an N-partition scan.
     let index = match shared_index {
@@ -1012,6 +1018,9 @@ pub(crate) struct BcfExec {
     pub(crate) index_path: Option<String>,
     /// CSI parsed once at planning time and shared by all scan partitions.
     pub(crate) index: Option<Arc<noodles_csi::Index>>,
+    /// Header parsed once at provider construction and shared by all scan
+    /// partitions (avoids re-downloading it per partition on remote scans).
+    pub(crate) header: Option<Arc<Header>>,
     pub(crate) residual_filters: Vec<Expr>,
 }
 
@@ -1092,6 +1101,7 @@ impl ExecutionPlan for BcfExec {
                 self.file_path.clone(),
                 index_path.clone(),
                 self.index.clone(),
+                self.header.clone(),
                 assignment.regions.clone(),
                 self.schema.clone(),
                 batch_size,
