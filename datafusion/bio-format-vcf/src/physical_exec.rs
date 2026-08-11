@@ -1616,10 +1616,15 @@ impl MultiSampleFormatBuilder {
                                     self.array_int_pool
                                         .push(v.map_err(|e| format_value_error(key, e))?);
                                 }
-                                Some(ParsedFormatValue::ArrayIntRange {
-                                    start,
-                                    len: self.array_int_pool.len() - start,
-                                })
+                                if self.array_int_pool[start..].iter().all(Option::is_none) {
+                                    self.array_int_pool.truncate(start);
+                                    None
+                                } else {
+                                    Some(ParsedFormatValue::ArrayIntRange {
+                                        start,
+                                        len: self.array_int_pool.len() - start,
+                                    })
+                                }
                             }
                             SamplesArray::Float(values) => {
                                 let start = self.array_float_pool.len();
@@ -1627,10 +1632,15 @@ impl MultiSampleFormatBuilder {
                                     self.array_float_pool
                                         .push(v.map_err(|e| format_value_error(key, e))?);
                                 }
-                                Some(ParsedFormatValue::ArrayFloatRange {
-                                    start,
-                                    len: self.array_float_pool.len() - start,
-                                })
+                                if self.array_float_pool[start..].iter().all(Option::is_none) {
+                                    self.array_float_pool.truncate(start);
+                                    None
+                                } else {
+                                    Some(ParsedFormatValue::ArrayFloatRange {
+                                        start,
+                                        len: self.array_float_pool.len() - start,
+                                    })
+                                }
                             }
                             SamplesArray::String(values) => {
                                 let start = self.array_string_pool.len();
@@ -1640,10 +1650,15 @@ impl MultiSampleFormatBuilder {
                                             .map(|s| s.to_string()),
                                     );
                                 }
-                                Some(ParsedFormatValue::ArrayStringRange {
-                                    start,
-                                    len: self.array_string_pool.len() - start,
-                                })
+                                if self.array_string_pool[start..].iter().all(Option::is_none) {
+                                    self.array_string_pool.truncate(start);
+                                    None
+                                } else {
+                                    Some(ParsedFormatValue::ArrayStringRange {
+                                        start,
+                                        len: self.array_string_pool.len() - start,
+                                    })
+                                }
                             }
                             SamplesArray::Character(values) => {
                                 let start = self.array_string_pool.len();
@@ -1653,10 +1668,15 @@ impl MultiSampleFormatBuilder {
                                             .map(|c| c.to_string()),
                                     );
                                 }
-                                Some(ParsedFormatValue::ArrayStringRange {
-                                    start,
-                                    len: self.array_string_pool.len() - start,
-                                })
+                                if self.array_string_pool[start..].iter().all(Option::is_none) {
+                                    self.array_string_pool.truncate(start);
+                                    None
+                                } else {
+                                    Some(ParsedFormatValue::ArrayStringRange {
+                                        start,
+                                        len: self.array_string_pool.len() - start,
+                                    })
+                                }
                             }
                         },
                         Some(SV::Genotype(_)) | None => None,

@@ -1929,23 +1929,49 @@ async fn bcf_accepts_missing_sample_in_fixed_format_array() -> Result<(), Box<dy
                 chr1\t10\trs1\tA\tC\t50\tPASS\t.\tAD\t.\t5,7\n";
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "missing-format-sample", body)?;
 
-    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["AD".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
     let context = SessionContext::new();
     context.register_table("variants", Arc::new(provider))?;
     let batches = context
-        .sql("SELECT COUNT(*) FROM variants")
+        .sql("SELECT genotypes FROM variants")
         .await?
         .collect()
         .await?;
-    assert_eq!(
-        batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap()
-            .value(0),
-        1
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("genotypes should be a struct");
+    let ad_rows = genotypes
+        .column_by_name("AD")
+        .expect("AD should be projected")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("AD should contain one list of samples per row");
+    let samples = ad_rows.value(0);
+    let samples = samples
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("each AD sample should be a nullable integer list");
+    assert!(
+        datafusion::arrow::array::Array::is_null(samples, 0),
+        "a wholly missing sample must remain an outer null"
     );
+    let s2 = samples.value(1);
+    let s2 = s2
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("present AD values should be Int32");
+    assert_eq!(s2.values(), &[5, 7]);
     Ok(())
 }
 
