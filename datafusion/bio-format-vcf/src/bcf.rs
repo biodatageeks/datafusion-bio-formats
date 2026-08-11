@@ -143,6 +143,81 @@ async fn read_csi_index(
     }
 }
 
+/// Returns the exclusive compressed end of the BGZF block starting at `start`
+/// using only ranged GETs. This avoids a metadata/HEAD request for signed HTTP
+/// URLs while still requesting an exact range for the indexed chunk.
+async fn remote_bgzf_block_end(object: &RemoteObject, start: u64) -> Result<u64> {
+    const GZIP_FIXED_HEADER_LEN: u64 = 12;
+    const GZIP_TRAILER_LEN: u64 = 8;
+
+    let fixed_end = start.checked_add(GZIP_FIXED_HEADER_LEN).ok_or_else(|| {
+        DataFusionError::Execution("remote BCF BGZF header offset overflow".into())
+    })?;
+    let fixed = object.read_range(start..fixed_end).await.map_err(|error| {
+        execution_error(
+            "failed to read remote BCF BGZF block header; the CSI index does not match the file",
+            error,
+        )
+    })?;
+    if fixed.len() != GZIP_FIXED_HEADER_LEN as usize
+        || fixed[0..3] != [0x1f, 0x8b, 0x08]
+        || fixed[3] & 0x04 == 0
+    {
+        return Err(DataFusionError::Execution(format!(
+            "remote BCF CSI offset {start} does not point to a BGZF block; the index does not \
+             match the file"
+        )));
+    }
+
+    let extra_len = u16::from_le_bytes([fixed[10], fixed[11]]) as u64;
+    let extra_end = fixed_end.checked_add(extra_len).ok_or_else(|| {
+        DataFusionError::Execution("remote BCF BGZF extra-header offset overflow".into())
+    })?;
+    let extra = object
+        .read_range(fixed_end..extra_end)
+        .await
+        .map_err(|error| {
+            execution_error(
+                "failed to read remote BCF BGZF extra header; the CSI index does not match the \
+                 file",
+                error,
+            )
+        })?;
+
+    let mut offset = 0usize;
+    let mut block_size = None;
+    while offset + 4 <= extra.len() {
+        let subfield_len = u16::from_le_bytes([extra[offset + 2], extra[offset + 3]]) as usize;
+        let payload_end = offset + 4 + subfield_len;
+        if payload_end > extra.len() {
+            break;
+        }
+        if &extra[offset..offset + 2] == b"BC" && subfield_len == 2 {
+            block_size =
+                Some(u16::from_le_bytes([extra[offset + 4], extra[offset + 5]]) as u64 + 1);
+            break;
+        }
+        offset = payload_end;
+    }
+
+    let block_size = block_size.ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "remote BCF BGZF block at offset {start} has no BC size subfield; the CSI index \
+             does not match the file"
+        ))
+    })?;
+    let minimum_size = GZIP_FIXED_HEADER_LEN + extra_len + GZIP_TRAILER_LEN;
+    if block_size < minimum_size {
+        return Err(DataFusionError::Execution(format!(
+            "remote BCF BGZF block at offset {start} reports invalid size {block_size}; the CSI \
+             index does not match the file"
+        )));
+    }
+    start.checked_add(block_size).ok_or_else(|| {
+        DataFusionError::Execution("remote BCF BGZF block-end offset overflow".into())
+    })
+}
+
 /// Reads and parses the CSI once at planning time so that scan partitions can
 /// share it instead of each re-downloading the full index.
 pub(crate) async fn load_csi_index(
@@ -883,8 +958,6 @@ async fn indexed_remote_stream(
     residual_filters: Vec<Expr>,
     limit: Option<usize>,
 ) -> Result<SendableRecordBatchStream> {
-    const BGZF_MAX_COMPRESSED_BLOCK_SIZE: u64 = 64 * 1024;
-
     let options = object_storage_options.unwrap_or_default();
     // Reuse the header parsed at provider construction; re-reading it here
     // would download and parse it once per partition.
@@ -902,10 +975,6 @@ async fn indexed_remote_stream(
     let object = RemoteObject::open(file_path, options)
         .await
         .map_err(|error| execution_error("failed to open indexed remote BCF", error))?;
-    let object_size = object
-        .size()
-        .await
-        .map_err(|error| execution_error("failed to stat indexed remote BCF", error))?;
     let output_schema = schema.clone();
 
     let stream = try_stream! {
@@ -925,35 +994,14 @@ async fn indexed_remote_stream(
 
         'chunks: for chunk in chunks {
             let compressed_start = chunk.start.compressed();
-            // A chunk whose blocks lie beyond the object means the CSI does not
-            // describe this file (truncated or replaced object with a stale
-            // index). Fail loudly instead of clamping, which would silently
-            // return incomplete results. When the end offset points into a
-            // block (uncompressed != 0), that block itself must start inside
-            // the object.
-            let end_beyond_object = if chunk.end.uncompressed() == 0 {
-                chunk.end.compressed() > object_size
-            } else {
-                chunk.end.compressed() >= object_size
-            };
-            if compressed_start >= object_size || end_beyond_object {
-                Err(DataFusionError::Execution(format!(
-                    "remote BCF CSI chunk at compressed offsets {}..{} exceeds the object size \
-                     {object_size}; the index does not match the file",
-                    compressed_start,
-                    chunk.end.compressed(),
-                )))?;
-            }
-            // Only the heuristic read-ahead past the end block is clamped here.
+            // Resolve the exact end of a partial BGZF block with range GETs.
+            // Do not stat/HEAD the object first: signed HTTP URLs are often
+            // authorized for GET (including ranges) only.
             let compressed_end = if chunk.end.uncompressed() == 0 {
                 chunk.end.compressed()
             } else {
-                chunk
-                    .end
-                    .compressed()
-                    .saturating_add(BGZF_MAX_COMPRESSED_BLOCK_SIZE)
-            }
-            .min(object_size);
+                remote_bgzf_block_end(&object, chunk.end.compressed()).await?
+            };
             if compressed_end <= compressed_start {
                 continue;
             }
@@ -961,7 +1009,15 @@ async fn indexed_remote_stream(
             let bytes = object
                 .read_range(compressed_start..compressed_end)
                 .await
-                .map_err(|error| execution_error("failed to read remote BCF CSI range", error))?;
+                .map_err(|error| {
+                    let context = if error.kind() == opendal::ErrorKind::Unexpected {
+                        "failed to read the complete remote BCF CSI range; the index does not \
+                         match the file"
+                    } else {
+                        "failed to read remote BCF CSI range"
+                    };
+                    execution_error(context, error)
+                })?;
             let inner = noodles_bgzf_vcf::io::Reader::new(Cursor::new(bytes));
             let mut reader = bcf::io::Reader::from(inner);
             let local_start =

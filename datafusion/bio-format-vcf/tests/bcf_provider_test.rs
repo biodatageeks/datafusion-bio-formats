@@ -55,6 +55,7 @@ fn create_equivalent_vcf_and_bcf() -> Result<(TempDir, String, String), Box<dyn 
 
 #[derive(Clone, Debug)]
 struct HttpRequest {
+    method: String,
     path: String,
     range: Option<(usize, usize)>,
 }
@@ -62,35 +63,44 @@ struct HttpRequest {
 struct RangeServer {
     address: std::net::SocketAddr,
     requests: Arc<Mutex<Vec<HttpRequest>>>,
+    deny_bcf_head: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl RangeServer {
     fn start(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
-        Self::start_inner(bcf, csi, false, false)
+        Self::start_inner(bcf, csi, false, false, false)
     }
 
     /// Serves the BCF normally but answers every CSI companion request with
     /// 403 Forbidden, mimicking a pre-signed URL that does not authorize the
     /// derived companion path.
     fn start_denying_csi(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
-        Self::start_inner(bcf, csi, true, false)
+        Self::start_inner(bcf, csi, true, false, false)
     }
 
-    /// Serves CSI GET requests but rejects HEAD, as a narrowly scoped signed
-    /// URL can do when it grants download but not metadata permissions.
+    /// Rejects CSI HEAD immediately. The BCF HEAD policy can be tightened after
+    /// provider construction to isolate requests made by the indexed scan.
     fn start_denying_csi_head(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
-        Self::start_inner(bcf, csi, false, true)
+        Self::start_inner(bcf, csi, false, true, false)
     }
 
-    fn start_inner(bcf: Vec<u8>, csi: Vec<u8>, deny_csi: bool, deny_csi_head: bool) -> Self {
+    fn start_inner(
+        bcf: Vec<u8>,
+        csi: Vec<u8>,
+        deny_csi: bool,
+        deny_csi_head: bool,
+        deny_bcf_head: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let deny_bcf_head = Arc::new(AtomicBool::new(deny_bcf_head));
         let stop = Arc::new(AtomicBool::new(false));
         let server_requests = Arc::clone(&requests);
+        let server_deny_bcf_head = Arc::clone(&deny_bcf_head);
         let server_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
@@ -126,6 +136,7 @@ impl RangeServer {
                     ))
                 });
                 server_requests.lock().unwrap().push(HttpRequest {
+                    method: method.to_string(),
                     path: path.clone(),
                     range,
                 });
@@ -140,6 +151,13 @@ impl RangeServer {
                     }
                     &csi
                 } else if path.starts_with("/remote.bcf") {
+                    if server_deny_bcf_head.load(Ordering::Relaxed) && method == "HEAD" {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        continue;
+                    }
                     &bcf
                 } else {
                     let _ = write!(
@@ -156,6 +174,14 @@ impl RangeServer {
                         body.len()
                     );
                 } else if let Some((start, end)) = range {
+                    if start >= body.len() {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        continue;
+                    }
                     let end = end.min(body.len() - 1);
                     let bytes = &body[start..=end];
                     let _ = write!(
@@ -181,6 +207,7 @@ impl RangeServer {
         Self {
             address,
             requests,
+            deny_bcf_head,
             stop,
             thread: Some(thread),
         }
@@ -188,6 +215,10 @@ impl RangeServer {
 
     fn url(&self) -> String {
         format!("http://{}/remote.bcf", self.address)
+    }
+
+    fn deny_bcf_head(&self) {
+        self.deny_bcf_head.store(true, Ordering::Relaxed);
     }
 }
 
@@ -1034,7 +1065,8 @@ async fn remote_bcf_forbidden_csi_probe_falls_back_to_sequential_scan()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn explicit_remote_csi_skips_head_probe() -> Result<(), Box<dyn std::error::Error>> {
+async fn indexed_scan_avoids_head_for_get_only_remote_bcf() -> Result<(), Box<dyn std::error::Error>>
+{
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
     let index = bcf::fs::index(&bcf_path)?;
     let index_path = format!("{bcf_path}.csi");
@@ -1054,6 +1086,8 @@ async fn explicit_remote_csi_skips_head_probe() -> Result<(), Box<dyn std::error
         VcfInputFormat::Auto,
         Some(csi_url),
     )?;
+    server.requests.lock().unwrap().clear();
+    server.deny_bcf_head();
     let rows = query(
         "variants",
         provider,
@@ -1062,6 +1096,22 @@ async fn explicit_remote_csi_skips_head_probe() -> Result<(), Box<dyn std::error
     .await?;
     assert!(rows.contains("rs3"));
     assert!(!rows.contains("rs1"));
+    let requests = server.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.path.starts_with("/remote.bcf"))
+            .all(|request| request.method != "HEAD"),
+        "GET-only signed URLs must not be probed with HEAD: {requests:?}"
+    );
+    assert!(
+        requests.iter().any(|request| {
+            request.path.starts_with("/remote.bcf")
+                && !request.path.starts_with("/remote.bcf.csi")
+                && request.range.is_some()
+        }),
+        "the query should use indexed BCF range GETs: {requests:?}"
+    );
     Ok(())
 }
 
