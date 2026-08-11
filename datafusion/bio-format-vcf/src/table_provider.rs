@@ -1277,6 +1277,16 @@ impl TableProvider for VcfTableProvider {
             ));
         }
 
+        // The write path serializes text VCF; writing it into a .bcf target
+        // would corrupt the file (subsequent opens resolve it as BCF and fail).
+        if self.input_format == VcfInputFormat::Bcf {
+            return Err(datafusion::common::DataFusionError::NotImplemented(
+                "BCF write is not supported; INSERT OVERWRITE targets must be text VCF \
+                 (optionally BGZF/GZIP compressed)"
+                    .to_string(),
+            ));
+        }
+
         // Validate input schema has the required core columns
         let input_schema = input.schema();
         if input_schema.fields().len() < 8 {

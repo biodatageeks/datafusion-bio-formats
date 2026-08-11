@@ -67,6 +67,17 @@ struct RangeServer {
 
 impl RangeServer {
     fn start(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
+        Self::start_inner(bcf, csi, false)
+    }
+
+    /// Serves the BCF normally but answers every CSI companion request with
+    /// 403 Forbidden, mimicking a pre-signed URL that does not authorize the
+    /// derived companion path.
+    fn start_denying_csi(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
+        Self::start_inner(bcf, csi, true)
+    }
+
+    fn start_inner(bcf: Vec<u8>, csi: Vec<u8>, deny_csi: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -112,6 +123,13 @@ impl RangeServer {
                 });
 
                 let body = if path.starts_with("/remote.bcf.csi") {
+                    if deny_csi {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        continue;
+                    }
                     &csi
                 } else if path.starts_with("/remote.bcf") {
                     &bcf
@@ -867,5 +885,66 @@ async fn bcf_multisample_format_array_missing_matches_vcf() -> Result<(), Box<dy
     assert_eq!(bcf_rows, vcf_rows);
     assert!(bcf_rows.contains('5'));
     assert!(bcf_rows.contains('7'));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_provider_rejects_insert_overwrite() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+
+    let result = context
+        .sql(
+            "INSERT OVERWRITE variants \
+             SELECT chrom, start, \"end\", id, \"ref\", alt, qual, filter FROM variants",
+        )
+        .await?
+        .collect()
+        .await;
+    let error = result
+        .expect_err("writing through a BCF provider must be rejected")
+        .to_string();
+    assert!(
+        error.contains("BCF write is not supported"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_bcf_forbidden_csi_probe_falls_back_to_sequential_scan()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server =
+        RangeServer::start_denying_csi(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+
+    // Provider construction must survive the 403 on the companion probe and
+    // fall back to the unindexed sequential scan.
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT id FROM variants WHERE chrom = 'chr2'")
+        .await?
+        .collect()
+        .await?;
+    let rows = pretty_format_batches(&batches)?.to_string();
+    assert!(rows.contains("rs3"));
+    assert!(!rows.contains("rs1"));
     Ok(())
 }
