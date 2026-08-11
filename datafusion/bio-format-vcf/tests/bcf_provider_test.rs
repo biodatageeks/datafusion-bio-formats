@@ -1280,6 +1280,62 @@ async fn bcf_accepts_missing_fixed_info_array() -> Result<(), Box<dyn std::error
 }
 
 #[tokio::test]
+async fn bcf_rejects_wrong_allele_dependent_info_cardinality_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cases = [
+        ("alternate", "AC", '2', 'A', "Number=A (1 expected)"),
+        ("reference", "AD", '3', 'R', "Number=R (2 expected)"),
+    ];
+
+    for (name, field, original_number, replacement_number, expected_error) in cases {
+        let dir = tempfile::tempdir()?;
+        let body = format!(
+            "##fileformat=VCFv4.3\n\
+             ##contig=<ID=chr1,length=1000>\n\
+             ##INFO=<ID={field},Number={original_number},Type=Integer,Description=\"Values\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+             chr1\t10\trs1\tA\tC\t50\tPASS\t{field}={}\n",
+            if original_number == '2' {
+                "5,7"
+            } else {
+                "5,7,9"
+            }
+        );
+        let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, &body)?;
+
+        let mut decompressed = Vec::new();
+        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        let declaration = format!("##INFO=<ID={field},Number={original_number}");
+        let declaration_start = decompressed
+            .windows(declaration.len())
+            .position(|window| window == declaration.as_bytes())
+            .expect("INFO declaration should be present in the BCF header");
+        decompressed[declaration_start + declaration.len() - 1] = replacement_number as u8;
+        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        writer.write_all(&decompressed)?;
+        writer.try_finish()?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("a wrong allele-dependent INFO cardinality must fail the scan")
+            .to_string();
+        assert!(
+            error.contains(expected_error),
+            "unexpected {name} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_wrong_fixed_format_cardinality_when_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -1316,6 +1372,120 @@ async fn bcf_rejects_wrong_fixed_format_cardinality_when_unprojected()
         error.contains("FORMAT field 'AD' declares 2 values")
             && error.contains("encodes 3 values per sample"),
         "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_rejects_wrong_allele_dependent_format_cardinality_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let cases = [
+        ("alternate-format", "AC", '2', 'A', "Number=A (1 expected)"),
+        ("reference-format", "AD", '3', 'R', "Number=R (2 expected)"),
+    ];
+
+    for (name, field, original_number, replacement_number, expected_error) in cases {
+        let dir = tempfile::tempdir()?;
+        let body = format!(
+            "##fileformat=VCFv4.3\n\
+             ##contig=<ID=chr1,length=1000>\n\
+             ##FORMAT=<ID={field},Number={original_number},Type=Integer,Description=\"Values\">\n\
+             #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+             chr1\t10\trs1\tA\tC\t50\tPASS\t.\t{field}\t{}\n",
+            if original_number == '2' {
+                "5,7"
+            } else {
+                "5,7,9"
+            }
+        );
+        let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, &body)?;
+
+        let mut decompressed = Vec::new();
+        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        let declaration = format!("##FORMAT=<ID={field},Number={original_number}");
+        let declaration_start = decompressed
+            .windows(declaration.len())
+            .position(|window| window == declaration.as_bytes())
+            .expect("FORMAT declaration should be present in the BCF header");
+        decompressed[declaration_start + declaration.len() - 1] = replacement_number as u8;
+        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        writer.write_all(&decompressed)?;
+        writer.try_finish()?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("a wrong allele-dependent FORMAT cardinality must fail the scan")
+            .to_string();
+        assert!(
+            error.contains(expected_error),
+            "unexpected {name} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_accepts_compact_all_missing_fixed_format_array()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=AD,Number=2,Type=Integer,Description=\"Allelic depths\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tAD\t5,7\t8,9\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "fixed-format-missing", body)?;
+
+    // Compact the two values per sample to one type-specific missing sentinel,
+    // which is the valid BCF representation when the entire series is absent.
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let individual_len =
+        u32::from_le_bytes(decompressed[record_start + 4..record_start + 8].try_into()?) as usize;
+    let samples_start = record_start + 8 + shared_len;
+    let descriptor_offset = bcf_typed_value_end(&decompressed, samples_start); // AD key
+    assert_eq!(
+        decompressed[descriptor_offset], 0x21,
+        "AD should encode two i8 values per sample"
+    );
+    decompressed[descriptor_offset] = 0x11;
+    let payload_start = descriptor_offset + 1;
+    decompressed[payload_start] = 0x80;
+    decompressed[payload_start + 1] = 0x80;
+    decompressed.drain(payload_start + 2..payload_start + 4);
+    decompressed[record_start + 4..record_start + 8]
+        .copy_from_slice(&u32::try_from(individual_len - 2)?.to_le_bytes());
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        1
     );
     Ok(())
 }

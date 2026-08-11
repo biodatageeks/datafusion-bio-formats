@@ -183,6 +183,17 @@ fn format_type_accepts_encoding(
     }
 }
 
+fn bcf_scalar_value_is_missing(encoded_type: BcfEncodedType, payload: &[u8]) -> bool {
+    match encoded_type {
+        BcfEncodedType::Null => payload.is_empty(),
+        BcfEncodedType::Int8 => payload == [0x80],
+        BcfEncodedType::Int16 => payload == i16::MIN.to_le_bytes(),
+        BcfEncodedType::Int32 => payload == i32::MIN.to_le_bytes(),
+        BcfEncodedType::Float => payload == 0x7f80_0001_u32.to_le_bytes(),
+        BcfEncodedType::String => payload == b".",
+    }
+}
+
 fn validate_bcf_info_fixed_cardinality(
     key: &str,
     info_number: InfoNumber,
@@ -190,9 +201,13 @@ fn validate_bcf_info_fixed_cardinality(
     encoded_type: BcfEncodedType,
     value_count: usize,
     payload: &[u8],
+    allele_count: usize,
 ) -> Result<()> {
-    let InfoNumber::Count(expected_count) = info_number else {
-        return Ok(());
+    let expected_count = match info_number {
+        InfoNumber::Count(count) => count,
+        InfoNumber::AlternateBases => allele_count - 1,
+        InfoNumber::ReferenceAlternateBases => allele_count,
+        InfoNumber::Samples | InfoNumber::Unknown => return Ok(()),
     };
 
     if matches!(info_type, InfoType::Flag) {
@@ -207,15 +222,7 @@ fn validate_bcf_info_fixed_cardinality(
     // A whole-field missing sentinel is not a zero- or one-element biological
     // vector, and is valid for any fixed cardinality.
     let is_missing = value_count == 0
-        || (value_count == 1
-            && match encoded_type {
-                BcfEncodedType::Null => true,
-                BcfEncodedType::Int8 => payload == [0x80],
-                BcfEncodedType::Int16 => payload == i16::MIN.to_le_bytes(),
-                BcfEncodedType::Int32 => payload == i32::MIN.to_le_bytes(),
-                BcfEncodedType::Float => payload == 0x7f80_0001_u32.to_le_bytes(),
-                BcfEncodedType::String => payload == b".",
-            });
+        || (value_count == 1 && bcf_scalar_value_is_missing(encoded_type, payload));
     if is_missing {
         return Ok(());
     }
@@ -232,16 +239,26 @@ fn validate_bcf_info_fixed_cardinality(
     };
 
     if actual_count != expected_count {
-        let message = if expected_count == 1 {
-            format!(
+        let message = match info_number {
+            InfoNumber::Count(1) => format!(
                 "INFO field '{key}' is declared scalar but the BCF record encodes \
                  {actual_count} values"
-            )
-        } else {
-            format!(
+            ),
+            InfoNumber::Count(_) => format!(
                 "INFO field '{key}' declares {expected_count} values but the BCF record encodes \
                  {actual_count} values"
-            )
+            ),
+            InfoNumber::AlternateBases => format!(
+                "INFO field '{key}' declares Number=A ({expected_count} expected) but the BCF \
+                 record encodes {actual_count} values"
+            ),
+            InfoNumber::ReferenceAlternateBases => format!(
+                "INFO field '{key}' declares Number=R ({expected_count} expected) but the BCF \
+                 record encodes {actual_count} values"
+            ),
+            InfoNumber::Samples | InfoNumber::Unknown => {
+                unreachable!("dynamic cardinalities returned above")
+            }
         };
         return Err(DataFusionError::Execution(message));
     }
@@ -249,7 +266,11 @@ fn validate_bcf_info_fixed_cardinality(
     Ok(())
 }
 
-fn validate_bcf_info_encoding(info: &bcf::record::Info<'_>, header: &Header) -> Result<()> {
+fn validate_bcf_info_encoding(
+    info: &bcf::record::Info<'_>,
+    header: &Header,
+    allele_count: usize,
+) -> Result<()> {
     let mut src = info.as_ref();
 
     for _ in 0..info.len() {
@@ -305,6 +326,7 @@ fn validate_bcf_info_encoding(info: &bcf::record::Info<'_>, header: &Header) -> 
             encoded_type,
             value_count,
             payload,
+            allele_count,
         )?;
     }
 
@@ -392,35 +414,70 @@ fn validate_bcf_gt_payload(
     Ok(())
 }
 
-fn validate_bcf_format_fixed_cardinality(
+fn validate_bcf_format_cardinality(
     key: &str,
     format_number: FormatNumber,
     format_type: FormatType,
+    encoded_type: BcfEncodedType,
     value_count: usize,
-    sample_count: usize,
     payload: &[u8],
+    allele_count: usize,
 ) -> Result<()> {
     if key == "GT" {
         return Ok(());
     }
 
-    let FormatNumber::Count(expected_count) = format_number else {
-        return Ok(());
+    let expected_count = match format_number {
+        FormatNumber::Count(count) => count,
+        FormatNumber::AlternateBases => allele_count - 1,
+        FormatNumber::ReferenceAlternateBases => allele_count,
+        FormatNumber::Samples
+        | FormatNumber::LocalAlternateBases
+        | FormatNumber::LocalReferenceAlternateBases
+        | FormatNumber::LocalSamples
+        | FormatNumber::Ploidy
+        | FormatNumber::BaseModifications
+        | FormatNumber::Unknown => return Ok(()),
     };
 
     match format_type {
         FormatType::Integer | FormatType::Float => {
+            let all_samples_missing = expected_count > 1
+                && value_count == 1
+                && !payload.is_empty()
+                && payload
+                    .chunks_exact(encoded_type.width())
+                    .all(|value| bcf_scalar_value_is_missing(encoded_type, value));
+            if all_samples_missing {
+                return Ok(());
+            }
             if value_count != expected_count {
-                let message = if expected_count == 1 {
-                    format!(
+                let message = match format_number {
+                    FormatNumber::Count(1) => format!(
                         "FORMAT field '{key}' is declared scalar but the BCF record encodes \
                          {value_count} values per sample"
-                    )
-                } else {
-                    format!(
+                    ),
+                    FormatNumber::Count(_) => format!(
                         "FORMAT field '{key}' declares {expected_count} values but the BCF record \
                          encodes {value_count} values per sample"
-                    )
+                    ),
+                    FormatNumber::AlternateBases => format!(
+                        "FORMAT field '{key}' declares Number=A ({expected_count} expected) but \
+                         the BCF record encodes {value_count} values per sample"
+                    ),
+                    FormatNumber::ReferenceAlternateBases => format!(
+                        "FORMAT field '{key}' declares Number=R ({expected_count} expected) but \
+                         the BCF record encodes {value_count} values per sample"
+                    ),
+                    FormatNumber::Samples
+                    | FormatNumber::LocalAlternateBases
+                    | FormatNumber::LocalReferenceAlternateBases
+                    | FormatNumber::LocalSamples
+                    | FormatNumber::Ploidy
+                    | FormatNumber::BaseModifications
+                    | FormatNumber::Unknown => {
+                        unreachable!("dynamic cardinalities returned above")
+                    }
                 };
                 return Err(DataFusionError::Execution(message));
             }
@@ -450,8 +507,6 @@ fn validate_bcf_format_fixed_cardinality(
                     )));
                 }
             }
-
-            debug_assert_eq!(payload.len(), value_count * sample_count);
         }
     }
 
@@ -504,13 +559,14 @@ fn validate_bcf_format_encoding(
                 DataFusionError::Execution("BCF FORMAT payload length overflow".into())
             })?;
         let payload = take_bcf_bytes(&mut src, payload_len)?;
-        validate_bcf_format_fixed_cardinality(
+        validate_bcf_format_cardinality(
             key,
             format.number(),
             format.ty(),
+            encoded_type,
             value_count,
-            sample_count,
             payload,
+            allele_count,
         )?;
         if key == "GT" {
             validate_bcf_gt_payload(payload, encoded_type, value_count, allele_count)?;
@@ -1002,8 +1058,8 @@ impl BcfBatchDecoder {
                 )));
             }
         }
-        validate_bcf_info_encoding(&record.info(), header)?;
         let allele_count = record.alternate_bases().len() + 1;
+        validate_bcf_info_encoding(&record.info(), header, allele_count)?;
         validate_bcf_format_encoding(&samples, header, allele_count)?;
 
         let has_filters = !self.residual_filters.is_empty();
