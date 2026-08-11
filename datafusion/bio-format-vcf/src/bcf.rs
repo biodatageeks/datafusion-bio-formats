@@ -27,7 +27,7 @@ use noodles_vcf::Header;
 use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
 use noodles_vcf::variant::Record as VariantRecord;
 use noodles_vcf::variant::record::Samples as _;
-use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
+use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, Info as _, ReferenceBases};
 
 use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
@@ -57,6 +57,7 @@ fn validate_version(version: (u8, u8)) -> Result<()> {
 
 #[derive(Clone, Copy)]
 enum BcfEncodedType {
+    Null,
     Int8,
     Int16,
     Int32,
@@ -67,6 +68,7 @@ enum BcfEncodedType {
 impl BcfEncodedType {
     fn width(self) -> usize {
         match self {
+            Self::Null => 0,
             Self::Int8 | Self::String => 1,
             Self::Int16 => 2,
             Self::Int32 | Self::Float => 4,
@@ -99,6 +101,7 @@ fn read_bcf_encoded_type(src: &mut &[u8]) -> Result<(BcfEncodedType, usize)> {
     }
 
     let encoded_type = match descriptor & 0x0f {
+        0 => BcfEncodedType::Null,
         1 => BcfEncodedType::Int8,
         2 => BcfEncodedType::Int16,
         3 => BcfEncodedType::Int32,
@@ -128,7 +131,7 @@ fn read_bcf_typed_integer(src: &mut &[u8]) -> Result<i32> {
             take_bcf_bytes(src, 2)?.try_into().unwrap(),
         )),
         BcfEncodedType::Int32 => i32::from_le_bytes(take_bcf_bytes(src, 4)?.try_into().unwrap()),
-        BcfEncodedType::Float | BcfEncodedType::String => {
+        BcfEncodedType::Null | BcfEncodedType::Float | BcfEncodedType::String => {
             return Err(DataFusionError::Execution(
                 "invalid BCF FORMAT encoding: expected integer value".into(),
             ));
@@ -138,16 +141,15 @@ fn read_bcf_typed_integer(src: &mut &[u8]) -> Result<i32> {
     Ok(value)
 }
 
-fn validate_bcf_scalar_format_lengths(
-    samples: &bcf::record::Samples<'_>,
+fn validate_bcf_info_dictionary_references(
+    info: &bcf::record::Info<'_>,
     header: &Header,
 ) -> Result<()> {
-    let sample_count = samples.len();
-    let mut src = samples.as_ref();
+    let mut src = info.as_ref();
 
-    for _ in 0..samples.format_count() {
+    for _ in 0..info.len() {
         let key_index = usize::try_from(read_bcf_typed_integer(&mut src)?).map_err(|_| {
-            DataFusionError::Execution("invalid BCF FORMAT string-map index".into())
+            DataFusionError::Execution("invalid BCF INFO string-map index in record".into())
         })?;
         let key = header
             .string_maps()
@@ -155,7 +157,49 @@ fn validate_bcf_scalar_format_lengths(
             .get_index(key_index)
             .ok_or_else(|| {
                 DataFusionError::Execution(format!(
-                    "invalid BCF FORMAT string-map index {key_index}"
+                    "invalid BCF INFO dictionary index {key_index} in record"
+                ))
+            })?;
+        if !header.infos().contains_key(key) {
+            return Err(DataFusionError::Execution(format!(
+                "BCF INFO dictionary index {key_index} resolves to '{key}', which has no INFO \
+                 header definition"
+            )));
+        }
+
+        let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
+        let payload_len = encoded_type
+            .width()
+            .checked_mul(value_count)
+            .ok_or_else(|| DataFusionError::Execution("BCF INFO payload length overflow".into()))?;
+        take_bcf_bytes(&mut src, payload_len)?;
+    }
+
+    if !src.is_empty() {
+        return Err(DataFusionError::Execution(format!(
+            "invalid BCF INFO encoding: {} trailing bytes",
+            src.len()
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_bcf_format_encoding(samples: &bcf::record::Samples<'_>, header: &Header) -> Result<()> {
+    let sample_count = samples.len();
+    let mut src = samples.as_ref();
+
+    for _ in 0..samples.format_count() {
+        let key_index = usize::try_from(read_bcf_typed_integer(&mut src)?).map_err(|_| {
+            DataFusionError::Execution("invalid BCF FORMAT dictionary index in record".into())
+        })?;
+        let key = header
+            .string_maps()
+            .strings()
+            .get_index(key_index)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "invalid BCF FORMAT dictionary index {key_index} in record"
                 ))
             })?;
         let format = header.formats().get(key).ok_or_else(|| {
@@ -660,9 +704,14 @@ impl BcfBatchDecoder {
                 self.source_sample_names.len()
             )));
         }
-        if self.has_format_fields && self.flags.any_format {
-            validate_bcf_scalar_format_lengths(&samples, header)?;
+        let reference_sequence_name = VariantRecord::reference_sequence_name(record, header)
+            .map_err(|e| execution_error("invalid BCF contig dictionary index in record", e))?;
+        for result in record.filters().iter(header) {
+            result
+                .map_err(|e| execution_error("invalid BCF FILTER dictionary index in record", e))?;
         }
+        validate_bcf_info_dictionary_references(&record.info(), header)?;
+        validate_bcf_format_encoding(&samples, header)?;
 
         let has_filters = !self.residual_filters.is_empty();
         let needs_start = self.flags.start || has_filters;
@@ -688,11 +737,7 @@ impl BcfBatchDecoder {
         };
 
         let chrom = if needs_chrom {
-            Some(
-                VariantRecord::reference_sequence_name(record, header)
-                    .map_err(|e| execution_error("invalid BCF contig dictionary index", e))?
-                    .to_string(),
-            )
+            Some(reference_sequence_name.to_string())
         } else {
             None
         };

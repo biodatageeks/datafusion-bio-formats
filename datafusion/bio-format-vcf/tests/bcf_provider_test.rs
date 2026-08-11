@@ -962,6 +962,111 @@ fn write_format_array_bcf(
     ))
 }
 
+fn bcf_typed_value_end(data: &[u8], offset: usize) -> usize {
+    let descriptor = data[offset];
+    let value_count = usize::from(descriptor >> 4);
+    assert!(value_count < 0x0f, "test fixture should use short lengths");
+    let value_width = match descriptor & 0x0f {
+        0 => 0,
+        1 | 7 => 1,
+        2 => 2,
+        3 | 5 => 4,
+        code => panic!("unexpected BCF type code in test fixture: {code}"),
+    };
+    offset + 1 + value_count * value_width
+}
+
+fn corrupt_bcf_record_dictionary_index(
+    bcf_path: &str,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let site_start = record_start + 8;
+    let allele_count =
+        u16::from_le_bytes(decompressed[site_start + 18..site_start + 20].try_into()?) as usize;
+
+    let corrupt_scalar_i8 = |data: &mut [u8], offset: usize| {
+        assert_eq!(data[offset], 0x11, "fixture dictionary ID should be i8");
+        data[offset + 1] = 0x7e;
+    };
+
+    if target == "contig" {
+        decompressed[site_start..site_start + 4].copy_from_slice(&126i32.to_le_bytes());
+    } else {
+        let mut cursor = site_start + 24;
+        cursor = bcf_typed_value_end(&decompressed, cursor); // IDs
+        for _ in 0..allele_count {
+            cursor = bcf_typed_value_end(&decompressed, cursor); // REF and ALTs
+        }
+
+        if target == "filter" {
+            corrupt_scalar_i8(&mut decompressed, cursor);
+        } else {
+            cursor = bcf_typed_value_end(&decompressed, cursor); // FILTER
+            if target == "info" {
+                corrupt_scalar_i8(&mut decompressed, cursor);
+            } else if target == "format" {
+                let samples_start = site_start + shared_len;
+                corrupt_scalar_i8(&mut decompressed, samples_start);
+            } else {
+                panic!("unknown dictionary target: {target}");
+            }
+        }
+    }
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FILTER=<ID=q10,Description=\"Low quality\">\n\
+                ##INFO=<ID=AC,Number=A,Type=Integer,Description=\"Allele count\">\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tq10\tAC=1\tGT\t0/1\n";
+    let cases: &[(&str, &str)] = &[
+        ("contig", "contig dictionary"),
+        ("filter", "FILTER dictionary"),
+        ("info", "INFO dictionary"),
+        ("format", "FORMAT dictionary"),
+    ];
+
+    for (name, expected_error) in cases {
+        let dir = tempfile::tempdir()?;
+        let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, body)?;
+        corrupt_bcf_record_dictionary_index(&bcf_path, name)?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("an unprojected invalid BCF dictionary index must fail the scan")
+            .to_string();
+        assert!(
+            error.contains(expected_error),
+            "unexpected {name} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn bcf_rejects_excess_values_for_scalar_format_field()
 -> Result<(), Box<dyn std::error::Error>> {
