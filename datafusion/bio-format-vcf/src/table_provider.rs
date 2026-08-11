@@ -268,12 +268,19 @@ async fn determine_schema_from_header(
                 // Prefix with "fmt_" if the column name collides with an existing field (e.g., INFO field).
                 // Also guard against the generated name itself colliding.
                 let column_name = if used_names.contains(tag.as_str()) {
-                    let candidate = format!("fmt_{tag}");
+                    let mut candidate = format!("fmt_{tag}");
                     if used_names.contains(&candidate) {
-                        format!("format_{tag}")
-                    } else {
-                        candidate
+                        // "fmt_"/"format_" prefixes are recognized by the writer
+                        // path (serializer/header_builder); keep them as the
+                        // preferred fallbacks and only then disambiguate.
+                        candidate = format!("format_{tag}");
                     }
+                    let mut suffix = 2;
+                    while used_names.contains(&candidate) {
+                        candidate = format!("format_{tag}_{suffix}");
+                        suffix += 1;
+                    }
+                    candidate
                 } else {
                     tag.clone()
                 };
@@ -349,7 +356,6 @@ async fn determine_schema_from_header(
     );
 
     let schema = Schema::new_with_metadata(fields, metadata);
-    // println!("Schema: {:?}", schema);
     Ok((Arc::new(schema), sample_names, source_sample_names))
 }
 
@@ -979,7 +985,6 @@ impl VcfTableProvider {
 impl TableProvider for VcfTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
-        // todo!()
     }
 
     fn schema(&self) -> SchemaRef {
@@ -988,7 +993,6 @@ impl TableProvider for VcfTableProvider {
 
     fn table_type(&self) -> TableType {
         TableType::Base
-        // todo!()
     }
 
     fn supports_filters_pushdown(

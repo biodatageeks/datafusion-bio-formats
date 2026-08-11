@@ -346,6 +346,9 @@ impl BcfBatchDecoder {
         coordinate_system_zero_based: bool,
         residual_filters: Vec<Expr>,
     ) -> Result<Self> {
+        // First pass exists only to learn the INFO field count for
+        // `ProjectionFlags`; the builders are rebuilt below once the
+        // batch-size heuristics have settled on `initial_builder_batch_size`.
         let mut info_builders = (Vec::new(), Vec::new(), Vec::new());
         set_info_builders(
             batch_size,
