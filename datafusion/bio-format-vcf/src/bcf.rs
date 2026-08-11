@@ -707,8 +707,13 @@ impl BcfBatchDecoder {
         let reference_sequence_name = VariantRecord::reference_sequence_name(record, header)
             .map_err(|e| execution_error("invalid BCF contig dictionary index in record", e))?;
         for result in record.filters().iter(header) {
-            result
+            let filter = result
                 .map_err(|e| execution_error("invalid BCF FILTER dictionary index in record", e))?;
+            if filter != "PASS" && !header.filters().contains_key(filter) {
+                return Err(DataFusionError::Execution(format!(
+                    "BCF FILTER dictionary entry '{filter}' has no FILTER header definition"
+                )));
+            }
         }
         validate_bcf_info_dictionary_references(&record.info(), header)?;
         validate_bcf_format_encoding(&samples, header)?;

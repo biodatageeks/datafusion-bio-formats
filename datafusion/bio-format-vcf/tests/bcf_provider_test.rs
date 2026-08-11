@@ -980,6 +980,19 @@ fn corrupt_bcf_record_dictionary_index(
     bcf_path: &str,
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let replacement_index = if target == "filter_info" {
+        let mut reader = bcf::io::Reader::new(File::open(bcf_path)?);
+        let header = reader.read_header()?;
+        header
+            .string_maps()
+            .strings()
+            .get_index_of("AC")
+            .expect("AC should have a BCF dictionary entry")
+    } else {
+        126
+    };
+    let replacement_index = u8::try_from(replacement_index)?;
+
     let mut decompressed = Vec::new();
     noodles_bgzf_vcf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
@@ -992,7 +1005,7 @@ fn corrupt_bcf_record_dictionary_index(
 
     let corrupt_scalar_i8 = |data: &mut [u8], offset: usize| {
         assert_eq!(data[offset], 0x11, "fixture dictionary ID should be i8");
-        data[offset + 1] = 0x7e;
+        data[offset + 1] = replacement_index;
     };
 
     if target == "contig" {
@@ -1004,7 +1017,7 @@ fn corrupt_bcf_record_dictionary_index(
             cursor = bcf_typed_value_end(&decompressed, cursor); // REF and ALTs
         }
 
-        if target == "filter" {
+        if matches!(target, "filter" | "filter_info") {
             corrupt_scalar_i8(&mut decompressed, cursor);
         } else {
             cursor = bcf_typed_value_end(&decompressed, cursor); // FILTER
@@ -1038,6 +1051,7 @@ async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
     let cases: &[(&str, &str)] = &[
         ("contig", "contig dictionary"),
         ("filter", "FILTER dictionary"),
+        ("filter_info", "no FILTER header definition"),
         ("info", "INFO dictionary"),
         ("format", "FORMAT dictionary"),
     ];
