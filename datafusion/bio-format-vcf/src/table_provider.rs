@@ -1279,7 +1279,12 @@ impl TableProvider for VcfTableProvider {
 
         // The write path serializes text VCF; writing it into a .bcf target
         // would corrupt the file (subsequent opens resolve it as BCF and fail).
-        if self.input_format == VcfInputFormat::Bcf {
+        // Check the destination path as well as the resolved input format:
+        // write-mode constructors hard-code `input_format` to `Vcf`, so a
+        // `.bcf` destination would otherwise slip through.
+        if self.input_format == VcfInputFormat::Bcf
+            || VcfInputFormat::Auto.resolve(&self.file_path) == VcfInputFormat::Bcf
+        {
             return Err(datafusion::common::DataFusionError::NotImplemented(
                 "BCF write is not supported; INSERT OVERWRITE targets must be text VCF \
                  (optionally BGZF/GZIP compressed)"

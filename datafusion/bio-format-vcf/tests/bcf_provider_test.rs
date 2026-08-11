@@ -948,3 +948,54 @@ async fn remote_bcf_forbidden_csi_probe_falls_back_to_sequential_scan()
     assert!(!rows.contains("rs1"));
     Ok(())
 }
+
+#[tokio::test]
+async fn write_provider_rejects_bcf_destination_path() -> Result<(), Box<dyn std::error::Error>> {
+    // Write-mode constructors hard-code the input format to text VCF; the
+    // insert_into guard must still refuse a .bcf destination path, which would
+    // otherwise be overwritten with text VCF under a BCF filename.
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let source = VcfTableProvider::new_with_samples_and_format(
+        bcf_path.clone(),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+    let schema = source.schema();
+
+    let dir = tempfile::tempdir()?;
+    let dest_path = dir.path().join("out.bcf").to_string_lossy().into_owned();
+    let dest = VcfTableProvider::new_for_write(
+        dest_path,
+        schema,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        true,
+    );
+
+    let context = SessionContext::new();
+    context.register_table("source", Arc::new(source))?;
+    context.register_table("dest", Arc::new(dest))?;
+
+    let result = context
+        .sql(
+            "INSERT OVERWRITE dest \
+             SELECT chrom, start, \"end\", id, \"ref\", alt, qual, filter FROM source",
+        )
+        .await?
+        .collect()
+        .await;
+    let error = result
+        .expect_err("a .bcf destination must be rejected by the write path")
+        .to_string();
+    assert!(
+        error.contains("BCF write is not supported"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
