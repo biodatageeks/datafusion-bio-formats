@@ -183,6 +183,72 @@ fn format_type_accepts_encoding(
     }
 }
 
+fn validate_bcf_info_fixed_cardinality(
+    key: &str,
+    info_number: InfoNumber,
+    info_type: InfoType,
+    encoded_type: BcfEncodedType,
+    value_count: usize,
+    payload: &[u8],
+) -> Result<()> {
+    let InfoNumber::Count(expected_count) = info_number else {
+        return Ok(());
+    };
+
+    if matches!(info_type, InfoType::Flag) {
+        if expected_count != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "INFO flag '{key}' declares invalid fixed cardinality {expected_count}"
+            )));
+        }
+        return Ok(());
+    }
+
+    // A whole-field missing sentinel is not a zero- or one-element biological
+    // vector, and is valid for any fixed cardinality.
+    let is_missing = value_count == 0
+        || (value_count == 1
+            && match encoded_type {
+                BcfEncodedType::Null => true,
+                BcfEncodedType::Int8 => payload == [0x80],
+                BcfEncodedType::Int16 => payload == i16::MIN.to_le_bytes(),
+                BcfEncodedType::Int32 => payload == i32::MIN.to_le_bytes(),
+                BcfEncodedType::Float => payload == 0x7f80_0001_u32.to_le_bytes(),
+                BcfEncodedType::String => payload == b".",
+            });
+    if is_missing {
+        return Ok(());
+    }
+
+    let actual_count = match info_type {
+        InfoType::Character | InfoType::String => {
+            let value = std::str::from_utf8(payload).map_err(|error| {
+                execution_error(&format!("invalid BCF INFO string for field '{key}'"), error)
+            })?;
+            value.bytes().filter(|&byte| byte == b',').count() + 1
+        }
+        InfoType::Integer | InfoType::Float => value_count,
+        InfoType::Flag => unreachable!("flags were handled above"),
+    };
+
+    if actual_count != expected_count {
+        let message = if expected_count == 1 {
+            format!(
+                "INFO field '{key}' is declared scalar but the BCF record encodes \
+                 {actual_count} values"
+            )
+        } else {
+            format!(
+                "INFO field '{key}' declares {expected_count} values but the BCF record encodes \
+                 {actual_count} values"
+            )
+        };
+        return Err(DataFusionError::Execution(message));
+    }
+
+    Ok(())
+}
+
 fn validate_bcf_info_encoding(info: &bcf::record::Info<'_>, header: &Header) -> Result<()> {
     let mut src = info.as_ref();
 
@@ -219,20 +285,6 @@ fn validate_bcf_info_encoding(info: &bcf::record::Info<'_>, header: &Header) -> 
                 info.ty()
             )));
         }
-        let scalar_requires_one_encoded_value = matches!(info.number(), InfoNumber::Count(1))
-            && matches!(
-                info.ty(),
-                InfoType::Integer | InfoType::Float | InfoType::Character
-            );
-        let scalar_has_valid_length =
-            value_count == 1 || (matches!(encoded_type, BcfEncodedType::Null) && value_count == 0);
-        if scalar_requires_one_encoded_value && !scalar_has_valid_length {
-            return Err(DataFusionError::Execution(format!(
-                "INFO field '{key}' is declared scalar but the BCF record encodes \
-                 {value_count} values"
-            )));
-        }
-
         let payload_len = encoded_type
             .width()
             .checked_mul(value_count)
@@ -246,6 +298,14 @@ fn validate_bcf_info_encoding(info: &bcf::record::Info<'_>, header: &Header) -> 
                 "INFO flag '{key}' has an invalid encoded value"
             )));
         }
+        validate_bcf_info_fixed_cardinality(
+            key,
+            info.number(),
+            info.ty(),
+            encoded_type,
+            value_count,
+            payload,
+        )?;
     }
 
     if !src.is_empty() {
@@ -258,7 +318,151 @@ fn validate_bcf_info_encoding(info: &bcf::record::Info<'_>, header: &Header) -> 
     Ok(())
 }
 
-fn validate_bcf_format_encoding(samples: &bcf::record::Samples<'_>, header: &Header) -> Result<()> {
+fn validate_bcf_gt_payload(
+    payload: &[u8],
+    encoded_type: BcfEncodedType,
+    value_count: usize,
+    allele_count: usize,
+) -> Result<()> {
+    let (width, vector_end): (usize, i64) = match encoded_type {
+        BcfEncodedType::Int8 => (1, i64::from(i8::MIN) + 1),
+        BcfEncodedType::Int16 => (2, i64::from(i16::MIN) + 1),
+        BcfEncodedType::Int32 => (4, i64::from(i32::MIN) + 1),
+        BcfEncodedType::Null | BcfEncodedType::Float | BcfEncodedType::String => {
+            return Err(DataFusionError::Execution(
+                "invalid non-integer BCF GT encoding".into(),
+            ));
+        }
+    };
+    let sample_width = width
+        .checked_mul(value_count)
+        .ok_or_else(|| DataFusionError::Execution("BCF GT payload length overflow".into()))?;
+
+    for (sample_index, genotype) in payload.chunks_exact(sample_width).enumerate() {
+        let mut reached_vector_end = false;
+
+        for (allele_offset, raw_allele) in genotype.chunks_exact(width).enumerate() {
+            let encoded_allele = match encoded_type {
+                BcfEncodedType::Int8 => i64::from(raw_allele[0] as i8),
+                BcfEncodedType::Int16 => {
+                    i64::from(i16::from_le_bytes(raw_allele.try_into().unwrap()))
+                }
+                BcfEncodedType::Int32 => {
+                    i64::from(i32::from_le_bytes(raw_allele.try_into().unwrap()))
+                }
+                BcfEncodedType::Null | BcfEncodedType::Float | BcfEncodedType::String => {
+                    unreachable!("non-integer GT encodings were rejected above")
+                }
+            };
+
+            if encoded_allele == vector_end {
+                reached_vector_end = true;
+                continue;
+            }
+            if reached_vector_end {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT encoding for sample {sample_index}: value after vector-end at \
+                     allele offset {allele_offset}"
+                )));
+            }
+            if encoded_allele < 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT encoding for sample {sample_index}: reserved or invalid \
+                     value {encoded_allele} at allele offset {allele_offset}"
+                )));
+            }
+
+            // Encoded values 0 and 1 are the unphased/phased missing allele.
+            if encoded_allele >= 2 {
+                let allele_index = usize::try_from((encoded_allele >> 1) - 1).map_err(|_| {
+                    DataFusionError::Execution(format!(
+                        "invalid BCF GT allele encoding {encoded_allele} for sample {sample_index}"
+                    ))
+                })?;
+                if allele_index >= allele_count {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid BCF GT allele index {allele_index} for sample {sample_index}; \
+                         record has {allele_count} REF/ALT alleles"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_bcf_format_fixed_cardinality(
+    key: &str,
+    format_number: FormatNumber,
+    format_type: FormatType,
+    value_count: usize,
+    sample_count: usize,
+    payload: &[u8],
+) -> Result<()> {
+    if key == "GT" {
+        return Ok(());
+    }
+
+    let FormatNumber::Count(expected_count) = format_number else {
+        return Ok(());
+    };
+
+    match format_type {
+        FormatType::Integer | FormatType::Float => {
+            if value_count != expected_count {
+                let message = if expected_count == 1 {
+                    format!(
+                        "FORMAT field '{key}' is declared scalar but the BCF record encodes \
+                         {value_count} values per sample"
+                    )
+                } else {
+                    format!(
+                        "FORMAT field '{key}' declares {expected_count} values but the BCF record \
+                         encodes {value_count} values per sample"
+                    )
+                };
+                return Err(DataFusionError::Execution(message));
+            }
+        }
+        FormatType::Character | FormatType::String => {
+            for (sample_index, raw_value) in payload.chunks_exact(value_count).enumerate() {
+                let end = raw_value
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(raw_value.len());
+                let value = std::str::from_utf8(&raw_value[..end]).map_err(|error| {
+                    execution_error(
+                        &format!(
+                            "invalid BCF FORMAT string for field '{key}', sample {sample_index}"
+                        ),
+                        error,
+                    )
+                })?;
+                if value.is_empty() || value == "." {
+                    continue;
+                }
+                let actual_count = value.bytes().filter(|&byte| byte == b',').count() + 1;
+                if actual_count != expected_count {
+                    return Err(DataFusionError::Execution(format!(
+                        "FORMAT field '{key}' declares {expected_count} values but sample \
+                         {sample_index} encodes {actual_count} values"
+                    )));
+                }
+            }
+
+            debug_assert_eq!(payload.len(), value_count * sample_count);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_bcf_format_encoding(
+    samples: &bcf::record::Samples<'_>,
+    header: &Header,
+    allele_count: usize,
+) -> Result<()> {
     let sample_count = samples.len();
     let mut src = samples.as_ref();
 
@@ -292,19 +496,6 @@ fn validate_bcf_format_encoding(samples: &bcf::record::Samples<'_>, header: &Hea
             )));
         }
 
-        let scalar_requires_one_encoded_value = key != "GT"
-            && matches!(format.number(), FormatNumber::Count(1))
-            && matches!(
-                format.ty(),
-                FormatType::Integer | FormatType::Float | FormatType::Character
-            );
-        if scalar_requires_one_encoded_value && value_count != 1 {
-            return Err(DataFusionError::Execution(format!(
-                "FORMAT field '{key}' is declared scalar but the BCF record encodes \
-                 {value_count} values per sample"
-            )));
-        }
-
         let payload_len = encoded_type
             .width()
             .checked_mul(value_count)
@@ -312,7 +503,18 @@ fn validate_bcf_format_encoding(samples: &bcf::record::Samples<'_>, header: &Hea
             .ok_or_else(|| {
                 DataFusionError::Execution("BCF FORMAT payload length overflow".into())
             })?;
-        take_bcf_bytes(&mut src, payload_len)?;
+        let payload = take_bcf_bytes(&mut src, payload_len)?;
+        validate_bcf_format_fixed_cardinality(
+            key,
+            format.number(),
+            format.ty(),
+            value_count,
+            sample_count,
+            payload,
+        )?;
+        if key == "GT" {
+            validate_bcf_gt_payload(payload, encoded_type, value_count, allele_count)?;
+        }
     }
 
     if !src.is_empty() {
@@ -801,7 +1003,8 @@ impl BcfBatchDecoder {
             }
         }
         validate_bcf_info_encoding(&record.info(), header)?;
-        validate_bcf_format_encoding(&samples, header)?;
+        let allele_count = record.alternate_bases().len() + 1;
+        validate_bcf_format_encoding(&samples, header, allele_count)?;
 
         let has_filters = !self.residual_filters.is_empty();
         let needs_start = self.flags.start || has_filters;
@@ -1533,6 +1736,27 @@ mod tests {
         assert!(validate_version((2, 2)).is_ok());
         assert!(validate_version((2, 1)).is_err());
         assert!(validate_version((3, 0)).is_err());
+    }
+
+    #[test]
+    fn validates_gt_payload_for_each_integer_width() {
+        assert!(validate_bcf_gt_payload(&[2, 4], BcfEncodedType::Int8, 2, 2).is_ok());
+
+        let mut int16 = Vec::new();
+        int16.extend_from_slice(&2i16.to_le_bytes());
+        int16.extend_from_slice(&4i16.to_le_bytes());
+        assert!(validate_bcf_gt_payload(&int16, BcfEncodedType::Int16, 2, 2).is_ok());
+
+        let mut int32 = Vec::new();
+        int32.extend_from_slice(&2i32.to_le_bytes());
+        int32.extend_from_slice(&6i32.to_le_bytes());
+        let error = validate_bcf_gt_payload(&int32, BcfEncodedType::Int32, 2, 2)
+            .expect_err("allele index 2 must be rejected for a biallelic record")
+            .to_string();
+        assert!(
+            error.contains("GT allele index 2"),
+            "unexpected error: {error}"
+        );
     }
 
     fn region(start: Option<u64>, end: Option<u64>) -> GenomicRegion {
