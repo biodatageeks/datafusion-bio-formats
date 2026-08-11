@@ -1184,7 +1184,7 @@ impl BcfBatchDecoder {
         // BCF stores the record span independently from the projected columns.
         // Validate it for every record so an empty projection (e.g. COUNT(*))
         // cannot accept a record that projecting `end` would reject.
-        let record_end = record
+        record
             .end()
             .map_err(|e| execution_error("invalid BCF record span", e))?;
         let start = needs_start.then_some(if self.coordinate_system_zero_based {
@@ -1200,7 +1200,10 @@ impl BcfBatchDecoder {
         };
 
         let end = if needs_end {
-            Some(u32::try_from(record_end.get()).map_err(|_| {
+            let position = record
+                .variant_end(header)
+                .map_err(|e| execution_error("invalid BCF variant span", e))?;
+            Some(u32::try_from(position.get()).map_err(|_| {
                 DataFusionError::Execution("BCF end position exceeds UInt32 range".into())
             })?)
         } else {

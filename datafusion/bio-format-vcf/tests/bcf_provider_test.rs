@@ -1272,6 +1272,44 @@ async fn bcf_validates_fixed_span_when_columns_are_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_logical_end_preserves_info_end_over_fixed_span()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=END,Number=1,Type=Integer,Description=\"End position\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\tdel1\tA\t<DEL>\t50\tPASS\tEND=100\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "info-end", body)?;
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let site_start = 9 + header_len + 8;
+    // Keep rlen valid but make it disagree with INFO/END. The fixed span must
+    // still be validated, while the logical end column follows VCF semantics.
+    decompressed[site_start + 8..site_start + 12].copy_from_slice(&1i32.to_le_bytes());
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT \"end\" FROM variants")
+        .await?
+        .collect()
+        .await?;
+    let end = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .expect("end should be UInt32");
+    assert_eq!(end.value(0), 100);
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
