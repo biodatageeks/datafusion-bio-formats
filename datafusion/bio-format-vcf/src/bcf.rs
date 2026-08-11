@@ -885,6 +885,26 @@ async fn indexed_remote_stream(
 
         'chunks: for chunk in chunks {
             let compressed_start = chunk.start.compressed();
+            // A chunk whose blocks lie beyond the object means the CSI does not
+            // describe this file (truncated or replaced object with a stale
+            // index). Fail loudly instead of clamping, which would silently
+            // return incomplete results. When the end offset points into a
+            // block (uncompressed != 0), that block itself must start inside
+            // the object.
+            let end_beyond_object = if chunk.end.uncompressed() == 0 {
+                chunk.end.compressed() > object_size
+            } else {
+                chunk.end.compressed() >= object_size
+            };
+            if compressed_start >= object_size || end_beyond_object {
+                Err(DataFusionError::Execution(format!(
+                    "remote BCF CSI chunk at compressed offsets {}..{} exceeds the object size \
+                     {object_size}; the index does not match the file",
+                    compressed_start,
+                    chunk.end.compressed(),
+                )))?;
+            }
+            // Only the heuristic read-ahead past the end block is clamped here.
             let compressed_end = if chunk.end.uncompressed() == 0 {
                 chunk.end.compressed()
             } else {

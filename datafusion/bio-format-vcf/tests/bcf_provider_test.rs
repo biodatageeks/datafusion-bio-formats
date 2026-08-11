@@ -670,3 +670,193 @@ async fn bcf_info_array_missing_elements_decode_as_nulls() -> Result<(), Box<dyn
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_bcf_stale_csi_index_fails_loudly() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a BCF large enough to span many BGZF blocks, then serve an object
+    // truncated to 60% with the full CSI, i.e. a stale index describing data
+    // beyond the object's end.
+    let dir = tempfile::tempdir()?;
+    let vcf_path = dir.path().join("stale.vcf");
+    let bcf_path_buf = dir.path().join("stale.bcf");
+    let bcf_path = bcf_path_buf.to_string_lossy().into_owned();
+
+    let mut vcf_text = String::from(
+        "##fileformat=VCFv4.3\n\
+         ##contig=<ID=chr1,length=1000000>\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n",
+    );
+    let long_ref = "A".repeat(2000);
+    for record_index in 0..200usize {
+        let pos = 1 + record_index * 500;
+        vcf_text.push_str(&format!(
+            "chr1\t{pos}\trs{record_index}\t{long_ref}\tC\t50\tPASS\t.\n"
+        ));
+    }
+    std::fs::write(&vcf_path, &vcf_text)?;
+
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(&vcf_path)?;
+    let header = reader.read_header()?;
+    let mut writer = bcf::io::Writer::new(File::create(&bcf_path_buf)?);
+    writer.write_header(&header)?;
+    for result in reader.records() {
+        writer.write_variant_record(&header, &result?)?;
+    }
+    writer.try_finish()?;
+
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+
+    let full = std::fs::read(&bcf_path)?;
+    let truncated = full[..full.len() * 6 / 10].to_vec();
+    let server = RangeServer::start(truncated, std::fs::read(index_path)?);
+
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
+    context.register_table("variants", Arc::new(provider))?;
+
+    let result = context
+        .sql("SELECT id FROM variants WHERE chrom = 'chr1'")
+        .await?
+        .collect()
+        .await;
+    let error = result
+        .expect_err("a stale CSI must fail the scan, not silently return incomplete results")
+        .to_string();
+    assert!(
+        error.contains("does not match the file"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+const FORMAT_ARRAY_HEADER: &str = "##fileformat=VCFv4.3\n\
+##contig=<ID=chr1,length=1000>\n\
+##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+##FORMAT=<ID=AD,Number=2,Type=Integer,Description=\"Allelic depths\">\n";
+
+fn write_format_array_bcf(
+    dir: &TempDir,
+    name: &str,
+    body: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let vcf_path = dir.path().join(format!("{name}.vcf"));
+    let bcf_path_buf = dir.path().join(format!("{name}.bcf"));
+    std::fs::write(&vcf_path, body)?;
+
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(&vcf_path)?;
+    let header = reader.read_header()?;
+    let mut writer = bcf::io::Writer::new(File::create(&bcf_path_buf)?);
+    writer.write_header(&header)?;
+    for result in reader.records() {
+        writer.write_variant_record(&header, &result?)?;
+    }
+    writer.try_finish()?;
+    Ok((
+        vcf_path.to_string_lossy().into_owned(),
+        bcf_path_buf.to_string_lossy().into_owned(),
+    ))
+}
+
+#[tokio::test]
+async fn bcf_format_array_missing_elements_decode_as_nulls()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Single-sample path: FORMAT AD=5,. must decode as [5, null], not error.
+    let dir = tempfile::tempdir()?;
+    let body = format!(
+        "{FORMAT_ARRAY_HEADER}#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+         chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT:AD\t0/1:5,.\n"
+    );
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "single", &body)?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["AD".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+
+    let batches = context
+        .sql("SELECT \"AD\" FROM variants")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    let list = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("AD should be a list array");
+    let values = list.value(0);
+    let ints = values
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("AD elements should be Int32");
+    assert_eq!(ints.len(), 2);
+    assert_eq!(ints.value(0), 5);
+    assert!(
+        datafusion::arrow::array::Array::is_null(ints, 1),
+        "missing FORMAT array element must decode as null"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_multisample_format_array_missing_matches_vcf() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Multisample pools: missing FORMAT array elements must round-trip through
+    // BCF identically to the text-VCF reader.
+    let dir = tempfile::tempdir()?;
+    let body = format!(
+        "{FORMAT_ARRAY_HEADER}#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+         chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT:AD\t0/1:5,.\t1/1:.,7\n"
+    );
+    let (vcf_path, bcf_path) = write_format_array_bcf(&dir, "multi", &body)?;
+
+    let vcf_provider = VcfTableProvider::new_with_samples_and_format(
+        vcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string(), "AD".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Vcf,
+        None,
+    )?;
+    let bcf_provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string(), "AD".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+
+    let vcf_rows = query(
+        "variants",
+        vcf_provider,
+        "SELECT chrom, start, genotypes FROM variants",
+    )
+    .await?;
+    let bcf_rows = query(
+        "variants",
+        bcf_provider,
+        "SELECT chrom, start, genotypes FROM variants",
+    )
+    .await?;
+
+    assert_eq!(bcf_rows, vcf_rows);
+    assert!(bcf_rows.contains('5'));
+    assert!(bcf_rows.contains('7'));
+    Ok(())
+}
