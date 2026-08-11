@@ -68,17 +68,23 @@ struct RangeServer {
 
 impl RangeServer {
     fn start(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
-        Self::start_inner(bcf, csi, false)
+        Self::start_inner(bcf, csi, false, false)
     }
 
     /// Serves the BCF normally but answers every CSI companion request with
     /// 403 Forbidden, mimicking a pre-signed URL that does not authorize the
     /// derived companion path.
     fn start_denying_csi(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
-        Self::start_inner(bcf, csi, true)
+        Self::start_inner(bcf, csi, true, false)
     }
 
-    fn start_inner(bcf: Vec<u8>, csi: Vec<u8>, deny_csi: bool) -> Self {
+    /// Serves CSI GET requests but rejects HEAD, as a narrowly scoped signed
+    /// URL can do when it grants download but not metadata permissions.
+    fn start_denying_csi_head(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
+        Self::start_inner(bcf, csi, false, true)
+    }
+
+    fn start_inner(bcf: Vec<u8>, csi: Vec<u8>, deny_csi: bool, deny_csi_head: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -97,6 +103,7 @@ impl RangeServer {
                     }
                     Err(error) => panic!("range server failed: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
 
                 let mut request = [0u8; 8192];
                 let size = stream.read(&mut request).unwrap();
@@ -124,7 +131,7 @@ impl RangeServer {
                 });
 
                 let body = if path.starts_with("/remote.bcf.csi") {
-                    if deny_csi {
+                    if deny_csi || (deny_csi_head && method == "HEAD") {
                         let _ = write!(
                             stream,
                             "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -1023,6 +1030,59 @@ async fn remote_bcf_forbidden_csi_probe_falls_back_to_sequential_scan()
     let rows = pretty_format_batches(&batches)?.to_string();
     assert!(rows.contains("rs3"));
     assert!(!rows.contains("rs1"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_remote_csi_skips_head_probe() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server =
+        RangeServer::start_denying_csi_head(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+    let bcf_url = server.url();
+    let csi_url = format!("{bcf_url}.csi");
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_url,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        None,
+        true,
+        VcfInputFormat::Auto,
+        Some(csi_url),
+    )?;
+    let rows = query(
+        "variants",
+        provider,
+        "SELECT id FROM variants WHERE chrom = 'chr2'",
+    )
+    .await?;
+    assert!(rows.contains("rs3"));
+    assert!(!rows.contains("rs1"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_bcf_url_fragment_is_auto_detected() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server = RangeServer::start(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+
+    let provider = VcfTableProvider::new(
+        format!("{}#download", server.url()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+    )?;
+    let rows = query("variants", provider, "SELECT id FROM variants").await?;
+    assert!(rows.contains("rs1"));
+    assert!(rows.contains("rs3"));
     Ok(())
 }
 

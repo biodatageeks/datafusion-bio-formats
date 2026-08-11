@@ -449,8 +449,14 @@ impl VcfInputFormat {
     fn resolve(self, file_path: &str) -> Self {
         match self {
             Self::Auto => {
-                let path_without_query = file_path.split('?').next().unwrap_or(file_path);
-                if path_without_query.to_ascii_lowercase().ends_with(".bcf") {
+                let detection_path = if file_path.contains("://") {
+                    let query = file_path.find('?').unwrap_or(file_path.len());
+                    let fragment = file_path.find('#').unwrap_or(file_path.len());
+                    &file_path[..query.min(fragment)]
+                } else {
+                    file_path
+                };
+                if detection_path.to_ascii_lowercase().ends_with(".bcf") {
                     Self::Bcf
                 } else {
                     Self::Vcf
@@ -738,54 +744,65 @@ impl VcfTableProvider {
         let (index_path, index_format) = match input_format {
             VcfInputFormat::Bcf => {
                 let options = object_storage_options.clone().unwrap_or_default();
-                let resolved = block_on(resolve_companion(
-                    &file_path,
-                    "BCF CSI",
-                    explicit_index_path.as_deref(),
-                    &[CompanionRule::AppendSuffix(".csi".to_string())],
-                    false,
-                    |candidate| {
-                        let options = options.clone();
-                        async move {
-                            if matches!(get_storage_type(candidate.clone()), StorageType::LOCAL) {
-                                let path = candidate.strip_prefix("file://").unwrap_or(&candidate);
-                                return Ok(std::path::Path::new(path).exists());
+                // Explicit remote CSI locations can be GET-authorized while a
+                // HEAD/stat probe is denied (for example, a narrowly scoped
+                // signed URL). Trust the caller-supplied location and let the
+                // actual index download report any access or parse error.
+                let explicit_remote = explicit_index_path.as_ref().filter(|path| {
+                    !matches!(get_storage_type((*path).clone()), StorageType::LOCAL)
+                });
+                let resolved = if let Some(path) = explicit_remote {
+                    Some(path.clone())
+                } else {
+                    block_on(resolve_companion(
+                        &file_path,
+                        "BCF CSI",
+                        explicit_index_path.as_deref(),
+                        &[CompanionRule::AppendSuffix(".csi".to_string())],
+                        false,
+                        |candidate| {
+                            let options = options.clone();
+                            async move {
+                                if matches!(get_storage_type(candidate.clone()), StorageType::LOCAL)
+                                {
+                                    let path =
+                                        candidate.strip_prefix("file://").unwrap_or(&candidate);
+                                    return Ok(std::path::Path::new(path).exists());
+                                }
+                                // A conventionally derived CSI is optional: any
+                                // probe failure (including PermissionDenied when
+                                // the primary signed URL does not authorize the
+                                // derived path) falls back to a sequential scan.
+                                let object =
+                                    match RemoteObject::open(candidate.clone(), options).await {
+                                        Ok(object) => object,
+                                        Err(error) => {
+                                            warn!(
+                                                "BCF CSI companion probe failed for {}; \
+                                             falling back to unindexed scan: {error}",
+                                                sanitize_location(&candidate)
+                                            );
+                                            return Ok(false);
+                                        }
+                                    };
+                                match object.size().await {
+                                    Ok(_) => Ok(true),
+                                    Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+                                        Ok(false)
+                                    }
+                                    Err(error) => {
+                                        warn!(
+                                            "BCF CSI companion probe failed for {}; \
+                                             falling back to unindexed scan: {error}",
+                                            sanitize_location(&candidate)
+                                        );
+                                        Ok(false)
+                                    }
+                                }
                             }
-                            // The CSI companion is optional: any probe failure
-                            // (NotFound, but also PermissionDenied — common when
-                            // the primary is a pre-signed URL whose query string
-                            // does not authorize the derived companion path) must
-                            // not make the primary BCF unusable. The scan falls
-                            // back to the unindexed sequential read instead.
-                            let object = match RemoteObject::open(candidate.clone(), options).await
-                            {
-                                Ok(object) => object,
-                                Err(error) => {
-                                    warn!(
-                                        "BCF CSI companion probe failed for {}; \
-                                         falling back to unindexed scan: {error}",
-                                        sanitize_location(&candidate)
-                                    );
-                                    return Ok(false);
-                                }
-                            };
-                            match object.size().await {
-                                Ok(_) => Ok(true),
-                                Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
-                                    Ok(false)
-                                }
-                                Err(error) => {
-                                    warn!(
-                                        "BCF CSI companion probe failed for {}; \
-                                         falling back to unindexed scan: {error}",
-                                        sanitize_location(&candidate)
-                                    );
-                                    Ok(false)
-                                }
-                            }
-                        }
-                    },
-                ))?;
+                        },
+                    ))?
+                };
                 if let Some(path) = resolved {
                     debug!("Discovered BCF CSI index: {path}");
                     (Some(path), Some(IndexFormat::CSI))
@@ -1527,5 +1544,21 @@ mod tests {
             &col("chrom").eq(lit("chr1")).and(col("id").eq(lit("rs1"))),
             &schema
         ));
+    }
+
+    #[test]
+    fn auto_format_detection_ignores_remote_url_query_and_fragment() {
+        assert_eq!(
+            VcfInputFormat::Auto.resolve("https://example.test/cohort.BCF?token=secret#download"),
+            VcfInputFormat::Bcf
+        );
+        assert_eq!(
+            VcfInputFormat::Auto.resolve("https://example.test/cohort.bcf#download"),
+            VcfInputFormat::Bcf
+        );
+        assert_eq!(
+            VcfInputFormat::Auto.resolve("https://example.test/cohort.vcf#looks-like.bcf"),
+            VcfInputFormat::Vcf
+        );
     }
 }
