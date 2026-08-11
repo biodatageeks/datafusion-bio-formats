@@ -460,6 +460,21 @@ fn info_array_error(key: &str, error: std::io::Error) -> datafusion::arrow::erro
     ))
 }
 
+/// Error for a malformed FORMAT value element. As with INFO arrays, missing
+/// elements decode as `Ok(None)` and stay null; only undecodable data reaches
+/// this path and must fail the scan rather than surface as plausible nulls.
+fn format_value_error(key: &str, error: std::io::Error) -> datafusion::arrow::error::ArrowError {
+    datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
+        "Error reading FORMAT field '{key}': {error}"
+    ))
+}
+
+fn samples_error(error: std::io::Error) -> datafusion::arrow::error::ArrowError {
+    datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
+        "Error reading FORMAT samples: {error}"
+    ))
+}
+
 pub(crate) fn load_infos_single_pass(
     record: &dyn Record,
     header: &Header,
@@ -1519,16 +1534,7 @@ impl MultiSampleFormatBuilder {
         self.array_float_pool.clear();
         self.array_string_pool.clear();
 
-        let samples = match record.samples() {
-            Ok(s) => s,
-            Err(_) => {
-                // Append null list for each FORMAT field
-                for (field_idx, builder) in self.format_list_builders.iter_mut().enumerate() {
-                    append_null_list(builder.as_mut(), &self.scalar_types[field_idx])?;
-                }
-                return Ok(());
-            }
-        };
+        let samples = record.samples().map_err(samples_error)?;
 
         let num_fields = self.scalar_types.len();
         let mut remaining_selected = self.sample_names.len();
@@ -1556,7 +1562,9 @@ impl MultiSampleFormatBuilder {
                         Some(SV::Genotype(gt)) => {
                             self.gt_buf.clear();
                             let mut first = true;
-                            for (allele, phasing) in gt.iter().flatten() {
+                            for result in gt.iter() {
+                                let (allele, phasing) =
+                                    result.map_err(|e| format_value_error(key, e))?;
                                 if !first {
                                     match phasing {
                                         Phasing::Phased => self.gt_buf.push('|'),
@@ -1585,7 +1593,8 @@ impl MultiSampleFormatBuilder {
                             SamplesArray::Integer(values) => {
                                 let start = self.array_int_pool.len();
                                 for v in values.iter() {
-                                    self.array_int_pool.push(v.ok().flatten());
+                                    self.array_int_pool
+                                        .push(v.map_err(|e| format_value_error(key, e))?);
                                 }
                                 Some(ParsedFormatValue::ArrayIntRange {
                                     start,
@@ -1595,7 +1604,8 @@ impl MultiSampleFormatBuilder {
                             SamplesArray::Float(values) => {
                                 let start = self.array_float_pool.len();
                                 for v in values.iter() {
-                                    self.array_float_pool.push(v.ok().flatten());
+                                    self.array_float_pool
+                                        .push(v.map_err(|e| format_value_error(key, e))?);
                                 }
                                 Some(ParsedFormatValue::ArrayFloatRange {
                                     start,
@@ -1605,8 +1615,10 @@ impl MultiSampleFormatBuilder {
                             SamplesArray::String(values) => {
                                 let start = self.array_string_pool.len();
                                 for v in values.iter() {
-                                    self.array_string_pool
-                                        .push(v.ok().flatten().map(|s| s.to_string()));
+                                    self.array_string_pool.push(
+                                        v.map_err(|e| format_value_error(key, e))?
+                                            .map(|s| s.to_string()),
+                                    );
                                 }
                                 Some(ParsedFormatValue::ArrayStringRange {
                                     start,
@@ -1616,8 +1628,10 @@ impl MultiSampleFormatBuilder {
                             SamplesArray::Character(values) => {
                                 let start = self.array_string_pool.len();
                                 for v in values.iter() {
-                                    self.array_string_pool
-                                        .push(v.ok().flatten().map(|c| c.to_string()));
+                                    self.array_string_pool.push(
+                                        v.map_err(|e| format_value_error(key, e))?
+                                            .map(|c| c.to_string()),
+                                    );
                                 }
                                 Some(ParsedFormatValue::ArrayStringRange {
                                     start,
@@ -1691,55 +1705,6 @@ impl MultiSampleFormatBuilder {
 
         Ok(Arc::new(struct_array))
     }
-}
-
-/// Appends a null list to a list builder for a given scalar type.
-fn append_null_list(
-    builder: &mut dyn ArrayBuilder,
-    scalar_type: &DataType,
-) -> Result<(), datafusion::arrow::error::ArrowError> {
-    match scalar_type {
-        DataType::Utf8 => builder
-            .as_any_mut()
-            .downcast_mut::<ListBuilder<StringBuilder>>()
-            .unwrap()
-            .append(false),
-        DataType::Int32 => builder
-            .as_any_mut()
-            .downcast_mut::<ListBuilder<Int32Builder>>()
-            .unwrap()
-            .append(false),
-        DataType::Float32 => builder
-            .as_any_mut()
-            .downcast_mut::<ListBuilder<Float32Builder>>()
-            .unwrap()
-            .append(false),
-        DataType::Boolean => builder
-            .as_any_mut()
-            .downcast_mut::<ListBuilder<BooleanBuilder>>()
-            .unwrap()
-            .append(false),
-        DataType::List(inner) => match inner.data_type() {
-            DataType::Int32 => builder
-                .as_any_mut()
-                .downcast_mut::<ListBuilder<ListBuilder<Int32Builder>>>()
-                .unwrap()
-                .append(false),
-            DataType::Float32 => builder
-                .as_any_mut()
-                .downcast_mut::<ListBuilder<ListBuilder<Float32Builder>>>()
-                .unwrap()
-                .append(false),
-            DataType::Utf8 => builder
-                .as_any_mut()
-                .downcast_mut::<ListBuilder<ListBuilder<StringBuilder>>>()
-                .unwrap()
-                .append(false),
-            _ => {}
-        },
-        _ => {}
-    }
-    Ok(())
 }
 
 /// Appends one list of N sample values for a single FORMAT field.
@@ -2162,16 +2127,7 @@ fn load_formats_single_pass(
     use noodles_vcf::variant::record::samples::series::Value as SV;
     use noodles_vcf::variant::record::samples::series::value::Array as SamplesArray;
 
-    let samples = match record.samples() {
-        Ok(s) => s,
-        Err(_) => {
-            // If samples can't be read, append null for all format fields
-            for builder in format_builders.iter_mut() {
-                builder.append_null()?;
-            }
-            return Ok(());
-        }
-    };
+    let samples = record.samples().map_err(samples_error)?;
 
     if num_format_fields == 0 {
         return Ok(());
@@ -2206,7 +2162,9 @@ fn load_formats_single_pass(
                     Some(SV::Genotype(gt)) => {
                         let mut gt_str = String::new();
                         let mut first = true;
-                        for (allele, phasing) in gt.iter().flatten() {
+                        for result in gt.iter() {
+                            let (allele, phasing) =
+                                result.map_err(|e| format_value_error(key, e))?;
                             if !first {
                                 match phasing {
                                     Phasing::Phased => gt_str.push('|'),
@@ -2239,67 +2197,73 @@ fn load_formats_single_pass(
                 }
                 Some(SV::Array(arr)) => match arr {
                     SamplesArray::Integer(values) => {
-                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                        let ints: Vec<Option<i32>> = values
+                            .iter()
+                            .collect::<std::io::Result<_>>()
+                            .map_err(|e| format_value_error(key, e))?;
+                        if ints.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Int32) {
-                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
+                            if let Some(first) = ints.iter().copied().flatten().next() {
                                 builder.append_int(first)?;
                             } else {
                                 builder.append_null()?;
                             }
                         } else {
-                            builder.append_array_int_nullable_iter(
-                                values.iter().map(|v| v.ok().flatten()),
-                            )?;
+                            builder.append_array_int_nullable_iter(ints.into_iter())?;
                         }
                     }
                     SamplesArray::Float(values) => {
-                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                        let floats: Vec<Option<f32>> = values
+                            .iter()
+                            .collect::<std::io::Result<_>>()
+                            .map_err(|e| format_value_error(key, e))?;
+                        if floats.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Float32) {
-                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
+                            if let Some(first) = floats.iter().copied().flatten().next() {
                                 builder.append_float(first)?;
                             } else {
                                 builder.append_null()?;
                             }
                         } else {
-                            builder.append_array_float_nullable_iter(
-                                values.iter().map(|v| v.ok().flatten()),
-                            )?;
+                            builder.append_array_float_nullable_iter(floats.into_iter())?;
                         }
                     }
                     SamplesArray::String(values) => {
-                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                        let strings: Vec<Option<String>> = values
+                            .iter()
+                            .map(|result| result.map(|value| value.map(|s| s.to_string())))
+                            .collect::<std::io::Result<_>>()
+                            .map_err(|e| format_value_error(key, e))?;
+                        if strings.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Utf8) {
-                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
-                                builder.append_string(first.as_ref())?;
+                            if let Some(first) = strings.iter().flatten().next() {
+                                builder.append_string(first.as_str())?;
                             } else {
                                 builder.append_null()?;
                             }
                         } else {
-                            builder.append_array_string_nullable_iter(
-                                values
-                                    .iter()
-                                    .map(|v| v.ok().flatten().map(|s| s.to_string())),
-                            )?;
+                            builder.append_array_string_nullable_iter(strings.into_iter())?;
                         }
                     }
                     SamplesArray::Character(values) => {
-                        if values.iter().all(|v| v.ok().flatten().is_none()) {
+                        let chars: Vec<Option<String>> = values
+                            .iter()
+                            .map(|result| result.map(|value| value.map(|c| c.to_string())))
+                            .collect::<std::io::Result<_>>()
+                            .map_err(|e| format_value_error(key, e))?;
+                        if chars.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Utf8) {
-                            if let Some(first) = values.iter().find_map(|v| v.ok().flatten()) {
-                                builder.append_string(&first.to_string())?;
+                            if let Some(first) = chars.iter().flatten().next() {
+                                builder.append_string(first.as_str())?;
                             } else {
                                 builder.append_null()?;
                             }
                         } else {
-                            builder.append_array_string_nullable_iter(
-                                values
-                                    .iter()
-                                    .map(|v| v.ok().flatten().map(|c| c.to_string())),
-                            )?;
+                            builder.append_array_string_nullable_iter(chars.into_iter())?;
                         }
                     }
                 },
