@@ -1748,6 +1748,81 @@ async fn bcf_rejects_wrong_allele_dependent_format_cardinality_when_unprojected(
 }
 
 #[tokio::test]
+async fn bcf_rejects_wrong_gt_dependent_format_cardinality_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                ##FORMAT=<ID=XG,Number=2,Type=Integer,Description=\"Values\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tXG:GT\t5,7:0/1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "number-g", body)?;
+
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let declaration = b"##FORMAT=<ID=XG,Number=2";
+    let declaration_start = decompressed
+        .windows(declaration.len())
+        .position(|window| window == declaration)
+        .expect("XG FORMAT declaration should be present in the BCF header");
+    decompressed[declaration_start + declaration.len() - 1] = b'G';
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("a wrong Number=G FORMAT cardinality must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("Number=G (3 expected for sample 0 with ploidy 2)"),
+        "unexpected error: {error}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_accepts_number_g_cardinality_for_mixed_ploidy_samples()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                ##FORMAT=<ID=XG,Number=G,Type=Integer,Description=\"Genotype values\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tXG:GT\t5,7,9:0/1\t5,7:1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "number-g-mixed-ploidy", body)?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_accepts_compact_all_missing_fixed_format_array()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

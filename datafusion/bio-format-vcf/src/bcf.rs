@@ -609,6 +609,83 @@ fn validate_bcf_gt_payload(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct BcfGtEncoding<'a> {
+    payload: &'a [u8],
+    encoded_type: BcfEncodedType,
+    value_count: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BcfFormatEncoding<'a> {
+    encoded_type: BcfEncodedType,
+    value_count: usize,
+    payload: &'a [u8],
+}
+
+fn bcf_gt_sample_ploidy(gt: &BcfGtEncoding<'_>, sample_index: usize) -> Result<usize> {
+    let width = gt.encoded_type.width();
+    if width == 0 {
+        return Err(DataFusionError::Execution(
+            "invalid non-integer BCF GT encoding".into(),
+        ));
+    }
+    let sample_width = width
+        .checked_mul(gt.value_count)
+        .ok_or_else(|| DataFusionError::Execution("BCF GT sample width overflow".into()))?;
+    let start = sample_width
+        .checked_mul(sample_index)
+        .ok_or_else(|| DataFusionError::Execution("BCF GT sample offset overflow".into()))?;
+    let end = start
+        .checked_add(sample_width)
+        .ok_or_else(|| DataFusionError::Execution("BCF GT sample offset overflow".into()))?;
+    let genotype = gt.payload.get(start..end).ok_or_else(|| {
+        DataFusionError::Execution(format!("BCF GT payload is missing sample {sample_index}"))
+    })?;
+    let ploidy = genotype
+        .chunks_exact(width)
+        .take_while(|value| !bcf_numeric_value_is_vector_end(gt.encoded_type, value))
+        .count();
+    if ploidy == 0 {
+        return Err(DataFusionError::Execution(format!(
+            "invalid BCF GT encoding for sample {sample_index}: genotype has zero ploidy"
+        )));
+    }
+
+    Ok(ploidy)
+}
+
+fn bcf_genotype_cardinality(allele_count: usize, ploidy: usize) -> Result<usize> {
+    if allele_count == 0 || ploidy == 0 {
+        return Err(DataFusionError::Execution(
+            "cannot calculate BCF genotype cardinality with zero alleles or ploidy".into(),
+        ));
+    }
+
+    // Number=G is the number of unordered genotypes with repetition:
+    // C(allele_count + ploidy - 1, ploidy). Use the smaller side of the
+    // binomial and a checked wide accumulator so corrupt declarations cannot
+    // overflow while being validated.
+    let n = allele_count
+        .checked_add(ploidy - 1)
+        .ok_or_else(|| DataFusionError::Execution("BCF genotype cardinality overflow".into()))?;
+    let k = ploidy.min(allele_count - 1);
+    let mut result = 1u128;
+    for i in 1..=k {
+        let factor = n - k + i;
+        result = result.checked_mul(factor as u128).ok_or_else(|| {
+            DataFusionError::Execution("BCF genotype cardinality overflow".into())
+        })? / i as u128;
+        if result > usize::MAX as u128 {
+            return Err(DataFusionError::Execution(
+                "BCF genotype cardinality exceeds the supported size".into(),
+            ));
+        }
+    }
+
+    Ok(result as usize)
+}
+
 fn validate_bcf_format_cardinality(
     key: &str,
     format_number: FormatNumber,
@@ -729,10 +806,104 @@ fn validate_bcf_format_cardinality(
     Ok(())
 }
 
-fn validate_bcf_format_encoding(
+fn bcf_number_g_cardinality_error(
+    key: &str,
+    expected_count: usize,
+    actual_count: usize,
+    sample_index: usize,
+    ploidy: usize,
+) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "FORMAT field '{key}' declares Number=G ({expected_count} expected for sample \
+         {sample_index} with ploidy {ploidy}) but the sample encodes {actual_count} values"
+    ))
+}
+
+fn validate_bcf_number_g_payload(
+    key: &str,
+    format_type: FormatType,
+    encoding: BcfFormatEncoding<'_>,
+    allele_count: usize,
+    gt: &BcfGtEncoding<'_>,
+) -> Result<()> {
+    let BcfFormatEncoding {
+        encoded_type,
+        value_count,
+        payload,
+    } = encoding;
+
+    match format_type {
+        FormatType::Integer | FormatType::Float => {
+            let sample_width = encoded_type
+                .width()
+                .checked_mul(value_count)
+                .ok_or_else(|| {
+                    DataFusionError::Execution("BCF FORMAT sample width overflow".into())
+                })?;
+            for (sample_index, sample) in payload.chunks_exact(sample_width).enumerate() {
+                let actual_count = bcf_numeric_logical_value_count(
+                    &format!("FORMAT sample {sample_index}"),
+                    key,
+                    encoded_type,
+                    sample,
+                )?;
+                if bcf_numeric_vector_is_missing(encoded_type, sample) {
+                    continue;
+                }
+                let ploidy = bcf_gt_sample_ploidy(gt, sample_index)?;
+                let expected_count = bcf_genotype_cardinality(allele_count, ploidy)?;
+                if actual_count != expected_count {
+                    return Err(bcf_number_g_cardinality_error(
+                        key,
+                        expected_count,
+                        actual_count,
+                        sample_index,
+                        ploidy,
+                    ));
+                }
+            }
+        }
+        FormatType::Character | FormatType::String => {
+            for (sample_index, raw_value) in payload.chunks_exact(value_count).enumerate() {
+                let end = raw_value
+                    .iter()
+                    .position(|&byte| byte == 0)
+                    .unwrap_or(raw_value.len());
+                let value = std::str::from_utf8(&raw_value[..end]).map_err(|error| {
+                    execution_error(
+                        &format!(
+                            "invalid BCF FORMAT string for field '{key}', sample {sample_index}"
+                        ),
+                        error,
+                    )
+                })?;
+                if value.is_empty() || value == "." {
+                    continue;
+                }
+                let actual_count = value.bytes().filter(|&byte| byte == b',').count() + 1;
+                let ploidy = bcf_gt_sample_ploidy(gt, sample_index)?;
+                let expected_count = bcf_genotype_cardinality(allele_count, ploidy)?;
+                if actual_count != expected_count {
+                    return Err(bcf_number_g_cardinality_error(
+                        key,
+                        expected_count,
+                        actual_count,
+                        sample_index,
+                        ploidy,
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_bcf_number_g_cardinality(
     samples: &bcf::record::Samples<'_>,
     header: &Header,
     allele_count: usize,
+    gt: &BcfGtEncoding<'_>,
 ) -> Result<()> {
     let sample_count = samples.len();
     let mut src = samples.as_ref();
@@ -753,6 +924,61 @@ fn validate_bcf_format_encoding(
         let format = header.formats().get(key).ok_or_else(|| {
             DataFusionError::Execution(format!("BCF FORMAT field '{key}' has no header definition"))
         })?;
+        let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
+        let payload_len = encoded_type
+            .width()
+            .checked_mul(value_count)
+            .and_then(|len| len.checked_mul(sample_count))
+            .ok_or_else(|| {
+                DataFusionError::Execution("BCF FORMAT payload length overflow".into())
+            })?;
+        let payload = take_bcf_bytes(&mut src, payload_len)?;
+
+        if format.number() == FormatNumber::Samples {
+            validate_bcf_number_g_payload(
+                key,
+                format.ty(),
+                BcfFormatEncoding {
+                    encoded_type,
+                    value_count,
+                    payload,
+                },
+                allele_count,
+                gt,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_bcf_format_encoding(
+    samples: &bcf::record::Samples<'_>,
+    header: &Header,
+    allele_count: usize,
+) -> Result<()> {
+    let sample_count = samples.len();
+    let mut src = samples.as_ref();
+    let mut gt_encoding = None;
+    let mut has_number_g = false;
+
+    for _ in 0..samples.format_count() {
+        let key_index = usize::try_from(read_bcf_typed_integer(&mut src)?).map_err(|_| {
+            DataFusionError::Execution("invalid BCF FORMAT dictionary index in record".into())
+        })?;
+        let key = header
+            .string_maps()
+            .strings()
+            .get_index(key_index)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "invalid BCF FORMAT dictionary index {key_index} in record"
+                ))
+            })?;
+        let format = header.formats().get(key).ok_or_else(|| {
+            DataFusionError::Execution(format!("BCF FORMAT field '{key}' has no header definition"))
+        })?;
+        has_number_g |= format.number() == FormatNumber::Samples;
         let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
         if value_count == 0 {
             return Err(DataFusionError::Execution(format!(
@@ -785,7 +1011,17 @@ fn validate_bcf_format_encoding(
             allele_count,
         )?;
         if key == "GT" {
+            if gt_encoding.is_some() {
+                return Err(DataFusionError::Execution(
+                    "BCF record contains duplicate GT FORMAT fields".into(),
+                ));
+            }
             validate_bcf_gt_payload(payload, encoded_type, value_count, allele_count)?;
+            gt_encoding = Some(BcfGtEncoding {
+                payload,
+                encoded_type,
+                value_count,
+            });
         }
     }
 
@@ -794,6 +1030,12 @@ fn validate_bcf_format_encoding(
             "invalid BCF FORMAT encoding: {} trailing bytes",
             src.len()
         )));
+    }
+
+    if has_number_g && let Some(gt) = gt_encoding.as_ref() {
+        // FORMAT series may appear in any order, so validate Number=G only
+        // after the complete first pass has located and validated GT.
+        validate_bcf_number_g_cardinality(samples, header, allele_count, gt)?;
     }
 
     Ok(())
@@ -2048,6 +2290,24 @@ mod tests {
             error.contains("GT allele index 2"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn calculates_number_g_cardinality_from_alleles_and_ploidy() {
+        assert_eq!(bcf_genotype_cardinality(2, 1).unwrap(), 2);
+        assert_eq!(bcf_genotype_cardinality(2, 2).unwrap(), 3);
+        assert_eq!(bcf_genotype_cardinality(3, 2).unwrap(), 6);
+        assert_eq!(bcf_genotype_cardinality(2, 3).unwrap(), 4);
+        assert!(bcf_genotype_cardinality(0, 2).is_err());
+        assert!(bcf_genotype_cardinality(2, 0).is_err());
+
+        let gt = BcfGtEncoding {
+            payload: &[2, 4, 4, 0x81],
+            encoded_type: BcfEncodedType::Int8,
+            value_count: 2,
+        };
+        assert_eq!(bcf_gt_sample_ploidy(&gt, 0).unwrap(), 2);
+        assert_eq!(bcf_gt_sample_ploidy(&gt, 1).unwrap(), 1);
     }
 
     #[test]
