@@ -40,13 +40,73 @@ use crate::physical_exec::{
 use crate::storage::VcfRecordFields;
 
 const SUPPORTED_BCF_VERSION: (u8, u8) = (2, 2);
+const BCF_HEADER_PREFIX_SIZE: usize = 9;
 const BCF_RECORD_LENGTH_PREFIX_SIZE: usize = 8;
 const BCF_FIXED_SITE_PREFIX_SIZE: usize = 24;
 const MIN_BCF_SHARED_LENGTH: u64 = 24;
+// Like record bodies, the BCF header text length is an untrusted u32. Bound it
+// before noodles reads the text into growable buffers.
+const MAX_BCF_HEADER_TEXT_SIZE: u64 = 256 * 1024 * 1024;
 // This is a hard safety ceiling, not a tuning target. Real records are normally
 // orders of magnitude smaller, while the on-disk u32 fields can declare nearly
 // 8 GiB in aggregate and make the decoder reserve that memory before parsing.
 const MAX_BCF_RECORD_BODY_SIZE: u64 = 256 * 1024 * 1024;
+
+fn validate_bcf_header_prefix(prefix: [u8; BCF_HEADER_PREFIX_SIZE]) -> Result<u64> {
+    if &prefix[..3] != b"BCF" {
+        return Err(DataFusionError::Execution(format!(
+            "invalid BCF magic: expected BCF, found {:02x?}",
+            &prefix[..3]
+        )));
+    }
+
+    validate_version((prefix[3], prefix[4]))?;
+
+    let header_len = u64::from(u32::from_le_bytes(prefix[5..].try_into().unwrap()));
+    if header_len > MAX_BCF_HEADER_TEXT_SIZE {
+        return Err(DataFusionError::Execution(format!(
+            "invalid BCF header length: l_text is {header_len}, exceeding the \
+             {MAX_BCF_HEADER_TEXT_SIZE}-byte safety limit"
+        )));
+    }
+
+    Ok(header_len)
+}
+
+fn read_bcf_header_bounded<R>(inner: &mut R) -> Result<Header>
+where
+    R: Read,
+{
+    let mut prefix = [0; BCF_HEADER_PREFIX_SIZE];
+    inner
+        .read_exact(&mut prefix)
+        .map_err(|e| execution_error("failed to read BCF header prefix", e))?;
+    let header_len = validate_bcf_header_prefix(prefix)?;
+
+    let body = (&mut *inner).take(header_len);
+    let bounded = Cursor::new(prefix).chain(body);
+    bcf::io::Reader::from(bounded)
+        .read_header()
+        .map_err(|e| execution_error("failed to parse BCF header", e))
+}
+
+async fn read_bcf_header_bounded_async<R>(inner: &mut R) -> Result<Header>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut prefix = [0; BCF_HEADER_PREFIX_SIZE];
+    tokio::io::AsyncReadExt::read_exact(&mut *inner, &mut prefix)
+        .await
+        .map_err(|e| execution_error("failed to read BCF header prefix", e))?;
+    let header_len = validate_bcf_header_prefix(prefix)?;
+
+    let body = tokio::io::AsyncReadExt::take(&mut *inner, header_len);
+    let bounded = tokio::io::AsyncReadExt::chain(Cursor::new(prefix), body);
+    bcf::r#async::io::Reader::from(bounded)
+        .read_header()
+        .await
+        .map_err(|e| execution_error("failed to parse BCF header", e))
+}
 
 fn read_bcf_record_lengths(prefix: [u8; BCF_RECORD_LENGTH_PREFIX_SIZE]) -> io::Result<(u64, u64)> {
     let shared = u64::from(u32::from_le_bytes(prefix[..4].try_into().unwrap()));
@@ -1054,52 +1114,19 @@ fn local_path(path: &str) -> &str {
 
 fn read_local_header(path: &str) -> Result<Header> {
     let path = local_path(path);
-
     let file = File::open(path).map_err(|e| execution_error("failed to open BCF", e))?;
-    let mut version_reader = bcf::io::Reader::new(file);
-    let mut header_reader = version_reader.header_reader();
-    header_reader
-        .read_magic_number()
-        .map_err(|e| execution_error("invalid BCF magic", e))?;
-    let version = header_reader
-        .read_format_version()
-        .map_err(|e| execution_error("failed to read BCF version", e))?;
-    validate_version(version)?;
-
-    let file = File::open(path).map_err(|e| execution_error("failed to reopen BCF", e))?;
     let mut reader = bcf::io::Reader::new(file);
-    reader
-        .read_header()
-        .map_err(|e| execution_error("failed to parse BCF header", e))
+    read_bcf_header_bounded(reader.get_mut())
 }
 
 async fn read_remote_header(
     path: &str,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<Header> {
-    let inner = get_remote_stream_bgzf_async(path.to_string(), object_storage_options.clone())
+    let mut inner = get_remote_stream_bgzf_async(path.to_string(), object_storage_options)
         .await
         .map_err(|e| execution_error("failed to open remote BCF", e))?;
-    let mut version_reader = bcf::r#async::io::Reader::from(inner);
-    let mut header_reader = version_reader.header_reader();
-    header_reader
-        .read_magic_number()
-        .await
-        .map_err(|e| execution_error("invalid BCF magic", e))?;
-    let version = header_reader
-        .read_format_version()
-        .await
-        .map_err(|e| execution_error("failed to read BCF version", e))?;
-    validate_version(version)?;
-
-    let inner = get_remote_stream_bgzf_async(path.to_string(), object_storage_options)
-        .await
-        .map_err(|e| execution_error("failed to reopen remote BCF", e))?;
-    let mut reader = bcf::r#async::io::Reader::from(inner);
-    reader
-        .read_header()
-        .await
-        .map_err(|e| execution_error("failed to parse remote BCF header", e))
+    read_bcf_header_bounded_async(&mut inner).await
 }
 
 pub(crate) async fn read_header(
@@ -1742,9 +1769,7 @@ fn full_local_stream(
         let file = File::open(local_path(&file_path))
             .map_err(|e| execution_error("failed to open BCF", e))?;
         let mut reader = bcf::io::Reader::new(file);
-        let header = reader
-            .read_header()
-            .map_err(|e| execution_error("failed to parse BCF header", e))?;
+        let header = read_bcf_header_bounded(reader.get_mut())?;
         let mut decoder = BcfBatchDecoder::new(
             &header,
             schema,
@@ -1802,14 +1827,12 @@ async fn full_remote_stream(
     limit: Option<usize>,
 ) -> Result<SendableRecordBatchStream> {
     let output_schema = schema.clone();
-    let inner = get_remote_stream_bgzf_async(file_path, object_storage_options.unwrap_or_default())
-        .await
-        .map_err(|e| execution_error("failed to open remote BCF", e))?;
+    let mut inner =
+        get_remote_stream_bgzf_async(file_path, object_storage_options.unwrap_or_default())
+            .await
+            .map_err(|e| execution_error("failed to open remote BCF", e))?;
+    let header = read_bcf_header_bounded_async(&mut inner).await?;
     let mut reader = bcf::r#async::io::Reader::from(inner);
-    let header = reader
-        .read_header()
-        .await
-        .map_err(|e| execution_error("failed to parse remote BCF header", e))?;
 
     let stream = try_stream! {
         let mut decoder = BcfBatchDecoder::new(
@@ -1886,9 +1909,7 @@ fn indexed_local_stream(
         let file = File::open(local_path(&file_path))
             .map_err(|e| execution_error("failed to open indexed BCF", e))?;
         let mut reader = bcf::io::Reader::new(file);
-        let header = reader
-            .read_header()
-            .map_err(|e| execution_error("failed to parse indexed BCF header", e))?;
+        let header = read_bcf_header_bounded(reader.get_mut())?;
         let mut decoder = BcfBatchDecoder::new(
             &header,
             schema,

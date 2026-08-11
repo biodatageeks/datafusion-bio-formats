@@ -635,6 +635,45 @@ async fn bcf_rejects_record_sample_count_mismatch() -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bcf_rejects_oversized_declared_header_before_allocation_locally_and_remotely()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    decompressed[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+    drop(writer);
+
+    let local_error = VcfTableProvider::new(
+        bcf_path.clone(),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+    )
+    .expect_err("an oversized local BCF header must fail before allocation")
+    .to_string();
+    assert!(
+        local_error.contains("invalid BCF header length") && local_error.contains("safety limit"),
+        "unexpected local error: {local_error}"
+    );
+
+    let server = RangeServer::start(std::fs::read(&bcf_path)?, Vec::new());
+    let remote_error =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)
+            .expect_err("an oversized remote BCF header must fail before allocation")
+            .to_string();
+    assert!(
+        remote_error.contains("invalid BCF header length") && remote_error.contains("safety limit"),
+        "unexpected remote error: {remote_error}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn truncated_bcf_fails_during_scan() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
