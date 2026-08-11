@@ -64,6 +64,7 @@ struct RangeServer {
     address: std::net::SocketAddr,
     requests: Arc<Mutex<Vec<HttpRequest>>>,
     deny_bcf_head: Arc<AtomicBool>,
+    shorten_bcf_ranges: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -98,9 +99,11 @@ impl RangeServer {
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let deny_bcf_head = Arc::new(AtomicBool::new(deny_bcf_head));
+        let shorten_bcf_ranges = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let server_requests = Arc::clone(&requests);
         let server_deny_bcf_head = Arc::clone(&deny_bcf_head);
+        let server_shorten_bcf_ranges = Arc::clone(&shorten_bcf_ranges);
         let server_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(30);
@@ -141,6 +144,8 @@ impl RangeServer {
                     range,
                 });
 
+                let is_bcf_payload =
+                    path.starts_with("/remote.bcf") && !path.starts_with("/remote.bcf.csi");
                 let body = if path.starts_with("/remote.bcf.csi") {
                     if deny_csi || (deny_csi_head && method == "HEAD") {
                         let _ = write!(
@@ -182,7 +187,13 @@ impl RangeServer {
                         );
                         continue;
                     }
-                    let end = end.min(body.len() - 1);
+                    let mut end = end.min(body.len() - 1);
+                    if server_shorten_bcf_ranges.load(Ordering::Relaxed)
+                        && is_bcf_payload
+                        && end.saturating_sub(start) >= 32
+                    {
+                        end -= 1;
+                    }
                     let bytes = &body[start..=end];
                     let _ = write!(
                         stream,
@@ -208,6 +219,7 @@ impl RangeServer {
             address,
             requests,
             deny_bcf_head,
+            shorten_bcf_ranges,
             stop,
             thread: Some(thread),
         }
@@ -219,6 +231,12 @@ impl RangeServer {
 
     fn deny_bcf_head(&self) {
         self.deny_bcf_head.store(true, Ordering::Relaxed);
+    }
+
+    /// Makes later large BCF range GETs return a successful response one byte
+    /// short, as can happen when a stale CSI end lies beyond EOF.
+    fn shorten_bcf_ranges(&self) {
+        self.shorten_bcf_ranges.store(true, Ordering::Relaxed);
     }
 }
 
@@ -339,6 +357,7 @@ async fn remote_bcf_uses_csi_range_requests() -> Result<(), Box<dyn std::error::
 
     let provider =
         VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    server.requests.lock().unwrap().clear();
     let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
     context.register_table("variants", Arc::new(provider))?;
     let batches = context
@@ -369,10 +388,23 @@ async fn remote_bcf_uses_csi_range_requests() -> Result<(), Box<dyn std::error::
         .iter()
         .filter(|request| request.path.starts_with("/remote.bcf.csi"))
         .count();
-    assert!(
-        csi_requests <= 3,
+    assert_eq!(
+        csi_requests, 1,
         "the CSI should be fetched once at planning time and shared across \
-         partitions, got {csi_requests} index requests: {requests:?}"
+         partitions: {requests:?}"
+    );
+    let bcf_non_range_requests = requests
+        .iter()
+        .filter(|request| {
+            request.path.starts_with("/remote.bcf")
+                && !request.path.starts_with("/remote.bcf.csi")
+                && request.range.is_none()
+        })
+        .count();
+    assert_eq!(
+        bcf_non_range_requests, 0,
+        "the header parsed at provider construction should be shared across \
+         partitions: {requests:?}"
     );
     Ok(())
 }
@@ -874,6 +906,34 @@ async fn remote_bcf_stale_csi_index_fails_loudly() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_bcf_short_range_response_fails_loudly() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server = RangeServer::start(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    server.shorten_bcf_ranges();
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(2));
+    context.register_table("variants", Arc::new(provider))?;
+
+    let error = context
+        .sql("SELECT id FROM variants WHERE chrom = 'chr2'")
+        .await?
+        .collect()
+        .await
+        .expect_err("a successful short CSI range response must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("the index does not match the file"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
 const FORMAT_ARRAY_HEADER: &str = "##fileformat=VCFv4.3\n\
 ##contig=<ID=chr1,length=1000>\n\
 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
@@ -900,6 +960,60 @@ fn write_format_array_bcf(
         vcf_path.to_string_lossy().into_owned(),
         bcf_path_buf.to_string_lossy().into_owned(),
     ))
+}
+
+#[tokio::test]
+async fn bcf_rejects_excess_values_for_scalar_format_field()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=DP,Number=2,Type=Integer,Description=\"Read depth\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tDP\t5,7\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "scalar-extra", body)?;
+
+    // Write a valid two-value array first, then corrupt only the same-width
+    // header declaration. The record remains encoded with two integers while
+    // the provider builds a scalar DP column from Number=1.
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let declaration = b"##FORMAT=<ID=DP,Number=2";
+    let declaration_start = decompressed
+        .windows(declaration.len())
+        .position(|window| window == declaration)
+        .expect("DP FORMAT declaration should be present in the BCF header");
+    decompressed[declaration_start + declaration.len() - 1] = b'1';
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["DP".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+
+    let error = context
+        .sql("SELECT \"DP\" FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("excess values for a scalar FORMAT field must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("FORMAT field 'DP' is declared scalar")
+            && error.contains("encodes 2 values per sample"),
+        "unexpected error: {error}"
+    );
+    Ok(())
 }
 
 #[tokio::test]

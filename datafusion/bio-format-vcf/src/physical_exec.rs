@@ -469,6 +469,26 @@ fn format_value_error(key: &str, error: std::io::Error) -> datafusion::arrow::er
     ))
 }
 
+fn validate_scalar_format_value_count(
+    key: &str,
+    data_type: &DataType,
+    value_count: usize,
+) -> Result<(), datafusion::arrow::error::ArrowError> {
+    if matches!(
+        data_type,
+        DataType::Int32 | DataType::Float32 | DataType::Utf8
+    ) && value_count != 1
+    {
+        return Err(datafusion::arrow::error::ArrowError::InvalidArgumentError(
+            format!(
+                "FORMAT field '{key}' is declared scalar but the record contains {value_count} values"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 fn samples_error(error: std::io::Error) -> datafusion::arrow::error::ArrowError {
     datafusion::arrow::error::ArrowError::InvalidArgumentError(format!(
         "Error reading FORMAT samples: {error}"
@@ -2201,6 +2221,7 @@ fn load_formats_single_pass(
                             .iter()
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
+                        validate_scalar_format_value_count(key, data_type, ints.len())?;
                         if ints.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Int32) {
@@ -2218,6 +2239,7 @@ fn load_formats_single_pass(
                             .iter()
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
+                        validate_scalar_format_value_count(key, data_type, floats.len())?;
                         if floats.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Float32) {
@@ -2236,6 +2258,7 @@ fn load_formats_single_pass(
                             .map(|result| result.map(|value| value.map(|s| s.to_string())))
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
+                        validate_scalar_format_value_count(key, data_type, strings.len())?;
                         if strings.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Utf8) {
@@ -2254,6 +2277,7 @@ fn load_formats_single_pass(
                             .map(|result| result.map(|value| value.map(|c| c.to_string())))
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
+                        validate_scalar_format_value_count(key, data_type, chars.len())?;
                         if chars.iter().all(|v| v.is_none()) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Utf8) {

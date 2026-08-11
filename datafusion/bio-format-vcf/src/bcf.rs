@@ -24,6 +24,7 @@ use futures::TryStreamExt;
 use log::info;
 use noodles_bcf::{self as bcf, Record as BcfRecord};
 use noodles_vcf::Header;
+use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
 use noodles_vcf::variant::Record as VariantRecord;
 use noodles_vcf::variant::record::Samples as _;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, ReferenceBases};
@@ -52,6 +53,147 @@ fn validate_version(version: (u8, u8)) -> Result<()> {
             version.0, version.1
         )))
     }
+}
+
+#[derive(Clone, Copy)]
+enum BcfEncodedType {
+    Int8,
+    Int16,
+    Int32,
+    Float,
+    String,
+}
+
+impl BcfEncodedType {
+    fn width(self) -> usize {
+        match self {
+            Self::Int8 | Self::String => 1,
+            Self::Int16 => 2,
+            Self::Int32 | Self::Float => 4,
+        }
+    }
+}
+
+fn take_bcf_bytes<'a>(src: &mut &'a [u8], len: usize) -> Result<&'a [u8]> {
+    if src.len() < len {
+        return Err(DataFusionError::Execution(
+            "invalid BCF FORMAT encoding: unexpected end of record".into(),
+        ));
+    }
+
+    let (value, rest) = src.split_at(len);
+    *src = rest;
+    Ok(value)
+}
+
+fn read_bcf_encoded_type(src: &mut &[u8]) -> Result<(BcfEncodedType, usize)> {
+    let descriptor = take_bcf_bytes(src, 1)?[0];
+    let mut len = usize::from(descriptor >> 4);
+    if len == 0x0f {
+        let extended_len = read_bcf_typed_integer(src)?;
+        len = usize::try_from(extended_len).map_err(|_| {
+            DataFusionError::Execution(format!(
+                "invalid BCF FORMAT encoding: negative extended length {extended_len}"
+            ))
+        })?;
+    }
+
+    let encoded_type = match descriptor & 0x0f {
+        1 => BcfEncodedType::Int8,
+        2 => BcfEncodedType::Int16,
+        3 => BcfEncodedType::Int32,
+        5 => BcfEncodedType::Float,
+        7 => BcfEncodedType::String,
+        code => {
+            return Err(DataFusionError::Execution(format!(
+                "invalid BCF FORMAT encoding: unsupported type code {code}"
+            )));
+        }
+    };
+
+    Ok((encoded_type, len))
+}
+
+fn read_bcf_typed_integer(src: &mut &[u8]) -> Result<i32> {
+    let (encoded_type, len) = read_bcf_encoded_type(src)?;
+    if len != 1 {
+        return Err(DataFusionError::Execution(format!(
+            "invalid BCF FORMAT encoding: expected one integer, found {len} values"
+        )));
+    }
+
+    let value = match encoded_type {
+        BcfEncodedType::Int8 => i32::from(take_bcf_bytes(src, 1)?[0] as i8),
+        BcfEncodedType::Int16 => i32::from(i16::from_le_bytes(
+            take_bcf_bytes(src, 2)?.try_into().unwrap(),
+        )),
+        BcfEncodedType::Int32 => i32::from_le_bytes(take_bcf_bytes(src, 4)?.try_into().unwrap()),
+        BcfEncodedType::Float | BcfEncodedType::String => {
+            return Err(DataFusionError::Execution(
+                "invalid BCF FORMAT encoding: expected integer value".into(),
+            ));
+        }
+    };
+
+    Ok(value)
+}
+
+fn validate_bcf_scalar_format_lengths(
+    samples: &bcf::record::Samples<'_>,
+    header: &Header,
+) -> Result<()> {
+    let sample_count = samples.len();
+    let mut src = samples.as_ref();
+
+    for _ in 0..samples.format_count() {
+        let key_index = usize::try_from(read_bcf_typed_integer(&mut src)?).map_err(|_| {
+            DataFusionError::Execution("invalid BCF FORMAT string-map index".into())
+        })?;
+        let key = header
+            .string_maps()
+            .strings()
+            .get_index(key_index)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "invalid BCF FORMAT string-map index {key_index}"
+                ))
+            })?;
+        let format = header.formats().get(key).ok_or_else(|| {
+            DataFusionError::Execution(format!("BCF FORMAT field '{key}' has no header definition"))
+        })?;
+        let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
+
+        let scalar_requires_one_encoded_value = key != "GT"
+            && matches!(format.number(), FormatNumber::Count(1))
+            && matches!(
+                format.ty(),
+                FormatType::Integer | FormatType::Float | FormatType::Character
+            );
+        if scalar_requires_one_encoded_value && value_count != 1 {
+            return Err(DataFusionError::Execution(format!(
+                "FORMAT field '{key}' is declared scalar but the BCF record encodes \
+                 {value_count} values per sample"
+            )));
+        }
+
+        let payload_len = encoded_type
+            .width()
+            .checked_mul(value_count)
+            .and_then(|len| len.checked_mul(sample_count))
+            .ok_or_else(|| {
+                DataFusionError::Execution("BCF FORMAT payload length overflow".into())
+            })?;
+        take_bcf_bytes(&mut src, payload_len)?;
+    }
+
+    if !src.is_empty() {
+        return Err(DataFusionError::Execution(format!(
+            "invalid BCF FORMAT encoding: {} trailing bytes",
+            src.len()
+        )));
+    }
+
+    Ok(())
 }
 
 fn local_path(path: &str) -> &str {
@@ -508,15 +650,18 @@ impl BcfBatchDecoder {
         record: &BcfRecord,
         header: &Header,
     ) -> Result<Option<RecordBatch>> {
-        let record_sample_count = record
+        let samples = record
             .samples()
-            .map_err(|e| execution_error("invalid BCF sample count", e))?
-            .len();
+            .map_err(|e| execution_error("invalid BCF sample count", e))?;
+        let record_sample_count = samples.len();
         if record_sample_count != self.source_sample_names.len() {
             return Err(DataFusionError::Execution(format!(
                 "BCF record sample count {record_sample_count} does not match header sample count {}",
                 self.source_sample_names.len()
             )));
+        }
+        if self.has_format_fields && self.flags.any_format {
+            validate_bcf_scalar_format_lengths(&samples, header)?;
         }
 
         let has_filters = !self.residual_filters.is_empty();
@@ -1018,6 +1163,18 @@ async fn indexed_remote_stream(
                     };
                     execution_error(context, error)
                 })?;
+            let expected_len = compressed_end - compressed_start;
+            let actual_len = u64::try_from(bytes.len()).map_err(|_| {
+                DataFusionError::Execution(
+                    "remote BCF CSI range length does not fit in u64".into(),
+                )
+            })?;
+            if actual_len != expected_len {
+                Err(DataFusionError::Execution(format!(
+                    "remote BCF CSI range returned {actual_len} bytes, expected {expected_len}; \
+                     the index does not match the file"
+                )))?;
+            }
             let inner = noodles_bgzf_vcf::io::Reader::new(Cursor::new(bytes));
             let mut reader = bcf::io::Reader::from(inner);
             let local_start =
