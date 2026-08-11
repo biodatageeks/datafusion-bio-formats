@@ -56,7 +56,7 @@ fn validate_version(version: (u8, u8)) -> Result<()> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BcfEncodedType {
     Null,
     Int8,
@@ -142,10 +142,48 @@ fn read_bcf_typed_integer(src: &mut &[u8]) -> Result<i32> {
     Ok(value)
 }
 
-fn validate_bcf_info_dictionary_references(
-    info: &bcf::record::Info<'_>,
-    header: &Header,
-) -> Result<()> {
+fn info_type_accepts_encoding(info_type: InfoType, encoded_type: BcfEncodedType) -> bool {
+    match info_type {
+        InfoType::Integer => matches!(
+            encoded_type,
+            BcfEncodedType::Null
+                | BcfEncodedType::Int8
+                | BcfEncodedType::Int16
+                | BcfEncodedType::Int32
+        ),
+        InfoType::Float => matches!(encoded_type, BcfEncodedType::Null | BcfEncodedType::Float),
+        InfoType::Flag => matches!(encoded_type, BcfEncodedType::Null | BcfEncodedType::Int8),
+        InfoType::Character | InfoType::String => {
+            matches!(encoded_type, BcfEncodedType::Null | BcfEncodedType::String)
+        }
+    }
+}
+
+fn format_type_accepts_encoding(
+    key: &str,
+    format_type: FormatType,
+    encoded_type: BcfEncodedType,
+) -> bool {
+    if key == "GT" {
+        return matches!(
+            encoded_type,
+            BcfEncodedType::Int8 | BcfEncodedType::Int16 | BcfEncodedType::Int32
+        );
+    }
+
+    match format_type {
+        FormatType::Integer => matches!(
+            encoded_type,
+            BcfEncodedType::Int8 | BcfEncodedType::Int16 | BcfEncodedType::Int32
+        ),
+        FormatType::Float => matches!(encoded_type, BcfEncodedType::Float),
+        FormatType::Character | FormatType::String => {
+            matches!(encoded_type, BcfEncodedType::String)
+        }
+    }
+}
+
+fn validate_bcf_info_encoding(info: &bcf::record::Info<'_>, header: &Header) -> Result<()> {
     let mut src = info.as_ref();
 
     for _ in 0..info.len() {
@@ -169,12 +207,26 @@ fn validate_bcf_info_dictionary_references(
         })?;
 
         let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
+        if encoded_type == BcfEncodedType::Null && value_count != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "INFO field '{key}' has an invalid null encoding length {value_count}"
+            )));
+        }
+        if !info_type_accepts_encoding(info.ty(), encoded_type) {
+            return Err(DataFusionError::Execution(format!(
+                "INFO field '{key}' is declared as {} but the BCF record uses an incompatible \
+                 {encoded_type:?} encoding",
+                info.ty()
+            )));
+        }
         let scalar_requires_one_encoded_value = matches!(info.number(), InfoNumber::Count(1))
             && matches!(
                 info.ty(),
                 InfoType::Integer | InfoType::Float | InfoType::Character
             );
-        if scalar_requires_one_encoded_value && value_count != 1 {
+        let scalar_has_valid_length =
+            value_count == 1 || (matches!(encoded_type, BcfEncodedType::Null) && value_count == 0);
+        if scalar_requires_one_encoded_value && !scalar_has_valid_length {
             return Err(DataFusionError::Execution(format!(
                 "INFO field '{key}' is declared scalar but the BCF record encodes \
                  {value_count} values"
@@ -185,7 +237,15 @@ fn validate_bcf_info_dictionary_references(
             .width()
             .checked_mul(value_count)
             .ok_or_else(|| DataFusionError::Execution("BCF INFO payload length overflow".into()))?;
-        take_bcf_bytes(&mut src, payload_len)?;
+        let payload = take_bcf_bytes(&mut src, payload_len)?;
+        if matches!(info.ty(), InfoType::Flag)
+            && encoded_type == BcfEncodedType::Int8
+            && (value_count != 1 || payload != [1])
+        {
+            return Err(DataFusionError::Execution(format!(
+                "INFO flag '{key}' has an invalid encoded value"
+            )));
+        }
     }
 
     if !src.is_empty() {
@@ -219,6 +279,18 @@ fn validate_bcf_format_encoding(samples: &bcf::record::Samples<'_>, header: &Hea
             DataFusionError::Execution(format!("BCF FORMAT field '{key}' has no header definition"))
         })?;
         let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
+        if value_count == 0 {
+            return Err(DataFusionError::Execution(format!(
+                "FORMAT field '{key}' has an invalid zero-length encoding"
+            )));
+        }
+        if !format_type_accepts_encoding(key, format.ty(), encoded_type) {
+            return Err(DataFusionError::Execution(format!(
+                "FORMAT field '{key}' is declared as {} but the BCF record uses an incompatible \
+                 {encoded_type:?} encoding",
+                format.ty()
+            )));
+        }
 
         let scalar_requires_one_encoded_value = key != "GT"
             && matches!(format.number(), FormatNumber::Count(1))
@@ -728,7 +800,7 @@ impl BcfBatchDecoder {
                 )));
             }
         }
-        validate_bcf_info_dictionary_references(&record.info(), header)?;
+        validate_bcf_info_encoding(&record.info(), header)?;
         validate_bcf_format_encoding(&samples, header)?;
 
         let has_filters = !self.residual_filters.is_empty();

@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use datafusion::arrow::array::{Int32Array, ListArray, StringArray, StructArray, UInt32Array};
+use datafusion::arrow::array::{
+    Int32Array, Int64Array, ListArray, StringArray, StructArray, UInt32Array,
+};
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::{SessionConfig, SessionContext};
@@ -1038,6 +1040,48 @@ fn corrupt_bcf_record_dictionary_index(
     Ok(())
 }
 
+fn corrupt_bcf_first_value_descriptor_type(
+    bcf_path: &str,
+    target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let site_start = record_start + 8;
+
+    let descriptor_offset = if target == "info" {
+        let allele_count =
+            u16::from_le_bytes(decompressed[site_start + 18..site_start + 20].try_into()?) as usize;
+        let mut cursor = site_start + 24;
+        cursor = bcf_typed_value_end(&decompressed, cursor); // IDs
+        for _ in 0..allele_count {
+            cursor = bcf_typed_value_end(&decompressed, cursor); // REF and ALTs
+        }
+        cursor = bcf_typed_value_end(&decompressed, cursor); // FILTER
+        bcf_typed_value_end(&decompressed, cursor) // INFO key
+    } else if target == "format" {
+        let samples_start = site_start + shared_len;
+        bcf_typed_value_end(&decompressed, samples_start) // FORMAT key
+    } else {
+        panic!("unknown BCF value target: {target}");
+    };
+
+    assert_eq!(
+        decompressed[descriptor_offset] & 0x0f,
+        1,
+        "fixture value should use an integer descriptor"
+    );
+    decompressed[descriptor_offset] = (decompressed[descriptor_offset] & 0xf0) | 7;
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1082,6 +1126,41 @@ async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_validates_unprojected_info_and_format_descriptor_types()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+                ##FORMAT=<ID=GQ,Number=1,Type=Integer,Description=\"Genotype quality\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tDP=5\tGQ\t7\n";
+
+    for (target, expected_field) in [("info", "INFO field 'DP'"), ("format", "FORMAT field 'GQ'")] {
+        let dir = tempfile::tempdir()?;
+        let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, target, body)?;
+        corrupt_bcf_first_value_descriptor_type(&bcf_path, target)?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("an unprojected descriptor type mismatch must fail the scan")
+            .to_string();
+        assert!(
+            error.contains(expected_field) && error.contains("incompatible String encoding"),
+            "unexpected {target} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_excess_values_for_unprojected_scalar_info_field()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -1119,6 +1198,65 @@ async fn bcf_rejects_excess_values_for_unprojected_scalar_info_field()
     assert!(
         error.contains("INFO field 'DP' is declared scalar") && error.contains("encodes 2 values"),
         "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_accepts_missing_unprojected_scalar_info_field()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tDP=5\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "scalar-info-missing", body)?;
+
+    // noodles cannot currently write an explicit null INFO value, so rewrite
+    // the valid scalar payload from [Int8(5)] to the BCF null descriptor and
+    // shrink the shared record section by the removed payload byte.
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let site_start = record_start + 8;
+    let allele_count =
+        u16::from_le_bytes(decompressed[site_start + 18..site_start + 20].try_into()?) as usize;
+    let mut cursor = site_start + 24;
+    cursor = bcf_typed_value_end(&decompressed, cursor); // IDs
+    for _ in 0..allele_count {
+        cursor = bcf_typed_value_end(&decompressed, cursor); // REF and ALTs
+    }
+    cursor = bcf_typed_value_end(&decompressed, cursor); // FILTER
+    cursor = bcf_typed_value_end(&decompressed, cursor); // INFO key
+    assert_eq!(decompressed[cursor], 0x11, "DP should be a scalar i8");
+    decompressed[cursor] = 0x00;
+    decompressed.remove(cursor + 1);
+    decompressed[record_start..record_start + 4]
+        .copy_from_slice(&u32::try_from(shared_len - 1)?.to_le_bytes());
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        1
     );
     Ok(())
 }
