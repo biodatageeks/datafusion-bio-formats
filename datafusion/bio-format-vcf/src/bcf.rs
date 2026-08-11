@@ -304,6 +304,77 @@ fn bcf_scalar_value_is_missing(encoded_type: BcfEncodedType, payload: &[u8]) -> 
     }
 }
 
+fn bcf_numeric_value_is_vector_end(encoded_type: BcfEncodedType, value: &[u8]) -> bool {
+    match encoded_type {
+        BcfEncodedType::Int8 => value == [(i8::MIN + 1) as u8],
+        BcfEncodedType::Int16 => value == (i16::MIN + 1).to_le_bytes(),
+        BcfEncodedType::Int32 => value == (i32::MIN + 1).to_le_bytes(),
+        BcfEncodedType::Float => value == 0x7f80_0002_u32.to_le_bytes(),
+        BcfEncodedType::Null | BcfEncodedType::String => false,
+    }
+}
+
+fn bcf_numeric_value_is_reserved(encoded_type: BcfEncodedType, value: &[u8]) -> bool {
+    match encoded_type {
+        BcfEncodedType::Int8 => ((i8::MIN + 2)..=(i8::MIN + 7)).contains(&(value[0] as i8)),
+        BcfEncodedType::Int16 => {
+            let value = i16::from_le_bytes(value.try_into().unwrap());
+            ((i16::MIN + 2)..=(i16::MIN + 7)).contains(&value)
+        }
+        BcfEncodedType::Int32 => {
+            let value = i32::from_le_bytes(value.try_into().unwrap());
+            ((i32::MIN + 2)..=(i32::MIN + 7)).contains(&value)
+        }
+        BcfEncodedType::Float => {
+            let bits = u32::from_le_bytes(value.try_into().unwrap());
+            (0x7f80_0003..=0x7f80_0007).contains(&bits)
+        }
+        BcfEncodedType::Null | BcfEncodedType::String => false,
+    }
+}
+
+fn bcf_numeric_vector_is_missing(encoded_type: BcfEncodedType, payload: &[u8]) -> bool {
+    let mut values = payload.chunks_exact(encoded_type.width());
+    values
+        .next()
+        .is_some_and(|value| bcf_scalar_value_is_missing(encoded_type, value))
+        && values.all(|value| bcf_numeric_value_is_vector_end(encoded_type, value))
+}
+
+fn bcf_numeric_logical_value_count(
+    field_kind: &str,
+    key: &str,
+    encoded_type: BcfEncodedType,
+    payload: &[u8],
+) -> Result<usize> {
+    let width = encoded_type.width();
+    debug_assert!(width > 0);
+    let mut logical_count = 0;
+    let mut reached_vector_end = false;
+
+    for (value_offset, value) in payload.chunks_exact(width).enumerate() {
+        if bcf_numeric_value_is_vector_end(encoded_type, value) {
+            reached_vector_end = true;
+        } else if bcf_numeric_value_is_reserved(encoded_type, value) {
+            return Err(DataFusionError::Execution(format!(
+                "invalid BCF {field_kind} field '{key}': reserved numeric value at offset \
+                 {value_offset}"
+            )));
+        } else if reached_vector_end {
+            return Err(DataFusionError::Execution(format!(
+                "invalid BCF {field_kind} field '{key}': value after vector-end at offset \
+                 {value_offset}"
+            )));
+        } else {
+            // Missing sentinels are logical null elements and still occupy one
+            // position in a fixed-cardinality vector.
+            logical_count += 1;
+        }
+    }
+
+    Ok(logical_count)
+}
+
 fn validate_bcf_info_fixed_cardinality(
     key: &str,
     info_number: InfoNumber,
@@ -314,16 +385,17 @@ fn validate_bcf_info_fixed_cardinality(
     allele_count: usize,
 ) -> Result<()> {
     let expected_count = match info_number {
-        InfoNumber::Count(count) => count,
-        InfoNumber::AlternateBases => allele_count - 1,
-        InfoNumber::ReferenceAlternateBases => allele_count,
-        InfoNumber::Samples | InfoNumber::Unknown => return Ok(()),
+        InfoNumber::Count(count) => Some(count),
+        InfoNumber::AlternateBases => Some(allele_count - 1),
+        InfoNumber::ReferenceAlternateBases => Some(allele_count),
+        InfoNumber::Samples | InfoNumber::Unknown => None,
     };
 
     if matches!(info_type, InfoType::Flag) {
-        if expected_count != 0 {
+        if expected_count.is_some_and(|count| count != 0) {
             return Err(DataFusionError::Execution(format!(
-                "INFO flag '{key}' declares invalid fixed cardinality {expected_count}"
+                "INFO flag '{key}' declares invalid fixed cardinality {}",
+                expected_count.unwrap()
             )));
         }
         return Ok(());
@@ -344,8 +416,14 @@ fn validate_bcf_info_fixed_cardinality(
             })?;
             value.bytes().filter(|&byte| byte == b',').count() + 1
         }
-        InfoType::Integer | InfoType::Float => value_count,
+        InfoType::Integer | InfoType::Float => {
+            bcf_numeric_logical_value_count("INFO", key, encoded_type, payload)?
+        }
         InfoType::Flag => unreachable!("flags were handled above"),
+    };
+
+    let Some(expected_count) = expected_count else {
+        return Ok(());
     };
 
     if actual_count != expected_count {
@@ -538,46 +616,64 @@ fn validate_bcf_format_cardinality(
     }
 
     let expected_count = match format_number {
-        FormatNumber::Count(count) => count,
-        FormatNumber::AlternateBases => allele_count - 1,
-        FormatNumber::ReferenceAlternateBases => allele_count,
+        FormatNumber::Count(count) => Some(count),
+        FormatNumber::AlternateBases => Some(allele_count - 1),
+        FormatNumber::ReferenceAlternateBases => Some(allele_count),
         FormatNumber::Samples
         | FormatNumber::LocalAlternateBases
         | FormatNumber::LocalReferenceAlternateBases
         | FormatNumber::LocalSamples
         | FormatNumber::Ploidy
         | FormatNumber::BaseModifications
-        | FormatNumber::Unknown => return Ok(()),
+        | FormatNumber::Unknown => None,
     };
 
     match format_type {
         FormatType::Integer | FormatType::Float => {
-            let all_samples_missing = expected_count > 1
-                && value_count == 1
-                && !payload.is_empty()
-                && payload
-                    .chunks_exact(encoded_type.width())
-                    .all(|value| bcf_scalar_value_is_missing(encoded_type, value));
-            if all_samples_missing {
+            let sample_width = encoded_type
+                .width()
+                .checked_mul(value_count)
+                .ok_or_else(|| {
+                    DataFusionError::Execution("BCF FORMAT sample width overflow".into())
+                })?;
+            let logical_counts = payload
+                .chunks_exact(sample_width)
+                .enumerate()
+                .map(|(sample_index, sample)| {
+                    let count = bcf_numeric_logical_value_count(
+                        &format!("FORMAT sample {sample_index}"),
+                        key,
+                        encoded_type,
+                        sample,
+                    )?;
+                    Ok((count, bcf_numeric_vector_is_missing(encoded_type, sample)))
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            let Some(expected_count) = expected_count else {
                 return Ok(());
-            }
-            if value_count != expected_count {
+            };
+            if let Some(actual_count) =
+                logical_counts.into_iter().find_map(|(count, is_missing)| {
+                    (!is_missing && count != expected_count).then_some(count)
+                })
+            {
                 let message = match format_number {
                     FormatNumber::Count(1) => format!(
                         "FORMAT field '{key}' is declared scalar but the BCF record encodes \
-                         {value_count} values per sample"
+                         {actual_count} values per sample"
                     ),
                     FormatNumber::Count(_) => format!(
                         "FORMAT field '{key}' declares {expected_count} values but the BCF record \
-                         encodes {value_count} values per sample"
+                         encodes {actual_count} values per sample"
                     ),
                     FormatNumber::AlternateBases => format!(
                         "FORMAT field '{key}' declares Number=A ({expected_count} expected) but \
-                         the BCF record encodes {value_count} values per sample"
+                         the BCF record encodes {actual_count} values per sample"
                     ),
                     FormatNumber::ReferenceAlternateBases => format!(
                         "FORMAT field '{key}' declares Number=R ({expected_count} expected) but \
-                         the BCF record encodes {value_count} values per sample"
+                         the BCF record encodes {actual_count} values per sample"
                     ),
                     FormatNumber::Samples
                     | FormatNumber::LocalAlternateBases
@@ -593,6 +689,9 @@ fn validate_bcf_format_cardinality(
             }
         }
         FormatType::Character | FormatType::String => {
+            let Some(expected_count) = expected_count else {
+                return Ok(());
+            };
             for (sample_index, raw_value) in payload.chunks_exact(value_count).enumerate() {
                 let end = raw_value
                     .iter()
@@ -1928,6 +2027,55 @@ mod tests {
             error.contains("GT allele index 2"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn counts_numeric_values_before_vector_end_for_each_width() {
+        assert_eq!(
+            bcf_numeric_logical_value_count("INFO", "DP", BcfEncodedType::Int8, &[5, 0x81])
+                .unwrap(),
+            1
+        );
+
+        let mut int16 = Vec::new();
+        int16.extend_from_slice(&5i16.to_le_bytes());
+        int16.extend_from_slice(&(i16::MIN + 1).to_le_bytes());
+        assert_eq!(
+            bcf_numeric_logical_value_count("INFO", "DP", BcfEncodedType::Int16, &int16).unwrap(),
+            1
+        );
+
+        let mut int32 = Vec::new();
+        int32.extend_from_slice(&5i32.to_le_bytes());
+        int32.extend_from_slice(&(i32::MIN + 1).to_le_bytes());
+        assert_eq!(
+            bcf_numeric_logical_value_count("INFO", "DP", BcfEncodedType::Int32, &int32).unwrap(),
+            1
+        );
+
+        let mut float = Vec::new();
+        float.extend_from_slice(&5.0f32.to_le_bytes());
+        float.extend_from_slice(&0x7f80_0002_u32.to_le_bytes());
+        assert_eq!(
+            bcf_numeric_logical_value_count("INFO", "DP", BcfEncodedType::Float, &float).unwrap(),
+            1
+        );
+
+        let error =
+            bcf_numeric_logical_value_count("INFO", "DP", BcfEncodedType::Int8, &[5, 0x81, 7])
+                .expect_err("a value after vector-end must be rejected")
+                .to_string();
+        assert!(error.contains("value after vector-end"));
+
+        let error = bcf_numeric_logical_value_count("INFO", "DP", BcfEncodedType::Int8, &[0x82])
+            .expect_err("a reserved numeric sentinel must be rejected")
+            .to_string();
+        assert!(error.contains("reserved numeric value"));
+
+        assert!(bcf_numeric_vector_is_missing(
+            BcfEncodedType::Int8,
+            &[0x80, 0x81]
+        ));
     }
 
     fn region(start: Option<u64>, end: Option<u64>) -> GenomicRegion {
