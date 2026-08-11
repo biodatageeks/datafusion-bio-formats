@@ -557,6 +557,7 @@ fn validate_bcf_gt_payload(
 
     for (sample_index, genotype) in payload.chunks_exact(sample_width).enumerate() {
         let mut reached_vector_end = false;
+        let mut ploidy = 0;
 
         for (allele_offset, raw_allele) in genotype.chunks_exact(width).enumerate() {
             let encoded_allele = match encoded_type {
@@ -588,6 +589,7 @@ fn validate_bcf_gt_payload(
                      value {encoded_allele} at allele offset {allele_offset}"
                 )));
             }
+            ploidy += 1;
 
             // Encoded values 0 and 1 are the unphased/phased missing allele.
             if encoded_allele >= 2 {
@@ -603,6 +605,11 @@ fn validate_bcf_gt_payload(
                     )));
                 }
             }
+        }
+        if ploidy == 0 {
+            return Err(DataFusionError::Execution(format!(
+                "invalid BCF GT encoding for sample {sample_index}: genotype has zero ploidy"
+            )));
         }
     }
 

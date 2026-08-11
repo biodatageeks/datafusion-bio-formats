@@ -1883,21 +1883,31 @@ async fn bcf_accepts_compact_all_missing_fixed_format_array()
 #[tokio::test]
 async fn bcf_rejects_unprojected_invalid_gt_allele_encodings()
 -> Result<(), Box<dyn std::error::Error>> {
+    type GtMutationCase<'a> = (&'a str, &'a [(usize, u8)], &'a str);
+
     let body = "##fileformat=VCFv4.3\n\
                 ##contig=<ID=chr1,length=1000>\n\
                 ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                ##FORMAT=<ID=XG,Number=G,Type=Integer,Description=\"Genotype values\">\n\
                 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
-                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0/1\n";
-    let cases = [
-        ("out-of-range", 1, 0x06, "GT allele index 2"),
-        ("reserved", 1, 0x82, "reserved or invalid value -126"),
-        ("after-vector-end", 0, 0x81, "value after vector-end"),
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT:XG\t0/1:.\n";
+    let cases: &[GtMutationCase<'_>] = &[
+        ("out-of-range", &[(1, 0x06)], "GT allele index 2"),
+        ("reserved", &[(1, 0x82)], "reserved or invalid value -126"),
+        ("after-vector-end", &[(0, 0x81)], "value after vector-end"),
+        (
+            "zero-ploidy-with-missing-number-g",
+            &[(0, 0x81), (1, 0x81)],
+            "genotype has zero ploidy",
+        ),
     ];
 
-    for (name, allele_offset, encoded_value, expected_error) in cases {
+    for &(name, mutations, expected_error) in cases {
         let dir = tempfile::tempdir()?;
         let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, body)?;
-        corrupt_bcf_gt_allele_value(&bcf_path, allele_offset, encoded_value)?;
+        for &(allele_offset, encoded_value) in mutations {
+            corrupt_bcf_gt_allele_value(&bcf_path, allele_offset, encoded_value)?;
+        }
 
         let provider =
             VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
