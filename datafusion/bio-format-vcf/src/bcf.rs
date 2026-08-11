@@ -28,21 +28,20 @@ use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Ty
 use noodles_vcf::header::record::value::map::info::{Number as InfoNumber, Type as InfoType};
 use noodles_vcf::variant::Record as VariantRecord;
 use noodles_vcf::variant::record::Samples as _;
-use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, Info as _, ReferenceBases};
+use noodles_vcf::variant::record::{AlternateBases, Filters, Info as _};
 use tokio::io::AsyncRead;
 
 use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
     adjust_effective_batch_size_by_observed_format_bytes, build_noodles_region,
     build_record_batch_from_builders, choose_effective_batch_size,
-    choose_initial_builder_batch_size, init_format_mode, join_into, load_infos_single_pass,
-    set_info_builders,
+    choose_initial_builder_batch_size, init_format_mode, load_infos_single_pass, set_info_builders,
 };
 use crate::storage::VcfRecordFields;
 
 const SUPPORTED_BCF_VERSION: (u8, u8) = (2, 2);
 const BCF_RECORD_LENGTH_PREFIX_SIZE: usize = 8;
-const BCF_FIXED_SITE_PREFIX_SIZE: usize = 12;
+const BCF_FIXED_SITE_PREFIX_SIZE: usize = 24;
 const MIN_BCF_SHARED_LENGTH: u64 = 24;
 // This is a hard safety ceiling, not a tuning target. Real records are normally
 // orders of magnitude smaller, while the on-disk u32 fields can declare nearly
@@ -83,16 +82,24 @@ fn read_bcf_record_lengths(prefix: [u8; BCF_RECORD_LENGTH_PREFIX_SIZE]) -> io::R
     Ok((shared, individual))
 }
 
-fn validate_bcf_fixed_span(prefix: &[u8; BCF_FIXED_SITE_PREFIX_SIZE]) -> io::Result<()> {
+fn validate_bcf_fixed_site(prefix: &[u8; BCF_FIXED_SITE_PREFIX_SIZE]) -> io::Result<()> {
     let span = i32::from_le_bytes(prefix[8..12].try_into().unwrap());
     if span <= 0 {
-        Err(io::Error::new(
+        return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("invalid BCF record span: rlen is {span}, expected a positive value"),
-        ))
-    } else {
-        Ok(())
+        ));
     }
+
+    let allele_count = u16::from_le_bytes(prefix[18..20].try_into().unwrap());
+    if allele_count == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid BCF allele count: expected at least one reference allele",
+        ));
+    }
+
+    Ok(())
 }
 
 fn read_bcf_record_bounded<R>(
@@ -112,7 +119,7 @@ where
     let (shared, individual) = read_bcf_record_lengths(length_prefix)?;
     let mut fixed_prefix = [0; BCF_FIXED_SITE_PREFIX_SIZE];
     inner.read_exact(&mut fixed_prefix)?;
-    validate_bcf_fixed_span(&fixed_prefix)?;
+    validate_bcf_fixed_site(&fixed_prefix)?;
 
     let remaining = shared + individual - BCF_FIXED_SITE_PREFIX_SIZE as u64;
     let remainder = (&mut *inner).take(remaining);
@@ -139,7 +146,7 @@ where
     let (shared, individual) = read_bcf_record_lengths(length_prefix)?;
     let mut fixed_prefix = [0; BCF_FIXED_SITE_PREFIX_SIZE];
     tokio::io::AsyncReadExt::read_exact(inner, &mut fixed_prefix).await?;
-    validate_bcf_fixed_span(&fixed_prefix)?;
+    validate_bcf_fixed_site(&fixed_prefix)?;
 
     let remaining = shared + individual - BCF_FIXED_SITE_PREFIX_SIZE as u64;
     let remainder = tokio::io::AsyncReadExt::take(&mut *inner, remaining);
@@ -1261,6 +1268,32 @@ impl BcfBatchDecoder {
         }
         let reference_sequence_name = VariantRecord::reference_sequence_name(record, header)
             .map_err(|e| execution_error("invalid BCF contig dictionary index in record", e))?;
+        let record_ids = record.ids();
+        let ids = std::str::from_utf8(record_ids.as_ref())
+            .map_err(|e| execution_error("invalid BCF ID", e))?;
+        let record_reference_bases = record.reference_bases();
+        let reference_bases = std::str::from_utf8(record_reference_bases.as_ref())
+            .map_err(|e| execution_error("invalid BCF reference allele", e))?;
+        if reference_bases.is_empty() {
+            return Err(DataFusionError::Execution(
+                "invalid BCF reference allele: expected a nonempty value".into(),
+            ));
+        }
+        let alternate_bases = record.alternate_bases();
+        for result in alternate_bases.iter() {
+            let alternate_base =
+                result.map_err(|e| execution_error("invalid BCF alternate allele", e))?;
+            if alternate_base.is_empty() {
+                return Err(DataFusionError::Execution(
+                    "invalid BCF alternate allele: expected a nonempty value".into(),
+                ));
+            }
+        }
+        let allele_count = alternate_bases.len() + 1;
+        let quality_score = record
+            .quality_score()
+            .map_err(|e| execution_error("invalid BCF quality score", e))?
+            .map(f64::from);
         for result in record.filters().iter(header) {
             let filter = result
                 .map_err(|e| execution_error("invalid BCF FILTER dictionary index in record", e))?;
@@ -1270,7 +1303,6 @@ impl BcfBatchDecoder {
                 )));
             }
         }
-        let allele_count = record.alternate_bases().len() + 1;
         validate_bcf_info_encoding(&record.info(), header, allele_count)?;
         validate_bcf_format_encoding(&samples, header, allele_count)?;
 
@@ -1333,17 +1365,10 @@ impl BcfBatchDecoder {
                 .append_end(end.expect("end was requested"));
         }
         if self.flags.id {
-            join_into(&mut self.join_buf, record.ids().iter(), ';');
-            self.core_builders.append_id(&self.join_buf);
+            self.core_builders.append_id(ids);
         }
         if self.flags.reference {
-            self.join_buf.clear();
-            for result in record.reference_bases().iter() {
-                self.join_buf.push(char::from(
-                    result.map_err(|e| execution_error("invalid BCF reference allele", e))?,
-                ));
-            }
-            self.core_builders.append_ref(&self.join_buf);
+            self.core_builders.append_ref(reference_bases);
         }
         if self.flags.alt {
             self.join_buf.clear();
@@ -1360,11 +1385,7 @@ impl BcfBatchDecoder {
             self.core_builders.append_alt(&self.join_buf);
         }
         if self.flags.qual {
-            let qual = VariantRecord::quality_score(record)
-                .transpose()
-                .map_err(|e| execution_error("invalid BCF quality score", e))?
-                .map(f64::from);
-            self.core_builders.append_qual(qual);
+            self.core_builders.append_qual(quality_score);
         }
         if self.flags.filter {
             self.join_buf.clear();

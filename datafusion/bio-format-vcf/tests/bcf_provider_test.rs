@@ -1152,6 +1152,68 @@ async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_validates_core_fields_when_columns_are_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\n";
+    let cases = [
+        ("id", "invalid BCF ID"),
+        ("reference", "invalid BCF reference allele"),
+        ("alternate", "invalid BCF alternate allele"),
+        ("quality", "invalid BCF quality score"),
+        ("allele-count", "invalid BCF allele count"),
+    ];
+
+    for (name, expected_error) in cases {
+        let dir = tempfile::tempdir()?;
+        let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, body)?;
+        let mut decompressed = Vec::new();
+        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+        let site_start = 9 + header_len + 8;
+        let ids_offset = site_start + 24;
+        let reference_offset = bcf_typed_value_end(&decompressed, ids_offset);
+        let alternate_offset = bcf_typed_value_end(&decompressed, reference_offset);
+
+        match name {
+            "id" => decompressed[ids_offset + 1] = 0xff,
+            "reference" => decompressed[reference_offset + 1] = 0xff,
+            "alternate" => decompressed[alternate_offset + 1] = 0xff,
+            "quality" => decompressed[site_start + 12..site_start + 16]
+                .copy_from_slice(&0x7f80_0002_u32.to_le_bytes()),
+            "allele-count" => {
+                decompressed[site_start + 18..site_start + 20].copy_from_slice(&0u16.to_le_bytes())
+            }
+            _ => unreachable!(),
+        }
+
+        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        writer.write_all(&decompressed)?;
+        writer.try_finish()?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("an invalid unprojected BCF core field must fail the scan")
+            .to_string();
+        assert!(
+            error.contains(expected_error),
+            "unexpected {name} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_validates_position_when_columns_are_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = "##fileformat=VCFv4.3\n\
