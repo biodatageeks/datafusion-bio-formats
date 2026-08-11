@@ -1199,6 +1199,79 @@ async fn bcf_validates_position_when_columns_are_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_rejects_oversized_declared_record_before_allocation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    decompressed[record_start..record_start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("an oversized declared BCF record must fail before allocation")
+        .to_string();
+    assert!(
+        error.contains("invalid BCF record length") && error.contains("safety limit"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_validates_fixed_span_when_columns_are_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\n";
+
+    for encoded_span in [0i32, -1] {
+        let dir = tempfile::tempdir()?;
+        let (_vcf_path, bcf_path) =
+            write_format_array_bcf(&dir, &format!("span-{encoded_span}"), body)?;
+        let mut decompressed = Vec::new();
+        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+        let site_start = 9 + header_len + 8;
+        decompressed[site_start + 8..site_start + 12].copy_from_slice(&encoded_span.to_le_bytes());
+
+        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        writer.write_all(&decompressed)?;
+        writer.try_finish()?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("a nonpositive unprojected BCF span must fail the scan")
+            .to_string();
+        assert!(
+            error.contains(&format!("invalid BCF record span: rlen is {encoded_span}")),
+            "unexpected span {encoded_span} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

@@ -2,7 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read};
 use std::sync::Arc;
 
 use async_stream::try_stream;
@@ -29,6 +29,7 @@ use noodles_vcf::header::record::value::map::info::{Number as InfoNumber, Type a
 use noodles_vcf::variant::Record as VariantRecord;
 use noodles_vcf::variant::record::Samples as _;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Ids, Info as _, ReferenceBases};
+use tokio::io::AsyncRead;
 
 use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
@@ -40,6 +41,115 @@ use crate::physical_exec::{
 use crate::storage::VcfRecordFields;
 
 const SUPPORTED_BCF_VERSION: (u8, u8) = (2, 2);
+const BCF_RECORD_LENGTH_PREFIX_SIZE: usize = 8;
+const BCF_FIXED_SITE_PREFIX_SIZE: usize = 12;
+const MIN_BCF_SHARED_LENGTH: u64 = 24;
+// This is a hard safety ceiling, not a tuning target. Real records are normally
+// orders of magnitude smaller, while the on-disk u32 fields can declare nearly
+// 8 GiB in aggregate and make the decoder reserve that memory before parsing.
+const MAX_BCF_RECORD_BODY_SIZE: u64 = 256 * 1024 * 1024;
+
+fn read_bcf_record_lengths(prefix: [u8; BCF_RECORD_LENGTH_PREFIX_SIZE]) -> io::Result<(u64, u64)> {
+    let shared = u64::from(u32::from_le_bytes(prefix[..4].try_into().unwrap()));
+    let individual = u64::from(u32::from_le_bytes(prefix[4..].try_into().unwrap()));
+
+    if shared < MIN_BCF_SHARED_LENGTH {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid BCF record length: l_shared is {shared}, expected at least \
+                 {MIN_BCF_SHARED_LENGTH} bytes"
+            ),
+        ));
+    }
+
+    let body_size = shared.checked_add(individual).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid BCF record length: l_shared + l_indiv overflowed",
+        )
+    })?;
+    if body_size > MAX_BCF_RECORD_BODY_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "invalid BCF record length: declared {body_size} body bytes \
+                 (l_shared={shared}, l_indiv={individual}) exceeds the \
+                 {MAX_BCF_RECORD_BODY_SIZE}-byte safety limit"
+            ),
+        ));
+    }
+
+    Ok((shared, individual))
+}
+
+fn validate_bcf_fixed_span(prefix: &[u8; BCF_FIXED_SITE_PREFIX_SIZE]) -> io::Result<()> {
+    let span = i32::from_le_bytes(prefix[8..12].try_into().unwrap());
+    if span <= 0 {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid BCF record span: rlen is {span}, expected a positive value"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn read_bcf_record_bounded<R>(
+    reader: &mut bcf::io::Reader<R>,
+    record: &mut BcfRecord,
+) -> io::Result<usize>
+where
+    R: Read,
+{
+    let inner = reader.get_mut();
+    let mut length_prefix = [0; BCF_RECORD_LENGTH_PREFIX_SIZE];
+    if inner.read(&mut length_prefix[..1])? == 0 {
+        return Ok(0);
+    }
+    inner.read_exact(&mut length_prefix[1..])?;
+
+    let (shared, individual) = read_bcf_record_lengths(length_prefix)?;
+    let mut fixed_prefix = [0; BCF_FIXED_SITE_PREFIX_SIZE];
+    inner.read_exact(&mut fixed_prefix)?;
+    validate_bcf_fixed_span(&fixed_prefix)?;
+
+    let remaining = shared + individual - BCF_FIXED_SITE_PREFIX_SIZE as u64;
+    let remainder = (&mut *inner).take(remaining);
+    let bounded = Cursor::new(length_prefix)
+        .chain(Cursor::new(fixed_prefix))
+        .chain(remainder);
+    bcf::io::Reader::from(bounded).read_record(record)
+}
+
+async fn read_bcf_record_bounded_async<R>(
+    reader: &mut bcf::r#async::io::Reader<R>,
+    record: &mut BcfRecord,
+) -> io::Result<usize>
+where
+    R: AsyncRead + Unpin,
+{
+    let inner = reader.get_mut();
+    let mut length_prefix = [0; BCF_RECORD_LENGTH_PREFIX_SIZE];
+    if tokio::io::AsyncReadExt::read(inner, &mut length_prefix[..1]).await? == 0 {
+        return Ok(0);
+    }
+    tokio::io::AsyncReadExt::read_exact(inner, &mut length_prefix[1..]).await?;
+
+    let (shared, individual) = read_bcf_record_lengths(length_prefix)?;
+    let mut fixed_prefix = [0; BCF_FIXED_SITE_PREFIX_SIZE];
+    tokio::io::AsyncReadExt::read_exact(inner, &mut fixed_prefix).await?;
+    validate_bcf_fixed_span(&fixed_prefix)?;
+
+    let remaining = shared + individual - BCF_FIXED_SITE_PREFIX_SIZE as u64;
+    let remainder = tokio::io::AsyncReadExt::take(&mut *inner, remaining);
+    let prefixes =
+        tokio::io::AsyncReadExt::chain(Cursor::new(length_prefix), Cursor::new(fixed_prefix));
+    let bounded = tokio::io::AsyncReadExt::chain(prefixes, remainder);
+    bcf::r#async::io::Reader::from(bounded)
+        .read_record(record)
+        .await
+}
 
 fn execution_error(context: &str, error: impl std::fmt::Display) -> DataFusionError {
     DataFusionError::Execution(format!("{context}: {error}"))
@@ -1071,6 +1181,12 @@ impl BcfBatchDecoder {
         let needs_chrom = self.flags.chrom || has_filters;
 
         let position = validate_bcf_position(record)?;
+        // BCF stores the record span independently from the projected columns.
+        // Validate it for every record so an empty projection (e.g. COUNT(*))
+        // cannot accept a record that projecting `end` would reject.
+        let record_end = record
+            .end()
+            .map_err(|e| execution_error("invalid BCF record span", e))?;
         let start = needs_start.then_some(if self.coordinate_system_zero_based {
             position - 1
         } else {
@@ -1084,10 +1200,7 @@ impl BcfBatchDecoder {
         };
 
         let end = if needs_end {
-            let position = record
-                .variant_end(header)
-                .map_err(|e| execution_error("invalid BCF variant span", e))?;
-            Some(u32::try_from(position.get()).map_err(|_| {
+            Some(u32::try_from(record_end.get()).map_err(|_| {
                 DataFusionError::Execution("BCF end position exceeds UInt32 range".into())
             })?)
         } else {
@@ -1276,8 +1389,7 @@ fn full_local_stream(
         let mut emitted = 0usize;
 
         loop {
-            let record_size = reader
-                .read_record(&mut record)
+            let record_size = read_bcf_record_bounded(&mut reader, &mut record)
                 .map_err(|e| execution_error("failed to decode BCF record", e))?;
             if record_size == 0 {
                 break;
@@ -1344,8 +1456,7 @@ async fn full_remote_stream(
         let mut emitted = 0usize;
 
         loop {
-            let record_size = reader
-                .read_record(&mut record)
+            let record_size = read_bcf_record_bounded_async(&mut reader, &mut record)
                 .await
                 .map_err(|e| execution_error("failed to decode remote BCF record", e))?;
             if record_size == 0 {
@@ -1424,26 +1535,36 @@ fn indexed_local_stream(
             // A filter on a contig absent from this file matches no rows; skip it
             // instead of letting the query fail (the indexed text-VCF path skips
             // unknown contigs the same way).
-            if header
+            let Some(reference_sequence_id) = header
                 .string_maps()
                 .contigs()
                 .get_index_of(region.chrom.as_str())
-                .is_none()
-            {
+            else {
                 log::debug!(
                     "skipping BCF region {}: contig not present in header dictionary",
                     region.chrom
                 );
                 continue;
-            }
+            };
             let noodles_region = build_noodles_region(&region)?;
-            let query = reader
-                .query(&header, index.as_ref(), &noodles_region)
+            let chunks = noodles_csi::BinningIndex::query(
+                index.as_ref(),
+                reference_sequence_id,
+                noodles_region.interval(),
+            )
                 .map_err(|e| execution_error("failed to query BCF CSI index", e))?;
+            // Build the CSI byte-range reader explicitly so record lengths are
+            // checked before the BCF decoder allocates its site/sample buffers.
+            let query = noodles_csi::io::Query::new(reader.get_mut(), chunks);
+            let mut query_reader = bcf::io::Reader::from(query);
+            let mut record = BcfRecord::default();
 
-            for result in query {
-                let record =
-                    result.map_err(|e| execution_error("failed to decode indexed BCF record", e))?;
+            loop {
+                let record_size = read_bcf_record_bounded(&mut query_reader, &mut record)
+                    .map_err(|e| execution_error("failed to decode indexed BCF record", e))?;
+                if record_size == 0 {
+                    break;
+                }
                 // The CSI query matches by interval overlap; keep only records that
                 // start inside this partition's sub-region so records spanning a
                 // partition boundary are not emitted twice.
@@ -1580,8 +1701,7 @@ async fn indexed_remote_stream(
             let mut record = BcfRecord::default();
 
             while reader.get_ref().virtual_position() < local_end {
-                let record_size = reader
-                    .read_record(&mut record)
+                let record_size = read_bcf_record_bounded(&mut reader, &mut record)
                     .map_err(|error| {
                         execution_error("failed to decode remote indexed BCF record", error)
                     })?;
