@@ -911,21 +911,24 @@ fn record_starts_in_regions(
 ) -> Result<bool> {
     let chrom = VariantRecord::reference_sequence_name(record, header)
         .map_err(|error| execution_error("invalid BCF contig dictionary index", error))?;
-    let Some(start) = record
-        .variant_start()
-        .transpose()
-        .map_err(|error| execution_error("invalid BCF position", error))?
-    else {
-        return Ok(false);
-    };
-    let start = start.get() as u64;
+    let start = validate_bcf_position(record)?;
 
     Ok(regions.iter().any(|region| {
         !region.unmapped_tail
             && region.chrom == chrom
-            && start >= region.start.unwrap_or(1)
-            && start <= region.end.unwrap_or(u64::MAX)
+            && u64::from(start) >= region.start.unwrap_or(1)
+            && u64::from(start) <= region.end.unwrap_or(u64::MAX)
     }))
+}
+
+fn validate_bcf_position(record: &BcfRecord) -> Result<u32> {
+    let position = record
+        .variant_start()
+        .transpose()
+        .map_err(|error| execution_error("invalid BCF position", error))?
+        .ok_or_else(|| DataFusionError::Execution("BCF record has no position".into()))?;
+    u32::try_from(position.get())
+        .map_err(|_| DataFusionError::Execution("BCF position exceeds UInt32 range".into()))
 }
 
 struct BcfBatchDecoder {
@@ -1067,23 +1070,12 @@ impl BcfBatchDecoder {
         let needs_end = self.flags.end || has_filters;
         let needs_chrom = self.flags.chrom || has_filters;
 
-        let start = if needs_start {
-            let position = record
-                .variant_start()
-                .transpose()
-                .map_err(|e| execution_error("invalid BCF position", e))?
-                .ok_or_else(|| DataFusionError::Execution("BCF record has no position".into()))?;
-            let position = u32::try_from(position.get()).map_err(|_| {
-                DataFusionError::Execution("BCF position exceeds UInt32 range".into())
-            })?;
-            Some(if self.coordinate_system_zero_based {
-                position - 1
-            } else {
-                position
-            })
+        let position = validate_bcf_position(record)?;
+        let start = needs_start.then_some(if self.coordinate_system_zero_based {
+            position - 1
         } else {
-            None
-        };
+            position
+        });
 
         let chrom = if needs_chrom {
             Some(reference_sequence_name.to_string())

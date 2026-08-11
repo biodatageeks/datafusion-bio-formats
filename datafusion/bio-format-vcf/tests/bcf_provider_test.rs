@@ -1152,6 +1152,53 @@ async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_validates_position_when_columns_are_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\n";
+    let cases = [
+        (-1i32, "BCF record has no position"),
+        (-2, "invalid BCF position"),
+    ];
+
+    for (encoded_position, expected_error) in cases {
+        let dir = tempfile::tempdir()?;
+        let (_vcf_path, bcf_path) =
+            write_format_array_bcf(&dir, &format!("position-{encoded_position}"), body)?;
+
+        let mut decompressed = Vec::new();
+        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+        let site_start = 9 + header_len + 8;
+        decompressed[site_start + 4..site_start + 8]
+            .copy_from_slice(&encoded_position.to_le_bytes());
+        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        writer.write_all(&decompressed)?;
+        writer.try_finish()?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("an invalid unprojected BCF position must fail the scan")
+            .to_string();
+        assert!(
+            error.contains(expected_error),
+            "unexpected position {encoded_position} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
