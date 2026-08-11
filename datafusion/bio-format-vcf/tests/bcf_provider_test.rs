@@ -1926,7 +1926,8 @@ async fn bcf_accepts_missing_sample_in_fixed_format_array() -> Result<(), Box<dy
                 ##contig=<ID=chr1,length=1000>\n\
                 ##FORMAT=<ID=AD,Number=2,Type=Integer,Description=\"Allelic depths\">\n\
                 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
-                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tAD\t.\t5,7\n";
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tAD\t.\t5,7\n\
+                chr1\t20\trs2\tG\tT\t50\tPASS\t.\tAD\t.,.\t8,9\n";
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "missing-format-sample", body)?;
 
     let provider = VcfTableProvider::new_with_samples_and_format(
@@ -1942,7 +1943,7 @@ async fn bcf_accepts_missing_sample_in_fixed_format_array() -> Result<(), Box<dy
     let context = SessionContext::new();
     context.register_table("variants", Arc::new(provider))?;
     let batches = context
-        .sql("SELECT genotypes FROM variants")
+        .sql("SELECT genotypes FROM variants ORDER BY start")
         .await?
         .collect()
         .await?;
@@ -1972,6 +1973,30 @@ async fn bcf_accepts_missing_sample_in_fixed_format_array() -> Result<(), Box<dy
         .downcast_ref::<Int32Array>()
         .expect("present AD values should be Int32");
     assert_eq!(s2.values(), &[5, 7]);
+
+    let samples = ad_rows.value(1);
+    let samples = samples
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("each AD sample should be a nullable integer list");
+    assert!(
+        !datafusion::arrow::array::Array::is_null(samples, 0),
+        "an explicit two-element missing array must remain present"
+    );
+    let s1 = samples.value(0);
+    let s1 = s1
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("explicit AD elements should be Int32");
+    assert_eq!(s1.len(), 2);
+    assert!(datafusion::arrow::array::Array::is_null(s1, 0));
+    assert!(datafusion::arrow::array::Array::is_null(s1, 1));
+    let s2 = samples.value(1);
+    let s2 = s2
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("present AD values should be Int32");
+    assert_eq!(s2.values(), &[8, 9]);
     Ok(())
 }
 
@@ -2032,11 +2057,13 @@ async fn bcf_rejects_excess_values_for_scalar_format_field()
 #[tokio::test]
 async fn bcf_format_array_missing_elements_decode_as_nulls()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Single-sample path: FORMAT AD=5,. must decode as [5, null], not error.
+    // Single-sample path: missing elements remain inner nulls, including when
+    // every explicitly present array element is missing.
     let dir = tempfile::tempdir()?;
     let body = format!(
         "{FORMAT_ARRAY_HEADER}#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
-         chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT:AD\t0/1:5,.\n"
+         chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT:AD\t0/1:5,.\n\
+         chr1\t20\trs2\tG\tT\t50\tPASS\t.\tGT:AD\t0/0:.,.\n"
     );
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "single", &body)?;
 
@@ -2058,7 +2085,7 @@ async fn bcf_format_array_missing_elements_decode_as_nulls()
         .await?
         .collect()
         .await?;
-    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 2);
     let list = batches[0]
         .column(0)
         .as_any()
@@ -2075,6 +2102,15 @@ async fn bcf_format_array_missing_elements_decode_as_nulls()
         datafusion::arrow::array::Array::is_null(ints, 1),
         "missing FORMAT array element must decode as null"
     );
+
+    let values = list.value(1);
+    let ints = values
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("AD elements should be Int32");
+    assert_eq!(ints.len(), 2);
+    assert!(datafusion::arrow::array::Array::is_null(ints, 0));
+    assert!(datafusion::arrow::array::Array::is_null(ints, 1));
     Ok(())
 }
 

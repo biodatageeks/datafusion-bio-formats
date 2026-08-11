@@ -1391,6 +1391,10 @@ fn pool_slice<T>(pool: &[Option<T>], start: usize, len: usize) -> Option<&[Optio
     pool.get(start..end)
 }
 
+fn decoded_array_is_wholly_missing<T>(encoded_len: usize, values: &[Option<T>]) -> bool {
+    values.iter().all(Option::is_none) && (values.len() < encoded_len || values.len() <= 1)
+}
+
 /// Multisample FORMAT builder that emits a single columnar `genotypes` column:
 /// `Struct<GT: List<Utf8>, GQ: List<Int32>, DP: List<Int32>, ...>`.
 /// Each list has N elements (one per selected sample) in sample order.
@@ -1611,12 +1615,16 @@ impl MultiSampleFormatBuilder {
                         Some(SV::Character(c)) => Some(ParsedFormatValue::String(c.to_string())),
                         Some(SV::Array(arr)) => match arr {
                             SamplesArray::Integer(values) => {
+                                let encoded_len = values.len();
                                 let start = self.array_int_pool.len();
                                 for v in values.iter() {
                                     self.array_int_pool
                                         .push(v.map_err(|e| format_value_error(key, e))?);
                                 }
-                                if self.array_int_pool[start..].iter().all(Option::is_none) {
+                                if decoded_array_is_wholly_missing(
+                                    encoded_len,
+                                    &self.array_int_pool[start..],
+                                ) {
                                     self.array_int_pool.truncate(start);
                                     None
                                 } else {
@@ -1627,12 +1635,16 @@ impl MultiSampleFormatBuilder {
                                 }
                             }
                             SamplesArray::Float(values) => {
+                                let encoded_len = values.len();
                                 let start = self.array_float_pool.len();
                                 for v in values.iter() {
                                     self.array_float_pool
                                         .push(v.map_err(|e| format_value_error(key, e))?);
                                 }
-                                if self.array_float_pool[start..].iter().all(Option::is_none) {
+                                if decoded_array_is_wholly_missing(
+                                    encoded_len,
+                                    &self.array_float_pool[start..],
+                                ) {
                                     self.array_float_pool.truncate(start);
                                     None
                                 } else {
@@ -1643,6 +1655,7 @@ impl MultiSampleFormatBuilder {
                                 }
                             }
                             SamplesArray::String(values) => {
+                                let encoded_len = values.len();
                                 let start = self.array_string_pool.len();
                                 for v in values.iter() {
                                     self.array_string_pool.push(
@@ -1650,7 +1663,10 @@ impl MultiSampleFormatBuilder {
                                             .map(|s| s.to_string()),
                                     );
                                 }
-                                if self.array_string_pool[start..].iter().all(Option::is_none) {
+                                if decoded_array_is_wholly_missing(
+                                    encoded_len,
+                                    &self.array_string_pool[start..],
+                                ) {
                                     self.array_string_pool.truncate(start);
                                     None
                                 } else {
@@ -1661,6 +1677,7 @@ impl MultiSampleFormatBuilder {
                                 }
                             }
                             SamplesArray::Character(values) => {
+                                let encoded_len = values.len();
                                 let start = self.array_string_pool.len();
                                 for v in values.iter() {
                                     self.array_string_pool.push(
@@ -1668,7 +1685,10 @@ impl MultiSampleFormatBuilder {
                                             .map(|c| c.to_string()),
                                     );
                                 }
-                                if self.array_string_pool[start..].iter().all(Option::is_none) {
+                                if decoded_array_is_wholly_missing(
+                                    encoded_len,
+                                    &self.array_string_pool[start..],
+                                ) {
                                     self.array_string_pool.truncate(start);
                                     None
                                 } else {
@@ -2237,12 +2257,13 @@ fn load_formats_single_pass(
                 }
                 Some(SV::Array(arr)) => match arr {
                     SamplesArray::Integer(values) => {
+                        let encoded_len = values.len();
                         let ints: Vec<Option<i32>> = values
                             .iter()
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
                         validate_scalar_format_value_count(key, data_type, ints.len())?;
-                        if ints.iter().all(|v| v.is_none()) {
+                        if decoded_array_is_wholly_missing(encoded_len, &ints) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Int32) {
                             if let Some(first) = ints.iter().copied().flatten().next() {
@@ -2255,12 +2276,13 @@ fn load_formats_single_pass(
                         }
                     }
                     SamplesArray::Float(values) => {
+                        let encoded_len = values.len();
                         let floats: Vec<Option<f32>> = values
                             .iter()
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
                         validate_scalar_format_value_count(key, data_type, floats.len())?;
-                        if floats.iter().all(|v| v.is_none()) {
+                        if decoded_array_is_wholly_missing(encoded_len, &floats) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Float32) {
                             if let Some(first) = floats.iter().copied().flatten().next() {
@@ -2273,13 +2295,14 @@ fn load_formats_single_pass(
                         }
                     }
                     SamplesArray::String(values) => {
+                        let encoded_len = values.len();
                         let strings: Vec<Option<String>> = values
                             .iter()
                             .map(|result| result.map(|value| value.map(|s| s.to_string())))
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
                         validate_scalar_format_value_count(key, data_type, strings.len())?;
-                        if strings.iter().all(|v| v.is_none()) {
+                        if decoded_array_is_wholly_missing(encoded_len, &strings) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Utf8) {
                             if let Some(first) = strings.iter().flatten().next() {
@@ -2292,13 +2315,14 @@ fn load_formats_single_pass(
                         }
                     }
                     SamplesArray::Character(values) => {
+                        let encoded_len = values.len();
                         let chars: Vec<Option<String>> = values
                             .iter()
                             .map(|result| result.map(|value| value.map(|c| c.to_string())))
                             .collect::<std::io::Result<_>>()
                             .map_err(|e| format_value_error(key, e))?;
                         validate_scalar_format_value_count(key, data_type, chars.len())?;
-                        if chars.iter().all(|v| v.is_none()) {
+                        if decoded_array_is_wholly_missing(encoded_len, &chars) {
                             builder.append_null()?;
                         } else if matches!(data_type, DataType::Utf8) {
                             if let Some(first) = chars.iter().flatten().next() {
