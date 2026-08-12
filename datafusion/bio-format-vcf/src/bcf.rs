@@ -1383,14 +1383,67 @@ async fn remote_bgzf_block_end(object: &RemoteObject, start: u64) -> Result<u64>
 pub(crate) async fn load_csi_index(
     index_path: &str,
     object_storage_options: Option<ObjectStorageOptions>,
-) -> Option<Arc<noodles_csi::Index>> {
-    match read_csi_index(index_path, object_storage_options).await {
-        Ok(index) => Some(Arc::new(index)),
-        Err(error) => {
-            log::debug!("failed to read BCF CSI index at planning time: {error}");
-            None
-        }
+) -> Result<Arc<noodles_csi::Index>> {
+    read_csi_index(index_path, object_storage_options)
+        .await
+        .map(Arc::new)
+}
+
+/// Validates every reference-dictionary property represented by CSI.
+///
+/// Standard BCF CSI files do not carry reference names, so their reference
+/// count is the strongest planning-time dictionary check available. If an
+/// auxiliary CSI header does carry names, require exact name and order parity
+/// with the BCF header as well.
+pub(crate) fn validate_csi_reference_dictionary(
+    index: &noodles_csi::Index,
+    bcf_header: &Header,
+) -> Result<()> {
+    use noodles_csi::BinningIndex;
+
+    let bcf_contigs = bcf_header.string_maps().contigs();
+    let mut bcf_names = Vec::with_capacity(bcf_header.contigs().len());
+    for reference_sequence_id in 0..bcf_header.contigs().len() {
+        let name = bcf_contigs
+            .get_index(reference_sequence_id)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "invalid BCF reference dictionary: missing contig ID {reference_sequence_id}"
+                ))
+            })?;
+        bcf_names.push(name);
     }
+    let index_reference_count = index.reference_sequences().len();
+    if index_reference_count != bcf_names.len() {
+        return Err(DataFusionError::Execution(format!(
+            "BCF CSI reference dictionary mismatch: BCF header has {} contigs, but CSI has {}",
+            bcf_names.len(),
+            index_reference_count
+        )));
+    }
+
+    let Some(index_header) = index.header() else {
+        return Ok(());
+    };
+    let index_names = index_header.reference_sequence_names();
+    if index_names.is_empty() {
+        return Ok(());
+    }
+
+    let dictionaries_match = index_names.len() == bcf_names.len()
+        && index_names
+            .iter()
+            .zip(bcf_names.iter())
+            .all(|(index_name, bcf_name)| index_name.as_slice() == bcf_name.as_bytes());
+    if !dictionaries_match {
+        return Err(DataFusionError::Execution(
+            "BCF CSI reference dictionary mismatch: CSI names or ordering differ from the BCF \
+             header"
+                .into(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Returns the 1-based inclusive coordinate interval represented by a CSI bin.
@@ -2691,14 +2744,15 @@ fn indexed_local_stream(
 ) -> SendableRecordBatchStream {
     let output_schema = schema.clone();
     let stream = try_stream! {
-        let index = match shared_index {
-            Some(index) => index,
-            None => Arc::new(read_local_csi_index(&index_path)?),
-        };
         let file = File::open(local_path(&file_path))
             .map_err(|e| execution_error("failed to open indexed BCF", e))?;
         let mut reader = bcf::io::Reader::new(file);
         let header = read_bcf_header_bounded(reader.get_mut())?;
+        let index = match shared_index {
+            Some(index) => index,
+            None => Arc::new(read_local_csi_index(&index_path)?),
+        };
+        validate_csi_reference_dictionary(index.as_ref(), &header)?;
         let mut decoder = BcfBatchDecoder::new(
             &header,
             schema,
@@ -2807,6 +2861,7 @@ async fn indexed_remote_stream(
         Some(index) => index,
         None => Arc::new(read_csi_index(&index_path, Some(options.clone())).await?),
     };
+    validate_csi_reference_dictionary(index.as_ref(), &header)?;
     let chunks = plan_remote_chunks(index.as_ref(), &header, &regions)?;
     let object = RemoteObject::open(file_path, options)
         .await
@@ -3128,6 +3183,36 @@ mod tests {
         );
         assert_eq!(csi_bin_interval(9, 10, 2), Some((1, 1024, 2)));
         assert_eq!(csi_bin_interval(37_450, 14, 5), None);
+    }
+
+    #[test]
+    fn rejects_named_csi_dictionary_with_different_order() {
+        let mut bcf_header = vcf::Header::builder()
+            .add_contig("chr1", Default::default())
+            .add_contig("chr2", Default::default())
+            .build();
+        *bcf_header.string_maps_mut() = vcf::header::StringMaps::try_from(&bcf_header).unwrap();
+        let csi_header = noodles_csi::binning_index::index::Header::builder()
+            .set_reference_sequence_names(["chr2", "chr1"].into_iter().map(Into::into).collect())
+            .build();
+        let reference_sequences = (0..2)
+            .map(|_| {
+                noodles_csi::binning_index::index::ReferenceSequence::new(
+                    Default::default(),
+                    Default::default(),
+                    None,
+                )
+            })
+            .collect();
+        let index = noodles_csi::Index::builder()
+            .set_header(csi_header)
+            .set_reference_sequences(reference_sequences)
+            .build();
+
+        let error = validate_csi_reference_dictionary(&index, &bcf_header)
+            .expect_err("different CSI name order must be rejected")
+            .to_string();
+        assert!(error.contains("names or ordering differ"));
     }
 
     #[tokio::test]

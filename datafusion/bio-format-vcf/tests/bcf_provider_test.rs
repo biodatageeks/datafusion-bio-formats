@@ -396,6 +396,39 @@ async fn bcf_uses_csi_for_region_queries() -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+#[tokio::test]
+async fn local_bcf_rejects_csi_with_different_reference_count()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_bcf_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let (_index_dir, _partitioned_bcf, foreign_index_path, _) = create_partitioned_bcf()?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        Some(foreign_index_path),
+    )?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+
+    let error = context
+        .sql("SELECT id FROM variants WHERE chrom = 'chr1'")
+        .await?
+        .collect()
+        .await
+        .expect_err("a CSI for a different reference dictionary must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("BCF header has 2 contigs, but CSI has 1"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
 #[test]
 fn bcf_reports_indexed_coordinate_pushdown_as_inexact() -> Result<(), Box<dyn std::error::Error>> {
     let (dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
@@ -488,6 +521,35 @@ async fn remote_bcf_uses_csi_range_requests() -> Result<(), Box<dyn std::error::
         bcf_non_range_requests, 0,
         "the header parsed at provider construction should be shared across \
          partitions: {requests:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_bcf_rejects_csi_with_different_reference_count()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_bcf_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let (_index_dir, _partitioned_bcf, foreign_index_path, _) = create_partitioned_bcf()?;
+    let server = RangeServer::start(
+        std::fs::read(&bcf_path)?,
+        std::fs::read(foreign_index_path)?,
+    );
+
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+
+    let error = context
+        .sql("SELECT id FROM variants WHERE chrom = 'chr1'")
+        .await?
+        .collect()
+        .await
+        .expect_err("a remote CSI for a different reference dictionary must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("BCF header has 2 contigs, but CSI has 1"),
+        "unexpected error: {error}"
     );
     Ok(())
 }

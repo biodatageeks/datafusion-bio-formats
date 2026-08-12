@@ -998,7 +998,12 @@ impl VcfTableProvider {
                 }
             };
 
-            if !index_names.is_empty() {
+            // A BCF header is the authoritative reference dictionary. Standard
+            // BCF CSI companions do not include reference names, and replacing
+            // the BCF names with optional CSI auxiliary names can silently map
+            // reference IDs to the wrong contigs. BCF CSI parity is validated
+            // when the index is loaded for a scan.
+            if input_format == VcfInputFormat::Vcf && !index_names.is_empty() {
                 let fmt_label = index_format
                     .map(|f| format!("{f:?}"))
                     .unwrap_or_else(|| "index".to_string());
@@ -1278,11 +1283,18 @@ impl TableProvider for VcfTableProvider {
                 let mut bcf_shared_index = None;
                 let estimates = match self.input_format {
                     VcfInputFormat::Bcf => {
-                        bcf_shared_index = crate::bcf::load_csi_index(
+                        let bcf_header = self.bcf_header.as_deref().ok_or_else(|| {
+                            datafusion::common::DataFusionError::Internal(
+                                "BCF provider is missing its parsed header".into(),
+                            )
+                        })?;
+                        let index = crate::bcf::load_csi_index(
                             index_path,
                             self.object_storage_options.clone(),
                         )
-                        .await;
+                        .await?;
+                        crate::bcf::validate_csi_reference_dictionary(index.as_ref(), bcf_header)?;
+                        bcf_shared_index = Some(index);
                         crate::bcf::estimate_region_sizes(
                             bcf_shared_index.as_deref(),
                             &regions,
