@@ -16,7 +16,7 @@ use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use datafusion_bio_format_core::genotype::MissingSamplePolicy;
 use datafusion_bio_format_vcf::table_provider::{
-    GenotypeOutputMode, VcfInputFormat, VcfTableProvider,
+    GenotypeOutputMode, VcfInputFormat, VcfTableProvider, describe_fields,
 };
 use noodles_bcf as bcf;
 use noodles_vcf as vcf;
@@ -393,6 +393,17 @@ async fn bcf_uses_csi_for_region_queries() -> Result<(), Box<dyn std::error::Err
     assert!(rows.contains("rs3"));
     assert!(!rows.contains("rs1"));
     assert!(!rows.contains("rs2"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_describe_fields_matches_vcf() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+
+    let vcf_fields = describe_fields(&vcf_path, None).await?;
+    let bcf_fields = describe_fields(&bcf_path, None).await?;
+
+    assert_eq!(bcf_fields, vcf_fields);
     Ok(())
 }
 

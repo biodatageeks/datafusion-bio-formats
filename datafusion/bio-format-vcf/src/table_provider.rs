@@ -482,6 +482,23 @@ impl VcfInputFormat {
     }
 }
 
+/// Describes INFO and FORMAT fields from either a VCF or BCF header.
+///
+/// The physical input format is inferred from `file_path`, including remote
+/// URLs with query strings or fragments. No variant records are decoded.
+pub async fn describe_fields(
+    file_path: &str,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::common::Result<datafusion::arrow::record_batch::RecordBatch> {
+    let input_format = VcfInputFormat::Auto.resolve(file_path);
+    let header = match input_format {
+        VcfInputFormat::Vcf => get_header(file_path.to_string(), object_storage_options).await?,
+        VcfInputFormat::Bcf => crate::bcf::read_header(file_path, object_storage_options).await?,
+        VcfInputFormat::Auto => unreachable!("input format was resolved"),
+    };
+    Ok(crate::storage::get_vcf_fields(&header).await)
+}
+
 /// A DataFusion table provider for reading VCF or BCF files.
 ///
 /// This provider enables SQL queries on VCF files by implementing the DataFusion
