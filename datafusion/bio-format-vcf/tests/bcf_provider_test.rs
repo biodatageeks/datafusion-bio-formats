@@ -69,8 +69,10 @@ fn create_partitioned_bcf() -> Result<(TempDir, String, String, usize), Box<dyn 
     let bcf_path = bcf_path_buf.to_string_lossy().into_owned();
 
     let mut vcf_text = String::from(
+        // Deliberately omit the contig length: CSI bin geometry must still make
+        // this single-contig input splittable, as in common real-world headers.
         "##fileformat=VCFv4.3\n\
-         ##contig=<ID=chr1,length=1000000>\n\
+         ##contig=<ID=chr1>\n\
          ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
          #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n",
     );
@@ -772,7 +774,7 @@ async fn truncated_bcf_fails_during_scan() -> Result<(), Box<dyn std::error::Err
 }
 
 #[tokio::test]
-async fn bcf_partition_splits_do_not_duplicate_spanning_records()
+async fn bcf_partition_splits_without_contig_length_do_not_duplicate_spanning_records()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, bcf_path, index_path, total_records) = create_partitioned_bcf()?;
 
@@ -806,7 +808,7 @@ async fn bcf_partition_splits_do_not_duplicate_spanning_records()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn remote_bcf_executes_multiple_csi_partitions_with_unique_rows()
+async fn remote_bcf_without_contig_length_executes_multiple_csi_partitions_with_unique_rows()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, bcf_path, index_path, total_records) = create_partitioned_bcf()?;
     let server = RangeServer::start(std::fs::read(bcf_path)?, std::fs::read(index_path)?);

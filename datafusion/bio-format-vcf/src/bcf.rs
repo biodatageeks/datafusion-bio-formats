@@ -1393,12 +1393,40 @@ pub(crate) async fn load_csi_index(
     }
 }
 
+/// Returns the 1-based inclusive coordinate interval represented by a CSI bin.
+///
+/// CSI numbers bins breadth-first. Level 0 is the root, and level `depth`
+/// contains the smallest bins whose width is `1 << min_shift` bases.
+fn csi_bin_interval(bin_id: usize, min_shift: u8, depth: u8) -> Option<(u64, u64, u8)> {
+    for level in 0..=depth {
+        let level_shift = u32::from(level).checked_mul(3)?;
+        let bin_count = 1usize.checked_shl(level_shift)?;
+        let first_bin = bin_count.checked_sub(1)?.checked_div(7)?;
+        let bins_end = first_bin.checked_add(bin_count)?;
+        if !(first_bin..bins_end).contains(&bin_id) {
+            continue;
+        }
+
+        let span_shift = u32::from(min_shift)
+            .checked_add(u32::from(depth.checked_sub(level)?).checked_mul(3)?)?;
+        let span = 1u64.checked_shl(span_shift)?;
+        let bin_offset = u64::try_from(bin_id.checked_sub(first_bin)?).ok()?;
+        let start = bin_offset.checked_mul(span)?.checked_add(1)?;
+        let end = start.checked_add(span.checked_sub(1)?)?;
+        return Some((start, end, level));
+    }
+
+    None
+}
+
 pub(crate) fn estimate_region_sizes(
     index: Option<&noodles_csi::Index>,
     regions: &[datafusion_bio_format_core::genomic_filter::GenomicRegion],
     contig_names: &[String],
     contig_lengths: &[u64],
 ) -> Vec<RegionSizeEstimate> {
+    use noodles_csi::BinningIndex;
+
     let Some(index) = index else {
         return regions
             .iter()
@@ -1425,8 +1453,9 @@ pub(crate) fn estimate_region_sizes(
         .cloned()
         .map(|region| {
             let reference_index = name_to_index.get(region.chrom.as_str()).copied();
-            let estimated_bytes = reference_index
-                .and_then(|index_value| index.reference_sequences().get(index_value))
+            let reference = reference_index
+                .and_then(|index_value| index.reference_sequences().get(index_value));
+            let estimated_bytes = reference
                 .map(|reference| {
                     let mut min_offset = u64::MAX;
                     let mut max_offset = 0;
@@ -1443,18 +1472,49 @@ pub(crate) fn estimate_region_sizes(
                     }
                 })
                 .unwrap_or(1);
-            let contig_length = reference_index
+            let declared_contig_length = reference_index
                 .and_then(|index_value| contig_lengths.get(index_value))
                 .copied()
                 .filter(|length| *length > 0);
 
+            // A valid VCF/BCF header may omit contig lengths. Infer a safe upper
+            // coordinate bound from populated CSI bins so a single large contig
+            // remains splittable. Finest-level bin starts also let the shared
+            // balancer place boundaries near actual data instead of empty space.
+            let min_shift = index.min_shift();
+            let depth = index.depth();
+            let leaf_span = 1u64.checked_shl(u32::from(min_shift)).unwrap_or(0);
+            let mut inferred_contig_length = None;
+            let mut nonempty_bin_positions = Vec::new();
+            if let Some(reference) = reference {
+                for (&bin_id, bin) in reference.bins() {
+                    if bin.chunks().is_empty() {
+                        continue;
+                    }
+                    let Some((start, end, level)) = csi_bin_interval(bin_id, min_shift, depth)
+                    else {
+                        continue;
+                    };
+                    inferred_contig_length =
+                        Some(inferred_contig_length.map_or(end, |current: u64| current.max(end)));
+                    if level == depth {
+                        nonempty_bin_positions.push(start);
+                    }
+                }
+            }
+            nonempty_bin_positions.sort_unstable();
+
             RegionSizeEstimate {
                 region,
                 estimated_bytes,
-                contig_length,
+                contig_length: declared_contig_length.or(inferred_contig_length),
                 unmapped_count: 0,
-                nonempty_bin_positions: Vec::new(),
-                leaf_bin_span: 0,
+                leaf_bin_span: if nonempty_bin_positions.is_empty() {
+                    0
+                } else {
+                    leaf_span
+                },
+                nonempty_bin_positions,
             }
         })
         .collect()
@@ -3055,6 +3115,19 @@ mod tests {
         assert!(validate_version((2, 2)).is_ok());
         assert!(validate_version((2, 1)).is_err());
         assert!(validate_version((3, 0)).is_err());
+    }
+
+    #[test]
+    fn maps_general_csi_bins_to_coordinate_intervals() {
+        assert_eq!(csi_bin_interval(0, 14, 5), Some((1, 536_870_912, 0)));
+        assert_eq!(csi_bin_interval(4681, 14, 5), Some((1, 16_384, 5)));
+        assert_eq!(csi_bin_interval(4682, 14, 5), Some((16_385, 32_768, 5)));
+        assert_eq!(
+            csi_bin_interval(37_448, 14, 5),
+            Some((536_854_529, 536_870_912, 5))
+        );
+        assert_eq!(csi_bin_interval(9, 10, 2), Some((1, 1024, 2)));
+        assert_eq!(csi_bin_interval(37_450, 14, 5), None);
     }
 
     #[tokio::test]
