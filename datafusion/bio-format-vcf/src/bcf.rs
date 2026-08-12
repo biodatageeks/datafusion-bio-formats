@@ -31,6 +31,7 @@ use noodles_vcf::header::record::value::map::info::{Number as InfoNumber, Type a
 use noodles_vcf::variant::Record as VariantRecord;
 use noodles_vcf::variant::record::Samples as _;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Info as _};
+use smallvec::SmallVec;
 use tokio::io::AsyncRead;
 
 use crate::physical_exec::{
@@ -1038,6 +1039,7 @@ fn validate_bcf_format_encoding<'a>(
     let mut src = samples.as_ref();
     let mut gt_encoding = None;
     let mut has_number_g = false;
+    let mut seen_key_indices = SmallVec::<[usize; 8]>::new();
 
     for _ in 0..samples.format_count() {
         let key_index = usize::try_from(read_bcf_typed_integer(&mut src)?).map_err(|_| {
@@ -1052,6 +1054,12 @@ fn validate_bcf_format_encoding<'a>(
                     "invalid BCF FORMAT dictionary index {key_index} in record"
                 ))
             })?;
+        if seen_key_indices.contains(&key_index) {
+            return Err(DataFusionError::Execution(format!(
+                "BCF record contains duplicate FORMAT field '{key}'"
+            )));
+        }
+        seen_key_indices.push(key_index);
         let format = header.formats().get(key).ok_or_else(|| {
             DataFusionError::Execution(format!("BCF FORMAT field '{key}' has no header definition"))
         })?;
@@ -1088,11 +1096,6 @@ fn validate_bcf_format_encoding<'a>(
             allele_count,
         )?;
         if key == "GT" {
-            if gt_encoding.is_some() {
-                return Err(DataFusionError::Execution(
-                    "BCF record contains duplicate GT FORMAT fields".into(),
-                ));
-            }
             if validate_gt_values {
                 validate_bcf_gt_payload(payload, encoded_type, value_count, allele_count)?;
             }

@@ -1425,6 +1425,7 @@ dependencies = [
  "noodles-vcf",
  "opendal",
  "serde_json",
+ "smallvec",
  "tempfile",
  "tokio",
  "tokio-util",
