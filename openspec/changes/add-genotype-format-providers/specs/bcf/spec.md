@@ -240,6 +240,12 @@ storage schemes as the existing VCF provider.
 - **WHEN** a caller supplies an explicit CSI location
 - **THEN** that location takes precedence over conventional discovery.
 
+#### Scenario: Bounded CSI companion
+- **WHEN** a local or remote CSI companion exceeds the configured safety limit
+- **THEN** the provider rejects it before buffering beyond that limit
+- **AND** a remote CSI is consumed incrementally without requiring a metadata
+  request before the object body.
+
 ### Requirement: BCF Integrity And Conformance
 
 The system SHALL reject truncated records, impossible typed lengths, invalid

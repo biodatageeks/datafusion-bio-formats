@@ -332,6 +332,11 @@ BCF uses a streaming BCF 2.2 decoder over BGZF and reuses record buffers. Header
 string dictionaries are resolved once. CSI provides sparse range reads and
 parallel chunks; unindexed input falls back to one sequential partition.
 Samples and FORMAT children are projected before typed value conversion.
+CSI companions have a hard byte ceiling. Local files are rejected from
+metadata before parsing, while remote companions use a single-request stream
+whose observed chunks are checked before extending the bounded buffer. The
+single-request storage primitive intentionally avoids a HEAD preflight so it
+also works with GET-only signed URLs.
 
 The BCF individual section is scanned once into validated typed FORMAT-series
 views containing the dictionary key, encoded primitive type, per-sample width,

@@ -22,7 +22,7 @@ use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
 use datafusion_bio_format_core::record_filter::evaluate_record_filters;
 use datafusion_bio_format_core::table_utils::{OptionalField, builders_to_arrays};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
-use futures::TryStreamExt;
+use futures::{TryStream, TryStreamExt};
 use log::info;
 use noodles_bcf::{self as bcf, Record as BcfRecord};
 use noodles_vcf::Header;
@@ -56,6 +56,10 @@ const MAX_BCF_HEADER_TEXT_SIZE: u64 = 256 * 1024 * 1024;
 // orders of magnitude smaller, while the on-disk u32 fields can declare nearly
 // 8 GiB in aggregate and make the decoder reserve that memory before parsing.
 const MAX_BCF_RECORD_BODY_SIZE: u64 = 256 * 1024 * 1024;
+// CSI companions are normally much smaller than the BCF itself. Bound their
+// compressed bytes before parsing so an untrusted remote object cannot make
+// provider planning buffer an arbitrary response.
+const MAX_BCF_CSI_INDEX_SIZE: usize = 256 * 1024 * 1024;
 
 fn validate_bcf_header_prefix(prefix: [u8; BCF_HEADER_PREFIX_SIZE]) -> Result<u64> {
     if &prefix[..3] != b"BCF" {
@@ -1226,8 +1230,7 @@ async fn read_csi_index(
     object_storage_options: Option<ObjectStorageOptions>,
 ) -> Result<noodles_csi::Index> {
     match get_storage_type(index_path.to_string()) {
-        StorageType::LOCAL => noodles_csi::fs::read(local_path(index_path))
-            .map_err(|error| execution_error("failed to read BCF CSI index", error)),
+        StorageType::LOCAL => read_local_csi_index(index_path),
         _ => {
             let object = RemoteObject::open(
                 index_path.to_string(),
@@ -1235,15 +1238,64 @@ async fn read_csi_index(
             )
             .await
             .map_err(|error| execution_error("failed to open remote BCF CSI index", error))?;
-            let bytes = object.read_all().await.map_err(|error| {
-                execution_error("failed to download remote BCF CSI index", error)
-            })?;
+            let stream = object
+                .stream_single_request()
+                .await
+                .map_err(|error| execution_error("failed to stream remote BCF CSI index", error))?;
+            let bytes = collect_remote_csi_bytes(stream, MAX_BCF_CSI_INDEX_SIZE).await?;
             let mut reader = noodles_csi::io::Reader::new(Cursor::new(bytes));
             reader
                 .read_index()
                 .map_err(|error| execution_error("failed to parse remote BCF CSI index", error))
         }
     }
+}
+
+fn read_local_csi_index(index_path: &str) -> Result<noodles_csi::Index> {
+    let path = local_path(index_path);
+    let file =
+        File::open(path).map_err(|error| execution_error("failed to open BCF CSI index", error))?;
+    let size = file
+        .metadata()
+        .map_err(|error| execution_error("failed to inspect BCF CSI index", error))?
+        .len();
+    if size > MAX_BCF_CSI_INDEX_SIZE as u64 {
+        return Err(DataFusionError::Execution(format!(
+            "BCF CSI index is {size} bytes, exceeding the {MAX_BCF_CSI_INDEX_SIZE}-byte safety \
+             limit"
+        )));
+    }
+    let mut reader = noodles_csi::io::Reader::new(file);
+    reader
+        .read_index()
+        .map_err(|error| execution_error("failed to read BCF CSI index", error))
+}
+
+async fn collect_remote_csi_bytes<S, E>(mut stream: S, max_size: usize) -> Result<Vec<u8>>
+where
+    S: TryStream<Ok = bytes::Bytes, Error = E> + Unpin,
+    E: std::fmt::Display,
+{
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .map_err(|error| execution_error("failed to stream remote BCF CSI index", error))?
+    {
+        let next_len = bytes.len().checked_add(chunk.len()).ok_or_else(|| {
+            DataFusionError::Execution("remote BCF CSI index length overflow".into())
+        })?;
+        if next_len > max_size {
+            return Err(DataFusionError::Execution(format!(
+                "remote BCF CSI index exceeds the {max_size}-byte safety limit"
+            )));
+        }
+        bytes.try_reserve_exact(chunk.len()).map_err(|error| {
+            execution_error("failed to allocate remote BCF CSI index buffer", error)
+        })?;
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// Returns the exclusive compressed end of the BGZF block starting at `start`
@@ -2576,10 +2628,7 @@ fn indexed_local_stream(
     let stream = try_stream! {
         let index = match shared_index {
             Some(index) => index,
-            None => Arc::new(
-                noodles_csi::fs::read(local_path(&index_path))
-                    .map_err(|e| execution_error("failed to read BCF CSI index", e))?,
-            ),
+            None => Arc::new(read_local_csi_index(&index_path)?),
         };
         let file = File::open(local_path(&file_path))
             .map_err(|e| execution_error("failed to open indexed BCF", e))?;
@@ -2980,6 +3029,40 @@ mod tests {
         assert!(validate_version((2, 2)).is_ok());
         assert!(validate_version((2, 1)).is_err());
         assert!(validate_version((3, 0)).is_err());
+    }
+
+    #[tokio::test]
+    async fn bounds_remote_csi_bytes_while_streaming() {
+        let accepted = futures::stream::iter([
+            Ok::<_, io::Error>(bytes::Bytes::from_static(b"abc")),
+            Ok(bytes::Bytes::from_static(b"de")),
+        ]);
+        assert_eq!(
+            collect_remote_csi_bytes(accepted, 5).await.unwrap(),
+            b"abcde"
+        );
+
+        let oversized = futures::stream::iter([
+            Ok::<_, io::Error>(bytes::Bytes::from_static(b"abc")),
+            Ok(bytes::Bytes::from_static(b"def")),
+        ]);
+        let error = collect_remote_csi_bytes(oversized, 5)
+            .await
+            .expect_err("the stream must stop before buffering more than the ceiling")
+            .to_string();
+        assert!(error.contains("exceeds the 5-byte safety limit"));
+    }
+
+    #[test]
+    fn rejects_oversized_local_csi_before_parsing() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file()
+            .set_len(MAX_BCF_CSI_INDEX_SIZE as u64 + 1)
+            .unwrap();
+        let error = read_local_csi_index(file.path().to_str().unwrap())
+            .expect_err("an oversized local CSI must be rejected from metadata")
+            .to_string();
+        assert!(error.contains("exceeding the 268435456-byte safety limit"));
     }
 
     #[test]

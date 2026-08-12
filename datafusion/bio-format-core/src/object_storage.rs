@@ -724,6 +724,18 @@ impl RemoteObject {
         reader.into_bytes_stream(..).await
     }
 
+    /// Streams the complete object through one sequential backend request.
+    ///
+    /// Unlike [`Self::stream`], this does not apply the configured reader chunk
+    /// size. It therefore avoids a size/HEAD preflight on backends that need the
+    /// object length to split a complete-object read into ranges. This is useful
+    /// for bounded companion metadata when the caller enforces its own byte
+    /// ceiling while consuming the stream.
+    pub async fn stream_single_request(&self) -> Result<FuturesBytesStream, opendal::Error> {
+        let reader = self.operator.reader_with(&self.path).concurrent(1).await?;
+        reader.into_bytes_stream(..).await
+    }
+
     /// Streams a half-open byte range.
     pub async fn stream_range(
         &self,

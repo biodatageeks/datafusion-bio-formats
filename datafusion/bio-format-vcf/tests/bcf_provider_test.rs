@@ -391,12 +391,14 @@ async fn remote_bcf_uses_csi_range_requests() -> Result<(), Box<dyn std::error::
     let csi_requests = requests
         .iter()
         .filter(|request| request.path.starts_with("/remote.bcf.csi"))
-        .count();
+        .collect::<Vec<_>>();
     assert_eq!(
-        csi_requests, 1,
+        csi_requests.len(),
+        1,
         "the CSI should be fetched once at planning time and shared across \
          partitions: {requests:?}"
     );
+    assert_eq!(csi_requests[0].method, "GET");
     let bcf_non_range_requests = requests
         .iter()
         .filter(|request| {
