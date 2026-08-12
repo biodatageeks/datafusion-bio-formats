@@ -1,6 +1,6 @@
 use crate::bcf::BcfExec;
 use crate::physical_exec::VcfExec;
-use crate::storage::{VcfRecordFields, get_header};
+use crate::storage::{VcfRecordFields, get_header, resolve_single_sample_format_column_name};
 use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
@@ -263,23 +263,11 @@ async fn determine_schema_from_header(
                 field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
                 // Prefix with "fmt_" if the column name collides with an existing field (e.g., INFO field).
                 // Also guard against the generated name itself colliding.
-                let column_name = if used_names.contains(tag.as_str()) {
-                    let mut candidate = format!("fmt_{tag}");
-                    if used_names.contains(&candidate) {
-                        // "fmt_"/"format_" prefixes are recognized by the writer
-                        // path (serializer/header_builder); keep them as the
-                        // preferred fallbacks and only then disambiguate.
-                        candidate = format!("format_{tag}");
-                    }
-                    let mut suffix = 2;
-                    while used_names.contains(&candidate) {
-                        candidate = format!("format_{tag}_{suffix}");
-                        suffix += 1;
-                    }
-                    candidate
-                } else {
-                    tag.clone()
-                };
+                // "fmt_"/"format_" prefixes are recognized by the writer
+                // path (serializer/header_builder); keep them as the preferred
+                // fallbacks and only then disambiguate with a numeric suffix.
+                let column_name =
+                    resolve_single_sample_format_column_name(&used_names, tag.as_str());
                 used_names.insert(column_name.clone());
                 let field = Field::new(column_name, dtype, true).with_metadata(field_metadata);
                 fields.push(field);

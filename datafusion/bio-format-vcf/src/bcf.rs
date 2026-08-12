@@ -1780,8 +1780,26 @@ impl BcfDosageBuilder {
     }
 
     #[inline(always)]
+    fn finish_dosage(dosage: usize, has_allele: bool, missing: bool) -> Result<Option<i8>> {
+        if !has_allele {
+            return Err(DataFusionError::Execution(
+                "invalid BCF GT encoding: genotype has zero ploidy".into(),
+            ));
+        }
+        if missing {
+            return Ok(None);
+        }
+        let dosage = i8::try_from(dosage).map_err(|_| {
+            DataFusionError::Execution(
+                "BCF GT alternate dosage exceeds the signed 8-bit output range".into(),
+            )
+        })?;
+        Ok(Some(dosage))
+    }
+
+    #[inline(always)]
     fn decode_i8(genotype: &[u8]) -> Result<Option<i8>> {
-        let mut dosage = 0i8;
+        let mut dosage = 0usize;
         let mut has_allele = false;
         let mut missing = false;
         let mut reached_vector_end = false;
@@ -1812,24 +1830,15 @@ impl BcfDosageBuilder {
                         (allele >> 1) - 1
                     )));
                 }
-                dosage = dosage.checked_add(1).ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "BCF GT alternate dosage exceeds the signed 8-bit output range".into(),
-                    )
-                })?;
+                dosage += 1;
             }
         }
-        if !has_allele {
-            return Err(DataFusionError::Execution(
-                "invalid BCF GT encoding: genotype has zero ploidy".into(),
-            ));
-        }
-        Ok((!missing).then_some(dosage))
+        Self::finish_dosage(dosage, has_allele, missing)
     }
 
     #[inline(always)]
     fn decode_i16(genotype: &[u8]) -> Result<Option<i8>> {
-        let mut dosage = 0i8;
+        let mut dosage = 0usize;
         let mut has_allele = false;
         let mut missing = false;
         let mut reached_vector_end = false;
@@ -1860,24 +1869,15 @@ impl BcfDosageBuilder {
                         (allele >> 1) - 1
                     )));
                 }
-                dosage = dosage.checked_add(1).ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "BCF GT alternate dosage exceeds the signed 8-bit output range".into(),
-                    )
-                })?;
+                dosage += 1;
             }
         }
-        if !has_allele {
-            return Err(DataFusionError::Execution(
-                "invalid BCF GT encoding: genotype has zero ploidy".into(),
-            ));
-        }
-        Ok((!missing).then_some(dosage))
+        Self::finish_dosage(dosage, has_allele, missing)
     }
 
     #[inline(always)]
     fn decode_i32(genotype: &[u8]) -> Result<Option<i8>> {
-        let mut dosage = 0i8;
+        let mut dosage = 0usize;
         let mut has_allele = false;
         let mut missing = false;
         let mut reached_vector_end = false;
@@ -1908,19 +1908,10 @@ impl BcfDosageBuilder {
                         (allele >> 1) - 1
                     )));
                 }
-                dosage = dosage.checked_add(1).ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "BCF GT alternate dosage exceeds the signed 8-bit output range".into(),
-                    )
-                })?;
+                dosage += 1;
             }
         }
-        if !has_allele {
-            return Err(DataFusionError::Execution(
-                "invalid BCF GT encoding: genotype has zero ploidy".into(),
-            ));
-        }
-        Ok((!missing).then_some(dosage))
+        Self::finish_dosage(dosage, has_allele, missing)
     }
 
     #[inline]
@@ -2436,16 +2427,16 @@ impl BcfBatchDecoder {
             None
         };
 
-        let end = if needs_end {
-            let position = record
-                .variant_end(header)
-                .map_err(|e| execution_error("invalid BCF variant span", e))?;
-            Some(u32::try_from(position.get()).map_err(|_| {
-                DataFusionError::Execution("BCF end position exceeds UInt32 range".into())
-            })?)
-        } else {
-            None
-        };
+        // INFO/END participates in the logical span and must be valid even for
+        // metadata-only projections such as COUNT(*). Reuse the validated value
+        // only when execution needs the end column or a residual filter.
+        let variant_end = record
+            .variant_end(header)
+            .map_err(|e| execution_error("invalid BCF variant span", e))?;
+        let variant_end = u32::try_from(variant_end.get()).map_err(|_| {
+            DataFusionError::Execution("BCF end position exceeds UInt32 range".into())
+        })?;
+        let end = needs_end.then_some(variant_end);
 
         if has_filters {
             let fields = VcfRecordFields {
@@ -3329,6 +3320,39 @@ mod tests {
             .to_string();
         assert!(
             error.contains("alternate dosage exceeds"),
+            "unexpected error: {error}"
+        );
+
+        let mut partially_missing_i8 = vec![4; 128];
+        partially_missing_i8.push(0);
+        assert_eq!(
+            BcfDosageBuilder::decode_i8(&partially_missing_i8).unwrap(),
+            None
+        );
+
+        let partially_missing_i16 = std::iter::repeat_n(4i16, 128)
+            .chain(std::iter::once(0))
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            BcfDosageBuilder::decode_i16(&partially_missing_i16).unwrap(),
+            None
+        );
+
+        let partially_missing_i32 = std::iter::repeat_n(4i32, 128)
+            .chain(std::iter::once(0))
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            BcfDosageBuilder::decode_i32(&partially_missing_i32).unwrap(),
+            None
+        );
+
+        let error = BcfDosageBuilder::decode_i8(&[0, 6])
+            .expect_err("a missing allele must not hide a later invalid allele")
+            .to_string();
+        assert!(
+            error.contains("allele index 2"),
             "unexpected error: {error}"
         );
     }

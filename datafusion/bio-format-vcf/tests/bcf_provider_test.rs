@@ -1954,6 +1954,57 @@ async fn bcf_logical_end_preserves_info_end_over_fixed_span()
 }
 
 #[tokio::test]
+async fn bcf_validates_info_end_when_columns_are_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    for encoded_end in [0i32, -1] {
+        let dir = tempfile::tempdir()?;
+        let body = "##fileformat=VCFv4.3\n\
+                    ##contig=<ID=chr1,length=1000>\n\
+                    ##INFO=<ID=END,Number=1,Type=Integer,Description=\"End position\">\n\
+                    #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                    chr1\t10\tdel1\tA\t<DEL>\t50\tPASS\tEND=100\n";
+        let (_vcf_path, bcf_path) =
+            write_format_array_bcf(&dir, &format!("invalid-info-end-{encoded_end}"), body)?;
+        let mut decompressed = Vec::new();
+        noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+        let record_start = 9 + header_len;
+        let shared_len =
+            u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+        let shared_start = record_start + 8;
+        let shared_end = shared_start + shared_len;
+        let end_value_offset = decompressed[shared_start..shared_end]
+            .windows(2)
+            .rposition(|window| window == [0x11, 100])
+            .map(|offset| shared_start + offset + 1)
+            .expect("END=100 should use a one-value Int8 BCF encoding");
+        decompressed[end_value_offset] = encoded_end as u8;
+        let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
+        writer.write_all(&decompressed)?;
+        writer.try_finish()?;
+
+        let provider =
+            VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql("SELECT COUNT(*) FROM variants")
+            .await?
+            .collect()
+            .await
+            .expect_err("an invalid INFO/END must fail an unprojected scan")
+            .to_string();
+        assert!(
+            error.contains("invalid BCF variant span")
+                && error.contains("invalid INFO END position"),
+            "unexpected END={encoded_end} error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

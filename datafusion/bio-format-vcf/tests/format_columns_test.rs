@@ -4,7 +4,7 @@ use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use datafusion_bio_format_vcf::storage::VcfReader;
-use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
+use datafusion_bio_format_vcf::table_provider::{VcfTableProvider, describe_fields};
 use std::sync::Arc;
 use tokio::fs;
 
@@ -488,6 +488,45 @@ const SAMPLE_VCF_SINGLE_COLLISION: &str = r#"##fileformat=VCFv4.3
 chr1	100	rs1	A	T	60	PASS	DP=50;AF=0.5	GT:DP:GQ	0/1:20:99
 chr1	200	rs2	G	C	80	PASS	DP=60;AF=0.3	GT:DP:GQ	1/1:30:95
 "#;
+
+const SAMPLE_VCF_SINGLE_DEEP_COLLISION: &str = r#"##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Combined depth">
+##INFO=<ID=fmt_DP,Number=1,Type=Integer,Description="First fallback collision">
+##INFO=<ID=format_DP,Number=1,Type=Integer,Description="Second fallback collision">
+##FORMAT=<ID=DP,Number=1,Type=Integer,Description="Sample depth">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO	FORMAT	SampleA
+chr1	100	rs1	A	T	60	PASS	DP=50;fmt_DP=51;format_DP=52	DP	20
+"#;
+
+#[tokio::test]
+async fn test_describe_fields_reuses_deep_collision_resolution()
+-> Result<(), Box<dyn std::error::Error>> {
+    let file_path = create_test_vcf_file(
+        "single_deep_collision_describe",
+        SAMPLE_VCF_SINGLE_DEEP_COLLISION,
+    )
+    .await?;
+    let options = Some(create_object_storage_options());
+    let provider = VcfTableProvider::new(file_path.clone(), None, None, options.clone(), true)?;
+    let batch = describe_fields(&file_path, options).await?;
+    let rows = describe_rows(&batch);
+
+    assert!(provider.schema().field_with_name("format_DP_2").is_ok());
+    assert!(rows.contains(&(
+        "FORMAT".to_string(),
+        "format_DP_2".to_string(),
+        "Integer".to_string()
+    )));
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.1 == "format_DP" || row.1 == "format_DP_2")
+            .count(),
+        2,
+        "INFO format_DP and collision-resolved FORMAT format_DP_2 must both be described"
+    );
+
+    Ok(())
+}
 
 /// Multi-sample VCF with INFO/FORMAT collision — should remain unaffected
 /// since FORMAT fields are nested under genotypes struct.
