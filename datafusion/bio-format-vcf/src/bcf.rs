@@ -33,6 +33,7 @@ use noodles_vcf::variant::record::Samples as _;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Info as _};
 use smallvec::SmallVec;
 use tokio::io::AsyncRead;
+use tokio_util::io::StreamReader;
 
 use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
@@ -60,6 +61,10 @@ const MAX_BCF_RECORD_BODY_SIZE: u64 = 256 * 1024 * 1024;
 // compressed bytes before parsing so an untrusted remote object cannot make
 // provider planning buffer an arbitrary response.
 const MAX_BCF_CSI_INDEX_SIZE: usize = 256 * 1024 * 1024;
+// A single CSI chunk may span a large part of a remote BCF. Decode the logical
+// range incrementally with one bounded compressed chunk in flight per scan
+// partition instead of allocating the whole span.
+const MAX_REMOTE_BCF_STREAM_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 fn validate_bcf_header_prefix(prefix: [u8; BCF_HEADER_PREFIX_SIZE]) -> Result<u64> {
     if &prefix[..3] != b"BCF" {
@@ -2778,32 +2783,27 @@ async fn indexed_remote_stream(
                 continue;
             }
 
-            let bytes = object
-                .read_range(compressed_start..compressed_end)
+            let remote_stream = object
+                .stream_range_bounded(
+                    compressed_start..compressed_end,
+                    MAX_REMOTE_BCF_STREAM_CHUNK_SIZE,
+                )
                 .await
                 .map_err(|error| {
                     let context = if error.kind() == opendal::ErrorKind::Unexpected {
-                        "failed to read the complete remote BCF CSI range; the index does not \
+                        "failed to stream the complete remote BCF CSI range; the index does not \
                          match the file"
                     } else {
-                        "failed to read remote BCF CSI range"
+                        "failed to stream remote BCF CSI range"
                     };
                     execution_error(context, error)
                 })?;
-            let expected_len = compressed_end - compressed_start;
-            let actual_len = u64::try_from(bytes.len()).map_err(|_| {
-                DataFusionError::Execution(
-                    "remote BCF CSI range length does not fit in u64".into(),
-                )
-            })?;
-            if actual_len != expected_len {
-                Err(DataFusionError::Execution(format!(
-                    "remote BCF CSI range returned {actual_len} bytes, expected {expected_len}; \
-                     the index does not match the file"
-                )))?;
-            }
-            let inner = noodles_bgzf_vcf::io::Reader::new(Cursor::new(bytes));
-            let mut reader = bcf::io::Reader::from(inner);
+            // OpenDAL splits this explicit range at the hard ceiling (or a
+            // smaller configured object-store chunk size). Stream those chunks
+            // directly through BGZF instead of materializing an arbitrarily
+            // large CSI span in one Bytes allocation.
+            let inner = StreamReader::new(remote_stream);
+            let mut bgzf_reader = noodles_bgzf_vcf::r#async::io::Reader::new(inner);
             let local_start =
                 noodles_bgzf_vcf::VirtualPosition::new(0, chunk.start.uncompressed())
                     .expect("zero compressed offset is valid");
@@ -2814,16 +2814,42 @@ async fn indexed_remote_stream(
             .ok_or_else(|| {
                 DataFusionError::Execution("remote BCF CSI virtual offset overflow".into())
             })?;
-            reader
-                .get_mut()
-                .seek(local_start)
-                .map_err(|error| execution_error("failed to seek remote BCF CSI range", error))?;
+
+            let mut prefix = tokio::io::AsyncReadExt::take(
+                &mut bgzf_reader,
+                u64::from(chunk.start.uncompressed()),
+            );
+            let skipped = tokio::io::copy(&mut prefix, &mut tokio::io::sink())
+                .await
+                .map_err(|error| {
+                    execution_error(
+                        "failed to seek streamed remote BCF CSI range; the index does not match \
+                         the file",
+                        error,
+                    )
+                })?;
+            if skipped != u64::from(chunk.start.uncompressed())
+                || bgzf_reader.virtual_position() != local_start
+            {
+                Err(DataFusionError::Execution(
+                    "streamed remote BCF CSI range ended before its virtual start; the index does \
+                     not match the file"
+                        .into(),
+                ))?;
+            }
+
+            let mut reader = bcf::r#async::io::Reader::from(bgzf_reader);
             let mut record = BcfRecord::default();
 
             while reader.get_ref().virtual_position() < local_end {
-                let record_size = read_bcf_record_bounded(&mut reader, &mut record)
+                let record_size = read_bcf_record_bounded_async(&mut reader, &mut record)
+                    .await
                     .map_err(|error| {
-                        execution_error("failed to decode remote indexed BCF record", error)
+                        execution_error(
+                            "failed to decode streamed remote indexed BCF record; the index does \
+                             not match the file",
+                            error,
+                        )
                     })?;
                 if record_size == 0 {
                     break;

@@ -337,6 +337,11 @@ metadata before parsing, while remote companions use a single-request stream
 whose observed chunks are checked before extending the bounded buffer. The
 single-request storage primitive intentionally avoids a HEAD preflight so it
 also works with GET-only signed URLs.
+Remote CSI-selected BCF spans are not materialized even when one index chunk is
+large: an explicit range stream caps each sequential backend read at 8 MiB and
+feeds those bytes directly into the asynchronous BGZF and BCF decoders. Outer
+DataFusion partitions provide scan concurrency without multiplying the cap
+inside one partition.
 
 The BCF individual section is scanned once into validated typed FORMAT-series
 views containing the dictionary key, encoded primitive type, per-sample width,

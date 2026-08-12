@@ -234,6 +234,8 @@ storage schemes as the existing VCF provider.
 #### Scenario: Remote indexed BCF
 - **WHEN** BCF and CSI are stored in a supported object store
 - **THEN** header and selected BGZF chunks are read through bounded ranges
+- **AND** an individual CSI-selected BCF span is streamed through hard-capped
+  sequential reads rather than materialized as one buffer
 - **AND** the complete BCF object is not downloaded for a sparse region query.
 
 #### Scenario: Explicit remote CSI
