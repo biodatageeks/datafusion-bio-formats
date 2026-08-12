@@ -268,7 +268,7 @@ pub async fn get_remote_gff_bgzf_reader(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<
-    gff::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
+    gff::r#async::io::Reader<bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
     Error,
 > {
     let inner = get_remote_stream_bgzf_async(file_path.clone(), object_storage_options).await?;
@@ -309,7 +309,11 @@ pub enum GffRemoteReader {
         >,
     ),
     /// Standard parser with BGZF compression
-    BGZF(gff::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>),
+    BGZF(
+        gff::r#async::io::Reader<
+            bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>,
+        >,
+    ),
     /// Standard parser with no compression
     PLAIN(gff::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
 
@@ -325,7 +329,9 @@ pub enum GffRemoteReader {
     ),
     /// Fast parser with BGZF compression
     BgzfFast(
-        gff::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
+        gff::r#async::io::Reader<
+            bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>,
+        >,
     ),
     /// Fast parser with no compression
     PlainFast(gff::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
@@ -342,7 +348,9 @@ pub enum GffRemoteReader {
     ),
     /// SIMD parser with BGZF compression
     BgzfSimd(
-        gff::r#async::io::Reader<bgzf::r#async::Reader<StreamReader<FuturesBytesStream, Bytes>>>,
+        gff::r#async::io::Reader<
+            bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>,
+        >,
     ),
     /// SIMD parser with no compression
     PlainSimd(gff::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>),
@@ -512,9 +520,9 @@ pub fn get_local_gff_gz_sync_reader(
 /// A synchronous GFF reader configured for BGZF-compressed files with parallel decompression
 pub fn get_local_gff_bgzf_sync_reader(
     file_path: String,
-) -> Result<gff::io::Reader<bgzf::Reader<std::fs::File>>, Error> {
+) -> Result<gff::io::Reader<bgzf::io::Reader<std::fs::File>>, Error> {
     let file = std::fs::File::open(file_path)?;
-    let reader = bgzf::Reader::new(file);
+    let reader = bgzf::io::Reader::new(file);
     Ok(gff::io::Reader::new(reader))
 }
 
@@ -567,13 +575,13 @@ pub async fn get_local_gff_bgzf_async_reader(
     file_path: String,
 ) -> Result<
     gff::r#async::io::Reader<
-        tokio::io::BufReader<bgzf::r#async::Reader<tokio::io::BufReader<tokio::fs::File>>>,
+        tokio::io::BufReader<bgzf::r#async::io::Reader<tokio::io::BufReader<tokio::fs::File>>>,
     >,
     Error,
 > {
     let file = tokio::fs::File::open(file_path).await?;
     let buf_reader = tokio::io::BufReader::new(file);
-    let bgzf_reader = bgzf::r#async::Reader::new(buf_reader);
+    let bgzf_reader = bgzf::r#async::io::Reader::new(buf_reader);
     let reader = gff::r#async::io::Reader::new(tokio::io::BufReader::new(bgzf_reader));
     Ok(reader)
 }
@@ -601,21 +609,21 @@ pub enum GffLocalReader {
     /// Standard parser with GZIP compression
     GZIP(gff::io::Reader<BufReader<flate2::read::MultiGzDecoder<File>>>),
     /// Standard parser with BGZF compression
-    BGZF(gff::io::Reader<bgzf::Reader<File>>),
+    BGZF(gff::io::Reader<bgzf::io::Reader<File>>),
     /// Standard parser with no compression
     PLAIN(gff::io::Reader<BufReader<File>>),
 
     /// Fast parser with GZIP compression
     GzipFast(gff::io::Reader<BufReader<flate2::read::MultiGzDecoder<File>>>),
     /// Fast parser with BGZF compression
-    BgzfFast(gff::io::Reader<bgzf::Reader<File>>),
+    BgzfFast(gff::io::Reader<bgzf::io::Reader<File>>),
     /// Fast parser with no compression
     PlainFast(gff::io::Reader<BufReader<File>>),
 
     /// SIMD parser with GZIP compression
     GzipSimd(gff::io::Reader<BufReader<flate2::read::MultiGzDecoder<File>>>),
     /// SIMD parser with BGZF compression
-    BgzfSimd(gff::io::Reader<bgzf::Reader<File>>),
+    BgzfSimd(gff::io::Reader<bgzf::io::Reader<File>>),
     /// SIMD parser with no compression
     PlainSimd(gff::io::Reader<BufReader<File>>),
 }
@@ -1056,8 +1064,7 @@ pub fn estimate_sizes_from_tbi(
 /// BGZF-compressed, tabix-indexed GFF files. This is used when an index file (.tbi/.csi)
 /// is available and genomic region filters are present.
 pub struct IndexedGffReader {
-    reader:
-        noodles_csi::io::IndexedReader<noodles_bgzf_gff::io::Reader<File>, noodles_tabix::Index>,
+    reader: noodles_csi::io::IndexedReader<noodles_bgzf::io::Reader<File>, noodles_tabix::Index>,
     contig_names: Vec<String>,
 }
 

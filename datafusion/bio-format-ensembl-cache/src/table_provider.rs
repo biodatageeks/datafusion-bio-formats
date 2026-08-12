@@ -42,6 +42,12 @@ pub struct EnsemblCacheOptions {
     /// `None` (or resetting it to `None`) causes provider construction to fail
     /// before any filesystem access.
     pub cache_source_type: Option<CacheSourceType>,
+    /// Optional expected VEP cache release assertion.
+    ///
+    /// When present, provider construction verifies that this decimal release
+    /// matches the release recovered independently from `info.txt` or the
+    /// canonical raw cache-root basename.
+    pub expected_cache_version: Option<String>,
     /// If true, expose genomic coordinates as 0-based half-open.
     /// If false, expose genomic coordinates as 1-based closed (VEP native).
     ///
@@ -81,6 +87,7 @@ impl EnsemblCacheOptions {
         Self {
             cache_root: cache_root.into(),
             cache_source_type: None,
+            expected_cache_version: None,
             coordinate_system_zero_based: false,
             target_partitions: None,
             batch_size_hint: None,
@@ -92,6 +99,12 @@ impl EnsemblCacheOptions {
     /// Returns options with an explicit VEP cache source mode.
     pub fn with_cache_source_type(mut self, cache_source_type: CacheSourceType) -> Self {
         self.cache_source_type = Some(cache_source_type);
+        self
+    }
+
+    /// Returns options with an expected VEP cache release assertion.
+    pub fn with_expected_cache_version(mut self, cache_version: impl Into<String>) -> Self {
+        self.expected_cache_version = Some(cache_version.into());
         self
     }
 }
@@ -124,7 +137,8 @@ impl ProviderInner {
             )
         })?;
         let cache_root = Path::new(&options.cache_root);
-        let cache_info = CacheInfo::from_root(cache_root)?;
+        let cache_info =
+            CacheInfo::from_root(cache_root, options.expected_cache_version.as_deref())?;
 
         let (schema, files, variation_region_size) = match kind {
             EnsemblEntityKind::Variation => {

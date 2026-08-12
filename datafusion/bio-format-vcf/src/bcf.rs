@@ -1575,8 +1575,8 @@ pub(crate) fn estimate_region_sizes(
 
 #[derive(Clone, Copy, Debug)]
 struct RemoteChunkSpan {
-    start: noodles_bgzf_vcf::VirtualPosition,
-    end: noodles_bgzf_vcf::VirtualPosition,
+    start: noodles_bgzf::VirtualPosition,
+    end: noodles_bgzf::VirtualPosition,
 }
 
 fn plan_remote_chunks(
@@ -2918,11 +2918,11 @@ async fn indexed_remote_stream(
             // directly through BGZF instead of materializing an arbitrarily
             // large CSI span in one Bytes allocation.
             let inner = StreamReader::new(remote_stream);
-            let mut bgzf_reader = noodles_bgzf_vcf::r#async::io::Reader::new(inner);
+            let mut bgzf_reader = noodles_bgzf::r#async::io::Reader::new(inner);
             let local_start =
-                noodles_bgzf_vcf::VirtualPosition::new(0, chunk.start.uncompressed())
+                noodles_bgzf::VirtualPosition::new(0, chunk.start.uncompressed())
                     .expect("zero compressed offset is valid");
-            let local_end = noodles_bgzf_vcf::VirtualPosition::new(
+            let local_end = noodles_bgzf::VirtualPosition::new(
                 chunk.end.compressed().saturating_sub(compressed_start),
                 chunk.end.uncompressed(),
             )

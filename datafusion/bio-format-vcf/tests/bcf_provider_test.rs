@@ -750,7 +750,7 @@ async fn text_vcf_honors_explicit_missing_sample_policy() -> Result<(), Box<dyn 
 async fn bcf_rejects_record_sample_count_mismatch() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
 
     // BCF starts with magic/version (5 bytes), followed by the little-endian
     // header-text length (4 bytes). Each record then starts with l_shared and
@@ -761,7 +761,7 @@ async fn bcf_rejects_record_sample_count_mismatch() -> Result<(), Box<dyn std::e
     assert_eq!(&decompressed[sample_count..sample_count + 3], &[2, 0, 0]);
     decompressed[sample_count..sample_count + 3].copy_from_slice(&[0, 0, 0]);
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -794,10 +794,10 @@ async fn bcf_rejects_oversized_declared_header_before_allocation_locally_and_rem
 -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     decompressed[5..9].copy_from_slice(&u32::MAX.to_le_bytes());
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
     drop(writer);
@@ -832,9 +832,9 @@ async fn bcf_rejects_oversized_declared_header_before_allocation_locally_and_rem
 async fn truncated_bcf_fails_during_scan() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     decompressed.truncate(decompressed.len() - 5);
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -1442,7 +1442,7 @@ async fn bcf_rejects_zero_width_gt_descriptor_without_panicking()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "zero-width-gt", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -1451,7 +1451,7 @@ async fn bcf_rejects_zero_width_gt_descriptor_without_panicking()
     let descriptor_offset = bcf_typed_value_end(&decompressed, samples_start);
     assert_eq!(decompressed[descriptor_offset], 0x21);
     decompressed[descriptor_offset] = 0x01;
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -1514,7 +1514,7 @@ fn corrupt_bcf_record_dictionary_index(
     let replacement_index = u8::try_from(replacement_index)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -1552,7 +1552,7 @@ fn corrupt_bcf_record_dictionary_index(
         }
     }
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
     Ok(())
@@ -1563,7 +1563,7 @@ fn corrupt_bcf_first_value_descriptor_type(
     target: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -1594,7 +1594,7 @@ fn corrupt_bcf_first_value_descriptor_type(
     );
     decompressed[descriptor_offset] = (decompressed[descriptor_offset] & 0xf0) | 7;
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
     Ok(())
@@ -1606,7 +1606,7 @@ fn corrupt_bcf_gt_allele_value(
     encoded_value: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -1620,7 +1620,7 @@ fn corrupt_bcf_gt_allele_value(
     );
     decompressed[descriptor_offset + 1 + allele_offset] = encoded_value;
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
     Ok(())
@@ -1684,7 +1684,7 @@ async fn bcf_rejects_pass_combined_with_a_failing_filter_when_unprojected()
     // reserved dictionary index 0, and the record's shared section grows by
     // one byte.
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -1711,7 +1711,7 @@ async fn bcf_rejects_pass_combined_with_a_failing_filter_when_unprojected()
     decompressed[record_start..record_start + 4]
         .copy_from_slice(&u32::try_from(shared_len + 1)?.to_le_bytes());
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -1752,7 +1752,7 @@ async fn bcf_validates_core_fields_when_columns_are_unprojected()
         let dir = tempfile::tempdir()?;
         let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, body)?;
         let mut decompressed = Vec::new();
-        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
         let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
         let site_start = 9 + header_len + 8;
         let ids_offset = site_start + 24;
@@ -1771,7 +1771,7 @@ async fn bcf_validates_core_fields_when_columns_are_unprojected()
             _ => unreachable!(),
         }
 
-        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
         writer.write_all(&decompressed)?;
         writer.try_finish()?;
 
@@ -1813,12 +1813,12 @@ async fn bcf_validates_position_when_columns_are_unprojected()
             write_format_array_bcf(&dir, &format!("position-{encoded_position}"), body)?;
 
         let mut decompressed = Vec::new();
-        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
         let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
         let site_start = 9 + header_len + 8;
         decompressed[site_start + 4..site_start + 8]
             .copy_from_slice(&encoded_position.to_le_bytes());
-        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
         writer.write_all(&decompressed)?;
         writer.try_finish()?;
 
@@ -1847,12 +1847,12 @@ async fn bcf_rejects_oversized_declared_record_before_allocation()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     decompressed[record_start..record_start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -1886,12 +1886,12 @@ async fn bcf_validates_fixed_span_when_columns_are_unprojected()
         let (_vcf_path, bcf_path) =
             write_format_array_bcf(&dir, &format!("span-{encoded_span}"), body)?;
         let mut decompressed = Vec::new();
-        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
         let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
         let site_start = 9 + header_len + 8;
         decompressed[site_start + 8..site_start + 12].copy_from_slice(&encoded_span.to_le_bytes());
 
-        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
         writer.write_all(&decompressed)?;
         writer.try_finish()?;
 
@@ -1926,13 +1926,13 @@ async fn bcf_logical_end_preserves_info_end_over_fixed_span()
                 chr1\t10\tdel1\tA\t<DEL>\t50\tPASS\tEND=100\n";
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "info-end", body)?;
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let site_start = 9 + header_len + 8;
     // Keep rlen valid but make it disagree with INFO/END. The fixed span must
     // still be validated, while the logical end column follows VCF semantics.
     decompressed[site_start + 8..site_start + 12].copy_from_slice(&1i32.to_le_bytes());
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -1965,14 +1965,14 @@ async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "fixed-info-extra", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let declaration = b"##INFO=<ID=DP,Number=3";
     let declaration_start = decompressed
         .windows(declaration.len())
         .position(|window| window == declaration)
         .expect("DP INFO declaration should be present in the BCF header");
     decompressed[declaration_start + declaration.len() - 1] = b'2';
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2005,7 +2005,7 @@ async fn bcf_rejects_multicharacter_info_values_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "multicharacter-info", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2029,7 +2029,7 @@ async fn bcf_rejects_multicharacter_info_values_when_unprojected()
     decompressed[record_start..record_start + 4]
         .copy_from_slice(&u32::try_from(shared_len + 1)?.to_le_bytes());
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2064,7 +2064,7 @@ async fn bcf_rejects_duplicate_info_fields_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "duplicate-info", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let site_start = record_start + 8;
@@ -2089,7 +2089,7 @@ async fn bcf_rejects_duplicate_info_fields_when_unprojected()
     );
     decompressed[zz_key_start + 1] = dp_key_index;
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2122,7 +2122,7 @@ async fn bcf_counts_logical_info_values_before_vector_end() -> Result<(), Box<dy
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "info-vector-end", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let site_start = 9 + header_len + 8;
     let allele_count =
@@ -2137,7 +2137,7 @@ async fn bcf_counts_logical_info_values_before_vector_end() -> Result<(), Box<dy
     assert_eq!(decompressed[cursor], 0x21, "DP should contain two i8s");
     decompressed[cursor + 2] = 0x81; // i8 vector-end in the second storage slot
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2170,7 +2170,7 @@ async fn bcf_rejects_data_after_info_string_vector_end_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "info-string-after-end", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let site_start = 9 + header_len + 8;
     let allele_count =
@@ -2189,7 +2189,7 @@ async fn bcf_rejects_data_after_info_string_vector_end_when_unprojected()
     assert_eq!(&decompressed[value_start + 1..value_start + 4], b"ABC");
     decompressed[value_start + 2] = 0;
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2254,7 +2254,7 @@ async fn bcf_accepts_missing_fixed_info_array() -> Result<(), Box<dyn std::error
     // The pinned noodles writer cannot emit a whole-field missing INFO value,
     // so rewrite the two-i8 payload to the valid scalar i8 missing sentinel.
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2275,7 +2275,7 @@ async fn bcf_accepts_missing_fixed_info_array() -> Result<(), Box<dyn std::error
     decompressed.remove(cursor + 2);
     decompressed[record_start..record_start + 4]
         .copy_from_slice(&u32::try_from(shared_len - 1)?.to_le_bytes());
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2324,14 +2324,14 @@ async fn bcf_rejects_wrong_allele_dependent_info_cardinality_when_unprojected()
         let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, &body)?;
 
         let mut decompressed = Vec::new();
-        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
         let declaration = format!("##INFO=<ID={field},Number={original_number}");
         let declaration_start = decompressed
             .windows(declaration.len())
             .position(|window| window == declaration.as_bytes())
             .expect("INFO declaration should be present in the BCF header");
         decompressed[declaration_start + declaration.len() - 1] = replacement_number as u8;
-        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
         writer.write_all(&decompressed)?;
         writer.try_finish()?;
 
@@ -2367,14 +2367,14 @@ async fn bcf_rejects_wrong_fixed_format_cardinality_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "fixed-format-extra", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let declaration = b"##FORMAT=<ID=AD,Number=3";
     let declaration_start = decompressed
         .windows(declaration.len())
         .position(|window| window == declaration)
         .expect("AD FORMAT declaration should be present in the BCF header");
     decompressed[declaration_start + declaration.len() - 1] = b'2';
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2408,7 +2408,7 @@ async fn bcf_rejects_invalid_utf8_in_unprojected_dynamic_format_string()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dynamic-format-utf8", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2422,7 +2422,7 @@ async fn bcf_rejects_invalid_utf8_in_unprojected_dynamic_format_string()
     );
     decompressed[descriptor_offset + 1] = 0xff;
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2455,7 +2455,7 @@ async fn bcf_rejects_data_after_format_string_vector_end_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "format-string-after-end", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2472,7 +2472,7 @@ async fn bcf_rejects_data_after_format_string_vector_end_when_unprojected()
     );
     decompressed[descriptor_offset + 3] = b'B';
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2506,7 +2506,7 @@ async fn bcf_counts_logical_format_values_before_vector_end()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "format-vector-end", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2519,7 +2519,7 @@ async fn bcf_counts_logical_format_values_before_vector_end()
     );
     decompressed[descriptor_offset + 2] = 0x81;
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2566,14 +2566,14 @@ async fn bcf_rejects_wrong_allele_dependent_format_cardinality_when_unprojected(
         let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, name, &body)?;
 
         let mut decompressed = Vec::new();
-        noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+        noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
         let declaration = format!("##FORMAT=<ID={field},Number={original_number}");
         let declaration_start = decompressed
             .windows(declaration.len())
             .position(|window| window == declaration.as_bytes())
             .expect("FORMAT declaration should be present in the BCF header");
         decompressed[declaration_start + declaration.len() - 1] = replacement_number as u8;
-        let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+        let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
         writer.write_all(&decompressed)?;
         writer.try_finish()?;
 
@@ -2610,14 +2610,14 @@ async fn bcf_rejects_wrong_gt_dependent_format_cardinality_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "number-g", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let declaration = b"##FORMAT=<ID=XG,Number=2";
     let declaration_start = decompressed
         .windows(declaration.len())
         .position(|window| window == declaration)
         .expect("XG FORMAT declaration should be present in the BCF header");
     decompressed[declaration_start + declaration.len() - 1] = b'G';
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2686,7 +2686,7 @@ async fn bcf_accepts_compact_all_missing_fixed_format_array()
     // Compact the two values per sample to one type-specific missing sentinel,
     // which is the valid BCF representation when the entire series is absent.
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2706,7 +2706,7 @@ async fn bcf_accepts_compact_all_missing_fixed_format_array()
     decompressed.drain(payload_start + 2..payload_start + 4);
     decompressed[record_start + 4..record_start + 8]
         .copy_from_slice(&u32::try_from(individual_len - 2)?.to_le_bytes());
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2827,7 +2827,7 @@ async fn bcf_rejects_duplicate_non_gt_format_fields_when_unprojected()
     let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "duplicate-format", body)?;
 
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2846,7 +2846,7 @@ async fn bcf_rejects_duplicate_non_gt_format_fields_when_unprojected()
     );
     decompressed[gq_key_start + 1] = dp_key_index;
 
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2881,14 +2881,14 @@ async fn bcf_rejects_excess_values_for_unprojected_scalar_info_field()
     // Keep the two-integer record payload intact and corrupt only the
     // same-width header declaration from an array into a scalar.
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let declaration = b"##INFO=<ID=DP,Number=2";
     let declaration_start = decompressed
         .windows(declaration.len())
         .position(|window| window == declaration)
         .expect("DP INFO declaration should be present in the BCF header");
     decompressed[declaration_start + declaration.len() - 1] = b'1';
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -2924,7 +2924,7 @@ async fn bcf_accepts_missing_unprojected_scalar_info_field()
     // the valid scalar payload from [Int8(5)] to the BCF null descriptor and
     // shrink the shared record section by the removed payload byte.
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let record_start = 9 + header_len;
     let shared_len =
@@ -2944,7 +2944,7 @@ async fn bcf_accepts_missing_unprojected_scalar_info_field()
     decompressed.remove(cursor + 1);
     decompressed[record_start..record_start + 4]
         .copy_from_slice(&u32::try_from(shared_len - 1)?.to_le_bytes());
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
@@ -3065,14 +3065,14 @@ async fn bcf_rejects_excess_values_for_scalar_format_field()
     // header declaration. The record remains encoded with two integers while
     // the provider builds a scalar DP column from Number=1.
     let mut decompressed = Vec::new();
-    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
     let declaration = b"##FORMAT=<ID=DP,Number=2";
     let declaration_start = decompressed
         .windows(declaration.len())
         .position(|window| window == declaration)
         .expect("DP FORMAT declaration should be present in the BCF header");
     decompressed[declaration_start + declaration.len() - 1] = b'1';
-    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
     writer.write_all(&decompressed)?;
     writer.try_finish()?;
 
