@@ -1694,6 +1694,65 @@ async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_rejects_duplicate_info_fields_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+                ##INFO=<ID=ZZ,Number=1,Type=Integer,Description=\"Auxiliary value\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tDP=7;ZZ=9\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "duplicate-info", body)?;
+
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let site_start = record_start + 8;
+    let allele_count =
+        u16::from_le_bytes(decompressed[site_start + 18..site_start + 20].try_into()?) as usize;
+    let mut dp_key_start = site_start + 24;
+    dp_key_start = bcf_typed_value_end(&decompressed, dp_key_start); // IDs
+    for _ in 0..allele_count {
+        dp_key_start = bcf_typed_value_end(&decompressed, dp_key_start); // REF and ALTs
+    }
+    dp_key_start = bcf_typed_value_end(&decompressed, dp_key_start); // FILTER
+    assert_eq!(
+        decompressed[dp_key_start], 0x11,
+        "DP key should use a scalar i8 dictionary index"
+    );
+    let dp_key_index = decompressed[dp_key_start + 1];
+    let dp_value_start = bcf_typed_value_end(&decompressed, dp_key_start);
+    let zz_key_start = bcf_typed_value_end(&decompressed, dp_value_start);
+    assert_eq!(
+        decompressed[zz_key_start], 0x11,
+        "ZZ key should use a scalar i8 dictionary index"
+    );
+    decompressed[zz_key_start + 1] = dp_key_index;
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("a duplicate unprojected INFO field must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("BCF record contains duplicate INFO field 'DP'"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_counts_logical_info_values_before_vector_end() -> Result<(), Box<dyn std::error::Error>>
 {
     let dir = tempfile::tempdir()?;

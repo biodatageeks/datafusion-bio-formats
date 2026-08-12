@@ -532,6 +532,7 @@ fn validate_bcf_info_encoding(
     allele_count: usize,
 ) -> Result<()> {
     let mut src = info.as_ref();
+    let mut seen_key_indices = SmallVec::<[usize; 16]>::new();
 
     for _ in 0..info.len() {
         let key_index = usize::try_from(read_bcf_typed_integer(&mut src)?).map_err(|_| {
@@ -546,6 +547,12 @@ fn validate_bcf_info_encoding(
                     "invalid BCF INFO dictionary index {key_index} in record"
                 ))
             })?;
+        if seen_key_indices.contains(&key_index) {
+            return Err(DataFusionError::Execution(format!(
+                "BCF record contains duplicate INFO field '{key}'"
+            )));
+        }
+        seen_key_indices.push(key_index);
         let info = header.infos().get(key).ok_or_else(|| {
             DataFusionError::Execution(format!(
                 "BCF INFO dictionary index {key_index} resolves to '{key}', which has no INFO \
