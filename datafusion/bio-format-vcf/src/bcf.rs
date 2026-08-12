@@ -486,6 +486,9 @@ fn validate_bcf_info_fixed_cardinality(
             let value = std::str::from_utf8(payload).map_err(|error| {
                 execution_error(&format!("invalid BCF INFO string for field '{key}'"), error)
             })?;
+            if info_type == InfoType::Character {
+                validate_bcf_character_elements("INFO", key, value)?;
+            }
             value.bytes().filter(|&byte| byte == b',').count() + 1
         }
         InfoType::Integer | InfoType::Float => {
@@ -523,6 +526,19 @@ fn validate_bcf_info_fixed_cardinality(
         return Err(DataFusionError::Execution(message));
     }
 
+    Ok(())
+}
+
+fn validate_bcf_character_elements(context: &str, key: &str, value: &str) -> Result<()> {
+    for (element_index, element) in value.split(',').enumerate() {
+        let character_count = element.chars().count();
+        if character_count != 1 {
+            return Err(DataFusionError::Execution(format!(
+                "invalid BCF {context} Character field '{key}': element {element_index} contains \
+                 {character_count} characters"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -862,6 +878,16 @@ fn validate_bcf_format_cardinality(
                     .iter()
                     .position(|&byte| byte == 0)
                     .unwrap_or(raw_value.len());
+                if end < raw_value.len()
+                    && let Some(trailing_offset) =
+                        raw_value[end + 1..].iter().position(|&byte| byte != 0)
+                {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid BCF FORMAT string for field '{key}', sample {sample_index}: \
+                         value after vector-end at offset {}",
+                        end + 1 + trailing_offset
+                    )));
+                }
                 let value = std::str::from_utf8(&raw_value[..end]).map_err(|error| {
                     execution_error(
                         &format!(
@@ -872,6 +898,13 @@ fn validate_bcf_format_cardinality(
                 })?;
                 if value.is_empty() || value == "." {
                     continue;
+                }
+                if format_type == FormatType::Character {
+                    validate_bcf_character_elements(
+                        &format!("FORMAT sample {sample_index}"),
+                        key,
+                        value,
+                    )?;
                 }
                 let Some(expected_count) = expected_count else {
                     continue;

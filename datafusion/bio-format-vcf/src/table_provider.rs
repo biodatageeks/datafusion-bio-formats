@@ -546,7 +546,10 @@ impl VcfTableProvider {
             ));
         }
         let selected_formats = Self::infer_format_fields_from_schema(&self.schema);
-        if selected_formats.as_slice() != ["GT"] {
+        let has_no_selected_samples = self.sample_names.is_empty();
+        if selected_formats.as_slice() != ["GT"]
+            && !(has_no_selected_samples && selected_formats.is_empty())
+        {
             return Err(datafusion::common::DataFusionError::Plan(format!(
                 "BCF genotype dosage currently requires GT as the only selected FORMAT field; \
                  selected fields are {selected_formats:?}"
@@ -605,7 +608,7 @@ impl VcfTableProvider {
                     .with_metadata(field.metadata().clone());
             }
         }
-        if !replaced_gt {
+        if !replaced_gt && !has_no_selected_samples {
             return Err(datafusion::common::DataFusionError::Plan(
                 "BCF genotype dosage requires a selected GT FORMAT field".to_string(),
             ));

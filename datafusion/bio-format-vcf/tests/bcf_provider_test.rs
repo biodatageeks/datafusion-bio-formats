@@ -1119,6 +1119,56 @@ async fn bcf_dosage_decodes_single_sample_to_nullable_int8()
 }
 
 #[tokio::test]
+async fn bcf_dosage_allows_an_explicit_empty_sample_selection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0/0\t0/1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-no-samples", body)?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    assert!(provider.schema().field_with_name("genotypes").is_err());
+    assert_eq!(
+        provider
+            .schema()
+            .metadata()
+            .get("bio.vcf.genotype_output_mode")
+            .map(String::as_str),
+        Some("dosage")
+    );
+
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_dosage_rejects_multiallelic_records_with_or_without_gt_projection()
 -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
@@ -1694,6 +1744,64 @@ async fn bcf_rejects_wrong_fixed_info_cardinality_when_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_rejects_multicharacter_info_values_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=CH,Number=1,Type=Character,Description=\"Character value\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tCH=A\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "multicharacter-info", body)?;
+
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let site_start = record_start + 8;
+    let allele_count =
+        u16::from_le_bytes(decompressed[site_start + 18..site_start + 20].try_into()?) as usize;
+    let mut value_start = site_start + 24;
+    value_start = bcf_typed_value_end(&decompressed, value_start); // IDs
+    for _ in 0..allele_count {
+        value_start = bcf_typed_value_end(&decompressed, value_start); // REF and ALTs
+    }
+    value_start = bcf_typed_value_end(&decompressed, value_start); // FILTER
+    value_start = bcf_typed_value_end(&decompressed, value_start); // CH key
+    assert_eq!(
+        decompressed[value_start], 0x17,
+        "CH should contain one string byte"
+    );
+    decompressed[value_start] = 0x27;
+    decompressed.insert(value_start + 2, b'B');
+    decompressed[record_start..record_start + 4]
+        .copy_from_slice(&u32::try_from(shared_len + 1)?.to_le_bytes());
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("a multi-character unprojected Character INFO value must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("invalid BCF INFO Character field 'CH'")
+            && error.contains("contains 2 characters"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_rejects_duplicate_info_fields_when_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
@@ -2027,6 +2135,57 @@ async fn bcf_rejects_invalid_utf8_in_unprojected_dynamic_format_string()
         .to_string();
     assert!(
         error.contains("invalid BCF FORMAT string for field 'TXT', sample 0"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_rejects_data_after_format_string_vector_end_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=TXT,Number=.,Type=String,Description=\"Text values\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tTXT\tA\tABC\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "format-string-after-end", body)?;
+
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let samples_start = record_start + 8 + shared_len;
+    let descriptor_offset = bcf_typed_value_end(&decompressed, samples_start); // TXT key
+    assert_eq!(
+        decompressed[descriptor_offset], 0x37,
+        "TXT should contain three string bytes per sample"
+    );
+    assert_eq!(
+        &decompressed[descriptor_offset + 1..descriptor_offset + 4],
+        b"A\0\0"
+    );
+    decompressed[descriptor_offset + 3] = b'B';
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("data after an unprojected FORMAT string vector-end must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("invalid BCF FORMAT string for field 'TXT', sample 0")
+            && error.contains("value after vector-end at offset 2"),
         "unexpected error: {error}"
     );
     Ok(())
