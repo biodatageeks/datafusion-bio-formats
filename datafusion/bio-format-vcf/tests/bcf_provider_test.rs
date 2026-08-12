@@ -398,9 +398,15 @@ async fn bcf_uses_csi_for_region_queries() -> Result<(), Box<dyn std::error::Err
 
 #[test]
 fn bcf_reports_indexed_coordinate_pushdown_as_inexact() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let (dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
     let index = bcf::fs::index(&bcf_path)?;
-    let index_path = format!("{bcf_path}.csi");
+    let conventional_index_path = format!("{bcf_path}.csi");
+    assert!(!std::path::Path::new(&conventional_index_path).exists());
+    let index_path = dir
+        .path()
+        .join("coordinate-pushdown.explicit.csi")
+        .to_string_lossy()
+        .into_owned();
     noodles_csi::fs::write(&index_path, &index)?;
 
     let provider = VcfTableProvider::new_with_samples_and_format(
