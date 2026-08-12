@@ -95,6 +95,60 @@ memory.
 - **THEN** record and temporary value buffers are reused where safe
 - **AND** values retained by an emitted Arrow batch are not mutated.
 
+### Requirement: Explicit BCF Genotype Output Mode
+
+The system SHALL preserve VCF-style GT strings by default and SHALL provide an
+explicit BCF dosage mode that emits nullable signed 8-bit counts of the first
+ALT allele for biallelic records.
+
+#### Scenario: Default string compatibility
+- **WHEN** no genotype output mode is selected
+- **THEN** GT uses the existing VCF-compatible string schema and values.
+
+#### Scenario: Biallelic dosage
+- **WHEN** dosage mode is selected for a biallelic record with called GT alleles
+- **THEN** each selected sample receives the count of allele index 1
+- **AND** phased and unphased representations with the same alleles produce the
+  same dosage.
+
+#### Scenario: Missing dosage
+- **WHEN** any GT allele for a selected sample is missing
+- **THEN** that sample dosage is null.
+
+#### Scenario: Multiallelic dosage rejection
+- **WHEN** dosage mode encounters a selected record with more than one ALT
+  allele
+- **THEN** the scan fails with an unsupported-dosage error
+- **AND** does not collapse distinct alternate alleles.
+
+#### Scenario: Unsupported dosage ploidy
+- **WHEN** a selected genotype dosage exceeds the signed 8-bit output range
+- **THEN** the scan fails with an unsupported-dosage error
+- **AND** the caller can use default string mode to preserve the genotype.
+
+### Requirement: Direct Typed BCF FORMAT Decode
+
+The system SHALL scan each BCF FORMAT series into a validated borrowed payload
+view and SHALL allow projected typed sinks to materialize values without an
+intermediate per-sample string or dynamically boxed value representation.
+
+#### Scenario: Direct GT dosage projection
+- **WHEN** only GT is requested in dosage mode
+- **THEN** the provider validates and writes dosage directly from the encoded GT
+  payload into bounded Arrow batches
+- **AND** does not construct VCF GT strings.
+
+#### Scenario: Unprojected FORMAT series
+- **WHEN** a record contains FORMAT children that are not requested
+- **THEN** their required integrity checks still run
+- **AND** no Arrow values or per-sample decoded objects are constructed for
+  those children.
+
+#### Scenario: Unsupported direct decoder
+- **WHEN** a requested representation has no direct typed sink
+- **THEN** the existing conformant decoder remains available
+- **AND** output semantics do not depend on whether the direct path is used.
+
 ### Requirement: BCF Projection And Sample Pushdown
 
 The system SHALL apply INFO, FORMAT, and selected-sample projection before
@@ -212,3 +266,18 @@ index construction, or in-place mutation in this capability.
 - **WHEN** BCF support is enabled
 - **THEN** users can register and query BCF as a table
 - **AND** no writer API is required.
+
+### Requirement: BCF Dosage Performance Gate
+
+The system SHALL validate BCF dosage performance with fresh one-thread
+processes, an optimized release build with native CPU tuning, equivalent output
+cells, and both wall-time and peak-memory measurements.
+
+#### Scenario: Independent one-thread comparison
+- **WHEN** the representative cohort is decoded to biallelic hard-call dosage
+  by this provider and the pinned snputils baseline in at least three
+  interleaved runs
+- **THEN** every normalized dosage cell and output row matches
+- **AND** this provider's median wall time is lower before the performance task
+  is marked complete
+- **AND** median peak RSS is reported for both implementations.

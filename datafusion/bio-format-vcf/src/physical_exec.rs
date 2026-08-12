@@ -2016,7 +2016,7 @@ impl FormatMode {
     }
 }
 
-fn resolve_selected_sample_indices(
+pub(crate) fn resolve_selected_sample_indices(
     selected_sample_names: &[String],
     source_sample_names: &[String],
 ) -> Vec<usize> {

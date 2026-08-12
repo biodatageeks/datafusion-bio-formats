@@ -6,7 +6,9 @@ use std::io::{self, Cursor, Read};
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::array::{Array, Int8Array, ListArray, NullBufferBuilder, StructArray};
+use datafusion::arrow::buffer::OffsetBuffer;
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
@@ -35,9 +37,11 @@ use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
     adjust_effective_batch_size_by_observed_format_bytes, build_noodles_region,
     build_record_batch_from_builders, choose_effective_batch_size,
-    choose_initial_builder_batch_size, init_format_mode, load_infos_single_pass, set_info_builders,
+    choose_initial_builder_batch_size, init_format_mode, load_infos_single_pass,
+    resolve_selected_sample_indices, set_info_builders,
 };
 use crate::storage::VcfRecordFields;
+use crate::table_provider::GenotypeOutputMode;
 
 const SUPPORTED_BCF_VERSION: (u8, u8) = (2, 2);
 const BCF_HEADER_PREFIX_SIZE: usize = 9;
@@ -1019,11 +1023,12 @@ fn validate_bcf_number_g_cardinality(
     Ok(())
 }
 
-fn validate_bcf_format_encoding(
-    samples: &bcf::record::Samples<'_>,
+fn validate_bcf_format_encoding<'a>(
+    samples: &'a bcf::record::Samples<'_>,
     header: &Header,
     allele_count: usize,
-) -> Result<()> {
+    validate_gt_values: bool,
+) -> Result<Option<BcfGtEncoding<'a>>> {
     let sample_count = samples.len();
     let mut src = samples.as_ref();
     let mut gt_encoding = None;
@@ -1083,7 +1088,9 @@ fn validate_bcf_format_encoding(
                     "BCF record contains duplicate GT FORMAT fields".into(),
                 ));
             }
-            validate_bcf_gt_payload(payload, encoded_type, value_count, allele_count)?;
+            if validate_gt_values {
+                validate_bcf_gt_payload(payload, encoded_type, value_count, allele_count)?;
+            }
             gt_encoding = Some(BcfGtEncoding {
                 payload,
                 encoded_type,
@@ -1102,10 +1109,13 @@ fn validate_bcf_format_encoding(
     if has_number_g && let Some(gt) = gt_encoding.as_ref() {
         // FORMAT series may appear in any order, so validate Number=G only
         // after the complete first pass has located and validated GT.
+        if !validate_gt_values {
+            validate_bcf_gt_payload(gt.payload, gt.encoded_type, gt.value_count, allele_count)?;
+        }
         validate_bcf_number_g_cardinality(samples, header, allele_count, gt)?;
     }
 
-    Ok(())
+    Ok(gt_encoding)
 }
 
 fn local_path(path: &str) -> &str {
@@ -1423,6 +1433,520 @@ fn validate_bcf_position(record: &BcfRecord) -> Result<u32> {
         .map_err(|_| DataFusionError::Execution("BCF position exceeds UInt32 range".into()))
 }
 
+enum BcfDosageValues {
+    Single {
+        values: Vec<i8>,
+        validity: NullBufferBuilder,
+    },
+    Multi {
+        values: Vec<i8>,
+        validity: NullBufferBuilder,
+        offsets: Vec<i32>,
+        gt_field: Field,
+    },
+}
+
+/// Direct typed sink for biallelic GT dosage.
+///
+/// The sink consumes the raw, already structurally validated BCF FORMAT series.
+/// It deliberately avoids noodles sample iterators, dynamic FORMAT values, GT
+/// strings, and per-cell heap allocations.
+struct BcfDosageBuilder {
+    values: BcfDosageValues,
+    selected_sample_indices: Vec<usize>,
+    all_samples_selected_in_order: bool,
+    batch_size: usize,
+}
+
+impl BcfDosageBuilder {
+    fn new(
+        schema: &SchemaRef,
+        batch_size: usize,
+        sample_names: &[String],
+        source_sample_names: &[String],
+    ) -> Result<Self> {
+        let selected_sample_indices =
+            resolve_selected_sample_indices(sample_names, source_sample_names);
+        if selected_sample_indices.is_empty() {
+            return Err(DataFusionError::Plan(
+                "BCF dosage requires at least one selected sample".into(),
+            ));
+        }
+        let all_samples_selected_in_order = selected_sample_indices.len()
+            == source_sample_names.len()
+            && selected_sample_indices
+                .iter()
+                .copied()
+                .eq(0..source_sample_names.len());
+        let inner_capacity = batch_size
+            .checked_mul(selected_sample_indices.len())
+            .ok_or_else(|| DataFusionError::Plan("BCF dosage batch capacity overflow".into()))?;
+
+        let values = if source_sample_names.len() == 1 {
+            BcfDosageValues::Single {
+                values: Vec::with_capacity(batch_size),
+                validity: NullBufferBuilder::new(batch_size),
+            }
+        } else {
+            let genotypes = schema.field_with_name("genotypes").map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "BCF dosage schema is missing the genotypes field: {error}"
+                ))
+            })?;
+            let DataType::Struct(children) = genotypes.data_type() else {
+                return Err(DataFusionError::Plan(
+                    "BCF dosage genotypes field must be a struct".into(),
+                ));
+            };
+            let gt_field = children
+                .iter()
+                .find(|field| field.name() == "GT")
+                .ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "BCF dosage genotypes struct is missing its GT child".into(),
+                    )
+                })?
+                .as_ref()
+                .clone();
+            let mut offsets = Vec::with_capacity(batch_size + 1);
+            offsets.push(0);
+            BcfDosageValues::Multi {
+                values: Vec::with_capacity(inner_capacity),
+                validity: NullBufferBuilder::new(inner_capacity),
+                offsets,
+                gt_field,
+            }
+        };
+
+        Ok(Self {
+            values,
+            selected_sample_indices,
+            all_samples_selected_in_order,
+            batch_size,
+        })
+    }
+
+    #[inline(always)]
+    fn decode_i8(genotype: &[u8]) -> Result<Option<i8>> {
+        let mut dosage = 0i8;
+        let mut ploidy = 0i8;
+        let mut missing = false;
+        let mut reached_vector_end = false;
+        for (allele_offset, &raw) in genotype.iter().enumerate() {
+            let allele = raw as i8;
+            if allele == i8::MIN + 1 {
+                reached_vector_end = true;
+                continue;
+            }
+            if reached_vector_end {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT encoding: value after vector-end at allele offset \
+                     {allele_offset}"
+                )));
+            }
+            if allele < 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT reserved value {allele} at allele offset {allele_offset}"
+                )));
+            }
+            ploidy = ploidy.checked_add(1).ok_or_else(|| {
+                DataFusionError::Execution(
+                    "BCF GT ploidy exceeds the signed 8-bit dosage range".into(),
+                )
+            })?;
+            if allele <= 1 {
+                missing = true;
+            } else if allele >= 4 {
+                if allele > 5 {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid BCF GT allele index {} for biallelic dosage",
+                        (allele >> 1) - 1
+                    )));
+                }
+                dosage += 1;
+            }
+        }
+        if ploidy == 0 {
+            return Err(DataFusionError::Execution(
+                "invalid BCF GT encoding: genotype has zero ploidy".into(),
+            ));
+        }
+        Ok((!missing).then_some(dosage))
+    }
+
+    #[inline(always)]
+    fn decode_i16(genotype: &[u8]) -> Result<Option<i8>> {
+        let mut dosage = 0i8;
+        let mut ploidy = 0i8;
+        let mut missing = false;
+        let mut reached_vector_end = false;
+        for (allele_offset, raw) in genotype.chunks_exact(2).enumerate() {
+            let allele = i16::from_le_bytes(raw.try_into().unwrap());
+            if allele == i16::MIN + 1 {
+                reached_vector_end = true;
+                continue;
+            }
+            if reached_vector_end {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT encoding: value after vector-end at allele offset \
+                     {allele_offset}"
+                )));
+            }
+            if allele < 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT reserved value {allele} at allele offset {allele_offset}"
+                )));
+            }
+            ploidy = ploidy.checked_add(1).ok_or_else(|| {
+                DataFusionError::Execution(
+                    "BCF GT ploidy exceeds the signed 8-bit dosage range".into(),
+                )
+            })?;
+            if allele <= 1 {
+                missing = true;
+            } else if allele >= 4 {
+                if allele > 5 {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid BCF GT allele index {} for biallelic dosage",
+                        (allele >> 1) - 1
+                    )));
+                }
+                dosage += 1;
+            }
+        }
+        if ploidy == 0 {
+            return Err(DataFusionError::Execution(
+                "invalid BCF GT encoding: genotype has zero ploidy".into(),
+            ));
+        }
+        Ok((!missing).then_some(dosage))
+    }
+
+    #[inline(always)]
+    fn decode_i32(genotype: &[u8]) -> Result<Option<i8>> {
+        let mut dosage = 0i8;
+        let mut ploidy = 0i8;
+        let mut missing = false;
+        let mut reached_vector_end = false;
+        for (allele_offset, raw) in genotype.chunks_exact(4).enumerate() {
+            let allele = i32::from_le_bytes(raw.try_into().unwrap());
+            if allele == i32::MIN + 1 {
+                reached_vector_end = true;
+                continue;
+            }
+            if reached_vector_end {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT encoding: value after vector-end at allele offset \
+                     {allele_offset}"
+                )));
+            }
+            if allele < 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "invalid BCF GT reserved value {allele} at allele offset {allele_offset}"
+                )));
+            }
+            ploidy = ploidy.checked_add(1).ok_or_else(|| {
+                DataFusionError::Execution(
+                    "BCF GT ploidy exceeds the signed 8-bit dosage range".into(),
+                )
+            })?;
+            if allele <= 1 {
+                missing = true;
+            } else if allele >= 4 {
+                if allele > 5 {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid BCF GT allele index {} for biallelic dosage",
+                        (allele >> 1) - 1
+                    )));
+                }
+                dosage += 1;
+            }
+        }
+        if ploidy == 0 {
+            return Err(DataFusionError::Execution(
+                "invalid BCF GT encoding: genotype has zero ploidy".into(),
+            ));
+        }
+        Ok((!missing).then_some(dosage))
+    }
+
+    #[inline]
+    fn append_optional(values: &mut Vec<i8>, validity: &mut NullBufferBuilder, value: Option<i8>) {
+        match value {
+            Some(value) => {
+                values.push(value);
+                validity.append_non_null();
+            }
+            None => {
+                values.push(0);
+                validity.append_null();
+            }
+        }
+    }
+
+    /// Decodes the overwhelmingly common fixed-diploid Int8 representation in
+    /// bulk. A separate validation pass makes the materialization loop
+    /// branch-free and gives LLVM room to vectorize it. Records containing a
+    /// missing allele, variable ploidy, or malformed value use the fully
+    /// checked fallback below.
+    #[inline]
+    fn append_all_diploid_i8(
+        values: &mut Vec<i8>,
+        validity: &mut NullBufferBuilder,
+        payload: &[u8],
+    ) -> Result<()> {
+        debug_assert_eq!(payload.len() % 2, 0);
+        let sample_count = payload.len() / 2;
+
+        if payload.iter().all(|&raw| (2..=5).contains(&raw)) {
+            values.reserve(sample_count);
+            for genotype in payload.chunks_exact(2) {
+                values.push(((genotype[0] >> 2) + (genotype[1] >> 2)) as i8);
+            }
+            validity.append_n_non_nulls(sample_count);
+            return Ok(());
+        }
+
+        // Buffer validity in runs so the lazy null builder is touched once per
+        // run rather than once for every one of billions of genotype cells.
+        let mut non_null_run = 0;
+        for genotype in payload.chunks_exact(2) {
+            match Self::decode_i8(genotype)? {
+                Some(dosage) => {
+                    values.push(dosage);
+                    non_null_run += 1;
+                }
+                None => {
+                    values.push(0);
+                    validity.append_n_non_nulls(non_null_run);
+                    validity.append_null();
+                    non_null_run = 0;
+                }
+            }
+        }
+        validity.append_n_non_nulls(non_null_run);
+        Ok(())
+    }
+
+    fn append_gt(&mut self, gt: Option<BcfGtEncoding<'_>>, allele_count: usize) -> Result<()> {
+        if allele_count != 2 {
+            return Err(DataFusionError::Execution(format!(
+                "BCF GT dosage supports exactly one ALT allele; record has {} ALT alleles",
+                allele_count.saturating_sub(1)
+            )));
+        }
+
+        match (&mut self.values, gt) {
+            (BcfDosageValues::Single { values, validity }, Some(gt)) => {
+                let sample_width = gt
+                    .encoded_type
+                    .width()
+                    .checked_mul(gt.value_count)
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("BCF GT sample width overflow".into())
+                    })?;
+                let sample_index = self.selected_sample_indices[0];
+                let start = sample_index.checked_mul(sample_width).ok_or_else(|| {
+                    DataFusionError::Execution("BCF GT sample offset overflow".into())
+                })?;
+                let sample = gt.payload.get(start..start + sample_width).ok_or_else(|| {
+                    DataFusionError::Execution("BCF GT sample payload is truncated".into())
+                })?;
+                let dosage = match gt.encoded_type {
+                    BcfEncodedType::Int8 => Self::decode_i8(sample)?,
+                    BcfEncodedType::Int16 => Self::decode_i16(sample)?,
+                    BcfEncodedType::Int32 => Self::decode_i32(sample)?,
+                    _ => unreachable!("GT encoding was validated before dosage decode"),
+                };
+                Self::append_optional(values, validity, dosage);
+            }
+            (BcfDosageValues::Single { values, validity }, None) => {
+                Self::append_optional(values, validity, None)
+            }
+            (
+                BcfDosageValues::Multi {
+                    values,
+                    validity,
+                    offsets,
+                    ..
+                },
+                Some(gt),
+            ) => {
+                let sample_width = gt
+                    .encoded_type
+                    .width()
+                    .checked_mul(gt.value_count)
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("BCF GT sample width overflow".into())
+                    })?;
+                macro_rules! append_sample {
+                    ($sample:expr, $decoder:ident) => {{
+                        Self::append_optional(values, validity, Self::$decoder($sample)?);
+                    }};
+                }
+                match gt.encoded_type {
+                    BcfEncodedType::Int8 => {
+                        if self.all_samples_selected_in_order && gt.value_count == 2 {
+                            Self::append_all_diploid_i8(values, validity, gt.payload)?;
+                        } else if self.all_samples_selected_in_order {
+                            for sample in gt.payload.chunks_exact(sample_width) {
+                                append_sample!(sample, decode_i8);
+                            }
+                        } else {
+                            for &sample_index in &self.selected_sample_indices {
+                                let start = sample_index * sample_width;
+                                append_sample!(&gt.payload[start..start + sample_width], decode_i8);
+                            }
+                        }
+                    }
+                    BcfEncodedType::Int16 => {
+                        if self.all_samples_selected_in_order {
+                            for sample in gt.payload.chunks_exact(sample_width) {
+                                append_sample!(sample, decode_i16);
+                            }
+                        } else {
+                            for &sample_index in &self.selected_sample_indices {
+                                let start = sample_index * sample_width;
+                                append_sample!(
+                                    &gt.payload[start..start + sample_width],
+                                    decode_i16
+                                );
+                            }
+                        }
+                    }
+                    BcfEncodedType::Int32 => {
+                        if self.all_samples_selected_in_order {
+                            for sample in gt.payload.chunks_exact(sample_width) {
+                                append_sample!(sample, decode_i32);
+                            }
+                        } else {
+                            for &sample_index in &self.selected_sample_indices {
+                                let start = sample_index * sample_width;
+                                append_sample!(
+                                    &gt.payload[start..start + sample_width],
+                                    decode_i32
+                                );
+                            }
+                        }
+                    }
+                    _ => unreachable!("GT encoding was validated before dosage decode"),
+                }
+                offsets.push(i32::try_from(values.len()).map_err(|_| {
+                    DataFusionError::Execution(
+                        "BCF dosage batch exceeds the Arrow List offset range".into(),
+                    )
+                })?);
+            }
+            (
+                BcfDosageValues::Multi {
+                    values,
+                    validity,
+                    offsets,
+                    ..
+                },
+                None,
+            ) => {
+                let sample_count = self.selected_sample_indices.len();
+                values.resize(values.len() + sample_count, 0);
+                validity.append_n_nulls(sample_count);
+                offsets.push(i32::try_from(values.len()).map_err(|_| {
+                    DataFusionError::Execution(
+                        "BCF dosage batch exceeds the Arrow List offset range".into(),
+                    )
+                })?);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_arrays(&mut self) -> Result<Vec<Arc<dyn Array>>> {
+        match &mut self.values {
+            BcfDosageValues::Single { values, validity } => {
+                let values = std::mem::replace(values, Vec::with_capacity(self.batch_size));
+                let array =
+                    Arc::new(Int8Array::new(values.into(), validity.finish())) as Arc<dyn Array>;
+                Ok(vec![array])
+            }
+            BcfDosageValues::Multi {
+                values,
+                validity,
+                offsets,
+                gt_field,
+            } => {
+                let DataType::List(item_field) = gt_field.data_type() else {
+                    return Err(DataFusionError::Execution(
+                        "BCF dosage GT field must be an Arrow List".into(),
+                    ));
+                };
+                let inner_capacity = self
+                    .batch_size
+                    .checked_mul(self.selected_sample_indices.len())
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("BCF dosage batch capacity overflow".into())
+                    })?;
+                let values = std::mem::replace(values, Vec::with_capacity(inner_capacity));
+                let child =
+                    Arc::new(Int8Array::new(values.into(), validity.finish())) as Arc<dyn Array>;
+                let finished_offsets =
+                    std::mem::replace(offsets, Vec::with_capacity(self.batch_size + 1));
+                offsets.push(0);
+                let list = Arc::new(ListArray::new(
+                    Arc::clone(item_field),
+                    OffsetBuffer::new(finished_offsets.into()),
+                    child,
+                    None,
+                )) as Arc<dyn Array>;
+                let array =
+                    StructArray::try_new(vec![Arc::new(gt_field.clone())].into(), vec![list], None)
+                        .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))?;
+                Ok(vec![Arc::new(array)])
+            }
+        }
+    }
+}
+
+enum BcfFormatMode {
+    Generic(FormatMode),
+    Dosage(BcfDosageBuilder),
+}
+
+impl BcfFormatMode {
+    fn is_direct_dosage(&self) -> bool {
+        matches!(self, Self::Dosage(_))
+    }
+
+    fn has_fields(&self) -> bool {
+        match self {
+            Self::Generic(mode) => mode.has_fields(),
+            Self::Dosage(_) => true,
+        }
+    }
+
+    fn append_record(
+        &mut self,
+        record: &BcfRecord,
+        header: &Header,
+        gt: Option<BcfGtEncoding<'_>>,
+        allele_count: usize,
+    ) -> Result<()> {
+        match self {
+            Self::Generic(mode) => mode
+                .append_record(record, header)
+                .map_err(|error| DataFusionError::ArrowError(Box::new(error), None)),
+            Self::Dosage(builder) => builder.append_gt(gt, allele_count),
+        }
+    }
+
+    fn finish_arrays(&mut self) -> Result<Vec<Arc<dyn Array>>> {
+        match self {
+            Self::Generic(mode) => mode
+                .finish_arrays()
+                .map_err(|error| DataFusionError::ArrowError(Box::new(error), None)),
+            Self::Dosage(builder) => builder.finish_arrays(),
+        }
+    }
+}
+
 struct BcfBatchDecoder {
     schema: SchemaRef,
     requested_batch_size: usize,
@@ -1436,7 +1960,8 @@ struct BcfBatchDecoder {
     info_builders: (Vec<String>, Vec<DataType>, Vec<OptionalField>),
     info_name_to_index: HashMap<String, usize>,
     info_populated: Vec<bool>,
-    format_mode: FormatMode,
+    format_mode: BcfFormatMode,
+    genotype_output_mode: GenotypeOutputMode,
     has_format_fields: bool,
     batch_row_count: usize,
     join_buf: String,
@@ -1455,6 +1980,7 @@ impl BcfBatchDecoder {
         projection: Option<Vec<usize>>,
         coordinate_system_zero_based: bool,
         residual_filters: Vec<Expr>,
+        genotype_output_mode: GenotypeOutputMode,
     ) -> Result<Self> {
         // First pass exists only to learn the INFO field count for
         // `ProjectionFlags`; the builders are rebuilt below once the
@@ -1467,19 +1993,29 @@ impl BcfBatchDecoder {
             &mut info_builders,
         );
         let flags = ProjectionFlags::new(&projection, info_builders.0.len());
-        let effective_batch_size = choose_effective_batch_size(
-            batch_size,
-            flags.any_format,
-            &format_fields,
-            sample_names,
-            &source_sample_names,
-            header.formats(),
-        );
-        let initial_builder_batch_size = choose_initial_builder_batch_size(
-            effective_batch_size,
-            flags.any_format,
-            &source_sample_names,
-        );
+        let effective_batch_size =
+            if genotype_output_mode == GenotypeOutputMode::Dosage && flags.any_format {
+                batch_size
+            } else {
+                choose_effective_batch_size(
+                    batch_size,
+                    flags.any_format,
+                    &format_fields,
+                    sample_names,
+                    &source_sample_names,
+                    header.formats(),
+                )
+            };
+        let initial_builder_batch_size =
+            if genotype_output_mode == GenotypeOutputMode::Dosage && flags.any_format {
+                effective_batch_size
+            } else {
+                choose_initial_builder_batch_size(
+                    effective_batch_size,
+                    flags.any_format,
+                    &source_sample_names,
+                )
+            };
 
         info_builders = (Vec::new(), Vec::new(), Vec::new());
         set_info_builders(
@@ -1496,14 +2032,27 @@ impl BcfBatchDecoder {
             .collect();
         let info_populated = vec![false; info_builders.0.len()];
 
-        let format_mode = init_format_mode(
-            initial_builder_batch_size,
-            format_fields,
-            sample_names,
-            &source_sample_names,
-            header.formats(),
-        )
-        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        let format_mode = if !flags.any_format {
+            BcfFormatMode::Generic(FormatMode::None)
+        } else if genotype_output_mode == GenotypeOutputMode::Dosage {
+            BcfFormatMode::Dosage(BcfDosageBuilder::new(
+                &schema,
+                initial_builder_batch_size,
+                sample_names,
+                &source_sample_names,
+            )?)
+        } else {
+            BcfFormatMode::Generic(
+                init_format_mode(
+                    initial_builder_batch_size,
+                    format_fields,
+                    sample_names,
+                    &source_sample_names,
+                    header.formats(),
+                )
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
+            )
+        };
         let has_format_fields = format_mode.has_fields();
         let core_builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
 
@@ -1521,6 +2070,7 @@ impl BcfBatchDecoder {
             info_name_to_index,
             info_populated,
             format_mode,
+            genotype_output_mode,
             has_format_fields,
             batch_row_count: 0,
             join_buf: String::with_capacity(64),
@@ -1580,7 +2130,9 @@ impl BcfBatchDecoder {
             }
         }
         validate_bcf_info_encoding(&record.info(), header, allele_count)?;
-        validate_bcf_format_encoding(&samples, header, allele_count)?;
+        let direct_dosage = self.format_mode.is_direct_dosage();
+        let gt_encoding =
+            validate_bcf_format_encoding(&samples, header, allele_count, !direct_dosage)?;
 
         let has_filters = !self.residual_filters.is_empty();
         let needs_start = self.flags.start || has_filters;
@@ -1624,6 +2176,17 @@ impl BcfBatchDecoder {
                 end,
             };
             if !evaluate_record_filters(&fields, &self.residual_filters) {
+                if direct_dosage && let Some(gt) = gt_encoding.as_ref() {
+                    // Direct materialization performs GT validation for accepted
+                    // records. A filtered record still needs the same integrity
+                    // checks even though no Arrow value is constructed.
+                    validate_bcf_gt_payload(
+                        gt.payload,
+                        gt.encoded_type,
+                        gt.value_count,
+                        allele_count,
+                    )?;
+                }
                 return Ok(None);
             }
         }
@@ -1691,8 +2254,7 @@ impl BcfBatchDecoder {
         }
         if self.has_format_fields && self.flags.any_format {
             self.format_mode
-                .append_record(record, header)
-                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+                .append_record(record, header, gt_encoding, allele_count)?;
         }
 
         self.batch_row_count += 1;
@@ -1710,23 +2272,23 @@ impl BcfBatchDecoder {
             None
         };
         let format_arrays = if self.has_format_fields && self.flags.any_format {
-            Some(
-                self.format_mode
-                    .finish_arrays()
-                    .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?,
-            )
+            Some(self.format_mode.finish_arrays()?)
         } else {
             None
         };
 
-        self.effective_batch_size = adjust_effective_batch_size_by_observed_format_bytes(
-            self.requested_batch_size,
-            self.effective_batch_size,
-            self.flags.any_format,
-            &self.source_sample_names,
-            self.batch_row_count,
-            format_arrays.as_ref(),
-        );
+        self.effective_batch_size = if self.genotype_output_mode == GenotypeOutputMode::Dosage {
+            self.requested_batch_size
+        } else {
+            adjust_effective_batch_size_by_observed_format_bytes(
+                self.requested_batch_size,
+                self.effective_batch_size,
+                self.flags.any_format,
+                &self.source_sample_names,
+                self.batch_row_count,
+                format_arrays.as_ref(),
+            )
+        };
         let row_count = self.batch_row_count;
         self.batch_row_count = 0;
 
@@ -1762,6 +2324,7 @@ fn full_local_stream(
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    genotype_output_mode: GenotypeOutputMode,
     limit: Option<usize>,
 ) -> SendableRecordBatchStream {
     let output_schema = schema.clone();
@@ -1781,6 +2344,7 @@ fn full_local_stream(
             projection,
             coordinate_system_zero_based,
             residual_filters,
+            genotype_output_mode,
         )?;
         let mut record = BcfRecord::default();
         let mut emitted = 0usize;
@@ -1824,6 +2388,7 @@ async fn full_remote_stream(
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    genotype_output_mode: GenotypeOutputMode,
     limit: Option<usize>,
 ) -> Result<SendableRecordBatchStream> {
     let output_schema = schema.clone();
@@ -1846,6 +2411,7 @@ async fn full_remote_stream(
             projection,
             coordinate_system_zero_based,
             residual_filters,
+            genotype_output_mode,
         )?;
         let mut record = BcfRecord::default();
         let mut emitted = 0usize;
@@ -1895,6 +2461,7 @@ fn indexed_local_stream(
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    genotype_output_mode: GenotypeOutputMode,
     limit: Option<usize>,
 ) -> SendableRecordBatchStream {
     let output_schema = schema.clone();
@@ -1921,6 +2488,7 @@ fn indexed_local_stream(
             projection,
             coordinate_system_zero_based,
             residual_filters,
+            genotype_output_mode,
         )?;
         let mut emitted = 0usize;
 
@@ -2001,6 +2569,7 @@ async fn indexed_remote_stream(
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    genotype_output_mode: GenotypeOutputMode,
     limit: Option<usize>,
 ) -> Result<SendableRecordBatchStream> {
     let options = object_storage_options.unwrap_or_default();
@@ -2034,6 +2603,7 @@ async fn indexed_remote_stream(
             projection,
             coordinate_system_zero_based,
             residual_filters,
+            genotype_output_mode,
         )?;
         let mut emitted = 0usize;
 
@@ -2146,6 +2716,7 @@ pub(crate) struct BcfExec {
     /// partitions (avoids re-downloading it per partition on remote scans).
     pub(crate) header: Option<Arc<Header>>,
     pub(crate) residual_filters: Vec<Expr>,
+    pub(crate) genotype_output_mode: GenotypeOutputMode,
 }
 
 impl Debug for BcfExec {
@@ -2217,6 +2788,7 @@ impl ExecutionPlan for BcfExec {
                     self.projection.clone(),
                     self.coordinate_system_zero_based,
                     self.residual_filters.clone(),
+                    self.genotype_output_mode,
                     self.limit,
                 ));
             }
@@ -2237,6 +2809,7 @@ impl ExecutionPlan for BcfExec {
                 self.object_storage_options.clone(),
                 self.coordinate_system_zero_based,
                 self.residual_filters.clone(),
+                self.genotype_output_mode,
                 self.limit,
             );
             let stream = futures::stream::once(future).try_flatten();
@@ -2258,6 +2831,7 @@ impl ExecutionPlan for BcfExec {
                 self.projection.clone(),
                 self.coordinate_system_zero_based,
                 self.residual_filters.clone(),
+                self.genotype_output_mode,
                 self.limit,
             )),
             _ => {
@@ -2273,6 +2847,7 @@ impl ExecutionPlan for BcfExec {
                     self.object_storage_options.clone(),
                     self.coordinate_system_zero_based,
                     self.residual_filters.clone(),
+                    self.genotype_output_mode,
                     self.limit,
                 );
                 let stream = futures::stream::once(future).try_flatten();
@@ -2316,6 +2891,42 @@ mod tests {
             .to_string();
         assert!(
             error.contains("GT allele index 2"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn decodes_biallelic_dosage_for_each_integer_width() {
+        assert_eq!(BcfDosageBuilder::decode_i8(&[2, 4]).unwrap(), Some(1));
+        assert_eq!(BcfDosageBuilder::decode_i8(&[5, 5]).unwrap(), Some(2));
+        assert_eq!(BcfDosageBuilder::decode_i8(&[3, 3]).unwrap(), Some(0));
+        assert_eq!(BcfDosageBuilder::decode_i8(&[2, 0]).unwrap(), None);
+        assert_eq!(
+            BcfDosageBuilder::decode_i8(&[4, (i8::MIN + 1) as u8]).unwrap(),
+            Some(1)
+        );
+
+        let int16 = [2i16, 5i16]
+            .into_iter()
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(BcfDosageBuilder::decode_i16(&int16).unwrap(), Some(1));
+
+        let int32 = [4i32, 4i32]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(BcfDosageBuilder::decode_i32(&int32).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn dosage_rejects_ploidy_beyond_int8_range() {
+        let genotype = vec![2; 128];
+        let error = BcfDosageBuilder::decode_i8(&genotype)
+            .expect_err("ploidy 128 must not fit in signed 8-bit dosage")
+            .to_string();
+        assert!(
+            error.contains("ploidy exceeds"),
             "unexpected error: {error}"
         );
     }

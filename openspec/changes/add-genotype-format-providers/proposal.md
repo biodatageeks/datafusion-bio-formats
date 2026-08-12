@@ -22,7 +22,8 @@ when a query does not need them.
   projection pruning, filter exactness, limit handling, partition planning,
   companion files, object storage, metrics, and bounded memory.
 - Add BCF 2.2 input to the existing VCF crate while preserving the current VCF
-  logical schema and FORMAT-field behavior.
+  logical schema and FORMAT-field behavior by default. Add an explicit
+  biallelic GT-dosage output mode that changes only the requested GT child type.
 - Add a PLINK 1 BED/BIM/FAM provider with explicit `A1`/`A2` semantics,
   fixed-offset variant reads, exact BIM pruning, and selected-sample decoding.
 - Add a BGEN 1.2/1.3 provider supporting Layout 1 compatibility, full Layout 2
@@ -40,8 +41,8 @@ when a query does not need them.
 - Stage delivery so each format capability can be implemented, benchmarked,
   and approved independently after the shared contract is established.
 
-This proposal does not change the existing VCF schema, add writers, perform
-automatic format conversion, or add genotype association algorithms.
+This proposal does not change the default existing VCF schema, add writers,
+perform automatic format conversion, or add genotype association algorithms.
 
 ## Impact
 
@@ -60,7 +61,7 @@ automatic format conversion, or add genotype association algorithms.
   - format examples, fixtures, conformance tests, and benchmarks
 - API compatibility:
   - Existing VCF APIs and schemas remain compatible.
-  - New APIs are additive and read-only.
+  - New genotype output modes are additive, explicit, and read-only.
 - Operational impact:
   - Indexed and fixed-offset scans may issue object-store range requests.
   - Remote SQLite BGI files require a bounded local cache.

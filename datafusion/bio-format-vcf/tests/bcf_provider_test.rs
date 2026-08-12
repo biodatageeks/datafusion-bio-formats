@@ -7,13 +7,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use datafusion::arrow::array::{
-    Int32Array, Int64Array, ListArray, StringArray, StructArray, UInt32Array,
+    Int8Array, Int32Array, Int64Array, ListArray, StringArray, StructArray, UInt32Array,
 };
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::catalog::TableProvider;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::genotype::MissingSamplePolicy;
-use datafusion_bio_format_vcf::table_provider::{VcfInputFormat, VcfTableProvider};
+use datafusion_bio_format_vcf::table_provider::{
+    GenotypeOutputMode, VcfInputFormat, VcfTableProvider,
+};
 use noodles_bcf as bcf;
 use noodles_vcf as vcf;
 use noodles_vcf::variant::io::Write as _;
@@ -1001,6 +1003,105 @@ fn write_format_array_bcf(
         vcf_path.to_string_lossy().into_owned(),
         bcf_path_buf.to_string_lossy().into_owned(),
     ))
+}
+
+#[tokio::test]
+async fn bcf_dosage_decodes_phase_missingness_ploidy_and_sample_order()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0|0\t0/1\n\
+                chr1\t20\trs2\tG\tT\t50\tPASS\t.\tGT\t1/1\t./1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage", body)?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        Some(vec!["S2".to_string(), "S1".to_string()]),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+
+    let genotypes_field = provider.schema().field_with_name("genotypes")?.clone();
+    let datafusion::arrow::datatypes::DataType::Struct(children) = genotypes_field.data_type()
+    else {
+        panic!("multisample dosage must retain the genotypes struct");
+    };
+    let gt_field = children.iter().find(|field| field.name() == "GT").unwrap();
+    let datafusion::arrow::datatypes::DataType::List(item) = gt_field.data_type() else {
+        panic!("multisample dosage GT must remain a list");
+    };
+    assert_eq!(
+        item.data_type(),
+        &datafusion::arrow::datatypes::DataType::Int8
+    );
+
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT genotypes FROM variants ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(batches.len(), 1);
+    let genotypes = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .expect("genotypes should be a struct");
+    let gt = genotypes
+        .column_by_name("GT")
+        .expect("GT should be projected")
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .expect("GT should contain one dosage list per row");
+
+    let row0 = gt.value(0);
+    let row0 = row0.as_any().downcast_ref::<Int8Array>().unwrap();
+    assert_eq!(row0.values(), &[1, 0]);
+
+    let row1 = gt.value(1);
+    let row1 = row1.as_any().downcast_ref::<Int8Array>().unwrap();
+    assert!(datafusion::arrow::array::Array::is_null(row1, 0));
+    assert_eq!(row1.value(1), 2);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_rejects_multiallelic_records() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT genotypes FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("dosage must not collapse multiple ALT alleles")
+        .to_string();
+    assert!(
+        error.contains("supports exactly one ALT allele"),
+        "unexpected error: {error}"
+    );
+    Ok(())
 }
 
 fn bcf_typed_value_end(data: &[u8], offset: usize) -> usize {

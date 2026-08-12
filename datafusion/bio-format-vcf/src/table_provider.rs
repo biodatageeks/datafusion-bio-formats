@@ -445,6 +445,21 @@ pub enum VcfInputFormat {
     Bcf,
 }
 
+/// Physical representation used for the BCF `GT` FORMAT field.
+///
+/// String mode preserves the VCF-compatible schema. Dosage mode is an explicit,
+/// read-only BCF optimization that emits the count of allele index 1 as nullable
+/// signed 8-bit values. It currently requires `GT` to be the only selected
+/// FORMAT field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GenotypeOutputMode {
+    /// Preserve phased or unphased VCF genotype strings such as `0|1`.
+    #[default]
+    String,
+    /// Emit biallelic alternate-allele counts, with missing genotypes as null.
+    Dosage,
+}
+
 impl VcfInputFormat {
     fn resolve(self, file_path: &str) -> Self {
         match self {
@@ -498,12 +513,118 @@ pub struct VcfTableProvider {
     contig_lengths: Vec<u64>,
     /// Physical input encoding.
     input_format: VcfInputFormat,
+    /// Physical representation requested for the BCF GT field.
+    genotype_output_mode: GenotypeOutputMode,
     /// Header parsed once at construction; shared with BCF scan partitions so
     /// remote scans do not re-download and re-parse it per partition.
     bcf_header: Option<Arc<noodles_vcf::Header>>,
 }
 
 impl VcfTableProvider {
+    /// Selects the physical representation of the BCF `GT` FORMAT field.
+    ///
+    /// Dosage mode is deliberately explicit and additive: existing providers
+    /// continue to expose VCF-compatible strings. The optimized dosage path
+    /// currently accepts BCF input with `GT` as the only selected FORMAT field.
+    /// Biallelic and ploidy constraints are validated while records are read.
+    pub fn with_genotype_output_mode(
+        mut self,
+        mode: GenotypeOutputMode,
+    ) -> datafusion::common::Result<Self> {
+        if mode == self.genotype_output_mode {
+            return Ok(self);
+        }
+        if mode != GenotypeOutputMode::Dosage {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "a provider configured for BCF dosage cannot be converted back to string mode"
+                    .to_string(),
+            ));
+        }
+        if self.input_format != VcfInputFormat::Bcf {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "genotype dosage output is supported only for BCF input".to_string(),
+            ));
+        }
+        let selected_formats = Self::infer_format_fields_from_schema(&self.schema);
+        if selected_formats.as_slice() != ["GT"] {
+            return Err(datafusion::common::DataFusionError::Plan(format!(
+                "BCF genotype dosage currently requires GT as the only selected FORMAT field; \
+                 selected fields are {selected_formats:?}"
+            )));
+        }
+
+        let mut fields = self
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let mut replaced_gt = false;
+        for field in &mut fields {
+            if field.name() == "genotypes" {
+                let DataType::Struct(children) = field.data_type() else {
+                    continue;
+                };
+                let dosage_children = children
+                    .iter()
+                    .map(|child| {
+                        if child.name() != "GT" {
+                            return child.clone();
+                        }
+                        let DataType::List(item) = child.data_type() else {
+                            return child.clone();
+                        };
+                        replaced_gt = true;
+                        let dosage_item = Arc::new(
+                            Field::new(item.name(), DataType::Int8, true)
+                                .with_metadata(item.metadata().clone()),
+                        );
+                        Arc::new(
+                            Field::new(
+                                child.name(),
+                                DataType::List(dosage_item),
+                                child.is_nullable(),
+                            )
+                            .with_metadata(child.metadata().clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                *field = Field::new(
+                    field.name(),
+                    DataType::Struct(dosage_children.into()),
+                    field.is_nullable(),
+                )
+                .with_metadata(field.metadata().clone());
+            } else if field
+                .metadata()
+                .get(VCF_FIELD_FORMAT_ID_KEY)
+                .is_some_and(|id| id == "GT")
+            {
+                replaced_gt = true;
+                *field = Field::new(field.name(), DataType::Int8, true)
+                    .with_metadata(field.metadata().clone());
+            }
+        }
+        if !replaced_gt {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "BCF genotype dosage requires a selected GT FORMAT field".to_string(),
+            ));
+        }
+
+        let mut metadata = self.schema.metadata().clone();
+        metadata.insert(
+            "bio.vcf.genotype_output_mode".to_string(),
+            "dosage".to_string(),
+        );
+        metadata.insert(
+            "bio.vcf.genotype_counted_allele".to_string(),
+            "1".to_string(),
+        );
+        self.schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+        self.genotype_output_mode = mode;
+        Ok(self)
+    }
+
     /// Resolves sample names from a schema, checking genotypes field metadata
     /// and schema-level metadata. Returns empty Vec if neither source has sample names.
     fn resolve_sample_names_from_schema(schema: &SchemaRef) -> Vec<String> {
@@ -928,6 +1049,7 @@ impl VcfTableProvider {
             contig_names,
             contig_lengths,
             input_format,
+            genotype_output_mode: GenotypeOutputMode::String,
             bcf_header: match input_format {
                 VcfInputFormat::Bcf => Some(header),
                 _ => None,
@@ -976,6 +1098,7 @@ impl VcfTableProvider {
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
             input_format: VcfInputFormat::Vcf,
+            genotype_output_mode: GenotypeOutputMode::String,
             bcf_header: None,
         }
     }
@@ -1018,6 +1141,7 @@ impl VcfTableProvider {
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
             input_format: VcfInputFormat::Vcf,
+            genotype_output_mode: GenotypeOutputMode::String,
             bcf_header: None,
         }
     }
@@ -1213,6 +1337,7 @@ impl TableProvider for VcfTableProvider {
                         index: bcf_shared_index,
                         header: self.bcf_header.clone(),
                         residual_filters: record_filters,
+                        genotype_output_mode: self.genotype_output_mode,
                     }),
                     VcfInputFormat::Vcf => Arc::new(VcfExec {
                         cache,
@@ -1267,6 +1392,7 @@ impl TableProvider for VcfTableProvider {
                     index: None,
                     header: self.bcf_header.clone(),
                     residual_filters: record_filters,
+                    genotype_output_mode: self.genotype_output_mode,
                 }))
             }
             VcfInputFormat::Vcf => Ok(Arc::new(VcfExec {

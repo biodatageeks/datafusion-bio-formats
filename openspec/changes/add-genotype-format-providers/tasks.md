@@ -67,6 +67,19 @@
 - [x] 3.14 Add BCF-to-VCF logical equivalence fixtures for INFO/FORMAT schemas.
 - [ ] 3.15 Benchmark sequential, indexed-region, metadata-only, sparse-sample,
   and parallel scans.
+- [x] 3.16 Add an explicit BCF genotype output mode while preserving string GT
+  and the current schema as the default.
+- [x] 3.17 Refactor BCF FORMAT parsing into borrowed validated series views and
+  an extensible projected typed-sink dispatch.
+- [x] 3.18 Implement fused biallelic GT validation and direct nullable `Int8`
+  ALT-dosage construction without intermediate genotype strings.
+- [x] 3.19 Cover dosage missingness, phase independence, sample selection,
+  encoded integer widths, excessive ploidy, and multiallelic rejection.
+- [x] 3.20 Expose BCF dosage mode through polars-bio and verify complete output
+  equivalence against the independent snputils result.
+- [x] 3.21 On the representative public cohort, require the median of at least
+  three fresh one-thread release/native runs to beat the pinned snputils
+  baseline while reporting peak RSS.
 
 ## 4. PLINK 1 Provider
 
