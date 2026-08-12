@@ -1484,6 +1484,70 @@ async fn bcf_validates_dictionary_indices_when_columns_are_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_rejects_pass_combined_with_a_failing_filter_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FILTER=<ID=q10,Description=\"Low quality\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tq10\t.\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "pass-and-q10", body)?;
+
+    // Expand the valid scalar q10 FILTER payload to [PASS, q10]. PASS has the
+    // reserved dictionary index 0, and the record's shared section grows by
+    // one byte.
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let site_start = record_start + 8;
+    let allele_count =
+        u16::from_le_bytes(decompressed[site_start + 18..site_start + 20].try_into()?) as usize;
+    let mut filter_start = site_start + 24;
+    filter_start = bcf_typed_value_end(&decompressed, filter_start); // IDs
+    for _ in 0..allele_count {
+        filter_start = bcf_typed_value_end(&decompressed, filter_start); // REF and ALTs
+    }
+    assert_eq!(
+        decompressed[filter_start], 0x11,
+        "q10 should use a scalar i8 FILTER dictionary index"
+    );
+    assert_ne!(
+        decompressed[filter_start + 1],
+        0,
+        "q10 should not use the reserved PASS index"
+    );
+    decompressed[filter_start] = 0x21;
+    decompressed.insert(filter_start + 1, 0);
+    decompressed[record_start..record_start + 4]
+        .copy_from_slice(&u32::try_from(shared_len + 1)?.to_le_bytes());
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("PASS combined with q10 must fail an unprojected scan")
+        .to_string();
+    assert!(
+        error.contains("BCF FILTER contains PASS together with a failing filter"),
+        "unexpected error: {error}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_validates_core_fields_when_columns_are_unprojected()
 -> Result<(), Box<dyn std::error::Error>> {
     let body = "##fileformat=VCFv4.3\n\

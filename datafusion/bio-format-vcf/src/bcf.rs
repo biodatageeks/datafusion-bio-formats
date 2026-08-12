@@ -923,21 +923,28 @@ fn validate_bcf_format_cardinality(
     Ok(())
 }
 
-fn bcf_number_g_cardinality_error(
+fn bcf_gt_dependent_cardinality_error(
     key: &str,
+    format_number: FormatNumber,
     expected_count: usize,
     actual_count: usize,
     sample_index: usize,
     ploidy: usize,
 ) -> DataFusionError {
+    let number = match format_number {
+        FormatNumber::Samples => 'G',
+        FormatNumber::Ploidy => 'P',
+        _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
+    };
     DataFusionError::Execution(format!(
-        "FORMAT field '{key}' declares Number=G ({expected_count} expected for sample \
+        "FORMAT field '{key}' declares Number={number} ({expected_count} expected for sample \
          {sample_index} with ploidy {ploidy}) but the sample encodes {actual_count} values"
     ))
 }
 
-fn validate_bcf_number_g_payload(
+fn validate_bcf_gt_dependent_payload(
     key: &str,
+    format_number: FormatNumber,
     format_type: FormatType,
     encoding: BcfFormatEncoding<'_>,
     allele_count: usize,
@@ -968,10 +975,15 @@ fn validate_bcf_number_g_payload(
                     continue;
                 }
                 let ploidy = bcf_gt_sample_ploidy(gt, sample_index)?;
-                let expected_count = bcf_genotype_cardinality(allele_count, ploidy)?;
+                let expected_count = match format_number {
+                    FormatNumber::Samples => bcf_genotype_cardinality(allele_count, ploidy)?,
+                    FormatNumber::Ploidy => ploidy,
+                    _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
+                };
                 if actual_count != expected_count {
-                    return Err(bcf_number_g_cardinality_error(
+                    return Err(bcf_gt_dependent_cardinality_error(
                         key,
+                        format_number,
                         expected_count,
                         actual_count,
                         sample_index,
@@ -999,10 +1011,15 @@ fn validate_bcf_number_g_payload(
                 }
                 let actual_count = value.bytes().filter(|&byte| byte == b',').count() + 1;
                 let ploidy = bcf_gt_sample_ploidy(gt, sample_index)?;
-                let expected_count = bcf_genotype_cardinality(allele_count, ploidy)?;
+                let expected_count = match format_number {
+                    FormatNumber::Samples => bcf_genotype_cardinality(allele_count, ploidy)?,
+                    FormatNumber::Ploidy => ploidy,
+                    _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
+                };
                 if actual_count != expected_count {
-                    return Err(bcf_number_g_cardinality_error(
+                    return Err(bcf_gt_dependent_cardinality_error(
                         key,
+                        format_number,
                         expected_count,
                         actual_count,
                         sample_index,
@@ -1016,7 +1033,7 @@ fn validate_bcf_number_g_payload(
     Ok(())
 }
 
-fn validate_bcf_number_g_cardinality(
+fn validate_bcf_gt_dependent_cardinality(
     samples: &bcf::record::Samples<'_>,
     header: &Header,
     allele_count: usize,
@@ -1051,9 +1068,13 @@ fn validate_bcf_number_g_cardinality(
             })?;
         let payload = take_bcf_bytes(&mut src, payload_len)?;
 
-        if format.number() == FormatNumber::Samples {
-            validate_bcf_number_g_payload(
+        if matches!(
+            format.number(),
+            FormatNumber::Samples | FormatNumber::Ploidy
+        ) {
+            validate_bcf_gt_dependent_payload(
                 key,
+                format.number(),
                 format.ty(),
                 BcfFormatEncoding {
                     encoded_type,
@@ -1078,7 +1099,7 @@ fn validate_bcf_format_encoding<'a>(
     let sample_count = samples.len();
     let mut src = samples.as_ref();
     let mut gt_encoding = None;
-    let mut has_number_g = false;
+    let mut has_gt_dependent_number = false;
     let mut seen_key_indices = SmallVec::<[usize; 8]>::new();
 
     for _ in 0..samples.format_count() {
@@ -1103,7 +1124,10 @@ fn validate_bcf_format_encoding<'a>(
         let format = header.formats().get(key).ok_or_else(|| {
             DataFusionError::Execution(format!("BCF FORMAT field '{key}' has no header definition"))
         })?;
-        has_number_g |= format.number() == FormatNumber::Samples;
+        has_gt_dependent_number |= matches!(
+            format.number(),
+            FormatNumber::Samples | FormatNumber::Ploidy
+        );
         let (encoded_type, value_count) = read_bcf_encoded_type(&mut src)?;
         if value_count == 0 {
             return Err(DataFusionError::Execution(format!(
@@ -1154,13 +1178,13 @@ fn validate_bcf_format_encoding<'a>(
         )));
     }
 
-    if has_number_g && let Some(gt) = gt_encoding.as_ref() {
-        // FORMAT series may appear in any order, so validate Number=G only
+    if has_gt_dependent_number && let Some(gt) = gt_encoding.as_ref() {
+        // FORMAT series may appear in any order, so validate Number=G/P only
         // after the complete first pass has located and validated GT.
         if !validate_gt_values {
             validate_bcf_gt_payload(gt.payload, gt.encoded_type, gt.value_count, allele_count)?;
         }
-        validate_bcf_number_g_cardinality(samples, header, allele_count, gt)?;
+        validate_bcf_gt_dependent_cardinality(samples, header, allele_count, gt)?;
     }
 
     Ok(gt_encoding)
@@ -2187,9 +2211,21 @@ impl BcfBatchDecoder {
             .quality_score()
             .map_err(|e| execution_error("invalid BCF quality score", e))?
             .map(f64::from);
+        let mut saw_pass_filter = false;
+        let mut saw_failing_filter = false;
         for result in record.filters().iter(header) {
             let filter = result
                 .map_err(|e| execution_error("invalid BCF FILTER dictionary index in record", e))?;
+            if filter == "PASS" {
+                saw_pass_filter = true;
+            } else {
+                saw_failing_filter = true;
+            }
+            if saw_pass_filter && saw_failing_filter {
+                return Err(DataFusionError::Execution(
+                    "BCF FILTER contains PASS together with a failing filter".into(),
+                ));
+            }
             if filter != "PASS" && !header.filters().contains_key(filter) {
                 return Err(DataFusionError::Execution(format!(
                     "BCF FILTER dictionary entry '{filter}' has no FILTER header definition"
@@ -3027,6 +3063,49 @@ mod tests {
         };
         assert_eq!(bcf_gt_sample_ploidy(&gt, 0).unwrap(), 2);
         assert_eq!(bcf_gt_sample_ploidy(&gt, 1).unwrap(), 1);
+    }
+
+    #[test]
+    fn validates_number_p_cardinality_against_gt_ploidy() {
+        let vcf_text = "##fileformat=VCFv4.3\n\
+                        ##contig=<ID=chr1,length=1000>\n\
+                        ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                        ##FORMAT=<ID=XP,Number=1,Type=Integer,Description=\"Ploidy values\">\n\
+                        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                        chr1\t10\trs1\tA\tC\t50\tPASS\t.\tXP:GT\t7:0/1\n";
+        let mut vcf_reader = vcf::io::Reader::new(vcf_text.as_bytes());
+        let vcf_header = vcf_reader.read_header().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("number-p.bcf");
+        let mut writer = bcf::io::Writer::new(File::create(&path).unwrap());
+        writer.write_header(&vcf_header).unwrap();
+        for result in vcf_reader.records() {
+            writer
+                .write_variant_record(&vcf_header, &result.unwrap())
+                .unwrap();
+        }
+        writer.try_finish().unwrap();
+
+        let mut reader = bcf::io::Reader::new(File::open(path).unwrap());
+        let mut header = reader.read_header().unwrap();
+        *header
+            .formats_mut()
+            .get_mut("XP")
+            .expect("XP must be defined")
+            .number_mut() = FormatNumber::Ploidy;
+        let mut record = BcfRecord::default();
+        assert!(reader.read_record(&mut record).unwrap() > 0);
+
+        let samples = record.samples().unwrap();
+        let error = validate_bcf_format_encoding(&samples, &header, 2, true)
+            .err()
+            .expect("one XP value must not satisfy diploid Number=P")
+            .to_string();
+        assert!(
+            error.contains("Number=P (2 expected for sample 0 with ploidy 2)"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
