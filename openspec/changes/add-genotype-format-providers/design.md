@@ -174,9 +174,11 @@ BCF dosage mode is explicit and defined only for records with exactly one ALT
 allele. It counts allele index 1 across the called GT alleles, ignores phase,
 uses null when any allele is missing, and rejects multiallelic records rather
 than collapsing distinct alternate alleles. The `Int8` representation supports
-ploidy through 127; larger valid ploidy remains available through default
-string mode and is rejected in dosage mode. Schema metadata records the output
-mode and that dosage counts the first ALT allele.
+first-ALT dosage through 127. Ploidy is tracked independently, so higher-ploidy
+genotypes remain valid when their observed dosage is representable; an observed
+dosage above 127 is rejected and remains available through default string mode.
+Schema metadata records the output mode and that dosage counts the first ALT
+allele.
 
 BGEN `GP` state ordering SHALL be the exact ordering defined by the BGEN
 specification for phased/unphased data, ploidy, and allele count. PGEN raw

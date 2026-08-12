@@ -74,7 +74,8 @@
 - [x] 3.18 Implement fused biallelic GT validation and direct nullable `Int8`
   ALT-dosage construction without intermediate genotype strings.
 - [x] 3.19 Cover dosage missingness, phase independence, sample selection,
-  encoded integer widths, excessive ploidy, and multiallelic rejection.
+  encoded integer widths, dosage overflow independently of ploidy, and
+  multiallelic rejection.
 - [x] 3.20 Expose BCF dosage mode through polars-bio and verify complete output
   equivalence against the independent snputils result.
 - [x] 3.21 On the representative public cohort, require the median of at least

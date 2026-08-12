@@ -1973,6 +1973,59 @@ async fn bcf_counts_logical_info_values_before_vector_end() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn bcf_rejects_data_after_info_string_vector_end_when_unprojected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##INFO=<ID=TXT,Number=.,Type=String,Description=\"Text values\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tTXT=ABC\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "info-string-after-end", body)?;
+
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let site_start = 9 + header_len + 8;
+    let allele_count =
+        u16::from_le_bytes(decompressed[site_start + 18..site_start + 20].try_into()?) as usize;
+    let mut value_start = site_start + 24;
+    value_start = bcf_typed_value_end(&decompressed, value_start); // IDs
+    for _ in 0..allele_count {
+        value_start = bcf_typed_value_end(&decompressed, value_start); // REF and ALTs
+    }
+    value_start = bcf_typed_value_end(&decompressed, value_start); // FILTER
+    value_start = bcf_typed_value_end(&decompressed, value_start); // TXT key
+    assert_eq!(
+        decompressed[value_start], 0x37,
+        "TXT should contain three string bytes"
+    );
+    assert_eq!(&decompressed[value_start + 1..value_start + 4], b"ABC");
+    decompressed[value_start + 2] = 0;
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("data after an unprojected INFO string vector-end must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("invalid BCF INFO string for field 'TXT'")
+            && error.contains("value after vector-end at offset 2"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_accepts_fixed_string_info_cardinality() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let body = "##fileformat=VCFv4.3\n\

@@ -447,6 +447,35 @@ fn bcf_numeric_logical_value_count(
     Ok(logical_count)
 }
 
+fn validate_bcf_string_payload<'a>(
+    key: &str,
+    sample_index: Option<usize>,
+    payload: &'a [u8],
+) -> Result<&'a str> {
+    let end = payload
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(payload.len());
+    if end < payload.len()
+        && let Some(trailing_offset) = payload[end + 1..].iter().position(|&byte| byte != 0)
+    {
+        let offset = end + 1 + trailing_offset;
+        let context = sample_index
+            .map(|sample_index| format!("FORMAT string for field '{key}', sample {sample_index}"))
+            .unwrap_or_else(|| format!("INFO string for field '{key}'"));
+        return Err(DataFusionError::Execution(format!(
+            "invalid BCF {context}: value after vector-end at offset {offset}"
+        )));
+    }
+
+    std::str::from_utf8(&payload[..end]).map_err(|error| {
+        let context = sample_index
+            .map(|sample_index| format!("FORMAT string for field '{key}', sample {sample_index}"))
+            .unwrap_or_else(|| format!("INFO string for field '{key}'"));
+        execution_error(&format!("invalid BCF {context}"), error)
+    })
+}
+
 fn validate_bcf_info_fixed_cardinality(
     key: &str,
     info_number: InfoNumber,
@@ -473,9 +502,14 @@ fn validate_bcf_info_fixed_cardinality(
         return Ok(());
     }
 
+    let string_value = matches!(info_type, InfoType::Character | InfoType::String)
+        .then(|| validate_bcf_string_payload(key, None, payload))
+        .transpose()?;
+
     // A whole-field missing sentinel is not a zero- or one-element biological
     // vector, and is valid for any fixed cardinality.
     let is_missing = value_count == 0
+        || string_value.is_some_and(|value| value == ".")
         || (value_count == 1 && bcf_scalar_value_is_missing(encoded_type, payload));
     if is_missing {
         return Ok(());
@@ -483,9 +517,7 @@ fn validate_bcf_info_fixed_cardinality(
 
     let actual_count = match info_type {
         InfoType::Character | InfoType::String => {
-            let value = std::str::from_utf8(payload).map_err(|error| {
-                execution_error(&format!("invalid BCF INFO string for field '{key}'"), error)
-            })?;
+            let value = string_value.expect("string INFO payload was validated above");
             if info_type == InfoType::Character {
                 validate_bcf_character_elements("INFO", key, value)?;
             }
@@ -874,28 +906,7 @@ fn validate_bcf_format_cardinality(
         }
         FormatType::Character | FormatType::String => {
             for (sample_index, raw_value) in payload.chunks_exact(value_count).enumerate() {
-                let end = raw_value
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .unwrap_or(raw_value.len());
-                if end < raw_value.len()
-                    && let Some(trailing_offset) =
-                        raw_value[end + 1..].iter().position(|&byte| byte != 0)
-                {
-                    return Err(DataFusionError::Execution(format!(
-                        "invalid BCF FORMAT string for field '{key}', sample {sample_index}: \
-                         value after vector-end at offset {}",
-                        end + 1 + trailing_offset
-                    )));
-                }
-                let value = std::str::from_utf8(&raw_value[..end]).map_err(|error| {
-                    execution_error(
-                        &format!(
-                            "invalid BCF FORMAT string for field '{key}', sample {sample_index}"
-                        ),
-                        error,
-                    )
-                })?;
+                let value = validate_bcf_string_payload(key, Some(sample_index), raw_value)?;
                 if value.is_empty() || value == "." {
                     continue;
                 }
@@ -994,18 +1005,7 @@ fn validate_bcf_gt_dependent_payload(
         }
         FormatType::Character | FormatType::String => {
             for (sample_index, raw_value) in payload.chunks_exact(value_count).enumerate() {
-                let end = raw_value
-                    .iter()
-                    .position(|&byte| byte == 0)
-                    .unwrap_or(raw_value.len());
-                let value = std::str::from_utf8(&raw_value[..end]).map_err(|error| {
-                    execution_error(
-                        &format!(
-                            "invalid BCF FORMAT string for field '{key}', sample {sample_index}"
-                        ),
-                        error,
-                    )
-                })?;
+                let value = validate_bcf_string_payload(key, Some(sample_index), raw_value)?;
                 if value.is_empty() || value == "." {
                     continue;
                 }
@@ -1612,7 +1612,7 @@ impl BcfDosageBuilder {
     #[inline(always)]
     fn decode_i8(genotype: &[u8]) -> Result<Option<i8>> {
         let mut dosage = 0i8;
-        let mut ploidy = 0i8;
+        let mut has_allele = false;
         let mut missing = false;
         let mut reached_vector_end = false;
         for (allele_offset, &raw) in genotype.iter().enumerate() {
@@ -1632,11 +1632,7 @@ impl BcfDosageBuilder {
                     "invalid BCF GT reserved value {allele} at allele offset {allele_offset}"
                 )));
             }
-            ploidy = ploidy.checked_add(1).ok_or_else(|| {
-                DataFusionError::Execution(
-                    "BCF GT ploidy exceeds the signed 8-bit dosage range".into(),
-                )
-            })?;
+            has_allele = true;
             if allele <= 1 {
                 missing = true;
             } else if allele >= 4 {
@@ -1646,10 +1642,14 @@ impl BcfDosageBuilder {
                         (allele >> 1) - 1
                     )));
                 }
-                dosage += 1;
+                dosage = dosage.checked_add(1).ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "BCF GT alternate dosage exceeds the signed 8-bit output range".into(),
+                    )
+                })?;
             }
         }
-        if ploidy == 0 {
+        if !has_allele {
             return Err(DataFusionError::Execution(
                 "invalid BCF GT encoding: genotype has zero ploidy".into(),
             ));
@@ -1660,7 +1660,7 @@ impl BcfDosageBuilder {
     #[inline(always)]
     fn decode_i16(genotype: &[u8]) -> Result<Option<i8>> {
         let mut dosage = 0i8;
-        let mut ploidy = 0i8;
+        let mut has_allele = false;
         let mut missing = false;
         let mut reached_vector_end = false;
         for (allele_offset, raw) in genotype.chunks_exact(2).enumerate() {
@@ -1680,11 +1680,7 @@ impl BcfDosageBuilder {
                     "invalid BCF GT reserved value {allele} at allele offset {allele_offset}"
                 )));
             }
-            ploidy = ploidy.checked_add(1).ok_or_else(|| {
-                DataFusionError::Execution(
-                    "BCF GT ploidy exceeds the signed 8-bit dosage range".into(),
-                )
-            })?;
+            has_allele = true;
             if allele <= 1 {
                 missing = true;
             } else if allele >= 4 {
@@ -1694,10 +1690,14 @@ impl BcfDosageBuilder {
                         (allele >> 1) - 1
                     )));
                 }
-                dosage += 1;
+                dosage = dosage.checked_add(1).ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "BCF GT alternate dosage exceeds the signed 8-bit output range".into(),
+                    )
+                })?;
             }
         }
-        if ploidy == 0 {
+        if !has_allele {
             return Err(DataFusionError::Execution(
                 "invalid BCF GT encoding: genotype has zero ploidy".into(),
             ));
@@ -1708,7 +1708,7 @@ impl BcfDosageBuilder {
     #[inline(always)]
     fn decode_i32(genotype: &[u8]) -> Result<Option<i8>> {
         let mut dosage = 0i8;
-        let mut ploidy = 0i8;
+        let mut has_allele = false;
         let mut missing = false;
         let mut reached_vector_end = false;
         for (allele_offset, raw) in genotype.chunks_exact(4).enumerate() {
@@ -1728,11 +1728,7 @@ impl BcfDosageBuilder {
                     "invalid BCF GT reserved value {allele} at allele offset {allele_offset}"
                 )));
             }
-            ploidy = ploidy.checked_add(1).ok_or_else(|| {
-                DataFusionError::Execution(
-                    "BCF GT ploidy exceeds the signed 8-bit dosage range".into(),
-                )
-            })?;
+            has_allele = true;
             if allele <= 1 {
                 missing = true;
             } else if allele >= 4 {
@@ -1742,10 +1738,14 @@ impl BcfDosageBuilder {
                         (allele >> 1) - 1
                     )));
                 }
-                dosage += 1;
+                dosage = dosage.checked_add(1).ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "BCF GT alternate dosage exceeds the signed 8-bit output range".into(),
+                    )
+                })?;
             }
         }
-        if ploidy == 0 {
+        if !has_allele {
             return Err(DataFusionError::Execution(
                 "invalid BCF GT encoding: genotype has zero ploidy".into(),
             ));
@@ -3036,13 +3036,32 @@ mod tests {
     }
 
     #[test]
-    fn dosage_rejects_ploidy_beyond_int8_range() {
-        let genotype = vec![2; 128];
-        let error = BcfDosageBuilder::decode_i8(&genotype)
-            .expect_err("ploidy 128 must not fit in signed 8-bit dosage")
+    fn dosage_range_is_independent_from_gt_ploidy() {
+        let reference_i8 = vec![2; 128];
+        assert_eq!(BcfDosageBuilder::decode_i8(&reference_i8).unwrap(), Some(0));
+
+        let reference_i16 = std::iter::repeat_n(2i16, 128)
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            BcfDosageBuilder::decode_i16(&reference_i16).unwrap(),
+            Some(0)
+        );
+
+        let reference_i32 = std::iter::repeat_n(2i32, 128)
+            .flat_map(i32::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            BcfDosageBuilder::decode_i32(&reference_i32).unwrap(),
+            Some(0)
+        );
+
+        let alternate_i8 = vec![4; 128];
+        let error = BcfDosageBuilder::decode_i8(&alternate_i8)
+            .expect_err("alternate dosage 128 must not fit in signed 8-bit output")
             .to_string();
         assert!(
-            error.contains("ploidy exceeds"),
+            error.contains("alternate dosage exceeds"),
             "unexpected error: {error}"
         );
     }
