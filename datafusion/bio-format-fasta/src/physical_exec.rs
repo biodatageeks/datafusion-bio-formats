@@ -294,26 +294,18 @@ async fn get_local_fasta_sync(
         let mut description: Vec<Option<String>> = Vec::with_capacity(batch_size);
         let mut sequence: Vec<String> = Vec::with_capacity(batch_size);
 
-        let mut def_buf = String::new();
+        let mut definition = noodles_fasta::record::Definition::default();
         let mut seq_buf = Vec::new();
         let mut record_num = 0usize;
 
         loop {
-            def_buf.clear();
-            match reader.read_definition(&mut def_buf) {
+            match reader.read_definition(&mut definition) {
                 Ok(0) => break, // EOF
                 Ok(_) => {
                     seq_buf.clear();
                     reader.read_sequence(&mut seq_buf).map_err(|e| {
                         DataFusionError::Execution(format!("FASTA sequence read error: {e}"))
                     })?;
-
-                    let definition: noodles_fasta::record::Definition =
-                        def_buf.parse().map_err(|e| {
-                            DataFusionError::Execution(format!(
-                                "FASTA definition parse error: {e}"
-                            ))
-                        })?;
 
                     name.push(
                         std::str::from_utf8(definition.name())

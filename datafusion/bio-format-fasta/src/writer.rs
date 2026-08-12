@@ -57,7 +57,7 @@ pub enum FastaLocalWriter {
     /// Writer for GZIP-compressed FASTA files
     Gzip(fasta::io::Writer<GzEncoder<BufWriter<File>>>),
     /// Writer for BGZF-compressed FASTA files (recommended)
-    Bgzf(fasta::io::Writer<bgzf::Writer<BufWriter<File>>>),
+    Bgzf(fasta::io::Writer<bgzf::io::Writer<BufWriter<File>>>),
 }
 
 impl FastaLocalWriter {
@@ -88,7 +88,7 @@ impl FastaLocalWriter {
                 Ok(FastaLocalWriter::Gzip(writer))
             }
             FastaCompressionType::Bgzf => {
-                let bgzf_writer = bgzf::Writer::new(buf_writer);
+                let bgzf_writer = bgzf::io::Writer::new(buf_writer);
                 let writer = fasta::io::Writer::new(bgzf_writer);
                 Ok(FastaLocalWriter::Bgzf(writer))
             }

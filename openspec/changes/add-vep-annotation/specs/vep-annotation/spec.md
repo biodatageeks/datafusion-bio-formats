@@ -153,6 +153,54 @@ The system SHALL require every VEP cache table to declare an explicit `cache_sou
 - **THEN** the system returns a clear error explaining that `cache_source_type` is required
 - **AND** no compatibility fallback treats `merged = true` as merged source mode
 
+### Requirement: Explicit VEP Cache Release Identity
+The system SHALL require every VEP cache entity schema and exported Parquet shard to carry a verified decimal Ensembl cache release in Arrow schema metadata under `bio.vep.cache_version`.
+
+#### Scenario: Raw cache release is verified during conversion
+- **WHEN** a cache build requests release `116` from raw Ensembl cache input
+- **THEN** the builder parses an explicit decimal release in `info.txt`, or strictly recovers it from the final canonical raw-cache root basename when the official cache omits that field
+- **AND** fails before export if the raw release is absent, malformed, or differs from `116`
+- **AND** treats the requested release only as an assertion, not as replacement identity
+- **AND** does not inspect arbitrary parent directories to recover a release
+
+#### Scenario: Every exported shard embeds cache release metadata
+- **WHEN** a verified raw cache is exported to chromosome-partitioned Parquet
+- **THEN** every transcript, variation, regulatory, motif, exon, translation, translation-core, and translation-SIFT shard carries `bio.vep.cache_version` in its embedded Arrow schema metadata
+- **AND** schema metadata survives projection, batch transformation, and Parquet writing
+- **AND** no sidecar or cache-level marker file is required to establish cache identity
+
+#### Scenario: Cache identity is not inferred from paths
+- **WHEN** a Parquet shard is stored under a path containing `115_GRCh38`
+- **AND** its Arrow schema omits `bio.vep.cache_version`
+- **THEN** annotation rejects the shard as missing identity
+- **AND** neither the path nor an annotation option can make the shard acceptable
+
+#### Scenario: Requested contig is validated lazily
+- **WHEN** an annotation invocation first processes `chr1`
+- **THEN** the engine reads metadata for all participating `chr1` entity shards before reading their annotation data
+- **AND** it does not open Parquet footers or data for unrelated contigs solely for version validation
+- **AND** successful validation is memoized for that cache root and contig
+
+#### Scenario: Requested contig contains mixed releases
+- **WHEN** the participating shards for one requested contig declare different cache releases
+- **THEN** annotation fails before reading annotation data
+- **AND** the error identifies the contig, conflicting shards, and observed releases
+
+#### Scenario: Later contig disagrees with invocation identity
+- **WHEN** `chr1` established cache release `115` for an invocation
+- **AND** a later requested `chr2` shard declares release `116`
+- **THEN** annotation rejects `chr2` before annotation
+
+#### Scenario: Unsupported cache release is rejected
+- **WHEN** a requested contig consistently declares a cache release absent from the compiled annotation support matrix
+- **THEN** annotation fails with the detected release and supported releases
+- **AND** no semantic fallback is selected
+
+#### Scenario: Complete cache publication verifies all shards
+- **WHEN** a builder completes a cache export in staging
+- **THEN** it eagerly verifies `bio.vep.cache_version` on every produced shard
+- **AND** publishes the cache only after all shards match the verified raw release
+
 ### Requirement: Source-Specific Transcript Semantics
 The system SHALL apply Ensembl VEP-compatible transcript inclusion and output semantics based on explicit `cache_source_type`.
 

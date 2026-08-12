@@ -1,6 +1,6 @@
 /// Convert Ensembl VEP cache storable entities to optimized Parquet files.
 ///
-/// Usage: cargo run --release --example storable_to_parquet -- <cache_root> <output_dir> <entity> [partitions] --cache-source-type <ensembl|merged|refseq> [--chrom CHROM]
+/// Usage: cargo run --release --example storable_to_parquet -- <cache_root> <output_dir> <entity> [partitions] --cache-source-type <ensembl|merged|refseq> --expected-cache-version <release> [--chrom CHROM]
 ///
 /// entity: transcript | exon | translation | regulatory | motif | variation
 ///
@@ -25,15 +25,15 @@ use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     CacheSourceType, EnsemblCacheOptions, EnsemblCacheTableProvider, EnsemblEntityKind,
-    build_export_query, build_translation_dedup_query, translation_core_schema,
-    translation_sift_schema,
+    VEP_CACHE_VERSION_METADATA_KEY, build_export_query, build_translation_dedup_query,
+    translation_core_schema, translation_sift_schema,
 };
 use futures::StreamExt;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Instant;
 
-const USAGE: &str = "Usage: storable_to_parquet <cache_root> <output_dir> <entity> [partitions] --cache-source-type <ensembl|merged|refseq> [--chrom CHROM]\n\
+const USAGE: &str = "Usage: storable_to_parquet <cache_root> <output_dir> <entity> [partitions] --cache-source-type <ensembl|merged|refseq> --expected-cache-version <release> [--chrom CHROM]\n\
 entity: transcript | exon | translation | regulatory | motif | variation";
 
 fn execution_error(message: impl Into<String>) -> datafusion::error::DataFusionError {
@@ -193,8 +193,8 @@ async fn write_translation_split(
     chrom_filter: &Option<String>,
     output_dir: &str,
     cache_dir_name: &str,
-    coordinate_system_zero_based: bool,
     cache_source_type: CacheSourceType,
+    cache_version: &str,
 ) -> datafusion::common::Result<Vec<(String, usize)>> {
     let chrom_suffix = if let Some(chrom) = &chrom_filter {
         format!("_{chrom}")
@@ -229,7 +229,7 @@ async fn write_translation_split(
     let mut results = Vec::new();
 
     // --- translation_core: sorted by transcript_id ---
-    let core_schema = translation_core_schema(coordinate_system_zero_based, cache_source_type);
+    let core_schema = translation_core_schema(false, cache_source_type, cache_version);
     let core_select = core_schema
         .fields()
         .iter()
@@ -269,7 +269,7 @@ async fn write_translation_split(
     results.push((core_file, core_rows));
 
     // --- translation_sift: sorted by (chrom, start) ---
-    let sift_schema = translation_sift_schema(coordinate_system_zero_based, cache_source_type);
+    let sift_schema = translation_sift_schema(false, cache_source_type, cache_version);
     let sift_select = sift_schema
         .fields()
         .iter()
@@ -325,6 +325,7 @@ async fn main() -> datafusion::common::Result<()> {
     let mut partitions: usize = 8;
     let mut chrom_filter: Option<String> = None;
     let mut cache_source_type: Option<CacheSourceType> = None;
+    let mut expected_cache_version: Option<String> = None;
     let remaining: Vec<String> = std::env::args().skip(4).collect();
     let mut i = 0;
     while i < remaining.len() {
@@ -344,6 +345,14 @@ async fn main() -> datafusion::common::Result<()> {
                 cache_source_type = Some(parse_cache_source_type(value)?);
                 i += 2;
             }
+            "--expected-cache-version" | "--expected_cache_version" => {
+                let value = remaining
+                    .get(i + 1)
+                    .cloned()
+                    .ok_or_else(|| execution_error("--expected-cache-version requires a value"))?;
+                expected_cache_version = Some(value);
+                i += 2;
+            }
             value => {
                 if let Ok(p) = value.parse::<usize>() {
                     partitions = p;
@@ -358,6 +367,9 @@ async fn main() -> datafusion::common::Result<()> {
     }
     let cache_source_type = cache_source_type.ok_or_else(|| {
         execution_error("Missing --cache-source-type; provide one of ensembl, merged, or refseq")
+    })?;
+    let expected_cache_version = expected_cache_version.ok_or_else(|| {
+        execution_error("Missing --expected-cache-version; provide the decimal raw cache release")
     })?;
 
     let (kind, table_name, entity_label) = match entity_str.as_str() {
@@ -393,10 +405,21 @@ async fn main() -> datafusion::common::Result<()> {
     let config = SessionConfig::new().with_target_partitions(partitions);
     let ctx = SessionContext::new_with_config(config);
 
-    let mut options =
-        EnsemblCacheOptions::new(&cache_root).with_cache_source_type(cache_source_type);
+    let mut options = EnsemblCacheOptions::new(&cache_root)
+        .with_cache_source_type(cache_source_type)
+        .with_expected_cache_version(&expected_cache_version);
     options.target_partitions = Some(partitions);
     let provider = EnsemblCacheTableProvider::for_entity(kind, options)?;
+    let cache_version = provider
+        .schema()
+        .metadata()
+        .get(VEP_CACHE_VERSION_METADATA_KEY)
+        .ok_or_else(|| {
+            execution_error(format!(
+                "provider schema is missing required {VEP_CACHE_VERSION_METADATA_KEY}"
+            ))
+        })?
+        .clone();
     ctx.register_table(table_name, provider)?;
 
     println!("After provider init RSS: {:.1} MB", rss_mb());
@@ -431,8 +454,8 @@ async fn main() -> datafusion::common::Result<()> {
             &chrom_filter,
             &output_dir,
             cache_dir_name,
-            false, // coordinate_system_zero_based
             cache_source_type,
+            &cache_version,
         )
         .await?;
 

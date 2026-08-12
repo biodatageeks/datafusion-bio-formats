@@ -336,7 +336,7 @@ fn block_ends_with_newline(file_path: &Path, block_offset: u64) -> Result<bool> 
 
     let file = File::open(file_path)
         .map_err(|e| exec_err(format!("Failed opening {}: {e}", file_path.display())))?;
-    let mut reader = bgzf::Reader::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
+    let mut reader = bgzf::io::Reader::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
     let vpos = bgzf::VirtualPosition::try_from((block_offset, 0))
         .map_err(|e| exec_err(format!("Invalid virtual position: {e}")))?;
     reader
@@ -366,7 +366,7 @@ fn block_ends_with_newline(file_path: &Path, block_offset: u64) -> Result<bool> 
 
 /// Wraps a bgzf reader that stops after the partition's end offset.
 pub(crate) struct BgzfPartitionLineReader {
-    inner: bgzf::Reader<BufReader<File>>,
+    inner: bgzf::io::Reader<BufReader<File>>,
     end_compressed: u64,
     buf: String,
     done: bool,
@@ -377,7 +377,7 @@ impl BgzfPartitionLineReader {
         let file = File::open(file_path)
             .map_err(|e| exec_err(format!("Failed opening {}: {e}", file_path.display())))?;
 
-        let mut inner = bgzf::Reader::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
+        let mut inner = bgzf::io::Reader::new(BufReader::with_capacity(IO_BUFFER_SIZE, file));
 
         if partition.start_compressed > 0 {
             let vpos = bgzf::VirtualPosition::try_from((partition.start_compressed, 0))

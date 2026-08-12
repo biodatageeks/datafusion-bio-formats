@@ -65,7 +65,7 @@ pub enum FastqLocalWriter {
     /// Writer for GZIP-compressed FASTQ files
     Gzip(fastq::io::Writer<GzEncoder<BufWriter<File>>>),
     /// Writer for BGZF-compressed FASTQ files (recommended)
-    Bgzf(fastq::io::Writer<bgzf::Writer<BufWriter<File>>>),
+    Bgzf(fastq::io::Writer<bgzf::io::Writer<BufWriter<File>>>),
 }
 
 impl FastqLocalWriter {
@@ -121,7 +121,7 @@ impl FastqLocalWriter {
                 Ok(FastqLocalWriter::Gzip(writer))
             }
             FastqCompressionType::Bgzf => {
-                let bgzf_writer = bgzf::Writer::new(buf_writer);
+                let bgzf_writer = bgzf::io::Writer::new(buf_writer);
                 let writer = fastq::io::Writer::new(bgzf_writer);
                 Ok(FastqLocalWriter::Bgzf(writer))
             }

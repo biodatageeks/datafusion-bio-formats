@@ -6,13 +6,15 @@ use datafusion::arrow::array::{
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::TableProvider;
 use datafusion::parquet::arrow::ArrowWriter;
+use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use datafusion::parquet::basic::Compression;
 use datafusion::parquet::file::properties::WriterProperties;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use datafusion_bio_format_ensembl_cache::{
     CacheSourceType, EnsemblCacheOptions, ExonTableProvider, MotifFeatureTableProvider,
     RegulatoryFeatureTableProvider, TranscriptTableProvider, TranslationTableProvider,
-    VariationTableProvider,
+    VEP_CACHE_VERSION_METADATA_KEY, VariationTableProvider, translation_core_schema,
+    translation_sift_schema,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -414,6 +416,39 @@ async fn transcript_parquet_roundtrip_issue_190_fields() -> datafusion::common::
 // ---------------------------------------------------------------------------
 // Translation parquet round-trip
 // ---------------------------------------------------------------------------
+
+#[test]
+fn translation_split_parquet_roundtrip_preserves_cache_version_metadata() {
+    let temp_dir = TempDir::new().unwrap();
+    for (name, schema) in [
+        (
+            "translation_core",
+            translation_core_schema(false, CacheSourceType::Ensembl, "115"),
+        ),
+        (
+            "translation_sift",
+            translation_sift_schema(false, CacheSourceType::Ensembl, "115"),
+        ),
+    ] {
+        let path = temp_dir.path().join(format!("{name}.parquet"));
+        let file = std::fs::File::create(&path).unwrap();
+        ArrowWriter::try_new(file, schema, None)
+            .unwrap()
+            .close()
+            .unwrap();
+
+        let file = std::fs::File::open(path).unwrap();
+        let read_schema = ParquetRecordBatchReaderBuilder::try_new(file)
+            .unwrap()
+            .schema()
+            .clone();
+        assert_eq!(
+            read_schema.metadata().get(VEP_CACHE_VERSION_METADATA_KEY),
+            Some(&"115".to_string()),
+            "{name} must retain cache release identity after Parquet writing"
+        );
+    }
+}
 
 #[tokio::test]
 async fn translation_parquet_roundtrip_preserves_data() -> datafusion::common::Result<()> {

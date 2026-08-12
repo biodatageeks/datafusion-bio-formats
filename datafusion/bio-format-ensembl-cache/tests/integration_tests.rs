@@ -1854,6 +1854,21 @@ async fn factory_for_entity_variation() -> datafusion::common::Result<()> {
     Ok(())
 }
 
+#[test]
+fn factory_rejects_expected_cache_version_mismatch() {
+    let options =
+        ensembl_options(fixture_path("variation_non_tabix")).with_expected_cache_version("116");
+    let error = EnsemblCacheTableProvider::for_entity(EnsemblEntityKind::Variation, options)
+        .expect_err("fixture release 112 must not satisfy expected release 116")
+        .to_string();
+    assert!(
+        error.contains("version mismatch"),
+        "unexpected error: {error}"
+    );
+    assert!(error.contains("112"), "unexpected error: {error}");
+    assert!(error.contains("116"), "unexpected error: {error}");
+}
+
 #[tokio::test]
 async fn factory_for_entity_transcript() -> datafusion::common::Result<()> {
     let provider = EnsemblCacheTableProvider::for_entity(
