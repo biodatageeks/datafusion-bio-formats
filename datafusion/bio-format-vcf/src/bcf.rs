@@ -38,9 +38,9 @@ use tokio_util::io::StreamReader;
 use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
     adjust_effective_batch_size_by_observed_format_bytes, build_noodles_region,
-    build_record_batch_from_builders, choose_effective_batch_size,
-    choose_initial_builder_batch_size, init_format_mode, load_infos_single_pass,
-    resolve_selected_sample_indices, set_info_builders,
+    build_record_batch_from_builders, choose_dosage_effective_batch_size,
+    choose_effective_batch_size, choose_initial_builder_batch_size, init_format_mode,
+    load_infos_single_pass, resolve_selected_sample_indices, set_info_builders,
 };
 use crate::storage::VcfRecordFields;
 use crate::table_provider::GenotypeOutputMode;
@@ -2241,7 +2241,9 @@ impl BcfBatchDecoder {
         let flags = ProjectionFlags::new(&projection, info_builders.0.len());
         let effective_batch_size =
             if genotype_output_mode == GenotypeOutputMode::Dosage && flags.any_format {
-                batch_size
+                let selected_sample_count =
+                    resolve_selected_sample_indices(sample_names, &source_sample_names).len();
+                choose_dosage_effective_batch_size(batch_size, selected_sample_count)
             } else {
                 choose_effective_batch_size(
                     batch_size,
@@ -2546,18 +2548,16 @@ impl BcfBatchDecoder {
             None
         };
 
-        self.effective_batch_size = if self.genotype_output_mode == GenotypeOutputMode::Dosage {
-            self.requested_batch_size
-        } else {
-            adjust_effective_batch_size_by_observed_format_bytes(
+        if self.genotype_output_mode != GenotypeOutputMode::Dosage {
+            self.effective_batch_size = adjust_effective_batch_size_by_observed_format_bytes(
                 self.requested_batch_size,
                 self.effective_batch_size,
                 self.flags.any_format,
                 &self.source_sample_names,
                 self.batch_row_count,
                 format_arrays.as_ref(),
-            )
-        };
+            );
+        }
         let row_count = self.batch_row_count;
         self.batch_row_count = 0;
 

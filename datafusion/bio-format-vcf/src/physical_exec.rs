@@ -148,6 +148,43 @@ pub(crate) fn choose_initial_builder_batch_size(
     }
 }
 
+/// Caps direct BCF dosage batches by their materialized Arrow storage.
+///
+/// Each selected sample contributes one `i8` value and one validity bit per
+/// row. Multisample lists additionally contribute one `i32` offset per row.
+/// Unlike the generic FORMAT representation, dosage does not carry sample IDs
+/// or heap-allocated strings in every row, so its byte estimate can be exact
+/// enough to use the full genotype byte budget without the generic cell cap.
+pub(crate) fn choose_dosage_effective_batch_size(
+    requested_batch_size: usize,
+    selected_sample_count: usize,
+) -> usize {
+    let requested_batch_size = requested_batch_size.max(1);
+    if selected_sample_count == 0 {
+        return requested_batch_size;
+    }
+
+    let bytes_per_row = selected_sample_count
+        .saturating_add(selected_sample_count.div_ceil(8))
+        .saturating_add(std::mem::size_of::<i32>())
+        .max(1);
+    let max_by_bytes = (MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH / bytes_per_row).max(1);
+    let effective = requested_batch_size.min(max_by_bytes);
+
+    if effective < requested_batch_size {
+        debug!(
+            "Reducing effective BCF dosage batch size from {} to {} (selected_samples={}, bytes_per_row={}, target_bytes={})",
+            requested_batch_size,
+            effective,
+            selected_sample_count,
+            bytes_per_row,
+            MULTISAMPLE_TARGET_GENOTYPE_BYTES_PER_BATCH
+        );
+    }
+
+    effective
+}
+
 pub(crate) fn adjust_effective_batch_size_by_observed_format_bytes(
     requested_batch_size: usize,
     current_effective_batch_size: usize,
@@ -2979,7 +3016,7 @@ async fn get_indexed_vcf_stream(
 
 #[cfg(test)]
 mod build_noodles_region_tests {
-    use super::build_noodles_region;
+    use super::{build_noodles_region, choose_dosage_effective_batch_size};
     use datafusion_bio_format_core::genomic_filter::GenomicRegion;
 
     #[test]
@@ -3032,5 +3069,18 @@ mod build_noodles_region_tests {
         let err = build_noodles_region(&region).expect_err("zero start must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("start position must be >= 1"));
+    }
+
+    #[test]
+    fn dosage_batch_size_respects_materialized_byte_budget() {
+        assert_eq!(choose_dosage_effective_batch_size(8192, 1), 8192);
+
+        let million_sample_rows = choose_dosage_effective_batch_size(8192, 1_000_000);
+        assert_eq!(million_sample_rows, 7);
+        let bytes_per_row = 1_000_000 + 1_000_000usize.div_ceil(8) + size_of::<i32>();
+        assert!(million_sample_rows * bytes_per_row <= 8_000_000);
+        assert!((million_sample_rows + 1) * bytes_per_row > 8_000_000);
+
+        assert_eq!(choose_dosage_effective_batch_size(0, usize::MAX), 1);
     }
 }
