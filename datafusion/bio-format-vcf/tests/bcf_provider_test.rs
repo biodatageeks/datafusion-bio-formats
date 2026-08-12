@@ -1927,6 +1927,53 @@ async fn bcf_rejects_wrong_fixed_format_cardinality_when_unprojected()
 }
 
 #[tokio::test]
+async fn bcf_rejects_invalid_utf8_in_unprojected_dynamic_format_string()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=TXT,Number=.,Type=String,Description=\"Text values\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tTXT\tvalid\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dynamic-format-utf8", body)?;
+
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let samples_start = record_start + 8 + shared_len;
+    let descriptor_offset = bcf_typed_value_end(&decompressed, samples_start); // TXT key
+    assert_eq!(
+        decompressed[descriptor_offset] & 0x0f,
+        7,
+        "TXT should use a BCF string descriptor"
+    );
+    decompressed[descriptor_offset + 1] = 0xff;
+
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
+    let provider = VcfTableProvider::new(bcf_path, Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT COUNT(*) FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("invalid UTF-8 in an unprojected dynamic FORMAT string must fail the scan")
+        .to_string();
+    assert!(
+        error.contains("invalid BCF FORMAT string for field 'TXT', sample 0"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_counts_logical_format_values_before_vector_end()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

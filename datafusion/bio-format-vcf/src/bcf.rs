@@ -849,9 +849,6 @@ fn validate_bcf_format_cardinality(
             }
         }
         FormatType::Character | FormatType::String => {
-            let Some(expected_count) = expected_count else {
-                return Ok(());
-            };
             for (sample_index, raw_value) in payload.chunks_exact(value_count).enumerate() {
                 let end = raw_value
                     .iter()
@@ -868,6 +865,9 @@ fn validate_bcf_format_cardinality(
                 if value.is_empty() || value == "." {
                     continue;
                 }
+                let Some(expected_count) = expected_count else {
+                    continue;
+                };
                 let actual_count = value.bytes().filter(|&byte| byte == b',').count() + 1;
                 if actual_count != expected_count {
                     return Err(DataFusionError::Execution(format!(
