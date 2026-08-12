@@ -1075,8 +1075,150 @@ async fn bcf_dosage_decodes_phase_missingness_ploidy_and_sample_order()
 }
 
 #[tokio::test]
-async fn bcf_dosage_rejects_multiallelic_records() -> Result<(), Box<dyn std::error::Error>> {
+async fn bcf_dosage_decodes_single_sample_to_nullable_int8()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0|1\n\
+                chr1\t20\trs2\tG\tT\t50\tPASS\t.\tGT\t./.\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-single", body)?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    assert_eq!(
+        provider.schema().field_with_name("GT")?.data_type(),
+        &datafusion::arrow::datatypes::DataType::Int8
+    );
+
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let batches = context
+        .sql("SELECT \"GT\" FROM variants ORDER BY start")
+        .await?
+        .collect()
+        .await?;
+    let gt = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int8Array>()
+        .expect("single-sample GT dosage should be Int8");
+    assert_eq!(gt.value(0), 1);
+    assert!(datafusion::arrow::array::Array::is_null(gt, 1));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_rejects_multiallelic_records_with_or_without_gt_projection()
+-> Result<(), Box<dyn std::error::Error>> {
     let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    for query in [
+        "SELECT genotypes FROM variants",
+        "SELECT COUNT(*) FROM variants",
+    ] {
+        let provider = VcfTableProvider::new_with_samples_and_format(
+            bcf_path.clone(),
+            Some(Vec::new()),
+            Some(vec!["GT".to_string()]),
+            None,
+            None,
+            true,
+            VcfInputFormat::Bcf,
+            None,
+        )?
+        .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+        let context = SessionContext::new();
+        context.register_table("variants", Arc::new(provider))?;
+        let error = context
+            .sql(query)
+            .await?
+            .collect()
+            .await
+            .expect_err("dosage must reject multiple ALT alleles for every projection")
+            .to_string();
+        assert!(
+            error.contains("supports exactly one ALT allele"),
+            "unexpected error for {query}: {error}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_validates_unselected_gt_samples() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0/0\t0/1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-subset", body)?;
+    // The third flat allele belongs to unselected S2. 0x82 is a reserved
+    // negative Int8 encoding and must fail even though only S1 is materialized.
+    corrupt_bcf_gt_allele_value(&bcf_path, 2, 0x82)?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        Some(vec!["S1".to_string()]),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT genotypes FROM variants")
+        .await?
+        .collect()
+        .await
+        .expect_err("an invalid unselected GT sample must fail the dosage scan")
+        .to_string();
+    assert!(
+        error.contains("reserved or invalid value"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_rejects_zero_width_gt_descriptor_without_panicking()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0/1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "zero-width-gt", body)?;
+
+    let mut decompressed = Vec::new();
+    noodles_bgzf_vcf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let record_start = 9 + header_len;
+    let shared_len =
+        u32::from_le_bytes(decompressed[record_start..record_start + 4].try_into()?) as usize;
+    let samples_start = record_start + 8 + shared_len;
+    let descriptor_offset = bcf_typed_value_end(&decompressed, samples_start);
+    assert_eq!(decompressed[descriptor_offset], 0x21);
+    decompressed[descriptor_offset] = 0x01;
+    let mut writer = noodles_bgzf_vcf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+
     let provider = VcfTableProvider::new_with_samples_and_format(
         bcf_path,
         Some(Vec::new()),
@@ -1091,14 +1233,14 @@ async fn bcf_dosage_rejects_multiallelic_records() -> Result<(), Box<dyn std::er
     let context = SessionContext::new();
     context.register_table("variants", Arc::new(provider))?;
     let error = context
-        .sql("SELECT genotypes FROM variants")
+        .sql("SELECT COUNT(*) FROM variants")
         .await?
         .collect()
         .await
-        .expect_err("dosage must not collapse multiple ALT alleles")
+        .expect_err("zero-width GT must be rejected as data corruption")
         .to_string();
     assert!(
-        error.contains("supports exactly one ALT allele"),
+        error.contains("invalid zero-length encoding"),
         "unexpected error: {error}"
     );
     Ok(())

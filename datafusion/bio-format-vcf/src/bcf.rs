@@ -605,6 +605,11 @@ fn validate_bcf_gt_payload(
     value_count: usize,
     allele_count: usize,
 ) -> Result<()> {
+    if value_count == 0 {
+        return Err(DataFusionError::Execution(
+            "invalid BCF GT encoding: expected at least one value per sample".into(),
+        ));
+    }
     let (width, vector_end): (usize, i64) = match encoded_type {
         BcfEncodedType::Int8 => (1, i64::from(i8::MIN) + 1),
         BcfEncodedType::Int16 => (2, i64::from(i16::MIN) + 1),
@@ -1446,6 +1451,17 @@ enum BcfDosageValues {
     },
 }
 
+fn validate_bcf_dosage_allele_count(allele_count: usize) -> Result<()> {
+    if allele_count == 2 {
+        Ok(())
+    } else {
+        Err(DataFusionError::Execution(format!(
+            "BCF GT dosage supports exactly one ALT allele; record has {} ALT alleles",
+            allele_count.saturating_sub(1)
+        )))
+    }
+}
+
 /// Direct typed sink for biallelic GT dosage.
 ///
 /// The sink consumes the raw, already structurally validated BCF FORMAT series.
@@ -1729,12 +1745,7 @@ impl BcfDosageBuilder {
     }
 
     fn append_gt(&mut self, gt: Option<BcfGtEncoding<'_>>, allele_count: usize) -> Result<()> {
-        if allele_count != 2 {
-            return Err(DataFusionError::Execution(format!(
-                "BCF GT dosage supports exactly one ALT allele; record has {} ALT alleles",
-                allele_count.saturating_sub(1)
-            )));
-        }
+        debug_assert_eq!(allele_count, 2, "dosage allele count is prevalidated");
 
         match (&mut self.values, gt) {
             (BcfDosageValues::Single { values, validity }, Some(gt)) => {
@@ -1913,6 +1924,13 @@ enum BcfFormatMode {
 impl BcfFormatMode {
     fn is_direct_dosage(&self) -> bool {
         matches!(self, Self::Dosage(_))
+    }
+
+    fn fuses_complete_gt_validation(&self) -> bool {
+        matches!(
+            self,
+            Self::Dosage(builder) if builder.all_samples_selected_in_order
+        )
     }
 
     fn has_fields(&self) -> bool {
@@ -2116,6 +2134,12 @@ impl BcfBatchDecoder {
             }
         }
         let allele_count = alternate_bases.len() + 1;
+        if self.genotype_output_mode == GenotypeOutputMode::Dosage {
+            // Dosage is a biallelic table contract, not merely a property of a
+            // projected column. Keep corruption/compatibility behavior stable
+            // for metadata-only and COUNT(*) scans as well.
+            validate_bcf_dosage_allele_count(allele_count)?;
+        }
         let quality_score = record
             .quality_score()
             .map_err(|e| execution_error("invalid BCF quality score", e))?
@@ -2131,8 +2155,13 @@ impl BcfBatchDecoder {
         }
         validate_bcf_info_encoding(&record.info(), header, allele_count)?;
         let direct_dosage = self.format_mode.is_direct_dosage();
+        // The direct sink validates every cell while decoding only when all
+        // source samples are selected in source order. A subset scan still
+        // validates the complete untrusted GT payload before materializing the
+        // requested cells, so integrity never depends on sample projection.
+        let validate_gt_values = !self.format_mode.fuses_complete_gt_validation();
         let gt_encoding =
-            validate_bcf_format_encoding(&samples, header, allele_count, !direct_dosage)?;
+            validate_bcf_format_encoding(&samples, header, allele_count, validate_gt_values)?;
 
         let has_filters = !self.residual_filters.is_empty();
         let needs_start = self.flags.start || has_filters;
@@ -2876,6 +2905,14 @@ mod tests {
 
     #[test]
     fn validates_gt_payload_for_each_integer_width() {
+        let error = validate_bcf_gt_payload(&[], BcfEncodedType::Int8, 0, 2)
+            .expect_err("zero-width GT must return an error rather than panic")
+            .to_string();
+        assert!(
+            error.contains("at least one value per sample"),
+            "unexpected error: {error}"
+        );
+
         assert!(validate_bcf_gt_payload(&[2, 4], BcfEncodedType::Int8, 2, 2).is_ok());
 
         let mut int16 = Vec::new();
