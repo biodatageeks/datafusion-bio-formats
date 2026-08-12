@@ -15,12 +15,14 @@ The VEP annotation engine spans two repositories with clear separation of concer
    (gene phenotype, CCDS/UniProt IDs, CDS incompleteness flags, mature miRNA
    regions, motif transcription factors). The native cache providers also expose
    explicit VEP cache source metadata for Ensembl, merged, and RefSeq cache
-   modes.
+   modes and mandatory Ensembl cache-release identity.
 
 2. **`datafusion-bio-functions`** (separate repo) — New `bio-function-vep` crate containing:
    - Variant lookup against cached known variants (`lookup_variants()` table function)
    - Consequence prediction with transcript overlap (`annotate_variants()` table function)
    - Explicit cache source mode handling for `ensembl`, `merged`, and `refseq`
+   - Lazy per-contig validation that cache-release metadata is present,
+     internally consistent, and supported by the compiled annotation engine
    - Consequence engine (position classification, codon analysis, SO terms)
    - Allele conversion UDFs (`match_allele`, `vep_allele`)
 
@@ -36,6 +38,19 @@ Users must provide `cache_source_type` with one of `ensembl`, `merged`, or
 not infer source mode from directory names such as `homo_sapiens_refseq`, and it
 does not support a legacy `merged=true` compatibility option.
 
+### Explicit Cache Release Identity
+
+Every VEP cache Arrow schema must carry `bio.vep.cache_version` and every
+Parquet shard must preserve it in Parquet-embedded Arrow schema metadata. Cache
+builders receive an expected release and verify it against release provenance
+recovered from an explicit `info.txt` value or, because official 115/116 caches
+omit that value, the final canonical raw-cache root basename. The verified value
+is stamped on every entity schema, including split translation schemas.
+Annotation never infers release identity from a generated-cache directory or
+filename and never accepts a sidecar identity file. The annotation engine
+validates only the shards for a contig when that contig is first requested,
+while enforcing one supported cache release across an annotation invocation.
+
 ### Two Annotation Modes
 
 - **`lookup_variants()`** — Match input variants against cached known variants (rs-IDs, frequencies, clinical significance). Uses `IntervalJoinExec` from `bio-function-ranges`. No biology computation.
@@ -50,7 +65,7 @@ does not support a legacy `merged=true` compatibility option.
 
 **This repo (`datafusion-bio-formats`):**
 - `datafusion/bio-format-ensembl-cache/src/info.rs` — Add explicit cache source mode configuration and validation
-- `datafusion/bio-format-ensembl-cache/src/schema.rs` — Add structured columns to `transcript_schema()` and cache source metadata
+- `datafusion/bio-format-ensembl-cache/src/schema.rs` — Add structured columns to `transcript_schema()`, cache source metadata, and mandatory cache-release metadata
 - `datafusion/bio-format-ensembl-cache/src/transcript.rs` — Parse exons, sequences, transcript flags, miRNA regions, CSQ metadata, and transcript `dbID` from JSON/storable
 - `datafusion/bio-format-ensembl-cache/src/discovery.rs` — Support RefSeq/merged region-file pruning without deriving source mode from paths
 - `datafusion/bio-format-ensembl-cache/src/export_query.rs` — Apply source-aware transcript de-duplication for exported cache tables
@@ -63,12 +78,14 @@ does not support a legacy `merged=true` compatibility option.
   `is_gencode_basic`, and `is_gencode_primary` from transcript objects.
 
 **Separate repo (`datafusion-bio-functions`):**
-- New crate `datafusion/bio-function-vep/` with consequence engine, index layer, execution layer, source-mode handling, and UDFs
+- New crate `datafusion/bio-function-vep/` with consequence engine, index layer, execution layer, source-mode handling, release support matrix, lazy per-contig cache identity validation, and UDFs
 
 ### Breaking Changes
 The VEP annotation API requires explicit `cache_source_type` source mode and does
 not accept a legacy `merged=true` option. Existing Ensembl cache schema gains new
-nullable columns.
+nullable columns. Metadata-less Parquet caches are not annotation-compatible and
+must be rebuilt; cache identity cannot be supplied through a filename, sidecar,
+or annotation option.
 
 ### Dependencies
 - `bio-function-ranges` (for `IntervalJoinExec` and `BioQueryPlanner`)

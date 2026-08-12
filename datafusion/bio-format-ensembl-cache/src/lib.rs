@@ -29,6 +29,7 @@ pub use export_query::{
     VEP_CACHE_REGION_SIZE_BP, build_export_query, build_export_query_multi_chrom,
     build_translation_dedup_query, build_translation_dedup_query_multi_chrom,
 };
+pub use info::VEP_CACHE_VERSION_METADATA_KEY;
 pub use schema::{translation_core_schema, translation_sift_schema};
 pub use source_type::{CacheSourceType, VEP_CACHE_SOURCE_TYPE_METADATA_KEY};
 pub use table_provider::{

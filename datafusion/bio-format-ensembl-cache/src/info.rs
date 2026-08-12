@@ -4,6 +4,13 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
+/// Arrow/Parquet schema metadata key containing the Ensembl VEP cache release.
+///
+/// This is annotation identity metadata. Downstream annotators must read it
+/// from each requested Parquet shard rather than infer it from generated-cache
+/// directory names or from the row-level `cache_version` provenance column.
+pub const VEP_CACHE_VERSION_METADATA_KEY: &str = "bio.vep.cache_version";
+
 #[derive(Debug, Clone)]
 pub(crate) struct SourceDescriptor {
     /// Normalized source name without `source_` prefix, e.g. `dbsnp`, `hgmd_public`.
@@ -53,7 +60,7 @@ pub(crate) struct CacheInfo {
 }
 
 impl CacheInfo {
-    pub fn from_root(cache_root: &Path) -> Result<Self> {
+    pub fn from_root(cache_root: &Path, expected_cache_version: Option<&str>) -> Result<Self> {
         let info_path = cache_root.join("info.txt");
         if !info_path.exists() {
             return Err(exec_err(format!(
@@ -107,13 +114,51 @@ impl CacheInfo {
             }
         }
 
+        let explicit_version = cache_version
+            .map(|version| validate_decimal_cache_version(&version, "info.txt"))
+            .transpose()?;
+        let basename_version = cache_version_from_raw_root_name(cache_root);
+        let expected_cache_version = expected_cache_version
+            .map(|version| validate_decimal_cache_version(version, "expected cache release"))
+            .transpose()?;
+        let cache_version = match (explicit_version, basename_version) {
+            (Some(explicit), Some(from_name)) if explicit != from_name => {
+                return Err(exec_err(format!(
+                    "VEP cache version conflict for '{}': info.txt declares '{}' but raw cache root basename declares '{}'",
+                    cache_root.display(),
+                    explicit,
+                    from_name
+                )));
+            }
+            (Some(explicit), _) => explicit,
+            (None, Some(from_name)) => from_name,
+            (None, None) => {
+                return Err(exec_err(format!(
+                    "VEP cache release is missing for '{}': info.txt must declare a decimal \
+                     cache_version/version or the raw cache root basename must use the canonical \
+                     <release>_<assembly>[_merged|_refseq] form",
+                    cache_root.display()
+                )));
+            }
+        };
+        if let Some(expected) = expected_cache_version
+            && cache_version != expected
+        {
+            return Err(exec_err(format!(
+                "VEP cache version mismatch for '{}': raw cache declares '{}' but expected cache release is '{}'",
+                cache_root.display(),
+                cache_version,
+                expected
+            )));
+        }
+
         let source_cache_path = cache_root.to_string_lossy().to_string();
         Ok(Self {
             cache_root: cache_root.to_path_buf(),
             source_cache_path,
             species: species.unwrap_or_else(|| "unknown".to_string()),
             assembly: assembly.unwrap_or_else(|| "unknown".to_string()),
-            cache_version: cache_version.unwrap_or_else(|| "unknown".to_string()),
+            cache_version,
             // Some merged/tabix cache bundles omit serializer metadata entirely.
             // VEP transcript/regulatory caches are storable in that layout.
             serializer_type: serializer_type.or_else(|| Some("storable".to_string())),
@@ -122,6 +167,43 @@ impl CacheInfo {
             variation_cols,
             source_descriptors: source_by_column.into_values().collect(),
         })
+    }
+}
+
+fn validate_decimal_cache_version(value: &str, source: &str) -> Result<String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(exec_err(format!(
+            "Invalid VEP cache release from {source}: expected a non-empty decimal release, got '{value}'"
+        )));
+    }
+    Ok(value.to_string())
+}
+
+/// Recover a release only from a canonical raw VEP cache-root basename.
+///
+/// Ensembl's shipped 115/116 `info.txt` files omit an explicit version, while
+/// the raw root itself is canonically named `{release}_{assembly}` with an
+/// optional `_merged` or `_refseq` suffix. This deliberately examines only the
+/// final path component and accepts only an all-decimal release plus a non-empty
+/// assembly token. It is conversion-time provenance recovery, never a generated
+/// Parquet annotation fallback.
+fn cache_version_from_raw_root_name(cache_root: &Path) -> Option<String> {
+    let basename = cache_root.file_name()?.to_str()?;
+    let mut parts = basename.split('_');
+    let release = parts.next()?;
+    let assembly = parts.next()?;
+    let suffix = parts.next();
+
+    if release.is_empty()
+        || !release.bytes().all(|byte| byte.is_ascii_digit())
+        || assembly.is_empty()
+    {
+        return None;
+    }
+
+    match (suffix, parts.next()) {
+        (None, None) | (Some("merged" | "refseq"), None) => Some(release.to_string()),
+        _ => None,
     }
 }
 
@@ -358,6 +440,14 @@ mod tests {
         f.write_all(content.as_bytes()).unwrap();
     }
 
+    fn named_cache_root(name: &str, content: &str) -> (tempfile::TempDir, PathBuf) {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join(name);
+        std::fs::create_dir(&root).unwrap();
+        write_info_file(&root, content);
+        (parent, root)
+    }
+
     #[test]
     fn cache_info_full_parse() {
         let dir = tempfile::tempdir().unwrap();
@@ -365,7 +455,7 @@ mod tests {
             dir.path(),
             "species homo_sapiens\nassembly GRCh38\ncache_version 115\nserialiser_type storable\nvar_type tabix\ncache_region_size 1000000\nsource_dbSNP 156\nvariation_cols chr,start,end,variation_name,allele_string\n",
         );
-        let info = CacheInfo::from_root(dir.path()).unwrap();
+        let info = CacheInfo::from_root(dir.path(), None).unwrap();
         assert_eq!(info.species, "homo_sapiens");
         assert_eq!(info.assembly, "GRCh38");
         assert_eq!(info.cache_version, "115");
@@ -380,8 +470,11 @@ mod tests {
     #[test]
     fn cache_info_missing_optional_fields() {
         let dir = tempfile::tempdir().unwrap();
-        write_info_file(dir.path(), "species homo_sapiens\nassembly GRCh38\n");
-        let info = CacheInfo::from_root(dir.path()).unwrap();
+        write_info_file(
+            dir.path(),
+            "species homo_sapiens\nassembly GRCh38\ncache_version 115\n",
+        );
+        let info = CacheInfo::from_root(dir.path(), None).unwrap();
         assert_eq!(info.species, "homo_sapiens");
         assert!(info.variation_cols.is_empty());
         // Defaults to storable when missing
@@ -389,19 +482,19 @@ mod tests {
     }
 
     #[test]
-    fn cache_info_defaults_on_empty() {
+    fn cache_info_rejects_missing_release() {
         let dir = tempfile::tempdir().unwrap();
         write_info_file(dir.path(), "# comment only\n");
-        let info = CacheInfo::from_root(dir.path()).unwrap();
-        assert_eq!(info.species, "unknown");
-        assert_eq!(info.assembly, "unknown");
-        assert_eq!(info.cache_version, "unknown");
+        let error = CacheInfo::from_root(dir.path(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("release is missing"));
     }
 
     #[test]
     fn cache_info_missing_file_errors() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(CacheInfo::from_root(dir.path()).is_err());
+        assert!(CacheInfo::from_root(dir.path(), None).is_err());
     }
 
     #[test]
@@ -409,9 +502,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_info_file(
             dir.path(),
-            "# a comment\n\nspecies mus_musculus\n  \nassembly GRCm39\n",
+            "# a comment\n\nspecies mus_musculus\n  \nassembly GRCm39\ncache_version 115\n",
         );
-        let info = CacheInfo::from_root(dir.path()).unwrap();
+        let info = CacheInfo::from_root(dir.path(), None).unwrap();
         assert_eq!(info.species, "mus_musculus");
         assert_eq!(info.assembly, "GRCm39");
     }
@@ -425,8 +518,8 @@ mod tests {
             "serializer",
         ] {
             let dir = tempfile::tempdir().unwrap();
-            write_info_file(dir.path(), &format!("{alias} sereal\n"));
-            let info = CacheInfo::from_root(dir.path()).unwrap();
+            write_info_file(dir.path(), &format!("{alias} sereal\ncache_version 115\n"));
+            let info = CacheInfo::from_root(dir.path(), None).unwrap();
             assert_eq!(
                 info.serializer_type.as_deref(),
                 Some("sereal"),
@@ -439,23 +532,116 @@ mod tests {
     fn cache_info_version_alias() {
         let dir = tempfile::tempdir().unwrap();
         write_info_file(dir.path(), "version 110\n");
-        let info = CacheInfo::from_root(dir.path()).unwrap();
+        let info = CacheInfo::from_root(dir.path(), None).unwrap();
         assert_eq!(info.cache_version, "110");
+    }
+
+    #[test]
+    fn cache_info_recovers_versions_from_canonical_raw_root_names() {
+        for (name, expected) in [
+            ("115_GRCh38", "115"),
+            ("116_GRCh38", "116"),
+            ("116_GRCh38_merged", "116"),
+            ("115_GRCh38_refseq", "115"),
+        ] {
+            let (_parent, root) = named_cache_root(name, "species homo_sapiens\nassembly GRCh38\n");
+            let info = CacheInfo::from_root(&root, None).unwrap();
+            assert_eq!(info.cache_version, expected, "failed for {name}");
+        }
+    }
+
+    #[test]
+    fn cache_info_does_not_infer_version_from_noncanonical_or_parent_names() {
+        for name in [
+            "raw_115_GRCh38",
+            "115",
+            "115_GRCh38_unknown",
+            "v115_GRCh38",
+            "115_GRCh38_merged_extra",
+        ] {
+            let (_parent, root) = named_cache_root(name, "assembly GRCh38\n");
+            let error = CacheInfo::from_root(&root, None).unwrap_err().to_string();
+            assert!(error.contains("release is missing"), "failed for {name}");
+        }
+
+        let parent = tempfile::Builder::new()
+            .prefix("115_GRCh38")
+            .tempdir()
+            .unwrap();
+        let root = parent.path().join("arbitrary");
+        std::fs::create_dir(&root).unwrap();
+        write_info_file(&root, "assembly GRCh38\n");
+        assert!(
+            CacheInfo::from_root(&root, None)
+                .unwrap_err()
+                .to_string()
+                .contains("release is missing")
+        );
+    }
+
+    #[test]
+    fn cache_info_rejects_explicit_and_basename_version_conflict() {
+        let (_parent, root) =
+            named_cache_root("116_GRCh38", "cache_version 115\nassembly GRCh38\n");
+        let error = CacheInfo::from_root(&root, None).unwrap_err().to_string();
+        assert!(error.contains("version conflict"));
+        assert!(error.contains("115"));
+        assert!(error.contains("116"));
+    }
+
+    #[test]
+    fn cache_info_rejects_malformed_explicit_version() {
+        let dir = tempfile::tempdir().unwrap();
+        write_info_file(dir.path(), "cache_version v116\nassembly GRCh38\n");
+        let error = CacheInfo::from_root(dir.path(), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("non-empty decimal release"));
+        assert!(error.contains("v116"));
+    }
+
+    #[test]
+    fn cache_info_checks_expected_version_assertion() {
+        let (_parent, root) =
+            named_cache_root("116_GRCh38", "species homo_sapiens\nassembly GRCh38\n");
+        let info = CacheInfo::from_root(&root, Some("116")).unwrap();
+        assert_eq!(info.cache_version, "116");
+
+        let error = CacheInfo::from_root(&root, Some("115"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("version mismatch"));
+        assert!(error.contains("116"));
+        assert!(error.contains("115"));
+    }
+
+    #[test]
+    fn cache_info_rejects_malformed_expected_version() {
+        let (_parent, root) =
+            named_cache_root("116_GRCh38", "species homo_sapiens\nassembly GRCh38\n");
+        let error = CacheInfo::from_root(&root, Some("116.0"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected cache release"));
+        assert!(error.contains("non-empty decimal release"));
     }
 
     #[test]
     fn cache_info_region_size_alias() {
         let dir = tempfile::tempdir().unwrap();
-        write_info_file(dir.path(), "region_size 500000\n");
-        let info = CacheInfo::from_root(dir.path()).unwrap();
+        write_info_file(dir.path(), "region_size 500000\ncache_version 115\n");
+        let info = CacheInfo::from_root(dir.path(), None).unwrap();
         assert_eq!(info.cache_region_size, Some(500_000));
     }
 
     #[test]
     fn cache_info_equals_format() {
         let dir = tempfile::tempdir().unwrap();
-        write_info_file(dir.path(), "species=homo_sapiens\nassembly=GRCh38\n");
-        let info = CacheInfo::from_root(dir.path()).unwrap();
+        write_info_file(
+            dir.path(),
+            "species=homo_sapiens\nassembly=GRCh38\ncache_version=115\n",
+        );
+        let info = CacheInfo::from_root(dir.path(), None).unwrap();
         assert_eq!(info.species, "homo_sapiens");
         assert_eq!(info.assembly, "GRCh38");
     }
@@ -465,9 +651,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_info_file(
             dir.path(),
-            "source_dbSNP 156\nsource_COSMIC 101\nsource_ClinVar 202502\n",
+            "source_dbSNP 156\nsource_COSMIC 101\nsource_ClinVar 202502\ncache_version 115\n",
         );
-        let info = CacheInfo::from_root(dir.path()).unwrap();
+        let info = CacheInfo::from_root(dir.path(), None).unwrap();
         assert_eq!(info.source_descriptors.len(), 3);
         // BTreeMap ordering: clinvar < cosmic < dbsnp
         let keys: Vec<&str> = info

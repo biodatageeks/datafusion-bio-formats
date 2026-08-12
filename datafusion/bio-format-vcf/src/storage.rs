@@ -13,7 +13,7 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
 use log::info;
-use noodles_bgzf::{AsyncReader, Reader as BgzfReader};
+use noodles_bgzf::{r#async::io::Reader as AsyncReader, io::Reader as BgzfReader};
 use noodles_vcf as vcf;
 use opendal::FuturesBytesStream;
 use std::fs::File;
@@ -292,6 +292,7 @@ pub async fn get_header(
 ///
 /// This enum handles BGZF, GZIP, and uncompressed remote VCF files from cloud storage.
 /// The appropriate variant is created based on the detected compression type.
+#[allow(clippy::large_enum_variant)]
 pub enum VcfRemoteReader {
     /// Reader for BGZF-compressed remote VCF files.
     BGZF(vcf::r#async::io::Reader<AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>),
@@ -651,6 +652,7 @@ pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
 ///
 /// This is the primary entry point for reading VCF files from any source (local, S3, GCS, etc).
 /// It automatically detects the storage type and compression format.
+#[allow(clippy::large_enum_variant)]
 pub enum VcfReader {
     /// Reader for local VCF files.
     Local(VcfLocalReader),
@@ -738,7 +740,7 @@ impl VcfReader {
 /// reader is `Send`. That lets the indexed scan decode inline on the consuming tokio
 /// worker via `async_stream::try_stream!` instead of a dedicated reader thread.
 pub struct IndexedVcfReader {
-    reader: vcf::io::Reader<noodles_bgzf_vcf::io::Reader<File>>,
+    reader: vcf::io::Reader<noodles_bgzf::io::Reader<File>>,
     index: noodles_tabix::Index,
     header: vcf::Header,
 }
@@ -751,7 +753,7 @@ impl IndexedVcfReader {
     /// * `index_path` - Path to the TBI or CSI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, std::io::Error> {
         let index = noodles_tabix::fs::read(index_path)?;
-        let inner = noodles_bgzf_vcf::io::Reader::new(File::open(file_path)?);
+        let inner = noodles_bgzf::io::Reader::new(File::open(file_path)?);
         let mut reader = vcf::io::Reader::new(inner);
         let header = reader.read_header()?;
         Ok(Self {
@@ -780,7 +782,9 @@ impl IndexedVcfReader {
         &mut self,
         region: &noodles_core::Region,
     ) -> Result<impl Iterator<Item = Result<Record, std::io::Error>> + '_, std::io::Error> {
-        self.reader.query(&self.header, &self.index, region)
+        self.reader
+            .query(&self.header, &self.index, region)
+            .map(|q| q.records())
     }
 }
 

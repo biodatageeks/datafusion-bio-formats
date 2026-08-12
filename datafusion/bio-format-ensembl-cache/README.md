@@ -414,7 +414,9 @@ Parquet files suitable for downstream annotation engines.
 
 ```
 cargo run --release --example storable_to_parquet -- \
-  <cache_root> <output_dir> <entity> [partitions] [--chrom CHROM]
+  <cache_root> <output_dir> <entity> [partitions] \
+  --cache-source-type <ensembl|merged|refseq> \
+  --expected-cache-version <release> [--chrom CHROM]
 ```
 
 | Argument | Description |
@@ -423,9 +425,17 @@ cargo run --release --example storable_to_parquet -- \
 | `output_dir` | Directory for output Parquet files |
 | `entity` | Entity type: `transcript`, `exon`, `translation`, `regulatory`, `motif`, `variation` |
 | `partitions` | Number of parallel partitions (default: 8) |
+| `--cache-source-type TYPE` | Required cache source mode: `ensembl`, `merged`, or `refseq` |
+| `--expected-cache-version RELEASE` | Required decimal release assertion, verified against raw-cache provenance before export |
 | `--chrom CHROM` | Optional chromosome filter (e.g. `22`, `X`) |
 
 Output filename: `<output_dir>/<version>_<assembly>_<entity>[_<chrom>].parquet`
+
+The converter rejects missing or malformed release provenance and a mismatch
+between the expected release, an explicit `cache_version`/`version` in
+`info.txt`, and the canonical raw-cache root basename. Every output shard,
+including `translation_core` and `translation_sift`, embeds the verified
+release as `bio.vep.cache_version` Arrow schema metadata.
 
 ### Example: Generate all chr22 Parquet files
 
@@ -435,7 +445,10 @@ OUT=/data/vep/parquet
 
 for entity in transcript exon translation regulatory motif variation; do
   cargo run --release --example storable_to_parquet -- \
-    $CACHE $OUT $entity 8 --chrom 22
+    $CACHE $OUT $entity 8 \
+    --cache-source-type merged \
+    --expected-cache-version 115 \
+    --chrom 22
 done
 ```
 
@@ -456,7 +469,9 @@ Omit `--chrom` to export all chromosomes into a single file per entity:
 
 ```bash
 cargo run --release --example storable_to_parquet -- \
-  $CACHE $OUT transcript 8
+  $CACHE $OUT transcript 8 \
+  --cache-source-type merged \
+  --expected-cache-version 115
 ```
 
 ### Deduplication

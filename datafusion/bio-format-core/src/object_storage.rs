@@ -3,7 +3,7 @@ use futures::StreamExt;
 use log;
 use log::debug;
 use noodles_bgzf as bgzf;
-use noodles_bgzf::AsyncReader;
+use noodles_bgzf::r#async::io::Reader as AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use opendal::services::{Azblob, Gcs, S3};
 use opendal::{FuturesBytesStream, Operator};
@@ -267,7 +267,7 @@ pub async fn get_remote_stream_bgzf_async(
     let remote_stream = StreamReader::new(
         get_remote_stream(file_path.clone(), object_storage_options, None).await?,
     );
-    Ok(bgzf::AsyncReader::new(remote_stream))
+    Ok(bgzf::r#async::io::Reader::new(remote_stream))
 }
 
 /// Builds a gzip decoder that decodes **all** members of a multi-member

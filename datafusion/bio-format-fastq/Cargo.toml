@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-fastq"
-version = "1.8.8"
+version = "1.9.1"
 description = "FASTQ file format support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
@@ -17,7 +17,7 @@ tokio-util.workspace = true
 tokio.workspace = true
 bytes.workspace = true
 datafusion-bio-format-core = {path = "../bio-format-core"}
-noodles-fastq = {version = "0.19.0", features = ["async"]}
+noodles-fastq = { git = "https://github.com/biodatageeks/noodles.git", rev = "42a3c0165617b7b8f9f5c5905287968eef92e31e", features = ["async"] }
 futures.workspace = true
 futures-util.workspace = true
 async-compression.workspace = true
