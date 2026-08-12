@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -11,7 +12,8 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::catalog::TableProvider;
-use datafusion::prelude::{SessionConfig, SessionContext};
+use datafusion::logical_expr::TableProviderFilterPushDown;
+use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use datafusion_bio_format_core::genotype::MissingSamplePolicy;
 use datafusion_bio_format_vcf::table_provider::{
     GenotypeOutputMode, VcfInputFormat, VcfTableProvider,
@@ -55,6 +57,47 @@ fn create_equivalent_vcf_and_bcf() -> Result<(TempDir, String, String), Box<dyn 
         vcf_path.to_string_lossy().into_owned(),
         bcf_path.to_string_lossy().into_owned(),
     ))
+}
+
+fn create_partitioned_bcf() -> Result<(TempDir, String, String, usize), Box<dyn std::error::Error>>
+{
+    // Long, overlapping records make a single contig large enough for the
+    // balancer to split while exercising exact record ownership at boundaries.
+    let dir = tempfile::tempdir()?;
+    let vcf_path = dir.path().join("partitioned.vcf");
+    let bcf_path_buf = dir.path().join("partitioned.bcf");
+    let bcf_path = bcf_path_buf.to_string_lossy().into_owned();
+
+    let mut vcf_text = String::from(
+        "##fileformat=VCFv4.3\n\
+         ##contig=<ID=chr1,length=1000000>\n\
+         ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n",
+    );
+    let long_ref = "A".repeat(2000);
+    let total_records = 800usize;
+    for record_index in 0..total_records {
+        let pos = 1 + record_index * 500;
+        vcf_text.push_str(&format!(
+            "chr1\t{pos}\trs{record_index}\t{long_ref}\tC\t50\tPASS\t.\tGT\t0/1\n"
+        ));
+    }
+    std::fs::write(&vcf_path, &vcf_text)?;
+
+    let mut reader = vcf::io::reader::Builder::default().build_from_path(&vcf_path)?;
+    let header = reader.read_header()?;
+    let mut writer = bcf::io::Writer::new(File::create(&bcf_path_buf)?);
+    writer.write_header(&header)?;
+    for result in reader.records() {
+        writer.write_variant_record(&header, &result?)?;
+    }
+    writer.try_finish()?;
+
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+
+    Ok((dir, bcf_path, index_path, total_records))
 }
 
 #[derive(Clone, Debug)]
@@ -348,6 +391,32 @@ async fn bcf_uses_csi_for_region_queries() -> Result<(), Box<dyn std::error::Err
     assert!(rows.contains("rs3"));
     assert!(!rows.contains("rs1"));
     assert!(!rows.contains("rs2"));
+    Ok(())
+}
+
+#[test]
+fn bcf_reports_indexed_coordinate_pushdown_as_inexact() -> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        Some(index_path),
+    )?;
+    let filter = col("chrom")
+        .eq(lit("chr1"))
+        .and(col("start").gt_eq(lit(9u32)));
+
+    let support = provider.supports_filters_pushdown(&[&filter])?;
+    assert_eq!(support, [TableProviderFilterPushDown::Inexact]);
     Ok(())
 }
 
@@ -705,42 +774,7 @@ async fn truncated_bcf_fails_during_scan() -> Result<(), Box<dyn std::error::Err
 #[tokio::test]
 async fn bcf_partition_splits_do_not_duplicate_spanning_records()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Enough data on a single contig that balanced partitioning splits chr1 into
-    // adjacent coordinate sub-regions, with 2000 bp REF alleles every 500 bp so
-    // records straddle any split boundary the balancer picks.
-    let dir = tempfile::tempdir()?;
-    let vcf_path = dir.path().join("span.vcf");
-    let bcf_path_buf = dir.path().join("span.bcf");
-    let bcf_path = bcf_path_buf.to_string_lossy().into_owned();
-
-    let mut vcf_text = String::from(
-        "##fileformat=VCFv4.3\n\
-         ##contig=<ID=chr1,length=1000000>\n\
-         ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
-         #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n",
-    );
-    let long_ref = "A".repeat(2000);
-    let total_records = 800usize;
-    for record_index in 0..total_records {
-        let pos = 1 + record_index * 500;
-        vcf_text.push_str(&format!(
-            "chr1\t{pos}\trs{record_index}\t{long_ref}\tC\t50\tPASS\t.\tGT\t0/1\n"
-        ));
-    }
-    std::fs::write(&vcf_path, &vcf_text)?;
-
-    let mut reader = vcf::io::reader::Builder::default().build_from_path(&vcf_path)?;
-    let header = reader.read_header()?;
-    let mut writer = bcf::io::Writer::new(File::create(&bcf_path_buf)?);
-    writer.write_header(&header)?;
-    for result in reader.records() {
-        writer.write_variant_record(&header, &result?)?;
-    }
-    writer.try_finish()?;
-
-    let index = bcf::fs::index(&bcf_path)?;
-    let index_path = format!("{bcf_path}.csi");
-    noodles_csi::fs::write(&index_path, &index)?;
+    let (_dir, bcf_path, index_path, total_records) = create_partitioned_bcf()?;
 
     let provider = VcfTableProvider::new_with_samples_and_format(
         bcf_path,
@@ -767,6 +801,75 @@ async fn bcf_partition_splits_do_not_duplicate_spanning_records()
     assert_eq!(
         total_rows, total_records,
         "records spanning a partition boundary must be emitted exactly once"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_bcf_executes_multiple_csi_partitions_with_unique_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, bcf_path, index_path, total_records) = create_partitioned_bcf()?;
+    let server = RangeServer::start(std::fs::read(bcf_path)?, std::fs::read(index_path)?);
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        server.url(),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+    server.requests.lock().unwrap().clear();
+
+    let context = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
+    let plan = provider.scan(&context.state(), None, &[], None).await?;
+    let partition_count = plan.properties().output_partitioning().partition_count();
+    assert!(
+        partition_count > 1,
+        "expected a remote BCF full scan to expose multiple CSI partitions, got {partition_count}"
+    );
+
+    let batches = datafusion::physical_plan::collect(plan, context.task_ctx()).await?;
+    let total_rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(total_rows, total_records);
+    let mut ids = HashSet::with_capacity(total_records);
+    for batch in &batches {
+        let values = batch
+            .column_by_name("id")
+            .expect("the unprojected scan must include id")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("BCF id must be Utf8");
+        for id in values.iter().flatten() {
+            assert!(ids.insert(id.to_string()), "duplicate remote BCF id: {id}");
+        }
+    }
+    assert_eq!(ids.len(), total_records);
+    assert!((0..total_records).all(|record_index| ids.contains(&format!("rs{record_index}"))));
+
+    let requests = server.requests.lock().unwrap();
+    let bcf_ranges = requests
+        .iter()
+        .filter(|request| {
+            request.method == "GET"
+                && request.path.starts_with("/remote.bcf")
+                && !request.path.starts_with("/remote.bcf.csi")
+                && request.range.is_some()
+        })
+        .count();
+    assert!(
+        bcf_ranges >= partition_count,
+        "each remote scan partition should issue indexed BCF range GETs: \
+         partitions={partition_count}, range requests={bcf_ranges}, requests={requests:?}"
+    );
+    assert!(
+        requests.iter().all(|request| {
+            !request.path.starts_with("/remote.bcf")
+                || request.path.starts_with("/remote.bcf.csi")
+                || request.range.is_some()
+        }),
+        "remote partition execution must not use a full BCF GET: {requests:?}"
     );
     Ok(())
 }
