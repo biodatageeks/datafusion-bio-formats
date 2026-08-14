@@ -113,3 +113,107 @@ pub async fn auto_register_vcf_long_view(ctx: &SessionContext, table_name: &str)
 
     register_vcf_long_view(ctx, table_name, &sample_names, &format_fields).await
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{
+        Array, Float64Array, ListBuilder, StringArray, StringBuilder, StructArray, UInt32Array,
+    };
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::arrow::util::display::array_value_to_string;
+    use datafusion::datasource::MemTable;
+    use datafusion_bio_format_core::to_json_string;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn auto_registers_long_view_from_shared_sample_metadata() -> Result<()> {
+        let gt_field = Arc::new(Field::new(
+            "GT",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ));
+        let sample_names = vec!["S1".to_string(), "S2".to_string()];
+        let genotype_metadata = HashMap::from([(
+            GENOTYPE_SAMPLE_NAMES_KEY.to_string(),
+            to_json_string(&sample_names),
+        )]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(
+                "genotypes",
+                DataType::Struct(vec![gt_field.clone()].into()),
+                true,
+            )
+            .with_metadata(genotype_metadata),
+        ]));
+
+        let mut gt_builder = ListBuilder::new(StringBuilder::new());
+        gt_builder.values().append_value("0/0");
+        gt_builder.values().append_value("0/1");
+        gt_builder.append(true);
+        let gt_array = Arc::new(gt_builder.finish()) as Arc<dyn Array>;
+        let genotypes = Arc::new(StructArray::try_new(
+            vec![gt_field].into(),
+            vec![gt_array],
+            None,
+        )?);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![9])),
+                Arc::new(UInt32Array::from(vec![10])),
+                Arc::new(StringArray::from(vec![Some("rs1")])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["C"])),
+                Arc::new(Float64Array::from(vec![Some(50.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                genotypes,
+            ],
+        )?;
+
+        let ctx = SessionContext::new();
+        let source = MemTable::try_new(schema, vec![vec![batch]])?;
+        ctx.register_table("variants", Arc::new(source))?;
+        auto_register_vcf_long_view(&ctx, "variants").await?;
+
+        let batches = ctx
+            .sql(r#"SELECT sample_id, "GT" FROM variants_long ORDER BY sample_id"#)
+            .await?
+            .collect()
+            .await?;
+        let rows = batches
+            .iter()
+            .flat_map(|batch| {
+                (0..batch.num_rows()).map(|row| {
+                    (
+                        array_value_to_string(batch.column(0).as_ref(), row).unwrap(),
+                        array_value_to_string(batch.column(1).as_ref(), row).unwrap(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("S1".to_string(), "0/0".to_string()),
+                ("S2".to_string(), "0/1".to_string()),
+            ]
+        );
+
+        Ok(())
+    }
+}

@@ -157,14 +157,19 @@ fn read_bcf_record_lengths(prefix: [u8; BCF_RECORD_LENGTH_PREFIX_SIZE]) -> io::R
 }
 
 fn remaining_bcf_record_body_size(shared: u64, individual: u64) -> io::Result<u64> {
-    shared
-        .checked_add(individual)
-        .and_then(|body_size| body_size.checked_sub(BCF_FIXED_SITE_PREFIX_SIZE as u64))
+    let body_size = shared.checked_add(individual).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid BCF record length: l_shared + l_indiv overflowed",
+        )
+    })?;
+
+    body_size
+        .checked_sub(BCF_FIXED_SITE_PREFIX_SIZE as u64)
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                "invalid BCF record length: body size overflowed or is shorter than the fixed \
-                 site prefix",
+                "invalid BCF record length: body is shorter than the fixed site prefix",
             )
         })
 }
@@ -3208,8 +3213,15 @@ mod tests {
     #[test]
     fn checks_remaining_bcf_record_body_arithmetic() {
         assert_eq!(remaining_bcf_record_body_size(24, 10).unwrap(), 10);
-        assert!(remaining_bcf_record_body_size(23, 0).is_err());
-        assert!(remaining_bcf_record_body_size(u64::MAX, 1).is_err());
+        let underflow = remaining_bcf_record_body_size(23, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(underflow.contains("shorter than the fixed site prefix"));
+
+        let overflow = remaining_bcf_record_body_size(u64::MAX, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(overflow.contains("l_shared + l_indiv overflowed"));
     }
 
     #[test]
@@ -3570,6 +3582,97 @@ mod tests {
         };
         assert!(
             error.contains("Number=G (3 expected for sample 0 with ploidy 2)"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn validates_number_g_character_payloads_in_the_deferred_path() {
+        fn read_character_record(value: &str) -> (Header, BcfRecord) {
+            let vcf_text = format!(
+                "##fileformat=VCFv4.3\n\
+                 ##contig=<ID=chr1,length=1000>\n\
+                 ##FORMAT=<ID=XC,Number=1,Type=String,Description=\"Characters\">\n\
+                 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                 chr1\t10\trs1\tA\tC\t50\tPASS\t.\tXC\t{value}\n"
+            );
+            let mut vcf_reader = vcf::io::Reader::new(vcf_text.as_bytes());
+            let vcf_header = vcf_reader.read_header().unwrap();
+
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = bcf::io::Writer::new(file.reopen().unwrap());
+            writer.write_header(&vcf_header).unwrap();
+            for result in vcf_reader.records() {
+                writer
+                    .write_variant_record(&vcf_header, &result.unwrap())
+                    .unwrap();
+            }
+            writer.try_finish().unwrap();
+            drop(writer);
+
+            let mut reader = bcf::io::Reader::new(file.reopen().unwrap());
+            let mut header = reader.read_header().unwrap();
+            let format = header.formats_mut().get_mut("XC").unwrap();
+            *format.number_mut() = FormatNumber::Samples;
+            *format.type_mut() = FormatType::Character;
+            let mut record = BcfRecord::default();
+            assert!(reader.read_record(&mut record).unwrap() > 0);
+            (header, record)
+        }
+
+        let (valid_header, valid_record) = read_character_record("a,b,c");
+        let valid_samples = valid_record.samples().unwrap();
+        assert!(validate_bcf_format_encoding(&valid_samples, &valid_header, 2, true).is_ok());
+
+        let (invalid_header, invalid_record) = read_character_record("a,bb,c");
+        let invalid_samples = invalid_record.samples().unwrap();
+        let error = match validate_bcf_format_encoding(&invalid_samples, &invalid_header, 2, true) {
+            Ok(_) => panic!("Number=G Character elements must remain single characters"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("Character field 'XC': element 1 contains 2 characters"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn validates_number_g_and_number_p_fields_in_the_same_format_series() {
+        let vcf_text = "##fileformat=VCFv4.3\n\
+                        ##contig=<ID=chr1,length=1000>\n\
+                        ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                        ##FORMAT=<ID=XG,Number=3,Type=Integer,Description=\"Genotype values\">\n\
+                        ##FORMAT=<ID=XP,Number=1,Type=Integer,Description=\"Ploidy values\">\n\
+                        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                        chr1\t10\trs1\tA\tC\t50\tPASS\t.\tXG:GT:XP\t5,7,9:0/1:7\n";
+        let mut vcf_reader = vcf::io::Reader::new(vcf_text.as_bytes());
+        let vcf_header = vcf_reader.read_header().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("number-g-and-p.bcf");
+        let mut writer = bcf::io::Writer::new(File::create(&path).unwrap());
+        writer.write_header(&vcf_header).unwrap();
+        for result in vcf_reader.records() {
+            writer
+                .write_variant_record(&vcf_header, &result.unwrap())
+                .unwrap();
+        }
+        writer.try_finish().unwrap();
+
+        let mut reader = bcf::io::Reader::new(File::open(path).unwrap());
+        let mut header = reader.read_header().unwrap();
+        *header.formats_mut().get_mut("XG").unwrap().number_mut() = FormatNumber::Samples;
+        *header.formats_mut().get_mut("XP").unwrap().number_mut() = FormatNumber::Ploidy;
+        let mut record = BcfRecord::default();
+        assert!(reader.read_record(&mut record).unwrap() > 0);
+
+        let samples = record.samples().unwrap();
+        let error = match validate_bcf_format_encoding(&samples, &header, 2, true) {
+            Ok(_) => panic!("valid Number=G must not hide invalid Number=P"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("FORMAT field 'XP' declares Number=P (2 expected"),
             "unexpected error: {error}"
         );
     }
