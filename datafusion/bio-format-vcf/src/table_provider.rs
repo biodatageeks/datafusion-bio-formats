@@ -1,12 +1,15 @@
+use crate::bcf::BcfExec;
 use crate::physical_exec::VcfExec;
-use crate::storage::get_header;
+use crate::storage::{VcfRecordFields, get_header, resolve_single_sample_format_column_name};
 use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion, sanitize_location};
 use datafusion_bio_format_core::genomic_filter::{
     build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
 };
+use datafusion_bio_format_core::genotype::{MissingSamplePolicy, resolve_samples};
 use datafusion_bio_format_core::index_utils::discover_vcf_index;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
@@ -17,7 +20,7 @@ use datafusion_bio_format_core::metadata::{
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
@@ -30,7 +33,7 @@ use datafusion::physical_plan::{
     ExecutionPlan, PlanProperties,
     execution_plan::{Boundedness, EmissionType},
 };
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::object_storage::{ObjectStorageOptions, RemoteObject};
 use futures::executor::block_on;
 use log::{debug, warn};
 use noodles_vcf::header::Formats;
@@ -64,30 +67,27 @@ use std::sync::Arc;
 fn resolve_selected_samples(
     header_sample_names: &[String],
     samples_to_include: &Option<Vec<String>>,
-) -> Vec<String> {
-    match samples_to_include {
-        None => header_sample_names.to_vec(),
-        Some(requested) => {
-            let available: HashSet<&str> = header_sample_names.iter().map(|s| s.as_str()).collect();
-            let mut seen = HashSet::with_capacity(requested.len());
-            let mut selected = Vec::with_capacity(requested.len());
+    missing_sample_policy: MissingSamplePolicy,
+) -> datafusion::common::Result<Vec<String>> {
+    if missing_sample_policy == MissingSamplePolicy::Ignore
+        && let Some(requested) = samples_to_include
+    {
+        let available: HashSet<&str> = header_sample_names.iter().map(|s| s.as_str()).collect();
+        let mut seen = HashSet::with_capacity(requested.len());
 
-            for sample in requested {
-                if !available.contains(sample.as_str()) {
-                    warn!(
-                        "Requested VCF sample '{sample}' not found in header; skipping this sample"
-                    );
-                    continue;
-                }
-
-                if seen.insert(sample.as_str()) {
-                    selected.push(sample.clone());
-                }
+        for sample in requested {
+            if seen.insert(sample.as_str()) && !available.contains(sample.as_str()) {
+                warn!("Requested VCF sample '{sample}' not found in header; skipping this sample");
             }
-
-            selected
         }
     }
+
+    resolve_samples(
+        header_sample_names,
+        samples_to_include.as_deref(),
+        missing_sample_policy,
+    )
+    .map(|selection| selection.names().to_vec())
 }
 
 /// # Returns
@@ -99,6 +99,7 @@ fn resolve_selected_samples(
 /// # Errors
 ///
 /// Returns an error if the file cannot be read or the header is invalid
+#[allow(clippy::too_many_arguments)]
 async fn determine_schema_from_header(
     file_path: &str,
     info_fields: &Option<Vec<String>>,
@@ -106,8 +107,23 @@ async fn determine_schema_from_header(
     samples_to_include: &Option<Vec<String>>,
     object_storage_options: &Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
-) -> datafusion::common::Result<(SchemaRef, Vec<String>, Vec<String>)> {
-    let header = get_header(file_path.to_string(), object_storage_options.clone()).await?;
+    input_format: VcfInputFormat,
+    missing_sample_policy: MissingSamplePolicy,
+) -> datafusion::common::Result<(
+    SchemaRef,
+    Vec<String>,
+    Vec<String>,
+    Arc<noodles_vcf::Header>,
+)> {
+    let header = match input_format {
+        VcfInputFormat::Vcf => {
+            get_header(file_path.to_string(), object_storage_options.clone()).await?
+        }
+        VcfInputFormat::Bcf => {
+            crate::bcf::read_header(file_path, object_storage_options.clone()).await?
+        }
+        VcfInputFormat::Auto => unreachable!("input format must be resolved before reading"),
+    };
     let header_infos = header.infos();
     let header_formats = header.formats();
     let source_sample_names: Vec<String> = header
@@ -115,7 +131,11 @@ async fn determine_schema_from_header(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let sample_names = resolve_selected_samples(&source_sample_names, samples_to_include);
+    let sample_names = resolve_selected_samples(
+        &source_sample_names,
+        samples_to_include,
+        missing_sample_policy,
+    )?;
 
     // Extract header metadata for schema storage
     let file_format_obj = header.file_format();
@@ -201,7 +221,7 @@ async fn determine_schema_from_header(
         Some(tags) => tags.clone(),
         None => header_formats.keys().map(|k| k.to_string()).collect(),
     };
-    let mut format_field_metadata: HashMap<String, VcfFieldMetadata> = HashMap::new();
+    let mut format_field_metadata: BTreeMap<String, VcfFieldMetadata> = BTreeMap::new();
     for tag in &format_tags {
         if let Some(format_info) = header_formats.get(tag.as_str()) {
             format_field_metadata.insert(
@@ -243,16 +263,11 @@ async fn determine_schema_from_header(
                 field_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), tag.clone());
                 // Prefix with "fmt_" if the column name collides with an existing field (e.g., INFO field).
                 // Also guard against the generated name itself colliding.
-                let column_name = if used_names.contains(tag.as_str()) {
-                    let candidate = format!("fmt_{tag}");
-                    if used_names.contains(&candidate) {
-                        format!("format_{tag}")
-                    } else {
-                        candidate
-                    }
-                } else {
-                    tag.clone()
-                };
+                // "fmt_"/"format_" prefixes are recognized by the writer
+                // path (serializer/header_builder); keep them as the preferred
+                // fallbacks and only then disambiguate with a numeric suffix.
+                let column_name =
+                    resolve_single_sample_format_column_name(&used_names, tag.as_str());
                 used_names.insert(column_name.clone());
                 let field = Field::new(column_name, dtype, true).with_metadata(field_metadata);
                 fields.push(field);
@@ -325,8 +340,12 @@ async fn determine_schema_from_header(
     );
 
     let schema = Schema::new_with_metadata(fields, metadata);
-    // println!("Schema: {:?}", schema);
-    Ok((Arc::new(schema), sample_names, source_sample_names))
+    Ok((
+        Arc::new(schema),
+        sample_names,
+        source_sample_names,
+        Arc::new(header),
+    ))
 }
 
 /// Determines if a VCF INFO field type is nullable.
@@ -387,7 +406,88 @@ pub fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
     }
 }
 
-/// A DataFusion table provider for reading VCF files.
+/// Returns true when the record-level decoder can fully evaluate `filter`.
+///
+/// `can_push_down_record_filter` accepts any scalar column in the schema, but
+/// [`VcfRecordFields`] only resolves `chrom`/`start`/`end`; filters on other
+/// columns pass every record. A limit may only stop the scan early when every
+/// filter is genuinely enforced by the decoder, otherwise rows matching the
+/// residual filter could be cut off.
+fn decoder_evaluates_filter(filter: &Expr, schema: &SchemaRef) -> bool {
+    can_push_down_record_filter(filter, schema)
+        && filter
+            .column_refs()
+            .iter()
+            .all(|column| VcfRecordFields::FILTER_COLUMNS.contains(&column.name.as_str()))
+}
+
+/// Input encoding accepted by [`VcfTableProvider`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VcfInputFormat {
+    /// Select BCF for `.bcf` paths and text VCF otherwise.
+    #[default]
+    Auto,
+    /// VCF text, optionally compressed with GZIP or BGZF.
+    Vcf,
+    /// BGZF-compressed BCF 2.2.
+    Bcf,
+}
+
+/// Physical representation used for the BCF `GT` FORMAT field.
+///
+/// String mode preserves the VCF-compatible schema. Dosage mode is an explicit,
+/// read-only BCF optimization that emits the count of allele index 1 as nullable
+/// signed 8-bit values. It currently requires `GT` to be the only selected
+/// FORMAT field.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GenotypeOutputMode {
+    /// Preserve phased or unphased VCF genotype strings such as `0|1`.
+    #[default]
+    String,
+    /// Emit biallelic alternate-allele counts, with missing genotypes as null.
+    Dosage,
+}
+
+impl VcfInputFormat {
+    fn resolve(self, file_path: &str) -> Self {
+        match self {
+            Self::Auto => {
+                let detection_path = if file_path.contains("://") {
+                    let query = file_path.find('?').unwrap_or(file_path.len());
+                    let fragment = file_path.find('#').unwrap_or(file_path.len());
+                    &file_path[..query.min(fragment)]
+                } else {
+                    file_path
+                };
+                if detection_path.to_ascii_lowercase().ends_with(".bcf") {
+                    Self::Bcf
+                } else {
+                    Self::Vcf
+                }
+            }
+            explicit => explicit,
+        }
+    }
+}
+
+/// Describes INFO and FORMAT fields from either a VCF or BCF header.
+///
+/// The physical input format is inferred from `file_path`, including remote
+/// URLs with query strings or fragments. No variant records are decoded.
+pub async fn describe_fields(
+    file_path: &str,
+    object_storage_options: Option<ObjectStorageOptions>,
+) -> datafusion::common::Result<datafusion::arrow::record_batch::RecordBatch> {
+    let input_format = VcfInputFormat::Auto.resolve(file_path);
+    let header = match input_format {
+        VcfInputFormat::Vcf => get_header(file_path.to_string(), object_storage_options).await?,
+        VcfInputFormat::Bcf => crate::bcf::read_header(file_path, object_storage_options).await?,
+        VcfInputFormat::Auto => unreachable!("input format was resolved"),
+    };
+    Ok(crate::storage::get_vcf_fields(&header).await)
+}
+
+/// A DataFusion table provider for reading VCF or BCF files.
 ///
 /// This provider enables SQL queries on VCF files by implementing the DataFusion
 /// TableProvider interface. It supports local and remote files, multiple compression formats,
@@ -416,9 +516,150 @@ pub struct VcfTableProvider {
     contig_names: Vec<String>,
     /// Contig lengths from the file header (for balanced partitioning)
     contig_lengths: Vec<u64>,
+    /// Physical input encoding.
+    input_format: VcfInputFormat,
+    /// Physical representation requested for the BCF GT field.
+    genotype_output_mode: GenotypeOutputMode,
+    /// Header parsed once at construction; shared with BCF scan partitions so
+    /// remote scans do not re-download and re-parse it per partition.
+    bcf_header: Option<Arc<noodles_vcf::Header>>,
 }
 
 impl VcfTableProvider {
+    /// Selects the physical representation of the BCF `GT` FORMAT field.
+    ///
+    /// Dosage mode is deliberately explicit and additive: existing providers
+    /// continue to expose VCF-compatible strings. The optimized dosage path
+    /// currently accepts BCF input with `GT` as the only selected FORMAT field.
+    /// Biallelic and ploidy constraints are validated while records are read.
+    pub fn with_genotype_output_mode(
+        mut self,
+        mode: GenotypeOutputMode,
+    ) -> datafusion::common::Result<Self> {
+        if mode == self.genotype_output_mode {
+            return Ok(self);
+        }
+        if mode != GenotypeOutputMode::Dosage {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "a provider configured for BCF dosage cannot be converted back to string mode"
+                    .to_string(),
+            ));
+        }
+        if self.input_format != VcfInputFormat::Bcf {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "genotype dosage output is supported only for BCF input".to_string(),
+            ));
+        }
+        // Validate the requested FORMAT selection independently of the output
+        // schema. An explicit empty sample selection intentionally removes the
+        // FORMAT columns from that schema, but it must not make invalid dosage
+        // options such as `format_fields=[]` or `["DP"]` appear valid.
+        let selected_formats = match &self.format_fields {
+            Some(format_fields) => format_fields.clone(),
+            None => self
+                .bcf_header
+                .as_ref()
+                .map(|header| header.formats().keys().map(ToString::to_string).collect())
+                .unwrap_or_else(|| Self::infer_format_fields_from_schema(&self.schema)),
+        };
+        let has_no_selected_samples = self.sample_names.is_empty();
+        if selected_formats.as_slice() != ["GT"] {
+            let selection = if self.format_fields.is_none() {
+                format!(
+                    "format_fields=None selects all header-defined FORMAT fields; \
+                     resolved fields are {selected_formats:?}"
+                )
+            } else {
+                format!("selected fields are {selected_formats:?}")
+            };
+            return Err(datafusion::common::DataFusionError::Plan(format!(
+                "BCF genotype dosage currently requires GT as the only selected FORMAT field; \
+                 {selection}"
+            )));
+        }
+        if !self
+            .bcf_header
+            .as_ref()
+            .is_some_and(|header| header.formats().contains_key("GT"))
+        {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "BCF genotype dosage requires a GT FORMAT field declared in the BCF header"
+                    .to_string(),
+            ));
+        }
+
+        let mut fields = self
+            .schema
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let mut replaced_gt = false;
+        for field in &mut fields {
+            if field.name() == "genotypes" {
+                let DataType::Struct(children) = field.data_type() else {
+                    continue;
+                };
+                let dosage_children = children
+                    .iter()
+                    .map(|child| {
+                        if child.name() != "GT" {
+                            return child.clone();
+                        }
+                        let DataType::List(item) = child.data_type() else {
+                            return child.clone();
+                        };
+                        replaced_gt = true;
+                        let dosage_item = Arc::new(
+                            Field::new(item.name(), DataType::Int8, true)
+                                .with_metadata(item.metadata().clone()),
+                        );
+                        Arc::new(
+                            Field::new(
+                                child.name(),
+                                DataType::List(dosage_item),
+                                child.is_nullable(),
+                            )
+                            .with_metadata(child.metadata().clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                *field = Field::new(
+                    field.name(),
+                    DataType::Struct(dosage_children.into()),
+                    field.is_nullable(),
+                )
+                .with_metadata(field.metadata().clone());
+            } else if field
+                .metadata()
+                .get(VCF_FIELD_FORMAT_ID_KEY)
+                .is_some_and(|id| id == "GT")
+            {
+                replaced_gt = true;
+                *field = Field::new(field.name(), DataType::Int8, true)
+                    .with_metadata(field.metadata().clone());
+            }
+        }
+        if !replaced_gt && !has_no_selected_samples {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "BCF genotype dosage requires a selected GT FORMAT field".to_string(),
+            ));
+        }
+
+        let mut metadata = self.schema.metadata().clone();
+        metadata.insert(
+            "bio.vcf.genotype_output_mode".to_string(),
+            "dosage".to_string(),
+        );
+        metadata.insert(
+            "bio.vcf.genotype_counted_allele".to_string(),
+            "1".to_string(),
+        );
+        self.schema = Arc::new(Schema::new_with_metadata(fields, metadata));
+        self.genotype_output_mode = mode;
+        Ok(self)
+    }
+
     /// Resolves sample names from a schema, checking genotypes field metadata
     /// and schema-level metadata. Returns empty Vec if neither source has sample names.
     fn resolve_sample_names_from_schema(schema: &SchemaRef) -> Vec<String> {
@@ -516,13 +757,36 @@ impl VcfTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
-        Self::new_with_samples(
+        Self::new_with_samples_and_format(
             file_path,
             info_fields,
             format_fields,
             None,
             object_storage_options,
             coordinate_system_zero_based,
+            VcfInputFormat::Auto,
+            None,
+        )
+    }
+
+    /// Creates a table provider with an explicit VCF or BCF input encoding.
+    pub fn new_with_format(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        input_format: VcfInputFormat,
+    ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples_and_format(
+            file_path,
+            info_fields,
+            format_fields,
+            None,
+            object_storage_options,
+            coordinate_system_zero_based,
+            input_format,
+            None,
         )
     }
 
@@ -538,9 +802,72 @@ impl VcfTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples_and_format(
+            file_path,
+            info_fields,
+            format_fields,
+            samples_to_include,
+            object_storage_options,
+            coordinate_system_zero_based,
+            VcfInputFormat::Auto,
+            None,
+        )
+    }
+
+    /// Creates a table provider with explicit samples, input encoding, and index.
+    ///
+    /// BCF accepts CSI indexes. The explicit index path takes precedence over
+    /// conventional local discovery.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_samples_and_format(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        samples_to_include: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        input_format: VcfInputFormat,
+        explicit_index_path: Option<String>,
+    ) -> datafusion::common::Result<Self> {
+        Self::new_with_samples_and_format_and_policy(
+            file_path,
+            info_fields,
+            format_fields,
+            samples_to_include,
+            object_storage_options,
+            coordinate_system_zero_based,
+            input_format,
+            explicit_index_path,
+            None,
+        )
+    }
+
+    /// Creates a provider with an explicit missing-sample policy.
+    ///
+    /// BCF defaults to [`MissingSamplePolicy::Error`]. Text VCF keeps its
+    /// historical ignore behavior unless a policy is supplied here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_samples_and_format_and_policy(
+        file_path: String,
+        info_fields: Option<Vec<String>>,
+        format_fields: Option<Vec<String>>,
+        samples_to_include: Option<Vec<String>>,
+        object_storage_options: Option<ObjectStorageOptions>,
+        coordinate_system_zero_based: bool,
+        input_format: VcfInputFormat,
+        explicit_index_path: Option<String>,
+        missing_sample_policy: Option<MissingSamplePolicy>,
+    ) -> datafusion::common::Result<Self> {
+        use datafusion_bio_format_core::index_utils::IndexFormat;
         use datafusion_bio_format_core::object_storage::{StorageType, get_storage_type};
 
-        let (mut schema, sample_names, source_sample_names) =
+        let input_format = input_format.resolve(&file_path);
+        let missing_sample_policy = missing_sample_policy.unwrap_or(match input_format {
+            VcfInputFormat::Bcf => MissingSamplePolicy::Error,
+            VcfInputFormat::Vcf => MissingSamplePolicy::Ignore,
+            VcfInputFormat::Auto => unreachable!("input format is resolved"),
+        });
+        let (mut schema, sample_names, source_sample_names, header) =
             block_on(determine_schema_from_header(
                 &file_path,
                 &info_fields,
@@ -548,6 +875,8 @@ impl VcfTableProvider {
                 &samples_to_include,
                 &object_storage_options,
                 coordinate_system_zero_based,
+                input_format,
+                missing_sample_policy,
             ))?;
 
         // Extract contig names and lengths from schema metadata
@@ -568,16 +897,96 @@ impl VcfTableProvider {
 
         // Auto-discover index file for local BGZF-compressed files
         let storage_type = get_storage_type(file_path.clone());
-        let (index_path, index_format) = if matches!(storage_type, StorageType::LOCAL) {
-            match discover_vcf_index(&file_path) {
-                Some((path, fmt)) => {
-                    debug!("Discovered VCF index: {path} (format: {fmt:?})");
-                    (Some(path), Some(fmt))
+        let (index_path, index_format) = match input_format {
+            VcfInputFormat::Bcf => {
+                let options = object_storage_options.clone().unwrap_or_default();
+                // Explicit remote CSI locations can be GET-authorized while a
+                // HEAD/stat probe is denied (for example, a narrowly scoped
+                // signed URL). Trust the caller-supplied location and let the
+                // actual index download report any access or parse error.
+                let explicit_remote = explicit_index_path.as_ref().filter(|path| {
+                    !matches!(get_storage_type((*path).clone()), StorageType::LOCAL)
+                });
+                let resolved = if let Some(path) = explicit_remote {
+                    Some(path.clone())
+                } else {
+                    block_on(resolve_companion(
+                        &file_path,
+                        "BCF CSI",
+                        explicit_index_path.as_deref(),
+                        &[CompanionRule::AppendSuffix(".csi".to_string())],
+                        false,
+                        |candidate| {
+                            let options = options.clone();
+                            async move {
+                                if matches!(get_storage_type(candidate.clone()), StorageType::LOCAL)
+                                {
+                                    let path =
+                                        candidate.strip_prefix("file://").unwrap_or(&candidate);
+                                    return Ok(std::path::Path::new(path).exists());
+                                }
+                                // A conventionally derived CSI is optional: any
+                                // probe failure (including PermissionDenied when
+                                // the primary signed URL does not authorize the
+                                // derived path) falls back to a sequential scan.
+                                let object =
+                                    match RemoteObject::open(candidate.clone(), options).await {
+                                        Ok(object) => object,
+                                        Err(error) => {
+                                            warn!(
+                                                "BCF CSI companion probe failed for {}; \
+                                             falling back to unindexed scan: {error}",
+                                                sanitize_location(&candidate)
+                                            );
+                                            return Ok(false);
+                                        }
+                                    };
+                                match object.size().await {
+                                    Ok(_) => Ok(true),
+                                    Err(error) if error.kind() == opendal::ErrorKind::NotFound => {
+                                        Ok(false)
+                                    }
+                                    Err(error) => {
+                                        warn!(
+                                            "BCF CSI companion probe failed for {}; \
+                                             falling back to unindexed scan: {error}",
+                                            sanitize_location(&candidate)
+                                        );
+                                        Ok(false)
+                                    }
+                                }
+                            }
+                        },
+                    ))?
+                };
+                if let Some(path) = resolved {
+                    debug!("Discovered BCF CSI index: {path}");
+                    (Some(path), Some(IndexFormat::CSI))
+                } else {
+                    (None, None)
                 }
-                None => (None, None),
             }
-        } else {
-            (None, None)
+            VcfInputFormat::Vcf => {
+                if let Some(path) = explicit_index_path {
+                    let format = if path.to_ascii_lowercase().ends_with(".csi") {
+                        IndexFormat::CSI
+                    } else {
+                        IndexFormat::TBI
+                    };
+                    (Some(path), Some(format))
+                } else if matches!(storage_type, StorageType::LOCAL) {
+                    match discover_vcf_index(&file_path) {
+                        Some((path, format)) => {
+                            debug!("Discovered variant index: {path} (format: {format:?})");
+                            (Some(path), Some(format))
+                        }
+                        None => (None, None),
+                    }
+                } else {
+                    (None, None)
+                }
+            }
+            VcfInputFormat::Auto => unreachable!("input format is resolved"),
         };
 
         // Prefer index header reference names for indexed full scans and size
@@ -621,7 +1030,12 @@ impl VcfTableProvider {
                 }
             };
 
-            if !index_names.is_empty() {
+            // A BCF header is the authoritative reference dictionary. Standard
+            // BCF CSI companions do not include reference names, and replacing
+            // the BCF names with optional CSI auxiliary names can silently map
+            // reference IDs to the wrong contigs. BCF CSI parity is validated
+            // when the index is loaded for a scan.
+            if input_format == VcfInputFormat::Vcf && !index_names.is_empty() {
                 let fmt_label = index_format
                     .map(|f| format!("{f:?}"))
                     .unwrap_or_else(|| "index".to_string());
@@ -674,6 +1088,12 @@ impl VcfTableProvider {
             index_path,
             contig_names,
             contig_lengths,
+            input_format,
+            genotype_output_mode: GenotypeOutputMode::String,
+            bcf_header: match input_format {
+                VcfInputFormat::Bcf => Some(header),
+                _ => None,
+            },
         })
     }
 
@@ -717,6 +1137,9 @@ impl VcfTableProvider {
             index_path: None,
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
+            input_format: VcfInputFormat::Vcf,
+            genotype_output_mode: GenotypeOutputMode::String,
+            bcf_header: None,
         }
     }
 
@@ -757,6 +1180,9 @@ impl VcfTableProvider {
             index_path: None,
             contig_names: Vec::new(),
             contig_lengths: Vec::new(),
+            input_format: VcfInputFormat::Vcf,
+            genotype_output_mode: GenotypeOutputMode::String,
+            bcf_header: None,
         }
     }
 }
@@ -765,7 +1191,6 @@ impl VcfTableProvider {
 impl TableProvider for VcfTableProvider {
     fn as_any(&self) -> &dyn Any {
         self
-        // todo!()
     }
 
     fn schema(&self) -> SchemaRef {
@@ -774,7 +1199,6 @@ impl TableProvider for VcfTableProvider {
 
     fn table_type(&self) -> TableType {
         TableType::Base
-        // todo!()
     }
 
     fn supports_filters_pushdown(
@@ -839,6 +1263,19 @@ impl TableProvider for VcfTableProvider {
         }
 
         let schema = project_schema(&self.schema, projection);
+        if limit == Some(0) {
+            return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                schema,
+            )));
+        }
+        let bcf_limit = if filters
+            .iter()
+            .all(|filter| decoder_evaluates_filter(filter, &self.schema))
+        {
+            limit
+        } else {
+            None
+        };
 
         // Determine regions and partitioning when index is available
         if let Some(ref index_path) = self.index_path {
@@ -875,12 +1312,36 @@ impl TableProvider for VcfTableProvider {
             if !regions.is_empty() {
                 // Use balanced partitioning with index size estimates
                 let target_partitions = state.config().target_partitions();
-                let estimates = crate::storage::estimate_sizes_from_tbi(
-                    index_path,
-                    &regions,
-                    &self.contig_names,
-                    &self.contig_lengths,
-                );
+                let mut bcf_shared_index = None;
+                let estimates = match self.input_format {
+                    VcfInputFormat::Bcf => {
+                        let bcf_header = self.bcf_header.as_deref().ok_or_else(|| {
+                            datafusion::common::DataFusionError::Internal(
+                                "BCF provider is missing its parsed header".into(),
+                            )
+                        })?;
+                        let index = crate::bcf::load_csi_index(
+                            index_path,
+                            self.object_storage_options.clone(),
+                        )
+                        .await?;
+                        crate::bcf::validate_csi_reference_dictionary(index.as_ref(), bcf_header)?;
+                        bcf_shared_index = Some(index);
+                        crate::bcf::estimate_region_sizes(
+                            bcf_shared_index.as_deref(),
+                            &regions,
+                            &self.contig_names,
+                            &self.contig_lengths,
+                        )
+                    }
+                    VcfInputFormat::Vcf => crate::storage::estimate_sizes_from_tbi(
+                        index_path,
+                        &regions,
+                        &self.contig_names,
+                        &self.contig_lengths,
+                    ),
+                    VcfInputFormat::Auto => unreachable!("input format is resolved"),
+                };
                 let assignments = balance_partitions(estimates, target_partitions);
                 let num_partitions = assignments.len();
 
@@ -899,13 +1360,70 @@ impl TableProvider for VcfTableProvider {
                     record_filters.len()
                 );
 
-                return Ok(Arc::new(VcfExec {
-                    cache: Arc::new(PlanProperties::new(
-                        EquivalenceProperties::new(schema.clone()),
-                        Partitioning::UnknownPartitioning(num_partitions),
-                        EmissionType::Incremental,
-                        Boundedness::Bounded,
-                    )),
+                let cache = Arc::new(PlanProperties::new(
+                    EquivalenceProperties::new(schema.clone()),
+                    Partitioning::UnknownPartitioning(num_partitions),
+                    EmissionType::Incremental,
+                    Boundedness::Bounded,
+                ));
+                let plan: Arc<dyn ExecutionPlan> = match self.input_format {
+                    VcfInputFormat::Bcf => Arc::new(BcfExec {
+                        cache,
+                        file_path: self.file_path.clone(),
+                        schema: schema.clone(),
+                        info_fields: self.info_fields.clone(),
+                        format_fields: self.format_fields.clone(),
+                        sample_names: self.sample_names.clone(),
+                        source_sample_names: self.source_sample_names.clone(),
+                        projection: projection.cloned(),
+                        limit: bcf_limit,
+                        object_storage_options: self.object_storage_options.clone(),
+                        coordinate_system_zero_based: self.coordinate_system_zero_based,
+                        partition_assignments: Some(assignments),
+                        index_path: Some(index_path.clone()),
+                        index: bcf_shared_index,
+                        header: self.bcf_header.clone(),
+                        residual_filters: record_filters,
+                        genotype_output_mode: self.genotype_output_mode,
+                    }),
+                    VcfInputFormat::Vcf => Arc::new(VcfExec {
+                        cache,
+                        file_path: self.file_path.clone(),
+                        schema: schema.clone(),
+                        info_fields: self.info_fields.clone(),
+                        format_fields: self.format_fields.clone(),
+                        sample_names: self.sample_names.clone(),
+                        source_sample_names: self.source_sample_names.clone(),
+                        projection: projection.cloned(),
+                        limit,
+                        object_storage_options: self.object_storage_options.clone(),
+                        coordinate_system_zero_based: self.coordinate_system_zero_based,
+                        partition_assignments: Some(assignments),
+                        index_path: Some(index_path.clone()),
+                        residual_filters: record_filters,
+                    }),
+                    VcfInputFormat::Auto => unreachable!("input format is resolved"),
+                };
+                return Ok(plan);
+            }
+        }
+
+        // Fallback: sequential full scan (no index or no regions)
+        let cache = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        match self.input_format {
+            VcfInputFormat::Bcf => {
+                let record_filters = filters
+                    .iter()
+                    .filter(|expr| can_push_down_record_filter(expr, &self.schema))
+                    .cloned()
+                    .collect();
+                Ok(Arc::new(BcfExec {
+                    cache,
                     file_path: self.file_path.clone(),
                     schema: schema.clone(),
                     info_fields: self.info_fields.clone(),
@@ -913,38 +1431,35 @@ impl TableProvider for VcfTableProvider {
                     sample_names: self.sample_names.clone(),
                     source_sample_names: self.source_sample_names.clone(),
                     projection: projection.cloned(),
-                    limit,
+                    limit: bcf_limit,
                     object_storage_options: self.object_storage_options.clone(),
                     coordinate_system_zero_based: self.coordinate_system_zero_based,
-                    partition_assignments: Some(assignments),
-                    index_path: Some(index_path.clone()),
+                    partition_assignments: None,
+                    index_path: None,
+                    index: None,
+                    header: self.bcf_header.clone(),
                     residual_filters: record_filters,
-                }));
+                    genotype_output_mode: self.genotype_output_mode,
+                }))
             }
+            VcfInputFormat::Vcf => Ok(Arc::new(VcfExec {
+                cache,
+                file_path: self.file_path.clone(),
+                schema: schema.clone(),
+                info_fields: self.info_fields.clone(),
+                format_fields: self.format_fields.clone(),
+                sample_names: self.sample_names.clone(),
+                source_sample_names: self.source_sample_names.clone(),
+                projection: projection.cloned(),
+                limit,
+                object_storage_options: self.object_storage_options.clone(),
+                coordinate_system_zero_based: self.coordinate_system_zero_based,
+                partition_assignments: None,
+                index_path: None,
+                residual_filters: Vec::new(),
+            })),
+            VcfInputFormat::Auto => unreachable!("input format is resolved"),
         }
-
-        // Fallback: sequential full scan (no index or no regions)
-        Ok(Arc::new(VcfExec {
-            cache: Arc::new(PlanProperties::new(
-                EquivalenceProperties::new(schema.clone()),
-                Partitioning::UnknownPartitioning(1),
-                EmissionType::Incremental,
-                Boundedness::Bounded,
-            )),
-            file_path: self.file_path.clone(),
-            schema: schema.clone(),
-            info_fields: self.info_fields.clone(),
-            format_fields: self.format_fields.clone(),
-            sample_names: self.sample_names.clone(),
-            source_sample_names: self.source_sample_names.clone(),
-            projection: projection.cloned(),
-            limit,
-            object_storage_options: self.object_storage_options.clone(),
-            coordinate_system_zero_based: self.coordinate_system_zero_based,
-            partition_assignments: None,
-            index_path: None,
-            residual_filters: Vec::new(),
-        }))
     }
 
     async fn insert_into(
@@ -960,6 +1475,21 @@ impl TableProvider for VcfTableProvider {
             return Err(datafusion::common::DataFusionError::NotImplemented(
                 "VCF write only supports OVERWRITE mode (INSERT OVERWRITE). \
                  APPEND mode is not supported."
+                    .to_string(),
+            ));
+        }
+
+        // The write path serializes text VCF; writing it into a .bcf target
+        // would corrupt the file (subsequent opens resolve it as BCF and fail).
+        // Check the destination path as well as the resolved input format:
+        // write-mode constructors hard-code `input_format` to `Vcf`, so a
+        // `.bcf` destination would otherwise slip through.
+        if self.input_format == VcfInputFormat::Bcf
+            || VcfInputFormat::Auto.resolve(&self.file_path) == VcfInputFormat::Bcf
+        {
+            return Err(datafusion::common::DataFusionError::NotImplemented(
+                "BCF write is not supported; INSERT OVERWRITE targets must be text VCF \
+                 (optionally BGZF/GZIP compressed)"
                     .to_string(),
             ));
         }
@@ -1139,5 +1669,69 @@ fn format_type_to_string(ty: &FormatType) -> String {
         FormatType::Float => "Float".to_string(),
         FormatType::Character => "Character".to_string(),
         FormatType::String => "String".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::prelude::{col, lit};
+
+    fn test_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("af", DataType::Float32, true),
+        ]))
+    }
+
+    #[test]
+    fn limit_pushdown_requires_decoder_evaluable_filters() {
+        let schema = test_schema();
+
+        // Coordinate filters are enforced by the decoder, so a limit may stop
+        // the scan early.
+        assert!(decoder_evaluates_filter(
+            &col("chrom").eq(lit("chr1")),
+            &schema
+        ));
+        assert!(decoder_evaluates_filter(
+            &col("start").gt_eq(lit(100u32)),
+            &schema
+        ));
+
+        // These pass `can_push_down_record_filter`, but `VcfRecordFields` cannot
+        // resolve the columns — every record would pass, so an early stop could
+        // drop rows the residual filter would have matched.
+        assert!(!decoder_evaluates_filter(
+            &col("id").eq(lit("rs1")),
+            &schema
+        ));
+        assert!(!decoder_evaluates_filter(
+            &col("af").gt(lit(0.5_f32)),
+            &schema
+        ));
+        assert!(!decoder_evaluates_filter(
+            &col("chrom").eq(lit("chr1")).and(col("id").eq(lit("rs1"))),
+            &schema
+        ));
+    }
+
+    #[test]
+    fn auto_format_detection_ignores_remote_url_query_and_fragment() {
+        assert_eq!(
+            VcfInputFormat::Auto.resolve("https://example.test/cohort.BCF?token=secret#download"),
+            VcfInputFormat::Bcf
+        );
+        assert_eq!(
+            VcfInputFormat::Auto.resolve("https://example.test/cohort.bcf#download"),
+            VcfInputFormat::Bcf
+        );
+        assert_eq!(
+            VcfInputFormat::Auto.resolve("https://example.test/cohort.vcf#looks-like.bcf"),
+            VcfInputFormat::Vcf
+        );
     }
 }

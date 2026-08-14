@@ -724,6 +724,18 @@ impl RemoteObject {
         reader.into_bytes_stream(..).await
     }
 
+    /// Streams the complete object through one sequential backend request.
+    ///
+    /// Unlike [`Self::stream`], this does not apply the configured reader chunk
+    /// size. It therefore avoids a size/HEAD preflight on backends that need the
+    /// object length to split a complete-object read into ranges. This is useful
+    /// for bounded companion metadata when the caller enforces its own byte
+    /// ceiling while consuming the stream.
+    pub async fn stream_single_request(&self) -> Result<FuturesBytesStream, opendal::Error> {
+        let reader = self.operator.reader_with(&self.path).concurrent(1).await?;
+        reader.into_bytes_stream(..).await
+    }
+
     /// Streams a half-open byte range.
     pub async fn stream_range(
         &self,
@@ -744,6 +756,37 @@ impl RemoteObject {
                     .await?
             }
         };
+        reader.into_bytes_stream(range).await
+    }
+
+    /// Streams a range with a hard ceiling on each sequential backend read.
+    ///
+    /// The configured chunk size is honored when it is smaller than
+    /// `max_chunk_size`; otherwise it is capped. Only one chunk is fetched at a
+    /// time, so callers can stream an arbitrarily large logical range without
+    /// materializing it or multiplying the byte ceiling by reader concurrency.
+    pub async fn stream_range_bounded(
+        &self,
+        range: Range<u64>,
+        max_chunk_size: usize,
+    ) -> Result<FuturesBytesStream, opendal::Error> {
+        if max_chunk_size == 0 {
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::ConfigInvalid,
+                "bounded range stream chunk size must be greater than zero",
+            ));
+        }
+
+        let chunk_size = self
+            .chunk_size
+            .unwrap_or(max_chunk_size)
+            .min(max_chunk_size);
+        let reader = self
+            .operator
+            .reader_with(&self.path)
+            .chunk(chunk_size)
+            .concurrent(1)
+            .await?;
         reader.into_bytes_stream(range).await
     }
 }

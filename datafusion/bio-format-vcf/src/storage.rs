@@ -593,16 +593,8 @@ pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
         used_names.extend(header.infos().keys().map(|name| name.to_string()));
 
         for (field_name, field) in header.formats() {
-            let column_name = if used_names.contains(field_name.as_str()) {
-                let candidate = format!("fmt_{field_name}");
-                if used_names.contains(&candidate) {
-                    format!("format_{field_name}")
-                } else {
-                    candidate
-                }
-            } else {
-                field_name.to_string()
-            };
+            let column_name =
+                resolve_single_sample_format_column_name(&used_names, field_name.as_str());
             used_names.insert(column_name.clone());
 
             field_names.append_value(column_name);
@@ -646,6 +638,26 @@ pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
         ],
     )
     .unwrap()
+}
+
+pub(crate) fn resolve_single_sample_format_column_name(
+    used_names: &std::collections::HashSet<String>,
+    format_id: &str,
+) -> String {
+    if !used_names.contains(format_id) {
+        return format_id.to_string();
+    }
+
+    let mut candidate = format!("fmt_{format_id}");
+    if used_names.contains(&candidate) {
+        candidate = format!("format_{format_id}");
+    }
+    let mut suffix = 2;
+    while used_names.contains(&candidate) {
+        candidate = format!("format_{format_id}_{suffix}");
+        suffix += 1;
+    }
+    candidate
 }
 
 /// Unified reader for both local and remote VCF files.
@@ -981,6 +993,13 @@ pub struct VcfRecordFields {
     pub start: Option<u32>,
     /// End position (in the output coordinate system)
     pub end: Option<u32>,
+}
+
+impl VcfRecordFields {
+    /// Columns that record-level filter evaluation can actually resolve.
+    /// Filters referencing any other column pass through unevaluated, so limit
+    /// pushdown must not rely on them.
+    pub const FILTER_COLUMNS: &'static [&'static str] = &["chrom", "start", "end"];
 }
 
 impl RecordFieldAccessor for VcfRecordFields {
