@@ -530,6 +530,13 @@ fn plan_payload_partitions(
     // Bridging the metadata gaps between payloads would otherwise merge a whole
     // small file into one range and leave every partition but the first empty,
     // so cap the coalesced size by an even split of the selected payload bytes.
+    //
+    // The split uses the requested partition count, while the plan ends up with
+    // `min(target_partitions, coalesced.len())` partitions. Asking for many more
+    // partitions than there are payload ranges therefore caps more tightly than
+    // strictly necessary, which costs a few extra object reads and never
+    // correctness; sizing it from the final count is not possible before
+    // coalescing has decided that count.
     let payload_bytes: u64 = ranges
         .iter()
         .map(|range| range.len())
@@ -550,13 +557,21 @@ fn plan_payload_partitions(
             .payload_offset
             .checked_add(variant.payload_size)
             .ok_or_else(|| DataFusionError::Plan("BGEN payload range overflowed".to_string()))?;
-        let position = coalesced.partition_point(|range| range.start <= variant.payload_offset);
-        if position == 0 {
-            continue;
-        }
-        if end <= coalesced[position - 1].end {
-            range_variants[position - 1].push(index);
-        }
+        // Coalescing only merges ranges built from these same payload bounds, so
+        // every payload is contained in exactly one coalesced range. Failing
+        // loudly keeps a future coalescing bug from silently dropping variants
+        // from the scan.
+        let position = coalesced
+            .partition_point(|range| range.start <= variant.payload_offset)
+            .checked_sub(1)
+            .filter(|&position| end <= coalesced[position].end)
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "BGEN variant {index} payload {}..{end} is not inside any coalesced range",
+                    variant.payload_offset
+                ))
+            })?;
+        range_variants[position].push(index);
     }
 
     // Partitions must stay contiguous so a scan reproduces source variant order
