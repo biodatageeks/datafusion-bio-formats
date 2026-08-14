@@ -25,6 +25,14 @@ const INITIAL_VARIANT_CAPACITY: u64 = 65_536;
 /// Bytes a Layout 2 payload spends on its own length fields: the block length
 /// and, when compressed, the declared decompressed length.
 const BLOCK_FRAMING_BYTES: u64 = 8;
+/// Worst-case codec expansion allowed on top of the decompressed limit.
+///
+/// zlib and zstd both bound their expansion on incompressible input to a small
+/// fraction of the input plus a fixed header, so allowing a sixteenth plus a
+/// kilobyte cannot reject a block a real encoder produced, while still bounding
+/// what a malformed record can make the reader download.
+const COMPRESSION_EXPANSION_DIVISOR: u64 = 16;
+const COMPRESSION_EXPANSION_BYTES: u64 = 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenVariant {
@@ -350,19 +358,23 @@ fn parse_variant(
         _ => None,
     };
     // Every payload is also bounded before it is read, so a record declaring a
-    // multi-gigabyte serialized block cannot make execution download it. The
-    // ceiling is the decompressed limit plus the block framing, which a valid
-    // block never exceeds: a compressed block that serialized to more than its
-    // own decompressed limit would have to be pathologically incompressible.
-    let serialized_ceiling =
-        (options.max_decompressed_block_bytes as u64).saturating_add(BLOCK_FRAMING_BYTES);
+    // multi-gigabyte serialized block cannot make execution download it.
+    //
+    // Compression does not guarantee the serialized form is smaller than its
+    // input, so the ceiling allows for codec expansion on top of the
+    // decompressed limit rather than assuming compression shrinks the block.
+    let limit = options.max_decompressed_block_bytes as u64;
+    let serialized_ceiling = limit
+        .saturating_add(limit / COMPRESSION_EXPANSION_DIVISOR)
+        .saturating_add(COMPRESSION_EXPANSION_BYTES)
+        .saturating_add(BLOCK_FRAMING_BYTES);
     if payload_size > serialized_ceiling {
         return Err(ParseVariantError::Invalid(catalog_error(
             path,
             index,
             record_offset,
             &format!(
-                "serialized payload of {payload_size} bytes exceeds max_decompressed_block_bytes {} plus block framing",
+                "serialized payload of {payload_size} bytes exceeds max_decompressed_block_bytes {} plus codec expansion and framing",
                 options.max_decompressed_block_bytes
             ),
         )));

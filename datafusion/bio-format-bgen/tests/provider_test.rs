@@ -712,6 +712,17 @@ async fn emits_biallelic_dosage_and_rejects_multiallelic_selection() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("does not support multiallelic"), "{error}");
+
+    // Projecting only the header-derived flags builds no dosage, so the
+    // multiallelic restriction of the unprojected output mode must not apply.
+    let flags = context
+        .sql("SELECT phased, bits FROM b WHERE id = 'v3'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a flag-only projection must not apply the dosage restriction");
+    assert_eq!(flags.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
 }
 
 #[tokio::test]

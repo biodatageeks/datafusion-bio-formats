@@ -620,6 +620,11 @@ async fn cache_remote_index(
         .await
         .is_ok_and(|metadata| metadata.len() == bytes.len() as u64)
     {
+        // Reusing an entry still has to respect this provider's limit: entries
+        // written under a larger limit would otherwise keep the shared cache
+        // above the configured maximum indefinitely. The destination itself is
+        // counted as incoming and excluded from eviction, matching the miss path.
+        evict_cache_entries(&cache_root, bytes.len(), max_cache_bytes, &destination).await?;
         // Opened before the lease is released so a concurrent provider cannot
         // evict this entry between publishing it and opening it.
         let connection = open_retained_index(&destination)?;

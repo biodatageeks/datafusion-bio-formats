@@ -429,7 +429,13 @@ fn decode_layout2_block(
             &format!("invalid probability bit precision {bits}"),
         ));
     }
-    if options.output_mode == BgenOutputMode::Dosage && allele_count != 2 {
+    // Only reject a multiallelic row when dosage is actually being built. A
+    // projection of `phased` or `bits` alone decodes no samples, and should not
+    // fail because of an output mode it never materializes.
+    if options.output_mode == BgenOutputMode::Dosage
+        && allele_count != 2
+        && !selected_samples.is_empty()
+    {
         return Err(execution_error(
             path,
             variant,
