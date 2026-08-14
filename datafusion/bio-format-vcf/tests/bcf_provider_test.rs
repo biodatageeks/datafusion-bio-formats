@@ -1192,6 +1192,102 @@ fn write_format_array_bcf(
 }
 
 #[tokio::test]
+async fn bcf_dosage_rejects_invalid_format_selection_when_samples_are_empty()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let invalid_selections = [
+        None,
+        Some(Vec::new()),
+        Some(vec!["DP".to_string()]),
+        Some(vec!["GT".to_string(), "DP".to_string()]),
+    ];
+
+    for format_fields in invalid_selections {
+        let provider = VcfTableProvider::new_with_samples_and_format(
+            bcf_path.clone(),
+            Some(Vec::new()),
+            format_fields,
+            Some(Vec::new()),
+            None,
+            true,
+            VcfInputFormat::Bcf,
+            None,
+        )?;
+        let error = provider
+            .with_genotype_output_mode(GenotypeOutputMode::Dosage)
+            .expect_err("dosage must require GT even when no samples are materialized")
+            .to_string();
+        assert!(
+            error.contains("requires GT as the only selected FORMAT field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_rejects_gt_missing_from_header_when_samples_are_empty()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read depth\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tDP\t12\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-no-gt", body)?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        Some(Vec::new()),
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?;
+    let error = provider
+        .with_genotype_output_mode(GenotypeOutputMode::Dosage)
+        .expect_err("dosage must require GT to be declared in the BCF header")
+        .to_string();
+    assert!(
+        error.contains("requires a GT FORMAT field declared in the BCF header"),
+        "unexpected error: {error}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_allows_default_formats_when_header_declares_only_gt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0/1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-default-gt", body)?;
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        None,
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+
+    assert_eq!(
+        provider.schema().field_with_name("GT")?.data_type(),
+        &datafusion::arrow::datatypes::DataType::Int8
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_dosage_decodes_phase_missingness_ploidy_and_sample_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

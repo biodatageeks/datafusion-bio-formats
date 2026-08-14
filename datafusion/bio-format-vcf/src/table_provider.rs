@@ -550,15 +550,42 @@ impl VcfTableProvider {
                 "genotype dosage output is supported only for BCF input".to_string(),
             ));
         }
-        let selected_formats = Self::infer_format_fields_from_schema(&self.schema);
+        // Validate the requested FORMAT selection independently of the output
+        // schema. An explicit empty sample selection intentionally removes the
+        // FORMAT columns from that schema, but it must not make invalid dosage
+        // options such as `format_fields=[]` or `["DP"]` appear valid.
+        let selected_formats = match &self.format_fields {
+            Some(format_fields) => format_fields.clone(),
+            None => self
+                .bcf_header
+                .as_ref()
+                .map(|header| header.formats().keys().map(ToString::to_string).collect())
+                .unwrap_or_else(|| Self::infer_format_fields_from_schema(&self.schema)),
+        };
         let has_no_selected_samples = self.sample_names.is_empty();
-        if selected_formats.as_slice() != ["GT"]
-            && !(has_no_selected_samples && selected_formats.is_empty())
-        {
+        if selected_formats.as_slice() != ["GT"] {
+            let selection = if self.format_fields.is_none() {
+                format!(
+                    "format_fields=None selects all header-defined FORMAT fields; \
+                     resolved fields are {selected_formats:?}"
+                )
+            } else {
+                format!("selected fields are {selected_formats:?}")
+            };
             return Err(datafusion::common::DataFusionError::Plan(format!(
                 "BCF genotype dosage currently requires GT as the only selected FORMAT field; \
-                 selected fields are {selected_formats:?}"
+                 {selection}"
             )));
+        }
+        if !self
+            .bcf_header
+            .as_ref()
+            .is_some_and(|header| header.formats().contains_key("GT"))
+        {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "BCF genotype dosage requires a GT FORMAT field declared in the BCF header"
+                    .to_string(),
+            ));
         }
 
         let mut fields = self
