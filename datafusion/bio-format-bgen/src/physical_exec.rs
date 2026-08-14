@@ -18,7 +18,7 @@ use datafusion_bio_format_core::genotype::{
 };
 use datafusion_bio_format_core::range_planning::ByteRange;
 
-use crate::decode::{DecodedGenotypes, DecodedValues, decode_variant};
+use crate::decode::{DecodeScratch, DecodedGenotypes, DecodedValues, decode_variant};
 use crate::table_provider::{BgenFileset, BgenOutputMode};
 
 #[derive(Clone, Debug)]
@@ -136,6 +136,9 @@ impl ExecutionPlan for BgenExec {
         let stream = try_stream! {
             let mut sizer = GenotypeBatchSizer::new(max_rows, soft_bytes)?;
             let mut rows = Vec::with_capacity(max_rows);
+            // Decoding buffers live for the whole partition so per-variant work
+            // reuses one decompressor and one set of probability buffers.
+            let mut scratch = DecodeScratch::new();
 
             if assignment.ranges.is_empty() {
                 for variant_index in assignment.variants {
@@ -204,6 +207,7 @@ impl ExecutionPlan for BgenExec {
                             payload,
                             fileset.selected_samples.source_indices(),
                             &fileset.options,
+                            &mut scratch,
                         )?;
                         let estimated_row_bytes = if genotype_projected {
                             decoded.estimated_arrow_bytes()
@@ -386,9 +390,7 @@ fn build_genotypes(
                 };
                 for sample in samples {
                     if let Some(probabilities) = sample {
-                        for probability in probabilities {
-                            outer.values().values().append_value(*probability);
-                        }
+                        outer.values().values().append_slice(probabilities);
                         outer.values().append(true);
                     } else {
                         outer.values().append(false);
@@ -429,9 +431,8 @@ fn build_genotypes(
         let decoded = row.genotypes.as_ref().ok_or_else(|| {
             DataFusionError::Execution("BGEN genotype projection has no decoded ploidy".to_string())
         })?;
-        for value in &decoded.ploidy {
-            ploidy.values().append_value(*value);
-        }
+        // Declared ploidy is never null, so the whole row is one bulk append.
+        ploidy.values().append_slice(&decoded.ploidy);
         ploidy.append(true);
     }
     Ok(Arc::new(StructArray::try_new(

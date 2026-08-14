@@ -17,6 +17,7 @@ bytes.workspace = true
 datafusion.workspace = true
 datafusion-bio-format-core = { path = "../bio-format-core" }
 flate2.workspace = true
+libdeflater.workspace = true
 opendal.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { workspace = true, features = ["fs", "io-util"] }

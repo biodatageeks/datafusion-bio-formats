@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::companion::sanitize_location;
 
@@ -8,6 +9,8 @@ use crate::source::ObjectAccess;
 use crate::table_provider::BgenReadOptions;
 
 const INITIAL_METADATA_WINDOW: usize = 4 * 1024;
+/// Bytes fetched per catalog read so one object read covers many variant records.
+const METADATA_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenVariant {
@@ -31,6 +34,69 @@ pub(crate) struct BgenCatalog {
     pub(crate) bytes_read: u64,
 }
 
+/// Sequential read-ahead buffer over the variant records of one BGEN object.
+///
+/// Variant metadata is small relative to the genotype block that follows it, so
+/// fetching one record at a time issues an object read per variant. This buffer
+/// fetches [`METADATA_CHUNK_BYTES`] at a time and serves subsequent records from
+/// memory, refilling only when a request leaves the buffered window.
+struct MetadataWindow<'a> {
+    path: &'a str,
+    source: &'a ObjectAccess,
+    object_size: u64,
+    buffer: Bytes,
+    buffer_start: u64,
+    bytes_read: u64,
+}
+
+impl<'a> MetadataWindow<'a> {
+    fn new(path: &'a str, source: &'a ObjectAccess, object_size: u64) -> Self {
+        Self {
+            path,
+            source,
+            object_size,
+            buffer: Bytes::new(),
+            buffer_start: 0,
+            bytes_read: 0,
+        }
+    }
+
+    /// Returns object bytes starting at `offset`, at least `wanted` long unless
+    /// the object ends first.
+    async fn bytes_at(&mut self, offset: u64, wanted: usize) -> Result<&[u8]> {
+        let remaining = self.object_size.saturating_sub(offset);
+        let target = (wanted as u64).min(remaining);
+        let buffered = self.buffered_len(offset);
+        if buffered < target {
+            let read_size = remaining.min(wanted.max(METADATA_CHUNK_BYTES) as u64);
+            let end = offset.checked_add(read_size).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "BGEN {} metadata range overflowed at offset {offset}",
+                    sanitize_location(self.path)
+                ))
+            })?;
+            self.buffer = self.source.read_range(self.path, offset..end).await?;
+            self.buffer_start = offset;
+            self.bytes_read = self.bytes_read.saturating_add(self.buffer.len() as u64);
+        }
+        let start = (offset - self.buffer_start) as usize;
+        Ok(&self.buffer[start..])
+    }
+
+    /// Bytes already buffered from `offset` onwards, or zero when `offset` is
+    /// outside the current window.
+    fn buffered_len(&self, offset: u64) -> u64 {
+        if offset < self.buffer_start {
+            return 0;
+        }
+        let buffer_end = self.buffer_start + self.buffer.len() as u64;
+        if offset > buffer_end {
+            return 0;
+        }
+        buffer_end - offset
+    }
+}
+
 pub(crate) async fn build_transient_catalog(
     path: &str,
     source: &ObjectAccess,
@@ -39,7 +105,7 @@ pub(crate) async fn build_transient_catalog(
 ) -> Result<BgenCatalog> {
     let mut variants = Vec::with_capacity(header.variant_count as usize);
     let mut record_offset = header.first_variant_offset;
-    let mut bytes_read = 0_u64;
+    let mut window = MetadataWindow::new(path, source, header.object_size);
 
     for index in 0..header.variant_count as usize {
         let mut window_size = INITIAL_METADATA_WINDOW.min(options.max_variant_metadata_bytes);
@@ -64,12 +130,8 @@ pub(crate) async fn build_transient_catalog(
                 ));
             }
             let read_size = remaining.min(window_size as u64);
-            let end = record_offset.checked_add(read_size).ok_or_else(|| {
-                catalog_error(path, index, record_offset, "metadata range overflowed")
-            })?;
-            let bytes = source.read_range(path, record_offset..end).await?;
-            bytes_read = bytes_read.saturating_add(bytes.len() as u64);
-            match parse_variant(path, index, record_offset, &bytes, header, options) {
+            let bytes = window.bytes_at(record_offset, window_size).await?;
+            match parse_variant(path, index, record_offset, bytes, header, options) {
                 Ok(variant) => break variant,
                 Err(ParseVariantError::NeedMore) if read_size < remaining => {
                     if window_size >= options.max_variant_metadata_bytes {
@@ -129,7 +191,7 @@ pub(crate) async fn build_transient_catalog(
 
     Ok(BgenCatalog {
         variants: Arc::new(variants),
-        bytes_read,
+        bytes_read: window.bytes_read,
     })
 }
 

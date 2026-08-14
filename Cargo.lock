@@ -1371,6 +1371,7 @@ dependencies = [
  "datafusion",
  "datafusion-bio-format-core",
  "flate2",
+ "libdeflater",
  "opendal",
  "rusqlite",
  "tempfile",

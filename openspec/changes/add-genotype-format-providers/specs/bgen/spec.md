@@ -282,6 +282,13 @@ compressed/decompressed work and coalesce only nearby bounded byte ranges.
 - **THEN** blocks are assigned to no more than target partitions
 - **AND** each selected variant is emitted once.
 
+#### Scenario: Coalescing preserves requested parallelism
+- **WHEN** consecutive selected payloads are separated only by the following
+  variant's metadata and target partitions exceed one
+- **THEN** the metadata gaps are bridged so a sequential scan does not issue one
+  object read per variant
+- **AND** coalesced ranges stay small enough to fill the requested partitions.
+
 #### Scenario: Decompression isolation
 - **WHEN** one selected BGEN block is malformed
 - **THEN** its partition fails with variant context

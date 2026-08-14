@@ -102,6 +102,12 @@ impl RangeServer {
                     }
                     Err(error) => panic!("range server failed: {error}"),
                 };
+                // Accepted sockets can inherit the listener's non-blocking mode,
+                // so reading the request would race the client's write.
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
                 let mut request_bytes = [0_u8; 8192];
                 let size = stream.read(&mut request_bytes).unwrap();
                 let request = String::from_utf8_lossy(&request_bytes[..size]);
@@ -1227,6 +1233,59 @@ with BgenReader(sys.argv[1], "", delay_parsing=True) as reader:
             "BGEN_REQUIRE_REFERENCE_ORACLES requires snputils, limix/bgen, bgenix, and qctool"
         );
     }
+}
+
+#[tokio::test]
+async fn coalescing_bridges_metadata_gaps_without_collapsing_partitions() {
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+
+    // Consecutive payloads are separated only by the next variant's metadata,
+    // so one sequential partition must bridge those gaps instead of issuing a
+    // read per variant.
+    let sequential = SessionContext::new_with_config(
+        SessionConfig::new()
+            .with_target_partitions(1)
+            .with_batch_size(1024),
+    );
+    let plan = provider
+        .scan(&sequential.state(), Some(&vec![8]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    assert_eq!(
+        datafusion::physical_plan::ExecutionPlan::properties(exec)
+            .partitioning
+            .partition_count(),
+        1
+    );
+    collect(plan.clone(), sequential.task_ctx()).await.unwrap();
+    let range_requests = exec.metrics_snapshot()[GenotypeMetric::RangeRequests as usize].1;
+    assert!(
+        range_requests < fixture.rows.len() as u64,
+        "expected coalesced reads, got {range_requests} for {} variants",
+        fixture.rows.len()
+    );
+
+    // Bridging those gaps must not merge the whole file into a single range and
+    // leave the other requested partitions empty.
+    let parallel = SessionContext::new_with_config(
+        SessionConfig::new()
+            .with_target_partitions(2)
+            .with_batch_size(1024),
+    );
+    let parallel_plan = provider
+        .scan(&parallel.state(), Some(&vec![8]), &[], None)
+        .await
+        .unwrap();
+    assert_eq!(parallel_plan.properties().partitioning.partition_count(), 2);
+    let batches = collect(parallel_plan, parallel.task_ctx()).await.unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        fixture.rows.len()
+    );
 }
 
 fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, required: bool) -> bool {

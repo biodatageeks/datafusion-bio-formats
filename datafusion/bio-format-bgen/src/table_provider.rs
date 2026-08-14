@@ -97,6 +97,9 @@ pub struct BgenReadOptions {
     /// Optional local directory for the shared remote BGI cache.
     pub bgi_cache_directory: Option<String>,
     /// Maximum gap bridged by a coalesced BGEN payload range.
+    ///
+    /// Consecutive probability blocks are separated by the next variant's
+    /// metadata, so a zero gap budget would issue one object read per variant.
     pub max_range_gap: u64,
     /// Maximum coalesced BGEN payload range size.
     pub max_range_bytes: u64,
@@ -127,7 +130,7 @@ impl Default for BgenReadOptions {
             max_bgi_bytes: 4 * 1024 * 1024 * 1024,
             max_bgi_cache_bytes: 8 * 1024 * 1024 * 1024,
             bgi_cache_directory: None,
-            max_range_gap: 0,
+            max_range_gap: 64 * 1024,
             max_range_bytes: 16 * 1024 * 1024,
             batch_soft_byte_limit: 64 * 1024 * 1024,
         }
@@ -524,32 +527,60 @@ fn plan_payload_partitions(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let coalesced = coalesce_byte_ranges(ranges, max_gap, max_range_bytes)?;
-    Ok(balance_byte_ranges(coalesced, target_partitions)
-        .into_iter()
-        .map(|partition| BgenPartition {
-            variants: Vec::new(),
-            ranges: partition
-                .ranges
-                .into_iter()
-                .map(|range| BgenReadRange {
-                    range,
-                    variants: selected
-                        .iter()
-                        .copied()
-                        .filter(|&index| {
-                            let variant = &catalog.variants[index];
-                            variant.payload_offset >= range.start
-                                && variant
-                                    .payload_offset
-                                    .checked_add(variant.payload_size)
-                                    .is_some_and(|end| end <= range.end)
-                        })
-                        .collect(),
-                })
-                .collect(),
-        })
-        .collect())
+    // Bridging the metadata gaps between payloads would otherwise merge a whole
+    // small file into one range and leave every partition but the first empty,
+    // so cap the coalesced size by an even split of the selected payload bytes.
+    let payload_bytes: u64 = ranges
+        .iter()
+        .map(|range| range.len())
+        .fold(0, u64::saturating_add);
+    let partition_cap = payload_bytes
+        .div_ceil(target_partitions.max(1) as u64)
+        .max(1);
+    let coalesced = coalesce_byte_ranges(ranges, max_gap, max_range_bytes.min(partition_cap))?;
+
+    // Coalesced ranges are sorted and disjoint, so each payload can only fall in
+    // the last range that starts at or before it. Locating that range by binary
+    // search assigns every variant in one pass; rescanning all variants for each
+    // range is quadratic and dominates planning on whole-chromosome files.
+    let mut range_variants: Vec<Vec<usize>> = vec![Vec::new(); coalesced.len()];
+    for &index in selected {
+        let variant = &catalog.variants[index];
+        let end = variant
+            .payload_offset
+            .checked_add(variant.payload_size)
+            .ok_or_else(|| DataFusionError::Plan("BGEN payload range overflowed".to_string()))?;
+        let position = coalesced.partition_point(|range| range.start <= variant.payload_offset);
+        if position == 0 {
+            continue;
+        }
+        if end <= coalesced[position - 1].end {
+            range_variants[position - 1].push(index);
+        }
+    }
+
+    Ok(
+        balance_byte_ranges(coalesced.iter().copied(), target_partitions)
+            .into_iter()
+            .map(|partition| BgenPartition {
+                variants: Vec::new(),
+                ranges: partition
+                    .ranges
+                    .into_iter()
+                    .map(|range| {
+                        // Balancing only reorders the coalesced ranges, and their
+                        // starts are unique, so each range maps back to one entry.
+                        let variants = coalesced
+                            .binary_search_by_key(&range.start, |candidate| candidate.start)
+                            .ok()
+                            .map(|position| std::mem::take(&mut range_variants[position]))
+                            .unwrap_or_default();
+                        BgenReadRange { range, variants }
+                    })
+                    .collect(),
+            })
+            .collect(),
+    )
 }
 
 fn plan_metadata_partitions(selected: &[usize], target_partitions: usize) -> Vec<BgenPartition> {
