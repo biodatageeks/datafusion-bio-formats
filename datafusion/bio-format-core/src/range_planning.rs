@@ -86,6 +86,64 @@ pub struct ByteRangePartition {
     pub total_bytes: u64,
 }
 
+/// Splits indivisible byte ranges into at most `target_partitions` contiguous,
+/// byte-balanced runs.
+///
+/// Unlike [`balance_byte_ranges`], partition `n` only holds ranges that precede
+/// every range in partition `n + 1`. A reader whose rows follow source order can
+/// therefore concatenate partitions in order and reproduce that order exactly,
+/// which a least-loaded assignment cannot guarantee. Every input range is
+/// assigned exactly once.
+pub fn partition_byte_ranges_in_order(
+    ranges: impl IntoIterator<Item = ByteRange>,
+    target_partitions: usize,
+) -> Vec<ByteRangePartition> {
+    let mut ranges: Vec<_> = ranges.into_iter().collect();
+    if ranges.is_empty() {
+        return Vec::new();
+    }
+    ranges.sort_unstable();
+
+    let partition_count = target_partitions.max(1).min(ranges.len());
+    let total_bytes = ranges
+        .iter()
+        .map(|range| range.len())
+        .fold(0_u64, u64::saturating_add);
+
+    let mut partitions: Vec<ByteRangePartition> = Vec::with_capacity(partition_count);
+    let mut current = ByteRangePartition {
+        ranges: Vec::new(),
+        total_bytes: 0,
+    };
+    let mut assigned_bytes = 0_u64;
+
+    for (index, range) in ranges.iter().copied().enumerate() {
+        let remaining_ranges = ranges.len() - index;
+        let remaining_partitions = partition_count - partitions.len();
+        // Close the current run once it holds its byte share, while leaving at
+        // least one range for each partition that has not been produced yet.
+        let share_complete = partition_count > 1
+            && !current.ranges.is_empty()
+            && assigned_bytes.saturating_mul(partition_count as u64)
+                >= total_bytes.saturating_mul(partitions.len() as u64 + 1);
+        let must_close = remaining_ranges < remaining_partitions;
+        if remaining_partitions > 1 && (share_complete || must_close) {
+            partitions.push(std::mem::replace(
+                &mut current,
+                ByteRangePartition {
+                    ranges: Vec::new(),
+                    total_bytes: 0,
+                },
+            ));
+        }
+        current.total_bytes = current.total_bytes.saturating_add(range.len());
+        current.ranges.push(range);
+        assigned_bytes = assigned_bytes.saturating_add(range.len());
+    }
+    partitions.push(current);
+    partitions
+}
+
 /// Balances indivisible byte ranges across at most `target_partitions`.
 ///
 /// The largest ranges are assigned first to the currently lightest partition.
@@ -201,5 +259,53 @@ mod tests {
     fn caps_partition_count_to_work_units() {
         assert_eq!(balance_byte_ranges(vec![range(0, 10)], 8).len(), 1);
         assert!(balance_byte_ranges(Vec::<ByteRange>::new(), 8).is_empty());
+    }
+
+    #[test]
+    fn in_order_partitions_are_contiguous_and_cover_every_range() {
+        let ranges: Vec<_> = (0..17_u64)
+            .map(|index| range(index * 100, index * 100 + 10 + index * 5))
+            .collect();
+        for target in 1..=20_usize {
+            let partitions = partition_byte_ranges_in_order(ranges.clone(), target);
+            assert!(!partitions.is_empty());
+            assert!(partitions.len() <= target.max(1).min(ranges.len()));
+            assert!(
+                partitions
+                    .iter()
+                    .all(|partition| !partition.ranges.is_empty()),
+                "target {target} produced an empty partition"
+            );
+            let flattened: Vec<_> = partitions
+                .iter()
+                .flat_map(|partition| partition.ranges.iter().copied())
+                .collect();
+            assert_eq!(flattened, ranges, "target {target} changed source order");
+            for partition in &partitions {
+                assert_eq!(
+                    partition.total_bytes,
+                    partition.ranges.iter().map(|r| r.len()).sum::<u64>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn in_order_partitions_split_even_work_evenly() {
+        let ranges: Vec<_> = (0..8_u64)
+            .map(|index| range(index * 10, index * 10 + 10))
+            .collect();
+        let partitions = partition_byte_ranges_in_order(ranges, 4);
+        assert_eq!(partitions.len(), 4);
+        assert!(
+            partitions
+                .iter()
+                .all(|partition| partition.ranges.len() == 2)
+        );
+    }
+
+    #[test]
+    fn in_order_partitions_handle_an_empty_input() {
+        assert!(partition_byte_ranges_in_order(Vec::new(), 4).is_empty());
     }
 }

@@ -20,7 +20,7 @@ use datafusion_bio_format_core::genotype::{
 };
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::range_planning::{
-    ByteRange, balance_byte_ranges, coalesce_byte_ranges,
+    ByteRange, coalesce_byte_ranges, partition_byte_ranges_in_order,
 };
 
 use crate::bgi::{BgiIndex, open_optional_bgi};
@@ -559,8 +559,10 @@ fn plan_payload_partitions(
         }
     }
 
+    // Partitions must stay contiguous so a scan reproduces source variant order
+    // no matter how many partitions the session requests.
     Ok(
-        balance_byte_ranges(coalesced.iter().copied(), target_partitions)
+        partition_byte_ranges_in_order(coalesced.iter().copied(), target_partitions)
             .into_iter()
             .map(|partition| BgenPartition {
                 variants: Vec::new(),
@@ -568,7 +570,7 @@ fn plan_payload_partitions(
                     .ranges
                     .into_iter()
                     .map(|range| {
-                        // Balancing only reorders the coalesced ranges, and their
+                        // Partitioning only groups the coalesced ranges, and their
                         // starts are unique, so each range maps back to one entry.
                         let variants = coalesced
                             .binary_search_by_key(&range.start, |candidate| candidate.start)
