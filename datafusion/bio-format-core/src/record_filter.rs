@@ -14,6 +14,15 @@ use std::sync::Arc;
 /// Each bioinformatics format implements this trait for its record type,
 /// enabling generic filter evaluation across formats.
 pub trait RecordFieldAccessor {
+    /// Returns whether a known field is null for this record.
+    ///
+    /// The default preserves the behavior of accessors whose supported fields
+    /// are non-null. Accessors for nullable fields should override this so a
+    /// SQL predicate on null is treated as not passing a `WHERE` clause rather
+    /// than as an unsupported field.
+    fn is_null_field(&self, _name: &str) -> bool {
+        false
+    }
     /// Get a string field value by column name.
     fn get_string_field(&self, name: &str) -> Option<String>;
     /// Get a u32 field value by column name.
@@ -75,6 +84,9 @@ fn evaluate_binary_filter(
         && let Expr::Literal(literal, _) = &*binary_expr.right
     {
         let field_name = &column.name;
+        if record.is_null_field(field_name) || literal.is_null() {
+            return false;
+        }
 
         // Try string comparison first
         if let Some(record_value) = record.get_string_field(field_name) {
@@ -105,6 +117,9 @@ fn evaluate_between_filter(record: &dyn RecordFieldAccessor, between_expr: &Betw
     {
         let field_name = &column.name;
         let negated = between_expr.negated;
+        if record.is_null_field(field_name) || low_literal.is_null() || high_literal.is_null() {
+            return false;
+        }
 
         // Try u32
         if let Some(record_value) = record.get_u32_field(field_name) {
@@ -135,41 +150,78 @@ fn evaluate_between_filter(record: &dyn RecordFieldAccessor, between_expr: &Betw
 fn evaluate_in_list_filter(record: &dyn RecordFieldAccessor, in_list_expr: &InList) -> bool {
     if let Expr::Column(column) = &*in_list_expr.expr {
         let field_name = &column.name;
-        let values: Vec<String> = in_list_expr
-            .list
-            .iter()
-            .filter_map(|e| match e {
-                Expr::Literal(ScalarValue::Utf8(Some(s)), _) => Some(s.clone()),
-                Expr::Literal(ScalarValue::LargeUtf8(Some(s)), _) => Some(s.clone()),
-                Expr::Literal(ScalarValue::UInt32(Some(v)), _) => Some(v.to_string()),
-                Expr::Literal(ScalarValue::Int32(Some(v)), _) => Some(v.to_string()),
-                Expr::Literal(ScalarValue::Int64(Some(v)), _) => Some(v.to_string()),
-                Expr::Literal(ScalarValue::Float32(Some(v)), _) => Some(v.to_string()),
-                Expr::Literal(ScalarValue::Float64(Some(v)), _) => Some(v.to_string()),
-                _ => None,
-            })
-            .collect();
+        if record.is_null_field(field_name) {
+            return false;
+        }
+
+        let literals = in_list_expr.list.iter().filter_map(|expr| match expr {
+            Expr::Literal(value, _) => Some(value),
+            _ => None,
+        });
 
         // Try string match
         if let Some(record_value) = record.get_string_field(field_name) {
-            let contains = values.contains(&record_value);
-            return if in_list_expr.negated {
-                !contains
-            } else {
-                contains
-            };
+            return evaluate_in_list(literals, in_list_expr.negated, |literal| match literal {
+                ScalarValue::Utf8(Some(value)) | ScalarValue::LargeUtf8(Some(value)) => {
+                    Some(record_value == *value)
+                }
+                value if value.is_null() => None,
+                _ => Some(false),
+            });
         }
-        // Try u32 match
+
+        // Try numeric matches using the same widening as binary comparisons.
         if let Some(record_value) = record.get_u32_field(field_name) {
-            let contains = values.contains(&record_value.to_string());
-            return if in_list_expr.negated {
-                !contains
-            } else {
-                contains
-            };
+            return evaluate_numeric_in_list(record_value as f64, literals, in_list_expr.negated);
+        }
+        if let Some(record_value) = record.get_f32_field(field_name) {
+            return evaluate_numeric_in_list(record_value as f64, literals, in_list_expr.negated);
+        }
+        if let Some(record_value) = record.get_f64_field(field_name) {
+            return evaluate_numeric_in_list(record_value, literals, in_list_expr.negated);
         }
     }
     true
+}
+
+fn evaluate_in_list<'a>(
+    literals: impl Iterator<Item = &'a ScalarValue>,
+    negated: bool,
+    mut matches: impl FnMut(&ScalarValue) -> Option<bool>,
+) -> bool {
+    let mut saw_null = false;
+    for literal in literals {
+        match matches(literal) {
+            Some(true) => return !negated,
+            Some(false) => {}
+            None => saw_null = true,
+        }
+    }
+
+    // A non-match in a list containing NULL evaluates to UNKNOWN for both IN
+    // and NOT IN, which does not pass a WHERE clause.
+    !saw_null && negated
+}
+
+fn evaluate_numeric_in_list<'a>(
+    record_value: f64,
+    literals: impl Iterator<Item = &'a ScalarValue>,
+    negated: bool,
+) -> bool {
+    evaluate_in_list(literals, negated, |literal| {
+        scalar_numeric_value(literal).map(|literal_value| record_value == literal_value)
+    })
+}
+
+fn scalar_numeric_value(literal: &ScalarValue) -> Option<f64> {
+    match literal {
+        ScalarValue::UInt32(Some(value)) => Some(*value as f64),
+        ScalarValue::Float32(Some(value)) => Some(*value as f64),
+        ScalarValue::Float64(Some(value)) => Some(*value),
+        ScalarValue::Int32(Some(value)) => Some(*value as f64),
+        ScalarValue::Int64(Some(value)) => Some(*value as f64),
+        _ => None,
+    }
 }
 
 fn evaluate_string_comparison(record_value: &str, literal: &ScalarValue, op: &Operator) -> bool {
@@ -187,13 +239,8 @@ fn evaluate_string_comparison(record_value: &str, literal: &ScalarValue, op: &Op
 }
 
 fn evaluate_numeric_comparison(record_value: f64, literal: &ScalarValue, op: &Operator) -> bool {
-    let literal_value = match literal {
-        ScalarValue::UInt32(Some(val)) => *val as f64,
-        ScalarValue::Float32(Some(val)) => *val as f64,
-        ScalarValue::Float64(Some(val)) => *val,
-        ScalarValue::Int32(Some(val)) => *val as f64,
-        ScalarValue::Int64(Some(val)) => *val as f64,
-        _ => return true,
+    let Some(literal_value) = scalar_numeric_value(literal) else {
+        return true;
     };
 
     match op {
@@ -341,6 +388,32 @@ mod tests {
         }
     }
 
+    struct NullableNumericRecord {
+        score: Option<f64>,
+    }
+
+    impl RecordFieldAccessor for NullableNumericRecord {
+        fn is_null_field(&self, name: &str) -> bool {
+            name == "score" && self.score.is_none()
+        }
+
+        fn get_string_field(&self, _name: &str) -> Option<String> {
+            None
+        }
+
+        fn get_u32_field(&self, _name: &str) -> Option<u32> {
+            None
+        }
+
+        fn get_f32_field(&self, _name: &str) -> Option<f32> {
+            None
+        }
+
+        fn get_f64_field(&self, name: &str) -> Option<f64> {
+            (name == "score").then_some(self.score).flatten()
+        }
+    }
+
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("chrom", DataType::Utf8, true),
@@ -417,5 +490,31 @@ mod tests {
 
         let filters_miss = vec![col("chrom").in_list(vec![lit("chr2"), lit("chr3")], false)];
         assert!(!evaluate_record_filters(&record, &filters_miss));
+    }
+
+    #[test]
+    fn nullable_fields_do_not_pass_comparisons_or_negated_lists() {
+        let record = NullableNumericRecord { score: None };
+        assert!(!evaluate_record_filters(
+            &record,
+            &[col("score").not_eq(lit(10.0_f64))]
+        ));
+        assert!(!evaluate_record_filters(
+            &record,
+            &[col("score").in_list(vec![lit(10.0_f64)], true)]
+        ));
+    }
+
+    #[test]
+    fn numeric_in_list_supports_f64_accessors() {
+        let record = NullableNumericRecord { score: Some(3.5) };
+        assert!(evaluate_record_filters(
+            &record,
+            &[col("score").in_list(vec![lit(1.5_f64), lit(3.5_f64)], false)]
+        ));
+        assert!(!evaluate_record_filters(
+            &record,
+            &[col("score").in_list(vec![lit(1.5_f64), lit(2.5_f64)], false)]
+        ));
     }
 }

@@ -1709,6 +1709,85 @@ async fn bcf_dosage_filters_unselected_multiallelic_records_by_id()
 }
 
 #[tokio::test]
+async fn bcf_dosage_evaluates_every_pushable_scalar_filter_before_validation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##FILTER=<ID=q10,Description=\"Low quality\">\n\
+                ##INFO=<ID=SI,Number=1,Type=Integer,Description=\"Scalar integer\">\n\
+                ##INFO=<ID=SF,Number=1,Type=Float,Description=\"Scalar float\">\n\
+                ##INFO=<ID=SS,Number=1,Type=String,Description=\"Scalar string\">\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\tS2\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\tSI=10;SF=1.5;SS=drop\tGT\t0/1\t0/0\n\
+                chr1\t20\trs2\tG\tA,T\t60\tPASS\t.\tGT\t1/2\t0/0\n\
+                chr1\t30\trs3\tT\tG\t.\tq10\tSI=30;SF=3.5;SS=keep\tGT\t1/1\t0/1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-scalar-filters", body)?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+
+    // Together with the existing coordinate and ID regressions, these cover
+    // every other scalar core type plus every scalar INFO type admitted by
+    // `can_push_down_record_filter`. The SI != case also proves that a missing
+    // value is SQL null, rather than an unsupported field that passes through.
+    for (sql, selected_id) in [
+        ("SELECT id, genotypes FROM variants WHERE ref = 'T'", "rs3"),
+        ("SELECT id, genotypes FROM variants WHERE alt = 'G'", "rs3"),
+        ("SELECT id, genotypes FROM variants WHERE qual < 55", "rs1"),
+        (
+            "SELECT id, genotypes FROM variants WHERE filter = 'q10'",
+            "rs3",
+        ),
+        (
+            "SELECT id, genotypes FROM variants WHERE \"SI\" = 30",
+            "rs3",
+        ),
+        (
+            "SELECT id, genotypes FROM variants WHERE \"SI\" != 10",
+            "rs3",
+        ),
+        (
+            "SELECT id, genotypes FROM variants WHERE \"SI\" != 10 LIMIT 1",
+            "rs3",
+        ),
+        (
+            "SELECT id, genotypes FROM variants WHERE \"SF\" > CAST(3.0 AS REAL)",
+            "rs3",
+        ),
+        (
+            "SELECT id, genotypes FROM variants WHERE \"SS\" = 'keep'",
+            "rs3",
+        ),
+    ] {
+        let mut results = Vec::new();
+        for candidate_index in [None, Some(index_path.clone())] {
+            let provider = VcfTableProvider::new_with_samples_and_format(
+                bcf_path.clone(),
+                None,
+                Some(vec!["GT".to_string()]),
+                None,
+                None,
+                true,
+                VcfInputFormat::Bcf,
+                candidate_index,
+            )?
+            .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+            let rows = query("variants", provider, sql)
+                .await
+                .unwrap_or_else(|error| panic!("query failed for {sql}: {error}"));
+            results.push(rows);
+        }
+
+        assert_eq!(results[0], results[1], "sequential/CSI mismatch for {sql}");
+        assert!(results[0].contains(selected_id), "missing row for {sql}");
+        assert!(!results[0].contains("rs2"), "multiallelic leak for {sql}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_dosage_validates_gt_with_dependent_formats_on_filtered_fast_path()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

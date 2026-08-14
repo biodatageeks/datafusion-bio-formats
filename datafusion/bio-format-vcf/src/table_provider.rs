@@ -1,7 +1,7 @@
 use crate::bcf::BcfExec;
 use crate::physical_exec::VcfExec;
 use crate::serializer::validate_vcf_serializable_genotypes;
-use crate::storage::{VcfRecordFields, get_header, resolve_single_sample_format_column_name};
+use crate::storage::{get_header, resolve_single_sample_format_column_name};
 use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
@@ -411,19 +411,27 @@ pub fn format_to_arrow_type(formats: &Formats, field: &str) -> DataType {
     }
 }
 
-/// Returns true when the record-level decoder can fully evaluate `filter`.
+const BCF_CORE_FILTER_COLUMNS: &[&str] = &[
+    "chrom", "start", "end", "id", "ref", "alt", "qual", "filter",
+];
+
+/// Returns true when the BCF decoder can fully evaluate `filter`.
 ///
-/// `can_push_down_record_filter` accepts any scalar column in the schema, but
-/// [`VcfRecordFields`] only resolves `chrom`/`start`/`end`; filters on other
-/// columns pass every record. A limit may only stop the scan early when every
-/// filter is genuinely enforced by the decoder, otherwise rows matching the
-/// residual filter could be cut off.
-fn decoder_evaluates_filter(filter: &Expr, schema: &SchemaRef) -> bool {
+/// Core columns and scalar INFO fields are decoded before dosage compatibility
+/// validation. A scalar single-sample FORMAT field can also be admitted by the
+/// shared planner in string mode, but remains a DataFusion residual, so a limit
+/// must not stop the scan before that residual is applied.
+fn bcf_decoder_evaluates_filter(filter: &Expr, schema: &SchemaRef) -> bool {
     can_push_down_record_filter(filter, schema)
-        && filter
-            .column_refs()
-            .iter()
-            .all(|column| VcfRecordFields::FILTER_COLUMNS.contains(&column.name.as_str()))
+        && filter.column_refs().iter().all(|column| {
+            BCF_CORE_FILTER_COLUMNS.contains(&column.name.as_str())
+                || schema.field_with_name(&column.name).is_ok_and(|field| {
+                    field
+                        .metadata()
+                        .get(VCF_FIELD_FIELD_TYPE_KEY)
+                        .is_some_and(|field_type| field_type == "INFO")
+                })
+        })
 }
 
 /// Input encoding accepted by [`VcfTableProvider`].
@@ -1277,7 +1285,7 @@ impl TableProvider for VcfTableProvider {
         }
         let bcf_limit = if filters
             .iter()
-            .all(|filter| decoder_evaluates_filter(filter, &self.schema))
+            .all(|filter| bcf_decoder_evaluates_filter(filter, &self.schema))
         {
             limit
         } else {
@@ -1692,7 +1700,16 @@ mod tests {
             Field::new("start", DataType::UInt32, false),
             Field::new("end", DataType::UInt32, false),
             Field::new("id", DataType::Utf8, true),
-            Field::new("af", DataType::Float32, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("af", DataType::Float32, true).with_metadata(HashMap::from([(
+                VCF_FIELD_FIELD_TYPE_KEY.to_string(),
+                "INFO".to_string(),
+            )])),
+            Field::new("fmt_dp", DataType::Int32, true).with_metadata(HashMap::from([(
+                VCF_FIELD_FIELD_TYPE_KEY.to_string(),
+                "FORMAT".to_string(),
+            )])),
         ]))
     }
 
@@ -1702,28 +1719,45 @@ mod tests {
 
         // Coordinate filters are enforced by the decoder, so a limit may stop
         // the scan early.
-        assert!(decoder_evaluates_filter(
+        assert!(bcf_decoder_evaluates_filter(
             &col("chrom").eq(lit("chr1")),
             &schema
         ));
-        assert!(decoder_evaluates_filter(
+        assert!(bcf_decoder_evaluates_filter(
             &col("start").gt_eq(lit(100u32)),
             &schema
         ));
 
         // Identifier filters are also evaluated by the decoder before limit or
         // dosage validation is applied.
-        assert!(decoder_evaluates_filter(&col("id").eq(lit("rs1")), &schema));
-        assert!(decoder_evaluates_filter(
+        assert!(bcf_decoder_evaluates_filter(
+            &col("id").eq(lit("rs1")),
+            &schema
+        ));
+        assert!(bcf_decoder_evaluates_filter(
             &col("chrom").eq(lit("chr1")).and(col("id").eq(lit("rs1"))),
             &schema
         ));
 
-        // Scalar INFO fields can pass `can_push_down_record_filter`, but
-        // `VcfRecordFields` cannot resolve them. An early stop could therefore
-        // drop rows the residual DataFusion filter would have matched.
-        assert!(!decoder_evaluates_filter(
+        // Every scalar core and INFO column is evaluated inside the BCF
+        // decoder, including nullable values.
+        assert!(bcf_decoder_evaluates_filter(
+            &col("ref").eq(lit("A")),
+            &schema
+        ));
+        assert!(bcf_decoder_evaluates_filter(
+            &col("qual").gt(lit(20.0_f64)),
+            &schema
+        ));
+        assert!(bcf_decoder_evaluates_filter(
             &col("af").gt(lit(0.5_f32)),
+            &schema
+        ));
+
+        // Single-sample scalar FORMAT fields remain a DataFusion residual in
+        // string mode, so they cannot make an early decoder limit safe.
+        assert!(!bcf_decoder_evaluates_filter(
+            &col("fmt_dp").gt(lit(10_i32)),
             &schema
         ));
     }

@@ -138,6 +138,13 @@ ALT allele for biallelic records.
   compatibility validation
 - **AND** the selected biallelic record is emitted.
 
+#### Scenario: Scalar-filtered dosage
+- **WHEN** a pushable scalar core-column or INFO predicate selects a biallelic
+  record from candidates that also contain an unrelated multiallelic record
+- **THEN** the BCF decoder evaluates every admitted scalar predicate, including
+  SQL null behavior, before dosage compatibility validation
+- **AND** sequential and CSI-indexed scans emit the same selected record.
+
 #### Scenario: Unsupported dosage ploidy
 - **WHEN** a selected genotype dosage exceeds the signed 8-bit output range
 - **THEN** the scan fails with an unsupported-dosage error

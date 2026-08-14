@@ -997,13 +997,6 @@ pub struct VcfRecordFields {
     pub id: Option<String>,
 }
 
-impl VcfRecordFields {
-    /// Columns that record-level filter evaluation can actually resolve.
-    /// Filters referencing any other column pass through unevaluated, so limit
-    /// pushdown must not rely on them.
-    pub const FILTER_COLUMNS: &'static [&'static str] = &["chrom", "start", "end", "id"];
-}
-
 impl RecordFieldAccessor for VcfRecordFields {
     fn get_string_field(&self, name: &str) -> Option<String> {
         match name {

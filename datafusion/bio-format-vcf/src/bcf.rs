@@ -1,5 +1,5 @@
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{self, Cursor, Read};
@@ -19,7 +19,7 @@ use datafusion_bio_format_core::object_storage::{
 };
 use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
 use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
-use datafusion_bio_format_core::record_filter::evaluate_record_filters;
+use datafusion_bio_format_core::record_filter::{RecordFieldAccessor, evaluate_record_filters};
 use datafusion_bio_format_core::table_utils::{OptionalField, builders_to_arrays};
 use datafusion_execution::{SendableRecordBatchStream, TaskContext};
 use futures::{TryStream, TryStreamExt};
@@ -30,6 +30,7 @@ use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Ty
 use noodles_vcf::header::record::value::map::info::{Number as InfoNumber, Type as InfoType};
 use noodles_vcf::variant::Record as VariantRecord;
 use noodles_vcf::variant::record::Samples as _;
+use noodles_vcf::variant::record::info::field::Value as InfoValue;
 use noodles_vcf::variant::record::{AlternateBases, Filters, Info as _};
 use smallvec::SmallVec;
 use tokio::io::AsyncRead;
@@ -39,10 +40,10 @@ use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
     adjust_effective_batch_size_by_observed_format_bytes, build_noodles_region,
     build_record_batch_from_builders, choose_dosage_effective_batch_size,
-    choose_effective_batch_size, choose_initial_builder_batch_size, filters_reference_column,
-    init_format_mode, load_infos_single_pass, resolve_selected_sample_indices, set_info_builders,
+    choose_effective_batch_size, choose_initial_builder_batch_size, init_format_mode,
+    is_missing_info_value_error, load_infos_single_pass, resolve_selected_sample_indices,
+    set_info_builders,
 };
-use crate::storage::VcfRecordFields;
 use crate::table_provider::GenotypeOutputMode;
 
 const SUPPORTED_BCF_VERSION: (u8, u8) = (2, 2);
@@ -2294,6 +2295,176 @@ impl BcfFormatMode {
     }
 }
 
+enum BcfInfoFilterValue {
+    String(String),
+    F64(f64),
+}
+
+struct BcfRecordFilterFields {
+    chrom: Option<String>,
+    start: Option<u32>,
+    end: Option<u32>,
+    id: Option<String>,
+    reference: Option<String>,
+    alternate: Option<String>,
+    quality: Option<Option<f64>>,
+    filter: Option<String>,
+    info_values: HashMap<String, BcfInfoFilterValue>,
+    null_info_fields: HashSet<String>,
+}
+
+struct BcfCoreFilterValues<'a> {
+    chrom: &'a str,
+    start: u32,
+    end: u32,
+    ids: &'a str,
+    reference_bases: &'a str,
+    quality_score: Option<f64>,
+}
+
+impl RecordFieldAccessor for BcfRecordFilterFields {
+    fn is_null_field(&self, name: &str) -> bool {
+        (name == "qual" && matches!(self.quality, Some(None)))
+            || self.null_info_fields.contains(name)
+    }
+
+    fn get_string_field(&self, name: &str) -> Option<String> {
+        match name {
+            "chrom" => self.chrom.clone(),
+            "id" => self.id.clone(),
+            "ref" => self.reference.clone(),
+            "alt" => self.alternate.clone(),
+            "filter" => self.filter.clone(),
+            _ => match self.info_values.get(name) {
+                Some(BcfInfoFilterValue::String(value)) => Some(value.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    fn get_u32_field(&self, name: &str) -> Option<u32> {
+        match name {
+            "start" => self.start,
+            "end" => self.end,
+            _ => None,
+        }
+    }
+
+    fn get_f32_field(&self, _name: &str) -> Option<f32> {
+        None
+    }
+
+    fn get_f64_field(&self, name: &str) -> Option<f64> {
+        if name == "qual" {
+            return self.quality.flatten();
+        }
+        match self.info_values.get(name) {
+            Some(BcfInfoFilterValue::F64(value)) => Some(*value),
+            _ => None,
+        }
+    }
+}
+
+fn bcf_record_filter_fields(
+    record: &BcfRecord,
+    header: &Header,
+    filter_columns: &HashSet<String>,
+    core: BcfCoreFilterValues<'_>,
+) -> Result<BcfRecordFilterFields> {
+    let mut alternate = None;
+    if filter_columns.contains("alt") {
+        let mut value = String::new();
+        for result in record.alternate_bases().iter() {
+            if !value.is_empty() {
+                value.push('|');
+            }
+            value.push_str(
+                result.map_err(|error| execution_error("invalid BCF alternate allele", error))?,
+            );
+        }
+        alternate = Some(value);
+    }
+
+    let mut filter = None;
+    if filter_columns.contains("filter") {
+        let mut value = String::new();
+        for result in record.filters().iter(header) {
+            if !value.is_empty() {
+                value.push(';');
+            }
+            value.push_str(
+                result.map_err(|error| {
+                    execution_error("invalid BCF filter dictionary index", error)
+                })?,
+            );
+        }
+        filter = Some(value);
+    }
+
+    let mut info_values = HashMap::new();
+    let mut null_info_fields = filter_columns
+        .iter()
+        .filter(|column| header.infos().contains_key(column.as_str()))
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    if !null_info_fields.is_empty() {
+        // Parse INFO once per record regardless of how many scalar INFO
+        // predicates are present. Absent and explicitly missing fields remain
+        // in `null_info_fields` and therefore follow SQL WHERE null semantics.
+        for result in record.info().iter(header) {
+            let (info_name, info_value) = match result {
+                Ok(field) => field,
+                Err(error) if is_missing_info_value_error(&error) => continue,
+                Err(error) => {
+                    return Err(execution_error(
+                        "invalid BCF INFO field during filter evaluation",
+                        error,
+                    ));
+                }
+            };
+            if !null_info_fields.contains(info_name) {
+                continue;
+            }
+            let Some(info_value) = info_value else {
+                continue;
+            };
+            let value = match info_value {
+                InfoValue::Integer(value) => BcfInfoFilterValue::F64(f64::from(value)),
+                InfoValue::Float(value) => BcfInfoFilterValue::F64(f64::from(value)),
+                InfoValue::Character(value) => BcfInfoFilterValue::String(value.to_string()),
+                InfoValue::String(value) => BcfInfoFilterValue::String(value.into_owned()),
+                InfoValue::Flag | InfoValue::Array(_) => {
+                    // Boolean and list-valued INFO fields are not admitted by
+                    // `can_push_down_record_filter`.
+                    continue;
+                }
+            };
+            null_info_fields.remove(info_name);
+            info_values.insert(info_name.to_string(), value);
+        }
+    }
+
+    Ok(BcfRecordFilterFields {
+        chrom: filter_columns
+            .contains("chrom")
+            .then(|| core.chrom.to_string()),
+        start: filter_columns.contains("start").then_some(core.start),
+        end: filter_columns.contains("end").then_some(core.end),
+        id: filter_columns.contains("id").then(|| core.ids.to_string()),
+        reference: filter_columns
+            .contains("ref")
+            .then(|| core.reference_bases.to_string()),
+        alternate,
+        quality: filter_columns
+            .contains("qual")
+            .then_some(core.quality_score),
+        filter,
+        info_values,
+        null_info_fields,
+    })
+}
+
 struct BcfBatchDecoder {
     schema: SchemaRef,
     requested_batch_size: usize,
@@ -2301,7 +2472,7 @@ struct BcfBatchDecoder {
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
-    needs_id_for_filters: bool,
+    filter_columns: HashSet<String>,
     source_sample_names: Vec<String>,
     flags: ProjectionFlags,
     core_builders: CoreBatchBuilders,
@@ -2381,7 +2552,12 @@ impl BcfBatchDecoder {
             .map(|(index, name)| (name.clone(), index))
             .collect();
         let info_populated = vec![false; info_builders.0.len()];
-        let needs_id_for_filters = filters_reference_column(&residual_filters, "id");
+        let mut filter_columns = HashSet::new();
+        for filter in &residual_filters {
+            for column in filter.column_refs() {
+                filter_columns.insert(column.name.clone());
+            }
+        }
 
         let format_mode = if !flags.any_format {
             BcfFormatMode::Generic(FormatMode::None)
@@ -2414,7 +2590,7 @@ impl BcfBatchDecoder {
             projection,
             coordinate_system_zero_based,
             residual_filters,
-            needs_id_for_filters,
+            filter_columns,
             source_sample_names,
             flags,
             core_builders,
@@ -2505,9 +2681,6 @@ impl BcfBatchDecoder {
         let gt_encoding = format_validation.gt_encoding;
 
         let has_filters = !self.residual_filters.is_empty();
-        let needs_start = self.flags.start || has_filters;
-        let needs_end = self.flags.end || has_filters;
-        let needs_chrom = self.flags.chrom || has_filters;
 
         let position = validate_bcf_position(record)?;
         // BCF stores the record span independently from the projected columns.
@@ -2516,36 +2689,43 @@ impl BcfBatchDecoder {
         record
             .end()
             .map_err(|e| execution_error("invalid BCF record span", e))?;
-        let start = needs_start.then_some(if self.coordinate_system_zero_based {
+        let output_start = if self.coordinate_system_zero_based {
             position - 1
         } else {
             position
-        });
+        };
+        let start = self.flags.start.then_some(output_start);
 
-        let chrom = if needs_chrom {
+        let chrom = if self.flags.chrom {
             Some(reference_sequence_name.to_string())
         } else {
             None
         };
 
         // INFO/END participates in the logical span and must be valid even for
-        // metadata-only projections such as COUNT(*). Reuse the validated value
-        // only when execution needs the end column or a residual filter.
+        // metadata-only projections such as COUNT(*).
         let variant_end = record
             .variant_end(header)
             .map_err(|e| execution_error("invalid BCF variant span", e))?;
         let variant_end = u32::try_from(variant_end.get()).map_err(|_| {
             DataFusionError::Execution("BCF end position exceeds UInt32 range".into())
         })?;
-        let end = needs_end.then_some(variant_end);
+        let end = self.flags.end.then_some(variant_end);
 
         if has_filters {
-            let fields = VcfRecordFields {
-                chrom: chrom.clone(),
-                start,
-                end,
-                id: self.needs_id_for_filters.then(|| ids.to_string()),
-            };
+            let fields = bcf_record_filter_fields(
+                record,
+                header,
+                &self.filter_columns,
+                BcfCoreFilterValues {
+                    chrom: reference_sequence_name,
+                    start: output_start,
+                    end: variant_end,
+                    ids,
+                    reference_bases,
+                    quality_score,
+                },
+            )?;
             if !evaluate_record_filters(&fields, &self.residual_filters) {
                 if direct_dosage
                     && !format_validation.gt_values_validated

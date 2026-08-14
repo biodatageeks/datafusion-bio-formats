@@ -639,7 +639,7 @@ pub(crate) fn load_infos_single_pass(
     Ok(())
 }
 
-fn is_missing_info_value_error(error: &std::io::Error) -> bool {
+pub(crate) fn is_missing_info_value_error(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::InvalidData && error.to_string() == "missing value"
 }
 
