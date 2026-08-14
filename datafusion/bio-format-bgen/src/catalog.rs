@@ -336,16 +336,25 @@ fn parse_variant(
             })?
         }
     };
-    // A declared payload larger than the decompressed limit can never produce a
-    // usable block, so reject it here rather than after a range read has already
-    // downloaded it.
-    if payload_size > options.max_decompressed_block_bytes as u64 {
+    // For an uncompressed block the payload is the decompressed data, so the
+    // configured limit can be applied before a range read downloads it. A
+    // compressed block carries its decompressed length inside the payload, so
+    // that case is still checked during decoding.
+    let declared_uncompressed = match (header.layout, header.compression) {
+        (BgenLayout::Layout1, BgenCompression::None) => Some(payload_size),
+        // Layout 2 prefixes the block with its own four-byte length.
+        (BgenLayout::Layout2, BgenCompression::None) => payload_size.checked_sub(4),
+        _ => None,
+    };
+    if let Some(size) = declared_uncompressed
+        && size > options.max_decompressed_block_bytes as u64
+    {
         return Err(ParseVariantError::Invalid(catalog_error(
             path,
             index,
             record_offset,
             &format!(
-                "declared payload of {payload_size} bytes exceeds max_decompressed_block_bytes {}",
+                "declared block of {size} bytes exceeds max_decompressed_block_bytes {}",
                 options.max_decompressed_block_bytes
             ),
         )));

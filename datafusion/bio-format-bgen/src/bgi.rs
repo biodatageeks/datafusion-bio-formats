@@ -188,14 +188,20 @@ async fn open_and_validate(
         .await?
     };
 
+    // Validation runs through the connection opened under the cache lease, so an
+    // entry evicted by a concurrent provider cannot make it fail on a path that
+    // no longer exists.
+    let connection = Arc::new(std::sync::Mutex::new(connection));
     let display_path = bgi_path.to_string();
-    let validation_path = sqlite_path.clone();
-    let (metadata, rows) =
-        tokio::task::spawn_blocking(move || read_sqlite(&validation_path, &display_path))
-            .await
-            .map_err(|error| {
-                index_error(bgi_path, &format!("SQLite validation task failed: {error}"))
-            })??;
+    let validation_connection = connection.clone();
+    let (metadata, rows) = tokio::task::spawn_blocking(move || {
+        let guard = validation_connection
+            .lock()
+            .map_err(|error| index_error(&display_path, &format!("poisoned index: {error}")))?;
+        read_sqlite(&guard, &display_path)
+    })
+    .await
+    .map_err(|error| index_error(bgi_path, &format!("SQLite validation task failed: {error}")))??;
     validate_identity(
         primary_path,
         primary_source,
@@ -216,7 +222,7 @@ async fn open_and_validate(
         row_indices: Arc::new((0..rows.len()).collect()),
         bytes_read: bgi_size,
         primary_bytes_read: header.object_size.min(1000),
-        connection: Arc::new(std::sync::Mutex::new(connection)),
+        connection,
         sqlite_path: Arc::new(sqlite_path),
         offset_to_index: Arc::new(offset_to_index),
     })
@@ -388,12 +394,7 @@ fn integer_value(value: &ScalarValue) -> Option<u64> {
     }
 }
 
-fn read_sqlite(path: &Path, display_path: &str) -> Result<(BgiMetadata, Vec<BgiRow>)> {
-    let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| index_error(display_path, &format!("open SQLite index: {error}")))?;
+fn read_sqlite(connection: &Connection, display_path: &str) -> Result<(BgiMetadata, Vec<BgiRow>)> {
     connection
         .pragma_update(None, "query_only", true)
         .map_err(|error| index_error(display_path, &format!("enable query-only mode: {error}")))?;
