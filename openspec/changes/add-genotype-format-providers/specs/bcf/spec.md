@@ -79,6 +79,15 @@ specification and the existing VCF Arrow type mapping.
 - **WHEN** a genotype refers to an alternate allele beyond the first
 - **THEN** its allele index is preserved relative to the BCF allele list.
 
+#### Scenario: Number=G without GT
+- **WHEN** a record contains a `Number=G` FORMAT field but no `GT` field
+- **THEN** cardinality validation assumes diploidy as required by the VCF
+  specification.
+
+#### Scenario: Number=P without GT
+- **WHEN** a record contains a `Number=P` FORMAT field but no `GT` field
+- **THEN** decoding fails with an error identifying that `GT` is required.
+
 ### Requirement: Streaming BGZF BCF Decode
 
 The system SHALL decode BCF records incrementally from BGZF data using
@@ -125,6 +134,12 @@ ALT allele for biallelic records.
 - **WHEN** a selected genotype dosage exceeds the signed 8-bit output range
 - **THEN** the scan fails with an unsupported-dosage error
 - **AND** the caller can use default string mode to preserve the genotype.
+
+#### Scenario: Shared dosage metadata
+- **WHEN** dosage mode is selected
+- **THEN** schema metadata records the output mode and counted allele under the
+  shared format-neutral genotype metadata keys
+- **AND** existing VCF-specific aliases remain available for compatibility.
 
 ### Requirement: Direct Typed BCF FORMAT Decode
 
@@ -205,6 +220,11 @@ no more than the DataFusion target partition count.
 - **WHEN** selected CSI chunks can be read independently
 - **AND** target partitions exceed one
 - **THEN** the execution plan exposes multiple byte-balanced partitions.
+
+#### Scenario: Range-specific byte estimates
+- **WHEN** a bounded region intersects only a subset of populated CSI bins
+- **THEN** partition byte estimates use chunks from the intersecting bins rather
+  than the whole contig.
 
 #### Scenario: Indexed parallel order
 - **WHEN** more than one BCF partition executes

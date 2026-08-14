@@ -14,7 +14,9 @@ use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
-use datafusion_bio_format_core::genotype::MissingSamplePolicy;
+use datafusion_bio_format_core::{
+    GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY, genotype::MissingSamplePolicy,
+};
 use datafusion_bio_format_vcf::table_provider::{
     GenotypeOutputMode, VcfInputFormat, VcfTableProvider, describe_fields,
 };
@@ -1429,6 +1431,22 @@ async fn bcf_dosage_allows_an_explicit_empty_sample_selection()
             .get("bio.vcf.genotype_output_mode")
             .map(String::as_str),
         Some("dosage")
+    );
+    assert_eq!(
+        provider
+            .schema()
+            .metadata()
+            .get(GENOTYPE_OUTPUT_MODE_KEY)
+            .map(String::as_str),
+        Some("dosage")
+    );
+    assert_eq!(
+        provider
+            .schema()
+            .metadata()
+            .get(GENOTYPE_COUNTED_ALLELE_KEY)
+            .map(String::as_str),
+        Some("1")
     );
 
     let context = SessionContext::new();

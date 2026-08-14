@@ -4,7 +4,6 @@ use crate::storage::{VcfRecordFields, get_header, resolve_single_sample_format_c
 use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
 use async_trait::async_trait;
-use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion, sanitize_location};
 use datafusion_bio_format_core::genomic_filter::{
     build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
@@ -20,6 +19,9 @@ use datafusion_bio_format_core::metadata::{
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
+use datafusion_bio_format_core::{
+    COORDINATE_SYSTEM_METADATA_KEY, GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -655,6 +657,8 @@ impl VcfTableProvider {
             "bio.vcf.genotype_counted_allele".to_string(),
             "1".to_string(),
         );
+        metadata.insert(GENOTYPE_OUTPUT_MODE_KEY.to_string(), "dosage".to_string());
+        metadata.insert(GENOTYPE_COUNTED_ALLELE_KEY.to_string(), "1".to_string());
         self.schema = Arc::new(Schema::new_with_metadata(fields, metadata));
         self.genotype_output_mode = mode;
         Ok(self)

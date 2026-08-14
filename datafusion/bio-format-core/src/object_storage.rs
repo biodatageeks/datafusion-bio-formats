@@ -88,10 +88,10 @@ impl Default for ObjectStorageOptions {
         ObjectStorageOptions {
             chunk_size: Some(8),                           // Default chunk size in MB
             concurrent_fetches: Some(1),                   // Default concurrent fetches
-            allow_anonymous: true, // Default to not allowing anonymous access
-            enable_request_payer: false, // Default to not enabling request payer
-            max_retries: Some(5),  // Default max retries
-            timeout: Some(300),    // Default timeout in seconds
+            allow_anonymous: true,                         // Default to allowing anonymous access
+            enable_request_payer: false,                   // Default to not enabling request payer
+            max_retries: Some(5),                          // Default max retries
+            timeout: Some(300),                            // Default timeout in seconds
             compression_type: Some(CompressionType::AUTO), // Default compression type
         }
     }
@@ -436,14 +436,11 @@ fn is_azure_blob_url(url_str: &str) -> bool {
                 let segments: Vec<_> = segments.collect();
                 return segments.len() >= 2;
             }
-        } else if !&env::var("AZURE_ENDPOINT_URL")
-            .unwrap_or("".parse().unwrap())
-            .is_empty()
-            && url
-                .to_string()
-                .starts_with(&env::var("AZURE_ENDPOINT_URL").unwrap())
-        //FIXME: this is a workaround for Azure Blob Storage emulator
+        } else if let Ok(endpoint) = env::var("AZURE_ENDPOINT_URL")
+            && !endpoint.is_empty()
+            && url.as_str().starts_with(&endpoint)
         {
+            // FIXME: This is a workaround for the Azure Blob Storage emulator.
             return true;
         }
     }

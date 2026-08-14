@@ -156,6 +156,19 @@ fn read_bcf_record_lengths(prefix: [u8; BCF_RECORD_LENGTH_PREFIX_SIZE]) -> io::R
     Ok((shared, individual))
 }
 
+fn remaining_bcf_record_body_size(shared: u64, individual: u64) -> io::Result<u64> {
+    shared
+        .checked_add(individual)
+        .and_then(|body_size| body_size.checked_sub(BCF_FIXED_SITE_PREFIX_SIZE as u64))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid BCF record length: body size overflowed or is shorter than the fixed \
+                 site prefix",
+            )
+        })
+}
+
 fn validate_bcf_fixed_site(prefix: &[u8; BCF_FIXED_SITE_PREFIX_SIZE]) -> io::Result<()> {
     let span = i32::from_le_bytes(prefix[8..12].try_into().unwrap());
     if span <= 0 {
@@ -195,7 +208,7 @@ where
     inner.read_exact(&mut fixed_prefix)?;
     validate_bcf_fixed_site(&fixed_prefix)?;
 
-    let remaining = shared + individual - BCF_FIXED_SITE_PREFIX_SIZE as u64;
+    let remaining = remaining_bcf_record_body_size(shared, individual)?;
     let remainder = (&mut *inner).take(remaining);
     let bounded = Cursor::new(length_prefix)
         .chain(Cursor::new(fixed_prefix))
@@ -222,7 +235,7 @@ where
     tokio::io::AsyncReadExt::read_exact(inner, &mut fixed_prefix).await?;
     validate_bcf_fixed_site(&fixed_prefix)?;
 
-    let remaining = shared + individual - BCF_FIXED_SITE_PREFIX_SIZE as u64;
+    let remaining = remaining_bcf_record_body_size(shared, individual)?;
     let remainder = tokio::io::AsyncReadExt::take(&mut *inner, remaining);
     let prefixes =
         tokio::io::AsyncReadExt::chain(Cursor::new(length_prefix), Cursor::new(fixed_prefix));
@@ -241,7 +254,8 @@ fn validate_version(version: (u8, u8)) -> Result<()> {
         Ok(())
     } else {
         Err(DataFusionError::Plan(format!(
-            "unsupported BCF version {}.{}; expected 2.2",
+            "unsupported BCF version {}.{}; expected 2.2; transcode the input first (for \
+             example, with `bcftools view -Ob input.bcf -o output.bcf`)",
             version.0, version.1
         )))
     }
@@ -362,6 +376,9 @@ fn format_type_accepts_encoding(
         );
     }
 
+    // Unlike INFO, FORMAT vectors reserve a fixed-width slot for every sample.
+    // Missing FORMAT values therefore use the declared type's sentinel (or "."
+    // for strings), rather than a standalone BCF Null descriptor.
     match format_type {
         FormatType::Integer => matches!(
             encoded_type,
@@ -968,8 +985,14 @@ fn validate_bcf_gt_dependent_payload(
     format_type: FormatType,
     encoding: BcfFormatEncoding<'_>,
     allele_count: usize,
-    gt: &BcfGtEncoding<'_>,
+    gt: Option<&BcfGtEncoding<'_>>,
 ) -> Result<()> {
+    if format_number == FormatNumber::Ploidy && gt.is_none() {
+        return Err(DataFusionError::Execution(format!(
+            "FORMAT field '{key}' declares Number=P but the record has no GT field"
+        )));
+    }
+
     let BcfFormatEncoding {
         encoded_type,
         value_count,
@@ -994,7 +1017,7 @@ fn validate_bcf_gt_dependent_payload(
                 if bcf_numeric_vector_is_missing(encoded_type, sample) {
                     continue;
                 }
-                let ploidy = bcf_gt_sample_ploidy(gt, sample_index)?;
+                let ploidy = bcf_gt_dependent_ploidy(key, format_number, gt, sample_index)?;
                 let expected_count = match format_number {
                     FormatNumber::Samples => bcf_genotype_cardinality(allele_count, ploidy)?,
                     FormatNumber::Ploidy => ploidy,
@@ -1019,7 +1042,7 @@ fn validate_bcf_gt_dependent_payload(
                     continue;
                 }
                 let actual_count = value.bytes().filter(|&byte| byte == b',').count() + 1;
-                let ploidy = bcf_gt_sample_ploidy(gt, sample_index)?;
+                let ploidy = bcf_gt_dependent_ploidy(key, format_number, gt, sample_index)?;
                 let expected_count = match format_number {
                     FormatNumber::Samples => bcf_genotype_cardinality(allele_count, ploidy)?,
                     FormatNumber::Ploidy => ploidy,
@@ -1042,11 +1065,28 @@ fn validate_bcf_gt_dependent_payload(
     Ok(())
 }
 
+fn bcf_gt_dependent_ploidy(
+    key: &str,
+    format_number: FormatNumber,
+    gt: Option<&BcfGtEncoding<'_>>,
+    sample_index: usize,
+) -> Result<usize> {
+    match (format_number, gt) {
+        (_, Some(gt)) => bcf_gt_sample_ploidy(gt, sample_index),
+        // VCF specifies that Number=G values are diploid when GT is absent.
+        (FormatNumber::Samples, None) => Ok(2),
+        (FormatNumber::Ploidy, None) => Err(DataFusionError::Execution(format!(
+            "FORMAT field '{key}' declares Number=P but the record has no GT field"
+        ))),
+        _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
+    }
+}
+
 fn validate_bcf_gt_dependent_cardinality(
     samples: &bcf::record::Samples<'_>,
     header: &Header,
     allele_count: usize,
-    gt: &BcfGtEncoding<'_>,
+    gt: Option<&BcfGtEncoding<'_>>,
 ) -> Result<()> {
     let sample_count = samples.len();
     let mut src = samples.as_ref();
@@ -1187,13 +1227,14 @@ fn validate_bcf_format_encoding<'a>(
         )));
     }
 
-    if has_gt_dependent_number && let Some(gt) = gt_encoding.as_ref() {
+    if has_gt_dependent_number {
         // FORMAT series may appear in any order, so validate Number=G/P only
-        // after the complete first pass has located and validated GT.
-        if !validate_gt_values {
+        // after the complete first pass has located and validated GT. Number=G
+        // assumes diploidy when GT is absent; Number=P requires GT.
+        if !validate_gt_values && let Some(gt) = gt_encoding.as_ref() {
             validate_bcf_gt_payload(gt.payload, gt.encoded_type, gt.value_count, allele_count)?;
         }
-        validate_bcf_gt_dependent_cardinality(samples, header, allele_count, gt)?;
+        validate_bcf_gt_dependent_cardinality(samples, header, allele_count, gt_encoding.as_ref())?;
     }
 
     Ok(gt_encoding)
@@ -1508,23 +1549,6 @@ pub(crate) fn estimate_region_sizes(
             let reference_index = name_to_index.get(region.chrom.as_str()).copied();
             let reference = reference_index
                 .and_then(|index_value| index.reference_sequences().get(index_value));
-            let estimated_bytes = reference
-                .map(|reference| {
-                    let mut min_offset = u64::MAX;
-                    let mut max_offset = 0;
-                    for bin in reference.bins().values() {
-                        for chunk in bin.chunks() {
-                            min_offset = min_offset.min(chunk.start().compressed());
-                            max_offset = max_offset.max(chunk.end().compressed());
-                        }
-                    }
-                    if min_offset == u64::MAX {
-                        1
-                    } else {
-                        max_offset.saturating_sub(min_offset).max(1)
-                    }
-                })
-                .unwrap_or(1);
             let declared_contig_length = reference_index
                 .and_then(|index_value| contig_lengths.get(index_value))
                 .copied()
@@ -1539,6 +1563,8 @@ pub(crate) fn estimate_region_sizes(
             let leaf_span = 1u64.checked_shl(u32::from(min_shift)).unwrap_or(0);
             let mut inferred_contig_length = None;
             let mut nonempty_bin_positions = Vec::new();
+            let mut min_offset = u64::MAX;
+            let mut max_offset = 0;
             if let Some(reference) = reference {
                 for (&bin_id, bin) in reference.bins() {
                     if bin.chunks().is_empty() {
@@ -1550,12 +1576,27 @@ pub(crate) fn estimate_region_sizes(
                     };
                     inferred_contig_length =
                         Some(inferred_contig_length.map_or(end, |current: u64| current.max(end)));
+                    let intersects_region =
+                        region.start.is_none_or(|start_bound| end >= start_bound)
+                            && region.end.is_none_or(|end_bound| start <= end_bound);
+                    if !intersects_region {
+                        continue;
+                    }
+                    for chunk in bin.chunks() {
+                        min_offset = min_offset.min(chunk.start().compressed());
+                        max_offset = max_offset.max(chunk.end().compressed());
+                    }
                     if level == depth {
                         nonempty_bin_positions.push(start);
                     }
                 }
             }
             nonempty_bin_positions.sort_unstable();
+            let estimated_bytes = if min_offset == u64::MAX {
+                1
+            } else {
+                max_offset.saturating_sub(min_offset).max(1)
+            };
 
             RegionSizeEstimate {
                 region,
@@ -3159,8 +3200,16 @@ mod tests {
     #[test]
     fn validates_only_bcf_2_2() {
         assert!(validate_version((2, 2)).is_ok());
-        assert!(validate_version((2, 1)).is_err());
+        let error = validate_version((2, 1)).unwrap_err().to_string();
+        assert!(error.contains("bcftools view -Ob"));
         assert!(validate_version((3, 0)).is_err());
+    }
+
+    #[test]
+    fn checks_remaining_bcf_record_body_arithmetic() {
+        assert_eq!(remaining_bcf_record_body_size(24, 10).unwrap(), 10);
+        assert!(remaining_bcf_record_body_size(23, 0).is_err());
+        assert!(remaining_bcf_record_body_size(u64::MAX, 1).is_err());
     }
 
     #[test]
@@ -3174,6 +3223,60 @@ mod tests {
         );
         assert_eq!(csi_bin_interval(9, 10, 2), Some((1, 1024, 2)));
         assert_eq!(csi_bin_interval(37_450, 14, 5), None);
+    }
+
+    #[test]
+    fn estimates_only_csi_bins_intersecting_the_requested_region() {
+        use noodles_csi::binning_index::index::ReferenceSequence;
+        use noodles_csi::binning_index::index::reference_sequence::{
+            Bin, bin::Chunk, index::BinnedIndex,
+        };
+
+        let virtual_position = |compressed| {
+            noodles_bgzf::VirtualPosition::new(compressed, 0)
+                .expect("test compressed positions must be representable")
+        };
+        let bins = [
+            (
+                4681,
+                Bin::new(vec![Chunk::new(
+                    virtual_position(100),
+                    virtual_position(200),
+                )]),
+            ),
+            (
+                4682,
+                Bin::new(vec![Chunk::new(
+                    virtual_position(10_000),
+                    virtual_position(20_000),
+                )]),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let reference: ReferenceSequence<BinnedIndex> =
+            ReferenceSequence::new(bins, Default::default(), None);
+        let index = noodles_csi::Index::builder()
+            .set_reference_sequences(vec![reference])
+            .build();
+        let contig_names = vec!["chr1".to_string()];
+        let contig_lengths = vec![32_768];
+
+        let targeted = estimate_region_sizes(
+            Some(&index),
+            &[region(Some(1), Some(16_000))],
+            &contig_names,
+            &contig_lengths,
+        );
+        assert_eq!(targeted[0].estimated_bytes, 100);
+
+        let full_contig = estimate_region_sizes(
+            Some(&index),
+            &[region(None, None)],
+            &contig_names,
+            &contig_lengths,
+        );
+        assert_eq!(full_contig[0].estimated_bytes, 19_900);
     }
 
     #[test]
@@ -3414,6 +3517,90 @@ mod tests {
             .to_string();
         assert!(
             error.contains("Number=P (2 expected for sample 0 with ploidy 2)"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn validates_number_g_as_diploid_when_gt_is_absent() {
+        let vcf_text = "##fileformat=VCFv4.3\n\
+                        ##contig=<ID=chr1,length=1000>\n\
+                        ##FORMAT=<ID=PL,Number=2,Type=Integer,Description=\"Likelihoods\">\n\
+                        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                        chr1\t10\trs1\tA\tC\t50\tPASS\t.\tPL\t0,10\n";
+        let mut vcf_reader = vcf::io::Reader::new(vcf_text.as_bytes());
+        let vcf_header = vcf_reader.read_header().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("number-g-without-gt.bcf");
+        let mut writer = bcf::io::Writer::new(File::create(&path).unwrap());
+        writer.write_header(&vcf_header).unwrap();
+        for result in vcf_reader.records() {
+            writer
+                .write_variant_record(&vcf_header, &result.unwrap())
+                .unwrap();
+        }
+        writer.try_finish().unwrap();
+
+        let mut reader = bcf::io::Reader::new(File::open(path).unwrap());
+        let mut header = reader.read_header().unwrap();
+        *header
+            .formats_mut()
+            .get_mut("PL")
+            .expect("PL must be defined")
+            .number_mut() = FormatNumber::Samples;
+        let mut record = BcfRecord::default();
+        assert!(reader.read_record(&mut record).unwrap() > 0);
+
+        let samples = record.samples().unwrap();
+        let error = match validate_bcf_format_encoding(&samples, &header, 2, true) {
+            Ok(_) => panic!("two PL values must not satisfy diploid Number=G"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("Number=G (3 expected for sample 0 with ploidy 2)"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_number_p_when_gt_is_absent() {
+        let vcf_text = "##fileformat=VCFv4.3\n\
+                        ##contig=<ID=chr1,length=1000>\n\
+                        ##FORMAT=<ID=XP,Number=1,Type=Integer,Description=\"Ploidy values\">\n\
+                        #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                        chr1\t10\trs1\tA\tC\t50\tPASS\t.\tXP\t7\n";
+        let mut vcf_reader = vcf::io::Reader::new(vcf_text.as_bytes());
+        let vcf_header = vcf_reader.read_header().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("number-p-without-gt.bcf");
+        let mut writer = bcf::io::Writer::new(File::create(&path).unwrap());
+        writer.write_header(&vcf_header).unwrap();
+        for result in vcf_reader.records() {
+            writer
+                .write_variant_record(&vcf_header, &result.unwrap())
+                .unwrap();
+        }
+        writer.try_finish().unwrap();
+
+        let mut reader = bcf::io::Reader::new(File::open(path).unwrap());
+        let mut header = reader.read_header().unwrap();
+        *header
+            .formats_mut()
+            .get_mut("XP")
+            .expect("XP must be defined")
+            .number_mut() = FormatNumber::Ploidy;
+        let mut record = BcfRecord::default();
+        assert!(reader.read_record(&mut record).unwrap() > 0);
+
+        let samples = record.samples().unwrap();
+        let error = match validate_bcf_format_encoding(&samples, &header, 2, true) {
+            Ok(_) => panic!("Number=P is defined by GT and must require it"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("FORMAT field 'XP' declares Number=P but the record has no GT field"),
             "unexpected error: {error}"
         );
     }
