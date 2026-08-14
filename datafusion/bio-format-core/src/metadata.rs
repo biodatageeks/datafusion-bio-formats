@@ -80,6 +80,12 @@ pub const VCF_FORMAT_FIELDS_KEY: &str = "bio.vcf.format_fields";
 /// Present on the `genotypes` struct field in multi-sample columnar schemas.
 pub const VCF_GENOTYPES_SAMPLE_NAMES_KEY: &str = "bio.vcf.genotypes.sample_names";
 
+/// VCF-specific compatibility alias for the genotype output representation.
+pub const VCF_GENOTYPE_OUTPUT_MODE_KEY: &str = "bio.vcf.genotype_output_mode";
+
+/// VCF-specific compatibility alias for the allele counted by genotype dosage.
+pub const VCF_GENOTYPE_COUNTED_ALLELE_KEY: &str = "bio.vcf.genotype_counted_allele";
+
 // Field-level metadata
 
 /// VCF field description stored in field metadata

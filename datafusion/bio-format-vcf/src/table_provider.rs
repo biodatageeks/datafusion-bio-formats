@@ -15,7 +15,8 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_INDEXED_KEY, VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY,
     VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
-    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY,
+    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPE_COUNTED_ALLELE_KEY,
+    VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY,
     VcfFieldMetadata, from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
@@ -652,13 +653,10 @@ impl VcfTableProvider {
 
         let mut metadata = self.schema.metadata().clone();
         metadata.insert(
-            "bio.vcf.genotype_output_mode".to_string(),
+            VCF_GENOTYPE_OUTPUT_MODE_KEY.to_string(),
             "dosage".to_string(),
         );
-        metadata.insert(
-            "bio.vcf.genotype_counted_allele".to_string(),
-            "1".to_string(),
-        );
+        metadata.insert(VCF_GENOTYPE_COUNTED_ALLELE_KEY.to_string(), "1".to_string());
         metadata.insert(GENOTYPE_OUTPUT_MODE_KEY.to_string(), "dosage".to_string());
         metadata.insert(GENOTYPE_COUNTED_ALLELE_KEY.to_string(), "1".to_string());
         self.schema = Arc::new(Schema::new_with_metadata(fields, metadata));
@@ -1713,19 +1711,19 @@ mod tests {
             &schema
         ));
 
-        // These pass `can_push_down_record_filter`, but `VcfRecordFields` cannot
-        // resolve the columns — every record would pass, so an early stop could
-        // drop rows the residual filter would have matched.
-        assert!(!decoder_evaluates_filter(
-            &col("id").eq(lit("rs1")),
+        // Identifier filters are also evaluated by the decoder before limit or
+        // dosage validation is applied.
+        assert!(decoder_evaluates_filter(&col("id").eq(lit("rs1")), &schema));
+        assert!(decoder_evaluates_filter(
+            &col("chrom").eq(lit("chr1")).and(col("id").eq(lit("rs1"))),
             &schema
         ));
+
+        // Scalar INFO fields can pass `can_push_down_record_filter`, but
+        // `VcfRecordFields` cannot resolve them. An early stop could therefore
+        // drop rows the residual DataFusion filter would have matched.
         assert!(!decoder_evaluates_filter(
             &col("af").gt(lit(0.5_f32)),
-            &schema
-        ));
-        assert!(!decoder_evaluates_filter(
-            &col("chrom").eq(lit("chr1")).and(col("id").eq(lit("rs1"))),
             &schema
         ));
     }

@@ -130,6 +130,14 @@ ALT allele for biallelic records.
 - **THEN** the scan fails with an unsupported-dosage error
 - **AND** does not collapse distinct alternate alleles.
 
+#### Scenario: Identifier-filtered dosage
+- **WHEN** dosage mode scans candidate records containing an unrelated
+  multiallelic record
+- **AND** an identifier predicate selects only a biallelic record
+- **THEN** identifier evaluation removes the unrelated record before dosage
+  compatibility validation
+- **AND** the selected biallelic record is emitted.
+
 #### Scenario: Unsupported dosage ploidy
 - **WHEN** a selected genotype dosage exceeds the signed 8-bit output range
 - **THEN** the scan fails with an unsupported-dosage error

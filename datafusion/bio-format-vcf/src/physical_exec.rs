@@ -245,6 +245,15 @@ pub(crate) struct ProjectionFlags {
     pub(crate) any_format: bool,
 }
 
+pub(crate) fn filters_reference_column(filters: &[Expr], name: &str) -> bool {
+    filters.iter().any(|filter| {
+        filter
+            .column_refs()
+            .iter()
+            .any(|column| column.name == name)
+    })
+}
+
 impl ProjectionFlags {
     pub(crate) fn new(projection: &Option<Vec<usize>>, num_info_fields: usize) -> Self {
         let contains = |idx: usize| {
@@ -738,6 +747,7 @@ async fn get_local_vcf(
     let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
 
     let has_residual_filters = !residual_filters.is_empty();
+    let needs_id_for_filters = filters_reference_column(&residual_filters, "id");
     let needs_start = flags.start || has_residual_filters;
 
     let stream = try_stream! {
@@ -768,12 +778,19 @@ async fn get_local_vcf(
             } else {
                 None
             };
+            let id_for_filters = if needs_id_for_filters {
+                join_into(&mut join_buf, record.ids().iter(), ';');
+                Some(join_buf.clone())
+            } else {
+                None
+            };
 
             if has_residual_filters {
                 let fields = VcfRecordFields {
                     chrom: chrom_for_filters.clone(),
                     start: start_val,
                     end: end_val,
+                    id: id_for_filters.clone(),
                 };
                 if !evaluate_record_filters(&fields, &residual_filters) {
                     continue;
@@ -791,7 +808,14 @@ async fn get_local_vcf(
                 builders.append_start(start_val.unwrap());
             }
             if flags.end { builders.append_end(end_val.unwrap()); }
-            if flags.id { join_into(&mut join_buf, record.ids().iter(), ';'); builders.append_id(&join_buf); }
+            if flags.id {
+                if let Some(id) = id_for_filters.as_deref() {
+                    builders.append_id(id);
+                } else {
+                    join_into(&mut join_buf, record.ids().iter(), ';');
+                    builders.append_id(&join_buf);
+                }
+            }
             if flags.reference { builders.append_ref(record.reference_bases()); }
             if flags.alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); builders.append_alt(&join_buf); }
             if flags.qual { builders.append_qual(record.quality_score().transpose()?.map(|v| v as f64)); }
@@ -958,6 +982,7 @@ async fn get_local_vcf_sync(
         let mut join_buf = String::with_capacity(64);
 
         let has_residual_filters = !residual_filters.is_empty();
+        let needs_id_for_filters = filters_reference_column(&residual_filters, "id");
         let needs_start = flags.start || has_residual_filters;
         let mut record = noodles_vcf::Record::default();
         let mut record_num = 0usize;
@@ -996,12 +1021,19 @@ async fn get_local_vcf_sync(
                     } else {
                         None
                     };
+                    let id_for_filters = if needs_id_for_filters {
+                        join_into(&mut join_buf, record.ids().iter(), ';');
+                        Some(join_buf.clone())
+                    } else {
+                        None
+                    };
 
                     if has_residual_filters {
                         let fields = VcfRecordFields {
                             chrom: chrom_for_filters.clone(),
                             start: start_val,
                             end: end_val,
+                            id: id_for_filters.clone(),
                         };
                         if !evaluate_record_filters(&fields, &residual_filters) {
                             continue;
@@ -1022,8 +1054,12 @@ async fn get_local_vcf_sync(
                         builders.append_end(end_val.unwrap());
                     }
                     if flags.id {
-                        join_into(&mut join_buf, record.ids().iter(), ';');
-                        builders.append_id(&join_buf);
+                        if let Some(id) = id_for_filters.as_deref() {
+                            builders.append_id(id);
+                        } else {
+                            join_into(&mut join_buf, record.ids().iter(), ';');
+                            builders.append_id(&join_buf);
+                        }
                     }
                     if flags.reference {
                         builders.append_ref(record.reference_bases());
@@ -1235,6 +1271,7 @@ async fn get_remote_vcf_stream(
     let has_format_fields = format_mode.has_fields();
 
     let has_residual_filters = !residual_filters.is_empty();
+    let needs_id_for_filters = filters_reference_column(&residual_filters, "id");
     let needs_start = flags.start || has_residual_filters;
 
     let stream = try_stream! {
@@ -1272,12 +1309,19 @@ async fn get_remote_vcf_stream(
             } else {
                 None
             };
+            let id_for_filters = if needs_id_for_filters {
+                join_into(&mut join_buf, record.ids().iter(), ';');
+                Some(join_buf.clone())
+            } else {
+                None
+            };
 
             if has_residual_filters {
                 let fields = VcfRecordFields {
                     chrom: chrom_for_filters.clone(),
                     start: start_val,
                     end: end_val,
+                    id: id_for_filters.clone(),
                 };
                 if !evaluate_record_filters(&fields, &residual_filters) {
                     continue;
@@ -1295,7 +1339,14 @@ async fn get_remote_vcf_stream(
                 builders.append_start(start_val.unwrap());
             }
             if flags.end { builders.append_end(end_val.unwrap()); }
-            if flags.id { join_into(&mut join_buf, record.ids().iter(), ';'); builders.append_id(&join_buf); }
+            if flags.id {
+                if let Some(id) = id_for_filters.as_deref() {
+                    builders.append_id(id);
+                } else {
+                    join_into(&mut join_buf, record.ids().iter(), ';');
+                    builders.append_id(&join_buf);
+                }
+            }
             if flags.reference { builders.append_ref(record.reference_bases()); }
             if flags.alt { join_into(&mut join_buf, record.alternate_bases().iter().map(|v| v.unwrap_or(".")), '|'); builders.append_alt(&join_buf); }
             if flags.qual { builders.append_qual(record.quality_score().transpose()?.map(|v| v as f64)); }
@@ -2770,6 +2821,7 @@ async fn get_indexed_vcf_stream(
         let mut builders = CoreBatchBuilders::new(&flags, initial_builder_batch_size);
         let mut join_buf = String::with_capacity(64);
         let has_residual_filters = !residual_filters.is_empty();
+        let needs_id_for_filters = filters_reference_column(&residual_filters, "id");
         let needs_start_for_filters = flags.start || has_residual_filters;
 
         let mut total_records = 0usize;
@@ -2852,12 +2904,19 @@ async fn get_indexed_vcf_stream(
                 } else {
                     None
                 };
+                let id_for_filters = if needs_id_for_filters {
+                    join_into(&mut join_buf, record.ids().iter(), ';');
+                    Some(join_buf.clone())
+                } else {
+                    None
+                };
 
                 if has_residual_filters {
                     let fields = VcfRecordFields {
                         chrom: chrom_for_filters.clone(),
                         start: start_val,
                         end: end_val,
+                        id: id_for_filters.clone(),
                     };
                     if !evaluate_record_filters(&fields, &residual_filters) {
                         continue;
@@ -2878,8 +2937,12 @@ async fn get_indexed_vcf_stream(
                     builders.append_end(end_val.unwrap());
                 }
                 if flags.id {
-                    join_into(&mut join_buf, record.ids().iter(), ';');
-                    builders.append_id(&join_buf);
+                    if let Some(id) = id_for_filters.as_deref() {
+                        builders.append_id(id);
+                    } else {
+                        join_into(&mut join_buf, record.ids().iter(), ';');
+                        builders.append_id(&join_buf);
+                    }
                 }
                 if flags.reference {
                     builders.append_ref(record.reference_bases());

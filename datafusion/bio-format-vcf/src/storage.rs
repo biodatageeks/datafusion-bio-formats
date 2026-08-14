@@ -993,19 +993,22 @@ pub struct VcfRecordFields {
     pub start: Option<u32>,
     /// End position (in the output coordinate system)
     pub end: Option<u32>,
+    /// Semicolon-delimited variant IDs, matching the logical `id` column.
+    pub id: Option<String>,
 }
 
 impl VcfRecordFields {
     /// Columns that record-level filter evaluation can actually resolve.
     /// Filters referencing any other column pass through unevaluated, so limit
     /// pushdown must not rely on them.
-    pub const FILTER_COLUMNS: &'static [&'static str] = &["chrom", "start", "end"];
+    pub const FILTER_COLUMNS: &'static [&'static str] = &["chrom", "start", "end", "id"];
 }
 
 impl RecordFieldAccessor for VcfRecordFields {
     fn get_string_field(&self, name: &str) -> Option<String> {
         match name {
             "chrom" => self.chrom.clone(),
+            "id" => self.id.clone(),
             _ => None,
         }
     }

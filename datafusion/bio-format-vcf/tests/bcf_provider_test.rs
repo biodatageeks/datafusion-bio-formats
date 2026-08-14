@@ -16,7 +16,9 @@ use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use datafusion_bio_format_core::{
     GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY, GENOTYPE_SAMPLE_NAMES_KEY,
-    from_json_string, genotype::MissingSamplePolicy,
+    from_json_string,
+    genotype::MissingSamplePolicy,
+    metadata::{VCF_GENOTYPE_COUNTED_ALLELE_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY},
 };
 use datafusion_bio_format_vcf::table_provider::{
     GenotypeOutputMode, VcfInputFormat, VcfTableProvider, describe_fields,
@@ -845,6 +847,8 @@ async fn bcf_rejects_invalid_reserved_gt_header_locally_and_remotely()
 
     let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
     let header = &mut decompressed[9..9 + header_len];
+    // noodles currently serializes FORMAT attributes in ID,Number,Type order.
+    // If this fails after an upgrade, inspect the emitted header field ordering.
     let marker = b"ID=GT,Number=1,Type=String";
     let marker_start = header
         .windows(marker.len())
@@ -1529,9 +1533,17 @@ async fn bcf_dosage_allows_an_explicit_empty_sample_selection()
         provider
             .schema()
             .metadata()
-            .get("bio.vcf.genotype_output_mode")
+            .get(VCF_GENOTYPE_OUTPUT_MODE_KEY)
             .map(String::as_str),
         Some("dosage")
+    );
+    assert_eq!(
+        provider
+            .schema()
+            .metadata()
+            .get(VCF_GENOTYPE_COUNTED_ALLELE_KEY)
+            .map(String::as_str),
+        Some("1")
     );
     assert_eq!(
         provider
@@ -1627,6 +1639,52 @@ async fn bcf_dosage_filters_unselected_multiallelic_records_consistently()
     let sequential_rows = query("variants", sequential_provider, sql).await?;
 
     // Adding CSI pushdown must change I/O planning, not query semantics.
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let indexed_provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        Some(index_path),
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    let indexed_rows = query("variants", indexed_provider, sql).await?;
+
+    assert_eq!(sequential_rows, indexed_rows);
+    assert!(sequential_rows.contains("rs3"));
+    assert!(!sequential_rows.contains("rs1"));
+    assert!(!sequential_rows.contains("rs2"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_filters_unselected_multiallelic_records_by_id()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let sql = "SELECT id, genotypes FROM variants WHERE id = 'rs3'";
+
+    // The sequential decoder encounters the unrelated multiallelic rs2 before
+    // rs3, so ID filtering must happen before dosage compatibility validation.
+    let sequential_provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path.clone(),
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    let sequential_rows = query("variants", sequential_provider, sql).await?;
+
+    // CSI may still schedule a candidate chunk containing rs2; record-level ID
+    // evaluation must preserve the same result as the sequential scan.
     let index = bcf::fs::index(&bcf_path)?;
     let index_path = format!("{bcf_path}.csi");
     noodles_csi::fs::write(&index_path, &index)?;

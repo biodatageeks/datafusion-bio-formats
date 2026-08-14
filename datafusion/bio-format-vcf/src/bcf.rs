@@ -39,8 +39,8 @@ use crate::physical_exec::{
     CoreBatchBuilders, FormatMode, ProjectionFlags,
     adjust_effective_batch_size_by_observed_format_bytes, build_noodles_region,
     build_record_batch_from_builders, choose_dosage_effective_batch_size,
-    choose_effective_batch_size, choose_initial_builder_batch_size, init_format_mode,
-    load_infos_single_pass, resolve_selected_sample_indices, set_info_builders,
+    choose_effective_batch_size, choose_initial_builder_batch_size, filters_reference_column,
+    init_format_mode, load_infos_single_pass, resolve_selected_sample_indices, set_info_builders,
 };
 use crate::storage::VcfRecordFields;
 use crate::table_provider::GenotypeOutputMode;
@@ -2301,6 +2301,7 @@ struct BcfBatchDecoder {
     projection: Option<Vec<usize>>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
+    needs_id_for_filters: bool,
     source_sample_names: Vec<String>,
     flags: ProjectionFlags,
     core_builders: CoreBatchBuilders,
@@ -2380,6 +2381,7 @@ impl BcfBatchDecoder {
             .map(|(index, name)| (name.clone(), index))
             .collect();
         let info_populated = vec![false; info_builders.0.len()];
+        let needs_id_for_filters = filters_reference_column(&residual_filters, "id");
 
         let format_mode = if !flags.any_format {
             BcfFormatMode::Generic(FormatMode::None)
@@ -2412,6 +2414,7 @@ impl BcfBatchDecoder {
             projection,
             coordinate_system_zero_based,
             residual_filters,
+            needs_id_for_filters,
             source_sample_names,
             flags,
             core_builders,
@@ -2541,6 +2544,7 @@ impl BcfBatchDecoder {
                 chrom: chrom.clone(),
                 start,
                 end,
+                id: self.needs_id_for_filters.then(|| ids.to_string()),
             };
             if !evaluate_record_filters(&fields, &self.residual_filters) {
                 if direct_dosage

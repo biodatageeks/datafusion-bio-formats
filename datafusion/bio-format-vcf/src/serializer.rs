@@ -9,9 +9,11 @@ use datafusion::arrow::array::{
 };
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
-use datafusion_bio_format_core::{GENOTYPE_OUTPUT_MODE_KEY, metadata::VCF_FIELD_FORMAT_ID_KEY};
+use datafusion_bio_format_core::{
+    GENOTYPE_OUTPUT_MODE_KEY,
+    metadata::{VCF_FIELD_FORMAT_ID_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY},
+};
 
-const VCF_GENOTYPE_OUTPUT_MODE_KEY: &str = "bio.vcf.genotype_output_mode";
 const DOSAGE_MODE: &str = "dosage";
 
 fn field_is_gt(field: &Field) -> bool {
