@@ -171,8 +171,10 @@ async fn open_and_validate(
             ),
         ));
     }
-    let sqlite_path = if let Some(path) = bgi_source.local_path() {
-        PathBuf::from(path)
+    let (sqlite_path, connection) = if let Some(path) = bgi_source.local_path() {
+        let path = PathBuf::from(path);
+        let connection = open_retained_index(&path)?;
+        (path, connection)
     } else {
         let bytes = bgi_source
             .read_all_bounded(bgi_path, options.max_bgi_bytes)
@@ -210,19 +212,6 @@ async fn open_and_validate(
         .enumerate()
         .map(|(index, row)| (row.offset, index))
         .collect();
-    // Opened here, before any later provider can evict this cache entry, and
-    // retained so pushdown never has to reopen the path.
-    let connection = Connection::open_with_flags(
-        &sqlite_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|error| {
-        index_error(
-            &sqlite_path.to_string_lossy(),
-            &format!("open for pushdown: {error}"),
-        )
-    })?;
-
     Ok(BgiIndex {
         row_indices: Arc::new((0..rows.len()).collect()),
         bytes_read: bgi_size,
@@ -585,7 +574,7 @@ async fn cache_remote_index(
     bytes: &[u8],
     max_cache_bytes: usize,
     configured_directory: Option<&str>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, Connection)> {
     if bytes.len() > max_cache_bytes {
         return Err(index_error(
             path,
@@ -617,8 +606,11 @@ async fn cache_remote_index(
         .await
         .is_ok_and(|metadata| metadata.len() == bytes.len() as u64)
     {
+        // Opened before the lease is released so a concurrent provider cannot
+        // evict this entry between publishing it and opening it.
+        let connection = open_retained_index(&destination)?;
         drop(lock);
-        return Ok(destination);
+        return Ok((destination, connection));
     }
 
     evict_cache_entries(&cache_root, bytes.len(), max_cache_bytes, &destination).await?;
@@ -644,8 +636,23 @@ async fn cache_remote_index(
     tokio::fs::rename(&temporary, &destination)
         .await
         .map_err(|error| index_error(path, &format!("publish cached BGI: {error}")))?;
+    let connection = open_retained_index(&destination)?;
     drop(lock);
-    Ok(destination)
+    Ok((destination, connection))
+}
+
+/// Opens the long-lived read-only connection kept by a [`BgiIndex`].
+fn open_retained_index(path: &Path) -> Result<Connection> {
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| {
+        index_error(
+            &path.to_string_lossy(),
+            &format!("open for pushdown: {error}"),
+        )
+    })
 }
 
 async fn evict_cache_entries(

@@ -402,7 +402,18 @@ fn build_genotypes(
                     )
                 })?;
                 states.extend_from_slice(&samples.values);
-                sample_offsets.extend(samples.offsets.iter().skip(1).map(|offset| offset + base));
+                // Each per-variant offset and the running base can both fit in
+                // i32 while their sum does not, so the sum is what must be
+                // checked; an unchecked add would wrap into a non-monotonic
+                // Arrow offset in release builds.
+                for offset in samples.offsets.iter().skip(1) {
+                    sample_offsets.push(offset.checked_add(base).ok_or_else(|| {
+                        DataFusionError::Execution(
+                            "BGEN probability offsets exceed the 32-bit Arrow list limit"
+                                .to_string(),
+                        )
+                    })?);
+                }
                 sample_valid.extend_from_slice(&samples.valid);
                 variant_offsets.push(i32::try_from(sample_valid.len()).map_err(|_| {
                     DataFusionError::Execution(

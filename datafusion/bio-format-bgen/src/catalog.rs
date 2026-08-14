@@ -17,10 +17,11 @@ const METADATA_CHUNK_BYTES: u64 = 1024 * 1024;
 /// records also pulls their payloads. That trade is worth making when records
 /// are small, and not worth making when one payload already fills the window.
 const READ_AHEAD_RECORDS: u64 = 64;
-/// Smallest possible Layout 2 variant record: six empty length-prefixed strings,
-/// a position, an allele count, and a block length. Used only to bound the
-/// catalog's initial allocation against an inflated declared variant count.
-const MINIMUM_VARIANT_RECORD_BYTES: u64 = 20;
+/// Records reserved before any variant has been parsed.
+///
+/// The declared variant count is untrusted, so it only caps this reservation
+/// rather than driving it; the catalog grows normally beyond it.
+const INITIAL_VARIANT_CAPACITY: u64 = 65_536;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenVariant {
@@ -143,14 +144,13 @@ pub(crate) async fn build_transient_catalog(
     header: &BgenHeader,
     options: &BgenReadOptions,
 ) -> Result<BgenCatalog> {
-    // The declared variant count is untrusted: a header may claim far more
-    // variants than the object can hold. Reserve from what the object could
-    // actually contain and let the vector grow, so a malformed header cannot
-    // force a multi-gigabyte allocation before the first record is validated.
-    let smallest_record = MINIMUM_VARIANT_RECORD_BYTES.max(1);
-    let capacity_bound = header.object_size / smallest_record;
+    // The declared variant count is untrusted, and a large object could still
+    // "justify" reserving tens of millions of records before a single record
+    // boundary has been validated. Start from a modest reservation and let the
+    // vector grow, so a malformed header costs a few reallocations rather than
+    // an allocation failure.
     let mut variants =
-        Vec::with_capacity((header.variant_count as u64).min(capacity_bound) as usize);
+        Vec::with_capacity((header.variant_count as u64).min(INITIAL_VARIANT_CAPACITY) as usize);
     let mut record_offset = header.first_variant_offset;
     let mut window = MetadataWindow::new(path, source, header.object_size);
 
@@ -336,6 +336,20 @@ fn parse_variant(
             })?
         }
     };
+    // A declared payload larger than the decompressed limit can never produce a
+    // usable block, so reject it here rather than after a range read has already
+    // downloaded it.
+    if payload_size > options.max_decompressed_block_bytes as u64 {
+        return Err(ParseVariantError::Invalid(catalog_error(
+            path,
+            index,
+            record_offset,
+            &format!(
+                "declared payload of {payload_size} bytes exceeds max_decompressed_block_bytes {}",
+                options.max_decompressed_block_bytes
+            ),
+        )));
+    }
     let metadata_size = payload_offset.checked_sub(record_offset).ok_or_else(|| {
         ParseVariantError::Invalid(catalog_error(
             path,
