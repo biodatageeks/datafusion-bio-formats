@@ -18,13 +18,30 @@ use crate::table_provider::{BgenReadOptions, StaleBgiPolicy};
 
 static CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct BgiIndex {
     pub(crate) row_indices: Arc<Vec<usize>>,
     pub(crate) bytes_read: u64,
     pub(crate) primary_bytes_read: u64,
+    /// Connection held open for the provider's lifetime.
+    ///
+    /// A cached remote BGI can be evicted by a later provider that exceeds
+    /// `max_bgi_cache_bytes`. Reopening by path after that would fail, so the
+    /// connection is opened once and retained: on POSIX the unlinked file stays
+    /// readable through it.
+    connection: Arc<std::sync::Mutex<Connection>>,
     sqlite_path: Arc<PathBuf>,
     offset_to_index: Arc<HashMap<u64, usize>>,
+}
+
+impl std::fmt::Debug for BgiIndex {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BgiIndex")
+            .field("rows", &self.row_indices.len())
+            .field("path", &self.sqlite_path)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BgiIndex {
@@ -46,11 +63,9 @@ impl BgiIndex {
             "SELECT file_start_position FROM Variant WHERE {} ORDER BY file_start_position, rowid",
             clauses.join(" AND ")
         );
-        let connection = Connection::open_with_flags(
-            self.sqlite_path.as_ref(),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|error| DataFusionError::Plan(format!("open BGI for pushdown: {error}")))?;
+        let connection = self.connection.lock().map_err(|error| {
+            DataFusionError::Plan(format!("BGI connection is poisoned: {error}"))
+        })?;
         let mut statement = connection
             .prepare(&sql)
             .map_err(|error| DataFusionError::Plan(format!("prepare BGI pushdown: {error}")))?;
@@ -195,10 +210,24 @@ async fn open_and_validate(
         .enumerate()
         .map(|(index, row)| (row.offset, index))
         .collect();
+    // Opened here, before any later provider can evict this cache entry, and
+    // retained so pushdown never has to reopen the path.
+    let connection = Connection::open_with_flags(
+        &sqlite_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| {
+        index_error(
+            &sqlite_path.to_string_lossy(),
+            &format!("open for pushdown: {error}"),
+        )
+    })?;
+
     Ok(BgiIndex {
         row_indices: Arc::new((0..rows.len()).collect()),
         bytes_read: bgi_size,
         primary_bytes_read: header.object_size.min(1000),
+        connection: Arc::new(std::sync::Mutex::new(connection)),
         sqlite_path: Arc::new(sqlite_path),
         offset_to_index: Arc::new(offset_to_index),
     })

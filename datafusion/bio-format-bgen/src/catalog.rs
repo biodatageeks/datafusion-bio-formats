@@ -10,7 +10,17 @@ use crate::table_provider::BgenReadOptions;
 
 const INITIAL_METADATA_WINDOW: usize = 4 * 1024;
 /// Bytes fetched per catalog read so one object read covers many variant records.
-const METADATA_CHUNK_BYTES: usize = 1024 * 1024;
+const METADATA_CHUNK_BYTES: u64 = 1024 * 1024;
+/// Fewest records a read-ahead must be expected to cover to be worth its bytes.
+///
+/// Metadata and genotype payloads are interleaved, so any read spanning several
+/// records also pulls their payloads. That trade is worth making when records
+/// are small, and not worth making when one payload already fills the window.
+const READ_AHEAD_RECORDS: u64 = 64;
+/// Smallest possible Layout 2 variant record: six empty length-prefixed strings,
+/// a position, an allele count, and a block length. Used only to bound the
+/// catalog's initial allocation against an inflated declared variant count.
+const MINIMUM_VARIANT_RECORD_BYTES: u64 = 20;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenVariant {
@@ -47,6 +57,9 @@ struct MetadataWindow<'a> {
     buffer: Bytes,
     buffer_start: u64,
     bytes_read: u64,
+    /// Size of the most recently parsed record, used to decide whether reading
+    /// ahead would mostly buffer genotype payloads.
+    last_record_size: u64,
 }
 
 impl<'a> MetadataWindow<'a> {
@@ -58,6 +71,7 @@ impl<'a> MetadataWindow<'a> {
             buffer: Bytes::new(),
             buffer_start: 0,
             bytes_read: 0,
+            last_record_size: 0,
         }
     }
 
@@ -66,9 +80,13 @@ impl<'a> MetadataWindow<'a> {
     async fn bytes_at(&mut self, offset: u64, wanted: usize) -> Result<&[u8]> {
         let remaining = self.object_size.saturating_sub(offset);
         let target = (wanted as u64).min(remaining);
-        let buffered = self.buffered_len(offset);
-        if buffered < target {
-            let read_size = remaining.min(wanted.max(METADATA_CHUNK_BYTES) as u64);
+        // Refill whenever the window cannot serve the request, including when
+        // `wanted` is zero but `offset` sits outside the buffer, so the slice
+        // below never depends on the caller having asked for at least one byte.
+        if window_slice(&self.buffer, self.buffer_start, offset)
+            .is_none_or(|slice| (slice.len() as u64) < target)
+        {
+            let read_size = remaining.min((wanted as u64).max(self.read_ahead_bytes()));
             let end = offset.checked_add(read_size).ok_or_else(|| {
                 DataFusionError::Execution(format!(
                     "BGEN {} metadata range overflowed at offset {offset}",
@@ -79,22 +97,44 @@ impl<'a> MetadataWindow<'a> {
             self.buffer_start = offset;
             self.bytes_read = self.bytes_read.saturating_add(self.buffer.len() as u64);
         }
-        let start = (offset - self.buffer_start) as usize;
-        Ok(&self.buffer[start..])
+        window_slice(&self.buffer, self.buffer_start, offset).ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "BGEN {} metadata window does not cover offset {offset}",
+                sanitize_location(self.path)
+            ))
+        })
     }
 
-    /// Bytes already buffered from `offset` onwards, or zero when `offset` is
-    /// outside the current window.
-    fn buffered_len(&self, offset: u64) -> u64 {
-        if offset < self.buffer_start {
-            return 0;
+    /// Bytes to fetch beyond what the caller asked for.
+    ///
+    /// Read-ahead only pays off when one fetch covers many records. Once a
+    /// single record is large enough that [`READ_AHEAD_RECORDS`] of them would
+    /// not fit, the window stops reading ahead and skips each genotype payload
+    /// instead of buffering it.
+    fn read_ahead_bytes(&self) -> u64 {
+        if self.last_record_size == 0 {
+            return METADATA_CHUNK_BYTES;
         }
-        let buffer_end = self.buffer_start + self.buffer.len() as u64;
-        if offset > buffer_end {
-            return 0;
+        match self.last_record_size.checked_mul(READ_AHEAD_RECORDS) {
+            Some(span) if span <= METADATA_CHUNK_BYTES => METADATA_CHUNK_BYTES,
+            _ => 0,
         }
-        buffer_end - offset
     }
+
+    /// Records how large the last parsed record was.
+    fn observe_record_size(&mut self, record_size: u64) {
+        self.last_record_size = record_size;
+    }
+}
+
+/// Returns the buffered bytes from `offset` onwards.
+///
+/// `None` means the window starts after `offset` or ends before it, so the
+/// caller must refill rather than slice.
+fn window_slice(buffer: &[u8], buffer_start: u64, offset: u64) -> Option<&[u8]> {
+    let start = offset.checked_sub(buffer_start)?;
+    let start = usize::try_from(start).ok()?;
+    buffer.get(start..)
 }
 
 pub(crate) async fn build_transient_catalog(
@@ -103,7 +143,14 @@ pub(crate) async fn build_transient_catalog(
     header: &BgenHeader,
     options: &BgenReadOptions,
 ) -> Result<BgenCatalog> {
-    let mut variants = Vec::with_capacity(header.variant_count as usize);
+    // The declared variant count is untrusted: a header may claim far more
+    // variants than the object can hold. Reserve from what the object could
+    // actually contain and let the vector grow, so a malformed header cannot
+    // force a multi-gigabyte allocation before the first record is validated.
+    let smallest_record = MINIMUM_VARIANT_RECORD_BYTES.max(1);
+    let capacity_bound = header.object_size / smallest_record;
+    let mut variants =
+        Vec::with_capacity((header.variant_count as u64).min(capacity_bound) as usize);
     let mut record_offset = header.first_variant_offset;
     let mut window = MetadataWindow::new(path, source, header.object_size);
 
@@ -167,6 +214,7 @@ pub(crate) async fn build_transient_catalog(
                 }
             }
         };
+        window.observe_record_size(variant.record_size);
         record_offset = variant
             .record_offset
             .checked_add(variant.record_size)
@@ -429,4 +477,48 @@ fn catalog_error(path: &str, index: usize, offset: u64, message: &str) -> DataFu
         "BGEN {} variant {index} at byte {offset}: {message}",
         sanitize_location(path)
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_slice_covers_only_the_buffered_range() {
+        let buffer = [10_u8, 11, 12, 13];
+        // Before the window starts.
+        assert_eq!(window_slice(&buffer, 100, 99), None);
+        // Exactly at the start.
+        assert_eq!(window_slice(&buffer, 100, 100), Some(&buffer[..]));
+        // Inside the window.
+        assert_eq!(window_slice(&buffer, 100, 102), Some(&buffer[2..]));
+        // One past the last byte is an empty slice, not a miss: the window still
+        // describes that position.
+        assert_eq!(window_slice(&buffer, 100, 104), Some(&buffer[4..]));
+        // Beyond the window.
+        assert_eq!(window_slice(&buffer, 100, 105), None);
+    }
+
+    #[test]
+    fn read_ahead_stops_once_one_record_fills_the_window() {
+        let source = ObjectAccess::Local("unused".to_string());
+        let mut window = MetadataWindow::new("unused", &source, 1 << 30);
+        // Nothing parsed yet: read ahead so the first fetch covers many records.
+        assert_eq!(window.read_ahead_bytes(), METADATA_CHUNK_BYTES);
+        // Small records: reading ahead covers at least READ_AHEAD_RECORDS.
+        window.observe_record_size(METADATA_CHUNK_BYTES / READ_AHEAD_RECORDS);
+        assert_eq!(window.read_ahead_bytes(), METADATA_CHUNK_BYTES);
+        // One byte larger and the read-ahead would mostly buffer payloads.
+        window.observe_record_size(METADATA_CHUNK_BYTES / READ_AHEAD_RECORDS + 1);
+        assert_eq!(window.read_ahead_bytes(), 0);
+        // A record larger than the whole window never reads ahead.
+        window.observe_record_size(u64::MAX);
+        assert_eq!(window.read_ahead_bytes(), 0);
+    }
+
+    #[test]
+    fn window_slice_rejects_an_offset_that_does_not_fit_usize() {
+        let buffer = [0_u8; 4];
+        assert_eq!(window_slice(&buffer, 0, u64::MAX), None);
+    }
 }

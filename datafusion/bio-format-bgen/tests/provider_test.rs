@@ -1288,6 +1288,49 @@ async fn coalescing_bridges_metadata_gaps_without_collapsing_partitions() {
     );
 }
 
+#[tokio::test]
+async fn a_cached_bgi_survives_eviction_by_a_later_provider() {
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Simulate a later provider evicting this entry from the shared cache.
+    for entry in fs::read_dir(&cache).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path().extension().and_then(|value| value.to_str()) == Some("bgi") {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+
+    // The first provider still resolves its index-backed predicate.
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT rsid FROM b WHERE rsid = 'rs2'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+}
+
 fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, required: bool) -> bool {
     let import_name = if name == "limix/bgen" { "bgen" } else { name };
     let available = Command::new(python)
