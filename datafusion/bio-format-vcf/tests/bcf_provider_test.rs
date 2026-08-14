@@ -15,7 +15,8 @@ use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::TableProviderFilterPushDown;
 use datafusion::prelude::{SessionConfig, SessionContext, col, lit};
 use datafusion_bio_format_core::{
-    GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY, genotype::MissingSamplePolicy,
+    GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY, GENOTYPE_SAMPLE_NAMES_KEY,
+    from_json_string, genotype::MissingSamplePolicy,
 };
 use datafusion_bio_format_vcf::table_provider::{
     GenotypeOutputMode, VcfInputFormat, VcfTableProvider, describe_fields,
@@ -341,6 +342,15 @@ async fn bcf_matches_vcf_for_projected_multisample_values() -> Result<(), Box<dy
     )?;
 
     assert_eq!(vcf_provider.schema(), bcf_provider.schema());
+    let bcf_schema = bcf_provider.schema();
+    let genotypes = bcf_schema.field_with_name("genotypes")?;
+    let shared_sample_names_json = genotypes
+        .metadata()
+        .get(GENOTYPE_SAMPLE_NAMES_KEY)
+        .expect("multi-sample BCF must expose the shared genotype sample metadata key");
+    let shared_sample_names: Vec<String> = from_json_string(shared_sample_names_json)
+        .expect("shared genotype sample metadata must be valid JSON");
+    assert_eq!(shared_sample_names, ["S2", "S1"]);
 
     let vcf_rows = query(
         "variants",

@@ -8,7 +8,7 @@ use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion, sa
 use datafusion_bio_format_core::genomic_filter::{
     build_full_scan_regions, extract_genomic_regions, is_genomic_coordinate_filter,
 };
-use datafusion_bio_format_core::genotype::{MissingSamplePolicy, resolve_samples};
+use datafusion_bio_format_core::genotype::{MissingSamplePolicy, SampleSelection, resolve_samples};
 use datafusion_bio_format_core::index_utils::discover_vcf_index;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
@@ -70,7 +70,7 @@ fn resolve_selected_samples(
     header_sample_names: &[String],
     samples_to_include: &Option<Vec<String>>,
     missing_sample_policy: MissingSamplePolicy,
-) -> datafusion::common::Result<Vec<String>> {
+) -> datafusion::common::Result<SampleSelection> {
     if missing_sample_policy == MissingSamplePolicy::Ignore
         && let Some(requested) = samples_to_include
     {
@@ -89,7 +89,6 @@ fn resolve_selected_samples(
         samples_to_include.as_deref(),
         missing_sample_policy,
     )
-    .map(|selection| selection.names().to_vec())
 }
 
 /// # Returns
@@ -133,11 +132,12 @@ async fn determine_schema_from_header(
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let sample_names = resolve_selected_samples(
+    let sample_selection = resolve_selected_samples(
         &source_sample_names,
         samples_to_include,
         missing_sample_policy,
     )?;
+    let sample_names = sample_selection.names().to_vec();
 
     // Extract header metadata for schema storage
     let file_format_obj = header.file_format();
@@ -304,7 +304,7 @@ async fn determine_schema_from_header(
                 .collect::<Vec<_>>();
 
             // Store sample names in genotypes field metadata
-            let mut genotypes_metadata = HashMap::new();
+            let mut genotypes_metadata = sample_selection.field_metadata();
             genotypes_metadata.insert(
                 VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
                 to_json_string(&sample_names),
