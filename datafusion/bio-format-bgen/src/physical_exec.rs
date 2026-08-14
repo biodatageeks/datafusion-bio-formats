@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use datafusion::arrow::array::{
-    ArrayRef, BooleanArray, Float32Builder, ListBuilder, StringArray, StringBuilder, StructArray,
-    UInt8Array, UInt8Builder, UInt64Array,
+    ArrayRef, BooleanArray, Float32Array, Float32Builder, ListArray, ListBuilder, StringArray,
+    StringBuilder, StructArray, UInt8Array, UInt8Builder, UInt64Array,
 };
+use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::common::{DataFusionError, Result};
@@ -264,7 +265,9 @@ fn empty_genotypes(mode: BgenOutputMode) -> DecodedGenotypes {
         bits: 0,
         ploidy: Vec::new(),
         values: match mode {
-            BgenOutputMode::Probability => DecodedValues::Probabilities(Vec::new()),
+            BgenOutputMode::Probability => {
+                DecodedValues::Probabilities(crate::decode::ProbabilityValues::default())
+            }
             BgenOutputMode::Dosage => DecodedValues::Dosages(Vec::new()),
         },
         decompressed_bytes: 0,
@@ -375,8 +378,13 @@ fn build_genotypes(
                 DataType::List(state_field.clone()),
                 true,
             ));
-            let samples = ListBuilder::new(Float32Builder::new()).with_field(state_field);
-            let mut outer = ListBuilder::new(samples).with_field(sample_field);
+            // The decoder already produced Arrow's own layout, so the states,
+            // sample offsets, and sample validity move into the arrays without
+            // being appended value by value.
+            let mut states: Vec<f32> = Vec::new();
+            let mut sample_offsets: Vec<i32> = vec![0];
+            let mut sample_valid: Vec<bool> = Vec::new();
+            let mut variant_offsets: Vec<i32> = vec![0];
             for row in rows {
                 let decoded = row.genotypes.as_ref().ok_or_else(|| {
                     DataFusionError::Execution(
@@ -388,17 +396,33 @@ fn build_genotypes(
                         "BGEN decoded dosage in probability mode".to_string(),
                     ));
                 };
-                for sample in samples {
-                    if let Some(probabilities) = sample {
-                        outer.values().values().append_slice(probabilities);
-                        outer.values().append(true);
-                    } else {
-                        outer.values().append(false);
-                    }
-                }
-                outer.append(true);
+                let base = i32::try_from(states.len()).map_err(|_| {
+                    DataFusionError::Execution(
+                        "BGEN probability offsets exceed the 32-bit Arrow list limit".to_string(),
+                    )
+                })?;
+                states.extend_from_slice(&samples.values);
+                sample_offsets.extend(samples.offsets.iter().skip(1).map(|offset| offset + base));
+                sample_valid.extend_from_slice(&samples.valid);
+                variant_offsets.push(i32::try_from(sample_valid.len()).map_err(|_| {
+                    DataFusionError::Execution(
+                        "BGEN sample offsets exceed the 32-bit Arrow list limit".to_string(),
+                    )
+                })?);
             }
-            Arc::new(outer.finish())
+            let states = Arc::new(Float32Array::from(states)) as ArrayRef;
+            let samples = ListArray::try_new(
+                state_field,
+                OffsetBuffer::new(ScalarBuffer::from(sample_offsets)),
+                states,
+                Some(NullBuffer::from(sample_valid)),
+            )?;
+            Arc::new(ListArray::try_new(
+                sample_field,
+                OffsetBuffer::new(ScalarBuffer::from(variant_offsets)),
+                Arc::new(samples) as ArrayRef,
+                None,
+            )?)
         }
         BgenOutputMode::Dosage => {
             let mut builder = ListBuilder::new(Float32Builder::new())

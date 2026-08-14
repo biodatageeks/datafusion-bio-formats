@@ -14,20 +14,58 @@ pub(crate) struct DecodedGenotypes {
     pub(crate) decompressed_bytes: usize,
 }
 
+/// One variant's per-sample probability vectors in a flat layout.
+///
+/// A vector per sample would allocate once per sample per variant, which
+/// dominates a whole-cohort probability scan. Values are concatenated instead,
+/// with one offset per sample; this is also the layout Arrow's list arrays use,
+/// so no per-value copy is needed when the batch is built.
+#[derive(Debug, Default)]
+pub(crate) struct ProbabilityValues {
+    /// Concatenated probabilities of every emitted sample.
+    pub(crate) values: Vec<f32>,
+    /// Start of each sample's states, with a trailing total length.
+    pub(crate) offsets: Vec<i32>,
+    /// False for a sample with no called genotype.
+    pub(crate) valid: Vec<bool>,
+}
+
+impl ProbabilityValues {
+    fn with_sample_capacity(samples: usize) -> Self {
+        let mut offsets = Vec::with_capacity(samples + 1);
+        offsets.push(0);
+        Self {
+            values: Vec::new(),
+            offsets,
+            valid: Vec::with_capacity(samples),
+        }
+    }
+
+    /// Records one sample whose probabilities are the tail of `values`.
+    fn finish_sample(&mut self, valid: bool) -> Result<()> {
+        let end = i32::try_from(self.values.len()).map_err(|_| {
+            DataFusionError::Execution(
+                "BGEN probability offsets exceed the 32-bit Arrow list limit".to_string(),
+            )
+        })?;
+        self.offsets.push(end);
+        self.valid.push(valid);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum DecodedValues {
-    Probabilities(Vec<Option<Vec<f32>>>),
+    Probabilities(ProbabilityValues),
     Dosages(Vec<Option<f32>>),
 }
 
 impl DecodedGenotypes {
     pub(crate) fn estimated_arrow_bytes(&self) -> usize {
         let value_bytes = match &self.values {
-            DecodedValues::Probabilities(samples) => samples
-                .iter()
-                .filter_map(Option::as_ref)
-                .map(|values| values.len().saturating_mul(size_of::<f32>()))
-                .fold(0_usize, usize::saturating_add),
+            DecodedValues::Probabilities(samples) => {
+                samples.values.len().saturating_mul(size_of::<f32>())
+            }
             DecodedValues::Dosages(samples) => samples.len().saturating_mul(size_of::<f32>()),
         };
         value_bytes
@@ -166,7 +204,7 @@ fn decode_layout1(
         }
     };
 
-    let mut probabilities = Vec::with_capacity(selected_samples.len());
+    let mut probabilities = ProbabilityValues::with_sample_capacity(selected_samples.len());
     let mut dosages = Vec::with_capacity(selected_samples.len());
     for &sample in selected_samples {
         let start = sample.checked_mul(6).ok_or_else(|| {
@@ -179,7 +217,7 @@ fn decode_layout1(
         ];
         let sum: u64 = values.iter().sum();
         if sum == 0 {
-            probabilities.push(None);
+            probabilities.finish_sample(false)?;
             dosages.push(None);
             continue;
         }
@@ -191,12 +229,12 @@ fn decode_layout1(
             ));
         }
         match options.output_mode {
-            BgenOutputMode::Probability => probabilities.push(Some(
-                values
-                    .iter()
-                    .map(|value| *value as f32 / 32_768.0)
-                    .collect(),
-            )),
+            BgenOutputMode::Probability => {
+                probabilities
+                    .values
+                    .extend(values.iter().map(|value| *value as f32 / 32_768.0));
+                probabilities.finish_sample(true)?;
+            }
             BgenOutputMode::Dosage => {
                 dosages.push(Some((values[1] + 2 * values[2]) as f32 / 32_768.0));
             }
@@ -538,20 +576,15 @@ fn decode_layout2_block(
 
     let denominator = (1_u64 << bits) - 1;
     let mut ploidies = Vec::with_capacity(selected_samples.len());
-    let mut probabilities = Vec::with_capacity(selected_samples.len());
+    let mut probabilities = ProbabilityValues::with_sample_capacity(selected_samples.len());
     let mut dosages = Vec::with_capacity(selected_samples.len());
 
-    // Whole-cohort dosage scans of biallelic 8-bit blocks with one declared
-    // ploidy are the dominant workload, and there every sample occupies the same
-    // whole bytes. Reading those bytes directly keeps the inner loop free of the
+    // Whole-cohort scans of biallelic 8-bit blocks with one declared ploidy are
+    // the dominant workload, and there every sample occupies the same whole
+    // bytes. Reading those bytes directly keeps the inner loop free of the
     // general bit reader, the probability buffers, and the per-sample state
     // lookups; the general path below still handles every other encoding.
-    if options.output_mode == BgenOutputMode::Dosage
-        && allele_count == 2
-        && bits == 8
-        && min_ploidy == max_ploidy
-        && min_ploidy > 0
-    {
+    if allele_count == 2 && bits == 8 && min_ploidy == max_ploidy && min_ploidy > 0 {
         let stride = min_ploidy as usize;
         for &sample in selected_samples {
             let ploidy_missing = ploidy_bytes[sample];
@@ -570,28 +603,57 @@ fn decode_layout2_block(
                         &format!("missing sample {sample} has non-zero stored probabilities"),
                     ));
                 }
-                dosages.push(None);
+                match options.output_mode {
+                    BgenOutputMode::Probability => probabilities.finish_sample(false)?,
+                    BgenOutputMode::Dosage => dosages.push(None),
+                }
                 continue;
             }
-            let numerator =
-                byte_dosage_numerator(values, denominator, min_ploidy, phased).ok_or_else(|| {
-                    let sum: u64 = values.iter().map(|&value| value as u64).sum();
-                    execution_error(
-                        path,
-                        variant,
-                        &format!(
-                            "sample {sample} stored probability sum {sum} exceeds denominator {denominator}"
-                        ),
+            match options.output_mode {
+                BgenOutputMode::Probability => {
+                    byte_probabilities_into(
+                        &mut probabilities.values,
+                        values,
+                        denominator,
+                        phased,
                     )
-                })?;
-            dosages.push(Some(numerator as f32 / denominator as f32));
+                    .ok_or_else(|| {
+                        let sum: u64 = values.iter().map(|&value| value as u64).sum();
+                        execution_error(
+                            path,
+                            variant,
+                            &format!(
+                                "sample {sample} stored probability sum {sum} exceeds denominator {denominator}"
+                            ),
+                        )
+                    })?;
+                    probabilities.finish_sample(true)?;
+                }
+                BgenOutputMode::Dosage => {
+                    let numerator = byte_dosage_numerator(values, denominator, min_ploidy, phased)
+                        .ok_or_else(|| {
+                            let sum: u64 = values.iter().map(|&value| value as u64).sum();
+                            execution_error(
+                                path,
+                                variant,
+                                &format!(
+                                    "sample {sample} stored probability sum {sum} exceeds denominator {denominator}"
+                                ),
+                            )
+                        })?;
+                    dosages.push(Some(numerator as f32 / denominator as f32));
+                }
+            }
         }
 
         return Ok(DecodedGenotypes {
             phased,
             bits,
             ploidy: ploidies,
-            values: DecodedValues::Dosages(dosages),
+            values: match options.output_mode {
+                BgenOutputMode::Probability => DecodedValues::Probabilities(probabilities),
+                BgenOutputMode::Dosage => DecodedValues::Dosages(dosages),
+            },
             decompressed_bytes: block.len(),
         });
     }
@@ -623,7 +685,7 @@ fn decode_layout2_block(
                     &format!("missing sample {sample} has non-zero stored probabilities"),
                 ));
             }
-            probabilities.push(None);
+            probabilities.finish_sample(false)?;
             dosages.push(None);
             continue;
         }
@@ -643,12 +705,11 @@ fn decode_layout2_block(
                     phased,
                     context,
                 )?;
-                probabilities.push(Some(
-                    complete
-                        .iter()
-                        .map(|value| *value as f32 / denominator as f32)
-                        .collect(),
-                ));
+                let scale = denominator as f32;
+                probabilities
+                    .values
+                    .extend(complete.iter().map(|value| *value as f32 / scale));
+                probabilities.finish_sample(true)?;
             }
             BgenOutputMode::Dosage => {
                 // Dosage rejects multiallelic variants above, so the omitted
@@ -777,6 +838,41 @@ struct ProbabilityContext<'a> {
     path: &'a str,
     variant: &'a BgenVariant,
     sample: usize,
+}
+
+/// Appends one biallelic sample's complete probability vector to `out`.
+///
+/// This is the probability-mode counterpart of [`byte_dosage_numerator`]: the
+/// omitted state of each stored vector is restored inline, so no intermediate
+/// integer buffer is built. Returns `None` for the same out-of-range stored sums
+/// the general path rejects.
+#[inline]
+fn byte_probabilities_into(
+    out: &mut Vec<f32>,
+    values: &[u8],
+    denominator: u64,
+    phased: bool,
+) -> Option<()> {
+    let scale = denominator as f32;
+    if phased {
+        // Each byte is P(allele 0) for one haplotype, followed by its complement.
+        for &value in values {
+            out.push(value as f32 / scale);
+            out.push((denominator - value as u64) as f32 / scale);
+        }
+        return Some(());
+    }
+    let mut sum = 0_u64;
+    for &value in values {
+        sum += value as u64;
+        out.push(value as f32 / scale);
+    }
+    if sum > denominator {
+        out.truncate(out.len() - values.len());
+        return None;
+    }
+    out.push((denominator - sum) as f32 / scale);
+    Some(())
 }
 
 /// [`biallelic_dosage_numerator`] for whole-byte stored values.
@@ -1233,6 +1329,74 @@ mod tests {
                             (expected, actual) => panic!(
                                 "fast path disagreed for ploidy {ploidy} phased {phased} \
                                  bytes {bytes:?}: general {expected:?}, fast {actual:?}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The whole-byte probability fast path must produce exactly what
+    /// reconstructing the complete vector and scaling it would produce.
+    #[test]
+    fn byte_probabilities_match_the_reconstructed_vector() {
+        let variant = test_variant();
+        let denominator = 255_u64;
+        let mut complete = Vec::new();
+        for ploidy in 1..=3_u8 {
+            for phased in [false, true] {
+                for first in (0..=255_u64).step_by(31) {
+                    for second in (0..=255_u64).step_by(37) {
+                        let bytes: Vec<u8> = (0..ploidy as usize)
+                            .map(|index| {
+                                if index % 2 == 0 {
+                                    first as u8
+                                } else {
+                                    second as u8
+                                }
+                            })
+                            .collect();
+                        let stored: Vec<u64> =
+                            bytes.iter().map(|&value| u64::from(value)).collect();
+                        let general = reconstruct_probabilities(
+                            &mut complete,
+                            &stored,
+                            denominator,
+                            ploidy,
+                            2,
+                            phased,
+                            ProbabilityContext {
+                                path: "fixture",
+                                variant: &variant,
+                                sample: 0,
+                            },
+                        )
+                        .map(|()| {
+                            complete
+                                .iter()
+                                .map(|value| *value as f32 / denominator as f32)
+                                .collect::<Vec<f32>>()
+                        });
+                        let mut fast = vec![f32::NAN; 2];
+                        let produced =
+                            byte_probabilities_into(&mut fast, &bytes, denominator, phased);
+                        match (general, produced) {
+                            (Ok(expected), Some(())) => {
+                                assert!(fast[..2].iter().all(|value| value.is_nan()));
+                                assert_eq!(
+                                    &fast[2..],
+                                    expected.as_slice(),
+                                    "ploidy {ploidy} phased {phased} bytes {bytes:?}"
+                                );
+                            }
+                            (Err(_), None) => {
+                                assert_eq!(fast.len(), 2, "a rejected sample must append nothing");
+                            }
+                            (general, produced) => panic!(
+                                "fast path disagreed for ploidy {ploidy} phased {phased} \
+                                 bytes {bytes:?}: general ok={:?}, fast={produced:?}",
+                                general.is_ok()
                             ),
                         }
                     }
