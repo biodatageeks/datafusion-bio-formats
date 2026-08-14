@@ -39,6 +39,10 @@ pub(crate) struct RegulatoryColumnIndices {
     // MotifFeature-specific
     score: Option<usize>,
     binding_matrix: Option<usize>,
+    binding_matrix_length: Option<usize>,
+    binding_matrix_elements: Option<usize>,
+    binding_matrix_unit: Option<usize>,
+    motif_seq: Option<usize>,
     overlapping_regulatory_feature: Option<usize>,
     transcription_factors: Option<usize>,
     // Shared
@@ -61,12 +65,226 @@ impl RegulatoryColumnIndices {
             regulatory_build_id: col_map.get("regulatory_build_id"),
             score: col_map.get("score"),
             binding_matrix: col_map.get("binding_matrix"),
+            binding_matrix_length: col_map.get("binding_matrix_length"),
+            binding_matrix_elements: col_map.get("binding_matrix_elements"),
+            binding_matrix_unit: col_map.get("binding_matrix_unit"),
+            motif_seq: col_map.get("motif_seq"),
             overlapping_regulatory_feature: col_map.get("overlapping_regulatory_feature"),
             transcription_factors: col_map.get("transcription_factors"),
             cell_types: col_map.get("cell_types"),
             raw_object_json: col_map.get("raw_object_json"),
             object_hash: col_map.get("object_hash"),
         }
+    }
+}
+
+/// Unwraps Storable blessed-object wrappers (`{"__class":..,"__value":..}`)
+/// until the underlying JSON map is reached.
+fn json_unwrap_blessed(
+    value: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    let mut current = value;
+    for _ in 0..4 {
+        let obj = current.as_object()?;
+        match obj.get("__value") {
+            Some(inner) => current = inner,
+            None => return Some(obj),
+        }
+    }
+    None
+}
+
+/// Extracts the BindingMatrix length. Ensembl VEP uses it to place a variant
+/// within a reverse-strand motif and to bounds-check MOTIF_POS.
+fn json_binding_matrix_length(value: Option<&serde_json::Value>) -> Option<i32> {
+    let obj = json_unwrap_blessed(value?)?;
+    json_str(obj.get("length"))?.parse().ok()
+}
+
+/// Storable counterpart of [`json_binding_matrix_length`].
+fn sv_binding_matrix_length(value: Option<&SValue>) -> Option<i32> {
+    let map = sv_unwrap_blessed(value?)?;
+    sv_str(map.get("length"))?.parse().ok()
+}
+
+/// Nucleotide order used when flattening a BindingMatrix, matching
+/// `Bio::EnsEMBL::Funcgen::BindingMatrix::Constants::VALID_NUCLEOTIDES`.
+const MATRIX_NUCLEOTIDES: [&str; 4] = ["A", "C", "G", "T"];
+
+/// Flattens a BindingMatrix frequency matrix into `A,C,G,T` per position, with
+/// positions separated by `;` in ascending order: `"980,99,249,216;234,..."`.
+///
+/// VEP needs the full matrix to compute `HIGH_INF_POS` and
+/// `MOTIF_SCORE_CHANGE`; without it both fields are always empty. The flat
+/// encoding keeps the column dictionary-friendly — a whole cache draws on a few
+/// dozen distinct matrices — and avoids re-parsing `raw_object_json`.
+///
+/// Yields `None` unless every position in `1..=length` carries all four
+/// nucleotides, so a partially decoded matrix is never scored against.
+fn json_binding_matrix_elements(value: Option<&serde_json::Value>) -> Option<String> {
+    let obj = json_unwrap_blessed(value?)?;
+    let elements = json_unwrap_blessed(obj.get("elements")?)?;
+    let length: usize = json_str(obj.get("length"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(elements.len());
+    flatten_matrix_positions(length, |position, nucleotide| {
+        let column = json_unwrap_blessed(elements.get(&position.to_string())?)?;
+        json_str(column.get(nucleotide))
+    })
+}
+
+/// Storable counterpart of [`json_binding_matrix_elements`].
+fn sv_binding_matrix_elements(value: Option<&SValue>) -> Option<String> {
+    let map = sv_unwrap_blessed(value?)?;
+    let elements = sv_unwrap_blessed(map.get("elements")?)?;
+    let length: usize = sv_str(map.get("length"))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(elements.len());
+    flatten_matrix_positions(length, |position, nucleotide| {
+        let column = sv_unwrap_blessed(elements.get(&position.to_string())?)?;
+        sv_str(column.get(nucleotide))
+    })
+}
+
+/// Shared assembly for the two `*_binding_matrix_elements` extractors.
+fn flatten_matrix_positions<F>(length: usize, mut cell: F) -> Option<String>
+where
+    F: FnMut(usize, &str) -> Option<String>,
+{
+    if length == 0 {
+        return None;
+    }
+    let mut out = String::new();
+    for position in 1..=length {
+        if position > 1 {
+            out.push(';');
+        }
+        for (index, nucleotide) in MATRIX_NUCLEOTIDES.iter().enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(&cell(position, nucleotide)?);
+        }
+    }
+    Some(out)
+}
+
+/// The unit the matrix elements are expressed in ("Frequencies"). VEP's
+/// frequency-to-weights conversion is only valid for that unit, so scoring has
+/// to be able to check it rather than assume it.
+fn json_binding_matrix_unit(value: Option<&serde_json::Value>) -> Option<String> {
+    json_str(json_unwrap_blessed(value?)?.get("unit"))
+}
+
+/// Storable counterpart of [`json_binding_matrix_unit`].
+fn sv_binding_matrix_unit(value: Option<&SValue>) -> Option<String> {
+    sv_str(sv_unwrap_blessed(value?)?.get("unit"))
+}
+
+/// The motif's reference sequence, already in motif orientation (Ensembl
+/// reverse-complements it for reverse-strand motifs). VEP reads it from the
+/// same cached slot — `MotifFeatureVariation::_motif_feature_seq` — to score
+/// the reference and variant sequences against the matrix.
+fn json_motif_seq(object: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let cache = json_unwrap_blessed(object.get("_variation_effect_feature_cache")?)?;
+    json_str(cache.get("seq"))
+}
+
+/// Storable counterpart of [`json_motif_seq`].
+fn sv_motif_seq(object: &HashMap<String, SValue>) -> Option<String> {
+    let cache = sv_unwrap_blessed(object.get("_variation_effect_feature_cache")?)?;
+    sv_str(cache.get("seq"))
+}
+
+/// Extracts the BindingMatrix stable id from a MotifFeature `binding_matrix`.
+///
+/// Ensembl >= 116 serialises `binding_matrix` as a nested BindingMatrix object
+/// (`{"stable_id":"ENSPFM0510", ..}`), while older caches stored a scalar id.
+/// `json_str` yields `None` for objects, which silently emptied the column and
+/// therefore VEP's `MOTIF_NAME` field.
+fn json_binding_matrix_id(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    match json_unwrap_blessed(value) {
+        Some(obj) => json_str(obj.get("stable_id")),
+        None => json_str(Some(value)),
+    }
+}
+
+/// Collects transcription factor names from a nested BindingMatrix.
+fn json_binding_matrix_transcription_factors(value: Option<&serde_json::Value>) -> Option<String> {
+    let obj = json_unwrap_blessed(value?)?;
+    let complexes = obj
+        .get("associated_transcription_factor_complexes")?
+        .as_array()?;
+    let mut names: Vec<String> = Vec::new();
+    for complex in complexes {
+        let Some(inner) = json_unwrap_blessed(complex) else {
+            continue;
+        };
+        // Filter the placeholder on each candidate *before* falling back, so a
+        // complex with `display_name: "-"` still resolves via `production_name`.
+        if let Some(name) = json_str(inner.get("display_name"))
+            .filter(|value| value != "-")
+            .or_else(|| json_str(inner.get("production_name")).filter(|value| value != "-"))
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(","))
+    }
+}
+
+/// Storable counterpart of [`json_unwrap_blessed`].
+fn sv_unwrap_blessed(value: &SValue) -> Option<&HashMap<String, SValue>> {
+    let mut current = value;
+    for _ in 0..4 {
+        match current {
+            SValue::Blessed { value, .. } => current = value.as_ref(),
+            SValue::Hash(map) => return Some(map.as_ref()),
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Storable counterpart of [`json_binding_matrix_id`].
+fn sv_binding_matrix_id(value: Option<&SValue>) -> Option<String> {
+    let value = value?;
+    match sv_unwrap_blessed(value) {
+        Some(map) => sv_str(map.get("stable_id")),
+        None => sv_str(Some(value)),
+    }
+}
+
+/// Storable counterpart of [`json_binding_matrix_transcription_factors`].
+fn sv_binding_matrix_transcription_factors(value: Option<&SValue>) -> Option<String> {
+    let map = sv_unwrap_blessed(value?)?;
+    let complexes = match map.get("associated_transcription_factor_complexes")? {
+        SValue::Array(items) => items,
+        _ => return None,
+    };
+    let mut names: Vec<String> = Vec::new();
+    for complex in complexes.iter() {
+        let Some(inner) = sv_unwrap_blessed(complex) else {
+            continue;
+        };
+        // Same placeholder-before-fallback ordering as the JSON path.
+        if let Some(name) = sv_str(inner.get("display_name"))
+            .filter(|value| value != "-")
+            .or_else(|| sv_str(inner.get("production_name")).filter(|value| value != "-"))
+            && !names.contains(&name)
+        {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        None
+    } else {
+        Some(names.join(","))
     }
 }
 
@@ -81,6 +299,7 @@ fn json_transcription_factors(
     ]
     .into_iter()
     .find_map(|key| json_str(object.get(key)).filter(|value| value != "-"))
+    .or_else(|| json_binding_matrix_transcription_factors(object.get("binding_matrix")))
 }
 
 fn storable_transcription_factors(
@@ -94,6 +313,7 @@ fn storable_transcription_factors(
     ]
     .into_iter()
     .find_map(|key| sv_str(object.get(key)).filter(|value| value != "-"))
+    .or_else(|| sv_binding_matrix_transcription_factors(object.get("binding_matrix")))
 }
 
 struct RegulatoryRowCore {
@@ -273,7 +493,31 @@ pub(crate) fn parse_regulatory_line_into(
                 batch.set_opt_f64(idx, json_f64(object.get("score")));
             }
             if let Some(idx) = col_idx.binding_matrix {
-                batch.set_opt_utf8_owned(idx, json_str(object.get("binding_matrix")).as_ref());
+                batch.set_opt_utf8_owned(
+                    idx,
+                    json_binding_matrix_id(object.get("binding_matrix")).as_ref(),
+                );
+            }
+            if let Some(idx) = col_idx.binding_matrix_length {
+                batch.set_opt_i32(
+                    idx,
+                    json_binding_matrix_length(object.get("binding_matrix")),
+                );
+            }
+            if let Some(idx) = col_idx.binding_matrix_elements {
+                batch.set_opt_utf8_owned(
+                    idx,
+                    json_binding_matrix_elements(object.get("binding_matrix")).as_ref(),
+                );
+            }
+            if let Some(idx) = col_idx.binding_matrix_unit {
+                batch.set_opt_utf8_owned(
+                    idx,
+                    json_binding_matrix_unit(object.get("binding_matrix")).as_ref(),
+                );
+            }
+            if let Some(idx) = col_idx.motif_seq {
+                batch.set_opt_utf8_owned(idx, json_motif_seq(object).as_ref());
             }
             if let Some(idx) = col_idx.transcription_factors {
                 let value = json_transcription_factors(object);
@@ -564,7 +808,22 @@ fn append_regulatory_storable_row_into(
                 batch.set_opt_f64(idx, sv_f64(object.get("score")));
             }
             if let Some(idx) = col_idx.binding_matrix {
-                let value = sv_str(object.get("binding_matrix"));
+                let value = sv_binding_matrix_id(object.get("binding_matrix"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
+            if let Some(idx) = col_idx.binding_matrix_length {
+                batch.set_opt_i32(idx, sv_binding_matrix_length(object.get("binding_matrix")));
+            }
+            if let Some(idx) = col_idx.binding_matrix_elements {
+                let value = sv_binding_matrix_elements(object.get("binding_matrix"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
+            if let Some(idx) = col_idx.binding_matrix_unit {
+                let value = sv_binding_matrix_unit(object.get("binding_matrix"));
+                batch.set_opt_utf8_owned(idx, value.as_ref());
+            }
+            if let Some(idx) = col_idx.motif_seq {
+                let value = sv_motif_seq(object);
                 batch.set_opt_utf8_owned(idx, value.as_ref());
             }
             if let Some(idx) = col_idx.transcription_factors {
@@ -644,5 +903,332 @@ mod tests {
             storable_transcription_factors(&object).as_deref(),
             Some("CTCF")
         );
+    }
+
+    // ------------------------------------------------------------------
+    // MotifFeature binding matrix (Ensembl >= 116 nested BindingMatrix)
+    // ------------------------------------------------------------------
+
+    /// Real release-116 shape: `binding_matrix` is a nested BindingMatrix
+    /// object, not a scalar id.
+    fn binding_matrix_payload() -> serde_json::Value {
+        json!({
+            "associated_transcription_factor_complexes": [{
+                "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex",
+                "__value": {
+                    "components": [{
+                        "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactor",
+                        "__value": { "gene_stable_id": "ENSG00000073861", "name": "TBX21" }
+                    }],
+                    "display_name": "TBX21",
+                    "production_name": "TBX21"
+                }
+            }],
+            "length": "23",
+            "name": "TBX1_AI_TACGGA40NGGC_TYTCACACCTNNNAGGTGTGARA_m2_c4_Cell2013",
+            "source": "SELEX",
+            "stable_id": "ENSPFM0510",
+            "threshold": "4.4",
+            "unit": "Frequencies"
+        })
+    }
+
+    /// A two-position frequency matrix, in the shape release 116 serialises.
+    fn elements_payload() -> serde_json::Value {
+        json!({
+            "length": "2",
+            "unit": "Frequencies",
+            "elements": {
+                "1": { "A": 980, "C": 99, "G": 249, "T": 216 },
+                "2": { "A": 234, "C": 210, "G": 463, "T": 636 }
+            }
+        })
+    }
+
+    #[test]
+    fn json_binding_matrix_elements_flattens_positions_in_acgt_order() {
+        let value = elements_payload();
+        assert_eq!(
+            json_binding_matrix_elements(Some(&value)).as_deref(),
+            Some("980,99,249,216;234,210,463,636")
+        );
+    }
+
+    /// Positions arrive as string keys, so `"10"` must not sort before `"2"`.
+    #[test]
+    fn json_binding_matrix_elements_orders_positions_numerically() {
+        let mut elements = serde_json::Map::new();
+        for position in 1..=10 {
+            elements.insert(
+                position.to_string(),
+                json!({ "A": position, "C": 0, "G": 0, "T": 0 }),
+            );
+        }
+        let value = json!({ "length": "10", "elements": elements });
+
+        let flattened = json_binding_matrix_elements(Some(&value)).unwrap();
+        let first_of_each: Vec<&str> = flattened
+            .split(';')
+            .map(|column| column.split(',').next().unwrap())
+            .collect();
+        assert_eq!(
+            first_of_each,
+            ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+        );
+    }
+
+    /// A matrix missing a position (or a nucleotide) must not be scored
+    /// against, so extraction yields nothing rather than a short matrix.
+    #[test]
+    fn json_binding_matrix_elements_is_none_when_incomplete() {
+        let truncated = json!({
+            "length": "3",
+            "elements": {
+                "1": { "A": 1, "C": 2, "G": 3, "T": 4 },
+                "2": { "A": 1, "C": 2, "G": 3, "T": 4 }
+            }
+        });
+        assert_eq!(json_binding_matrix_elements(Some(&truncated)), None);
+
+        let missing_nucleotide = json!({
+            "length": "1",
+            "elements": { "1": { "A": 1, "C": 2, "G": 3 } }
+        });
+        assert_eq!(
+            json_binding_matrix_elements(Some(&missing_nucleotide)),
+            None
+        );
+    }
+
+    #[test]
+    fn json_binding_matrix_elements_is_none_without_a_matrix() {
+        assert_eq!(json_binding_matrix_elements(None), None);
+        assert_eq!(json_binding_matrix_elements(Some(&json!({}))), None);
+    }
+
+    #[test]
+    fn json_binding_matrix_unit_reads_nested_unit() {
+        let value = elements_payload();
+        assert_eq!(
+            json_binding_matrix_unit(Some(&value)).as_deref(),
+            Some("Frequencies")
+        );
+    }
+
+    #[test]
+    fn json_motif_seq_reads_the_variation_effect_feature_cache() {
+        let payload = json!({
+            "_variation_effect_feature_cache": { "seq": "ACTCTCCAGGGATT" }
+        });
+        let object = payload.as_object().unwrap();
+        assert_eq!(json_motif_seq(object).as_deref(), Some("ACTCTCCAGGGATT"));
+    }
+
+    #[test]
+    fn json_motif_seq_is_none_without_a_cached_sequence() {
+        let payload = json!({ "_variation_effect_feature_cache": {} });
+        assert_eq!(json_motif_seq(payload.as_object().unwrap()), None);
+        assert_eq!(json_motif_seq(json!({}).as_object().unwrap()), None);
+    }
+
+    /// Storable mirror of the JSON flattening, including the blessed wrapper
+    /// the decoder emits for the first occurrence of a shared matrix.
+    #[test]
+    fn sv_binding_matrix_elements_flattens_blessed_matrix() {
+        let mut column = HashMap::new();
+        for (nucleotide, frequency) in [("A", 980), ("C", 99), ("G", 249), ("T", 216)] {
+            column.insert(nucleotide.to_string(), SValue::Int(frequency));
+        }
+        let mut elements = HashMap::new();
+        elements.insert("1".to_string(), SValue::Hash(Arc::new(column)));
+        let mut matrix = HashMap::new();
+        matrix.insert("length".to_string(), SValue::Int(1));
+        matrix.insert("elements".to_string(), SValue::Hash(Arc::new(elements)));
+        let value = SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::Funcgen::BindingMatrix"),
+            value: Arc::new(SValue::Hash(Arc::new(matrix))),
+        };
+
+        assert_eq!(
+            sv_binding_matrix_elements(Some(&value)).as_deref(),
+            Some("980,99,249,216")
+        );
+    }
+
+    #[test]
+    fn sv_motif_seq_reads_the_variation_effect_feature_cache() {
+        let mut cache = HashMap::new();
+        cache.insert(
+            "seq".to_string(),
+            SValue::String(Arc::from("AATCCCTGGAGAGT")),
+        );
+        let mut object = HashMap::new();
+        object.insert(
+            "_variation_effect_feature_cache".to_string(),
+            SValue::Hash(Arc::new(cache)),
+        );
+
+        assert_eq!(sv_motif_seq(&object).as_deref(), Some("AATCCCTGGAGAGT"));
+    }
+
+    #[test]
+    fn json_binding_matrix_id_reads_stable_id_from_nested_object() {
+        let value = binding_matrix_payload();
+        assert_eq!(
+            json_binding_matrix_id(Some(&value)).as_deref(),
+            Some("ENSPFM0510")
+        );
+    }
+
+    #[test]
+    fn json_binding_matrix_id_accepts_scalar_for_older_caches() {
+        let value = json!("MA0001.1");
+        assert_eq!(
+            json_binding_matrix_id(Some(&value)).as_deref(),
+            Some("MA0001.1")
+        );
+    }
+
+    #[test]
+    fn json_binding_matrix_id_is_none_when_absent() {
+        assert_eq!(json_binding_matrix_id(None), None);
+        assert_eq!(json_binding_matrix_id(Some(&json!(null))), None);
+        assert_eq!(json_binding_matrix_id(Some(&json!({}))), None);
+    }
+
+    #[test]
+    fn json_transcription_factors_reads_nested_binding_matrix_complexes() {
+        let payload = json!({ "binding_matrix": binding_matrix_payload() });
+        let object = payload.as_object().unwrap();
+        assert_eq!(json_transcription_factors(object).as_deref(), Some("TBX21"));
+    }
+
+    #[test]
+    fn json_transcription_factors_prefers_top_level_aliases() {
+        let payload = json!({
+            "transcription_factors": ["TFAP2A", "GATA3"],
+            "binding_matrix": binding_matrix_payload()
+        });
+        let object = payload.as_object().unwrap();
+        assert_eq!(
+            json_transcription_factors(object).as_deref(),
+            Some("TFAP2A,GATA3")
+        );
+    }
+
+    #[test]
+    fn sv_binding_matrix_id_reads_stable_id_from_hash() {
+        let mut matrix = HashMap::new();
+        matrix.insert(
+            "stable_id".to_string(),
+            SValue::String(Arc::from("ENSPFM0510")),
+        );
+        let value = SValue::Hash(Arc::new(matrix));
+        assert_eq!(
+            sv_binding_matrix_id(Some(&value)).as_deref(),
+            Some("ENSPFM0510")
+        );
+    }
+
+    #[test]
+    fn sv_binding_matrix_id_unwraps_blessed_matrix() {
+        let mut matrix = HashMap::new();
+        matrix.insert(
+            "stable_id".to_string(),
+            SValue::String(Arc::from("ENSPFM0510")),
+        );
+        let value = SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::Funcgen::BindingMatrix"),
+            value: Arc::new(SValue::Hash(Arc::new(matrix))),
+        };
+        assert_eq!(
+            sv_binding_matrix_id(Some(&value)).as_deref(),
+            Some("ENSPFM0510")
+        );
+    }
+
+    #[test]
+    fn sv_binding_matrix_id_accepts_scalar_for_older_caches() {
+        let value = SValue::String(Arc::from("MA0001.1"));
+        assert_eq!(
+            sv_binding_matrix_id(Some(&value)).as_deref(),
+            Some("MA0001.1")
+        );
+    }
+
+    /// A complex whose `display_name` is the `-` placeholder must fall back to
+    /// `production_name` rather than discarding the whole entry.
+    #[test]
+    fn json_transcription_factors_falls_back_to_production_name_over_placeholder() {
+        let payload = json!({
+            "binding_matrix": {
+                "associated_transcription_factor_complexes": [{
+                    "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex",
+                    "__value": { "display_name": "-", "production_name": "TBX21" }
+                }]
+            }
+        });
+        let object = payload.as_object().unwrap();
+        assert_eq!(json_transcription_factors(object).as_deref(), Some("TBX21"));
+    }
+
+    /// Both names being placeholders yields no transcription factors.
+    #[test]
+    fn json_transcription_factors_skips_complexes_with_only_placeholders() {
+        let payload = json!({
+            "binding_matrix": {
+                "associated_transcription_factor_complexes": [{
+                    "__class": "Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex",
+                    "__value": { "display_name": "-", "production_name": "-" }
+                }]
+            }
+        });
+        let object = payload.as_object().unwrap();
+        assert_eq!(json_transcription_factors(object), None);
+    }
+
+    /// Storable mirror of the placeholder fallback.
+    #[test]
+    fn sv_transcription_factors_falls_back_to_production_name_over_placeholder() {
+        let mut complex = HashMap::new();
+        complex.insert("display_name".to_string(), SValue::String(Arc::from("-")));
+        complex.insert(
+            "production_name".to_string(),
+            SValue::String(Arc::from("TBX21")),
+        );
+        let complex = SValue::Blessed {
+            class: Arc::from("Bio::EnsEMBL::Funcgen::TranscriptionFactorComplex"),
+            value: Arc::new(SValue::Hash(Arc::new(complex))),
+        };
+        let mut matrix = HashMap::new();
+        matrix.insert(
+            "associated_transcription_factor_complexes".to_string(),
+            SValue::Array(Arc::new(vec![complex])),
+        );
+        let mut object = HashMap::new();
+        object.insert("binding_matrix".to_string(), SValue::Hash(Arc::new(matrix)));
+
+        assert_eq!(
+            storable_transcription_factors(&object).as_deref(),
+            Some("TBX21")
+        );
+    }
+
+    #[test]
+    fn json_binding_matrix_length_reads_nested_length() {
+        assert_eq!(
+            json_binding_matrix_length(Some(&binding_matrix_payload())),
+            Some(23)
+        );
+        assert_eq!(json_binding_matrix_length(Some(&json!("MA0001.1"))), None);
+        assert_eq!(json_binding_matrix_length(None), None);
+    }
+
+    #[test]
+    fn sv_binding_matrix_length_reads_nested_length() {
+        let mut matrix = HashMap::new();
+        matrix.insert("length".to_string(), SValue::String(Arc::from("23")));
+        let value = SValue::Hash(Arc::new(matrix));
+        assert_eq!(sv_binding_matrix_length(Some(&value)), Some(23));
     }
 }

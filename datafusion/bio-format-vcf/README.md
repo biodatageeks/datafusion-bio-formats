@@ -1,6 +1,6 @@
 # datafusion-bio-format-vcf
 
-VCF (Variant Call Format) file format support for Apache DataFusion, enabling SQL queries on genetic variation data.
+VCF and BCF file format support for Apache DataFusion, enabling SQL queries on genetic variation data.
 
 ## Overview
 
@@ -8,9 +8,10 @@ This crate provides a DataFusion `TableProvider` implementation for reading and 
 
 ## Features
 
-- Read and write VCF files directly as DataFusion tables
+- Read VCF and BCF 2.2 files directly as DataFusion tables
+- Write VCF files directly from DataFusion queries
 - Support for compressed files (GZIP, BGZF)
-- Parallel reading of BGZF-compressed files via TBI/CSI indexes
+- Parallel local reading of BGZF-compressed VCF/BCF via TBI/CSI indexes
 - Cloud storage support (GCS, S3, Azure Blob Storage)
 - Preserves case sensitivity for INFO and FORMAT fields
 - Projection pushdown for efficient querying
@@ -101,6 +102,32 @@ let table = VcfTableProvider::new(
 )?;
 ctx.register_table("vcf_table", Arc::new(table))?;
 ```
+
+### BCF Registration
+
+Paths ending in `.bcf` are detected automatically and use the same schema,
+projection, sample selection, and SQL interface as equivalent VCF input:
+
+```rust
+let table = VcfTableProvider::new(
+    "data/variants.bcf".to_string(),
+    Some(vec!["AF".to_string()]),
+    Some(vec!["GT".to_string(), "DP".to_string()]),
+    None,
+    true,
+)?;
+ctx.register_table("variants", Arc::new(table))?;
+```
+
+Use `VcfInputFormat::Bcf` with `new_with_format` when a BCF object does not
+have a `.bcf` suffix. Local `sample.bcf.csi` indexes are discovered
+automatically; `new_with_samples_and_format` accepts an explicit CSI path.
+Unindexed BCF uses one streaming partition with a reusable record buffer.
+
+BCF support is read-only. Remote BCF objects stream through the configured
+object store. When a remote CSI companion is available, genomic predicates
+are planned as coalesced BGZF byte ranges instead of downloading the complete
+BCF payload.
 
 ### With Sample Selection
 

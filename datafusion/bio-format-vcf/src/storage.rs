@@ -13,7 +13,7 @@ use futures::stream::BoxStream;
 use futures::{StreamExt, stream};
 use log::debug;
 use log::info;
-use noodles_bgzf::{AsyncReader, Reader as BgzfReader};
+use noodles_bgzf::{r#async::io::Reader as AsyncReader, io::Reader as BgzfReader};
 use noodles_vcf as vcf;
 use opendal::FuturesBytesStream;
 use std::fs::File;
@@ -292,6 +292,7 @@ pub async fn get_header(
 ///
 /// This enum handles BGZF, GZIP, and uncompressed remote VCF files from cloud storage.
 /// The appropriate variant is created based on the detected compression type.
+#[allow(clippy::large_enum_variant)]
 pub enum VcfRemoteReader {
     /// Reader for BGZF-compressed remote VCF files.
     BGZF(vcf::r#async::io::Reader<AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>),
@@ -592,16 +593,8 @@ pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
         used_names.extend(header.infos().keys().map(|name| name.to_string()));
 
         for (field_name, field) in header.formats() {
-            let column_name = if used_names.contains(field_name.as_str()) {
-                let candidate = format!("fmt_{field_name}");
-                if used_names.contains(&candidate) {
-                    format!("format_{field_name}")
-                } else {
-                    candidate
-                }
-            } else {
-                field_name.to_string()
-            };
+            let column_name =
+                resolve_single_sample_format_column_name(&used_names, field_name.as_str());
             used_names.insert(column_name.clone());
 
             field_names.append_value(column_name);
@@ -647,10 +640,31 @@ pub async fn get_vcf_fields(header: &Header) -> arrow::array::RecordBatch {
     .unwrap()
 }
 
+pub(crate) fn resolve_single_sample_format_column_name(
+    used_names: &std::collections::HashSet<String>,
+    format_id: &str,
+) -> String {
+    if !used_names.contains(format_id) {
+        return format_id.to_string();
+    }
+
+    let mut candidate = format!("fmt_{format_id}");
+    if used_names.contains(&candidate) {
+        candidate = format!("format_{format_id}");
+    }
+    let mut suffix = 2;
+    while used_names.contains(&candidate) {
+        candidate = format!("format_{format_id}_{suffix}");
+        suffix += 1;
+    }
+    candidate
+}
+
 /// Unified reader for both local and remote VCF files.
 ///
 /// This is the primary entry point for reading VCF files from any source (local, S3, GCS, etc).
 /// It automatically detects the storage type and compression format.
+#[allow(clippy::large_enum_variant)]
 pub enum VcfReader {
     /// Reader for local VCF files.
     Local(VcfLocalReader),
@@ -738,7 +752,7 @@ impl VcfReader {
 /// reader is `Send`. That lets the indexed scan decode inline on the consuming tokio
 /// worker via `async_stream::try_stream!` instead of a dedicated reader thread.
 pub struct IndexedVcfReader {
-    reader: vcf::io::Reader<noodles_bgzf_vcf::io::Reader<File>>,
+    reader: vcf::io::Reader<noodles_bgzf::io::Reader<File>>,
     index: noodles_tabix::Index,
     header: vcf::Header,
 }
@@ -751,7 +765,7 @@ impl IndexedVcfReader {
     /// * `index_path` - Path to the TBI or CSI index file
     pub fn new(file_path: &str, index_path: &str) -> Result<Self, std::io::Error> {
         let index = noodles_tabix::fs::read(index_path)?;
-        let inner = noodles_bgzf_vcf::io::Reader::new(File::open(file_path)?);
+        let inner = noodles_bgzf::io::Reader::new(File::open(file_path)?);
         let mut reader = vcf::io::Reader::new(inner);
         let header = reader.read_header()?;
         Ok(Self {
@@ -780,7 +794,9 @@ impl IndexedVcfReader {
         &mut self,
         region: &noodles_core::Region,
     ) -> Result<impl Iterator<Item = Result<Record, std::io::Error>> + '_, std::io::Error> {
-        self.reader.query(&self.header, &self.index, region)
+        self.reader
+            .query(&self.header, &self.index, region)
+            .map(|q| q.records())
     }
 }
 
@@ -977,6 +993,13 @@ pub struct VcfRecordFields {
     pub start: Option<u32>,
     /// End position (in the output coordinate system)
     pub end: Option<u32>,
+}
+
+impl VcfRecordFields {
+    /// Columns that record-level filter evaluation can actually resolve.
+    /// Filters referencing any other column pass through unevaluated, so limit
+    /// pushdown must not rely on them.
+    pub const FILTER_COLUMNS: &'static [&'static str] = &["chrom", "start", "end"];
 }
 
 impl RecordFieldAccessor for VcfRecordFields {

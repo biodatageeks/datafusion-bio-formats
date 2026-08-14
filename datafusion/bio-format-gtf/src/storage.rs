@@ -104,7 +104,7 @@ pub enum GtfLocalReader {
     /// GZIP compressed reader
     Gzip(Box<BufReader<MultiGzDecoder<File>>>),
     /// BGZF compressed reader (block-gzipped, used with tabix indexes)
-    Bgzf(Box<BufReader<noodles_bgzf::Reader<File>>>),
+    Bgzf(Box<BufReader<noodles_bgzf::io::Reader<File>>>),
 }
 
 impl GtfLocalReader {
@@ -118,7 +118,7 @@ impl GtfLocalReader {
             // Check if this is BGZF by reading the first few bytes
             if is_bgzf(path)? {
                 let file = File::open(path)?;
-                let bgzf_reader = noodles_bgzf::Reader::new(file);
+                let bgzf_reader = noodles_bgzf::io::Reader::new(file);
                 Ok(GtfLocalReader::Bgzf(Box::new(BufReader::new(bgzf_reader))))
             } else {
                 let file = File::open(path)?;
@@ -148,13 +148,18 @@ impl GtfLocalReader {
 }
 
 /// Async remote GTF file reader supporting plain, GZIP, and BGZF compressed streams
+#[allow(clippy::large_enum_variant)]
 pub enum GtfRemoteReader {
     /// Plain text remote reader
     Plain(tokio::io::BufReader<StreamReader<FuturesBytesStream, Bytes>>),
     /// GZIP compressed remote reader
     Gzip(tokio::io::BufReader<GzipDecoder<StreamReader<FuturesBytesStream, Bytes>>>),
     /// BGZF compressed remote reader
-    Bgzf(tokio::io::BufReader<noodles_bgzf::AsyncReader<StreamReader<FuturesBytesStream, Bytes>>>),
+    Bgzf(
+        tokio::io::BufReader<
+            noodles_bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>,
+        >,
+    ),
 }
 
 impl GtfRemoteReader {
@@ -314,8 +319,7 @@ pub(crate) fn parse_gtf_line(line: &str) -> Result<GtfRecord, Error> {
 /// BGZF-compressed, tabix-indexed GTF files. This is used when an index file (.tbi/.csi)
 /// is available and genomic region filters are present.
 pub struct IndexedGtfReader {
-    reader:
-        noodles_csi::io::IndexedReader<noodles_bgzf_gtf::io::Reader<File>, noodles_tabix::Index>,
+    reader: noodles_csi::io::IndexedReader<noodles_bgzf::io::Reader<File>, noodles_tabix::Index>,
     contig_names: Vec<String>,
 }
 

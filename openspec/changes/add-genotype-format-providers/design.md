@@ -157,7 +157,8 @@ The format-specific child fields are:
 
 | Format/mode | Genotype children |
 | --- | --- |
-| BCF | Existing VCF FORMAT-to-Arrow mapping |
+| BCF string mode (default) | Existing VCF FORMAT-to-Arrow mapping |
+| BCF dosage mode | `GT: List<Int8>` containing biallelic ALT dosage 0..ploidy or null |
 | PLINK 1 | `GT: List<UInt8>` containing A1 dosage 0, 1, 2, or null |
 | BGEN probability | `GP: List<List<Float32>>`, `PLOIDY: List<UInt8>`, and variant `phased` |
 | BGEN dosage | `DS: List<Float32>` and `PLOIDY: List<UInt8>` |
@@ -168,6 +169,16 @@ The format-specific child fields are:
 
 Null represents missing sample genotype data. Empty inner allele/probability
 lists are not used as a substitute for missingness.
+
+BCF dosage mode is explicit and defined only for records with exactly one ALT
+allele. It counts allele index 1 across the called GT alleles, ignores phase,
+uses null when any allele is missing, and rejects multiallelic records rather
+than collapsing distinct alternate alleles. The `Int8` representation supports
+first-ALT dosage through 127. Ploidy is tracked independently, so higher-ploidy
+genotypes remain valid when their observed dosage is representable; an observed
+dosage above 127 is rejected and remains available through default string mode.
+Schema metadata records the output mode and that dosage counts the first ALT
+allele.
 
 BGEN `GP` state ordering SHALL be the exact ordering defined by the BGEN
 specification for phased/unphased data, ploidy, and allele count. PGEN raw
@@ -321,6 +332,31 @@ BCF uses a streaming BCF 2.2 decoder over BGZF and reuses record buffers. Header
 string dictionaries are resolved once. CSI provides sparse range reads and
 parallel chunks; unindexed input falls back to one sequential partition.
 Samples and FORMAT children are projected before typed value conversion.
+CSI companions have a hard byte ceiling. Local files are rejected from
+metadata before parsing, while remote companions use a single-request stream
+whose observed chunks are checked before extending the bounded buffer. The
+single-request storage primitive intentionally avoids a HEAD preflight so it
+also works with GET-only signed URLs.
+Remote CSI-selected BCF spans are not materialized even when one index chunk is
+large: an explicit range stream caps each sequential backend read at 8 MiB and
+feeds those bytes directly into the asynchronous BGZF and BCF decoders. Outer
+DataFusion partitions provide scan concurrency without multiplying the cap
+inside one partition.
+
+The BCF individual section is scanned once into validated typed FORMAT-series
+views containing the dictionary key, encoded primitive type, per-sample width,
+and borrowed payload. Projected series dispatch to preselected typed sinks;
+unprojected series are validated and skipped without constructing noodles
+trait objects or intermediate per-sample values. Validation and materialization
+are fused where the selected sink can enforce the same integrity checks.
+
+GT has representation-specific sinks. Default string mode retains the existing
+lossless VCF-compatible path. Dosage mode decodes BCF allele integers directly
+into contiguous Arrow `Int8` values and validity bits, without constructing GT
+strings, boxed per-cell iterators, or a complete-file genotype matrix. The
+FORMAT-series scanner and sink boundary are intentionally field-generic so
+integer, float, vector, and string FORMAT children can migrate to direct typed
+decoders without changing the record reader or public mode semantics.
 
 #### PLINK 1
 
@@ -418,6 +454,13 @@ Each format receives:
 Differential comparisons normalize only declared semantic differences such as
 floating-point quantization and coordinate presentation. Benchmarks report
 wall time, throughput, peak memory, bytes read, ranges, and decoded values.
+
+The BCF dosage release gate uses fresh one-thread processes, release builds
+with native CPU tuning, the same source file and selected samples, equivalent
+biallelic hard-call dosage values, and both timing and peak RSS. At least three
+interleaved runs are summarized by their median. The optimized streaming BCF
+path must have a lower median wall time than the pinned independent snputils
+GT-dosage baseline before the performance task is complete.
 
 ### 17. Licensing boundary
 

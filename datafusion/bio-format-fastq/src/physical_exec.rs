@@ -15,7 +15,7 @@ use datafusion_bio_format_core::object_storage::{
 use datafusion_bio_format_core::sync_stream::sync_batch_stream;
 use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
-use noodles_bgzf::{IndexedReader, gzi};
+use noodles_bgzf::{gzi, io::IndexedReader};
 use noodles_fastq as fastq;
 use std::any::Any;
 use std::fmt::{Debug, Formatter};

@@ -19,7 +19,7 @@ use std::path::Path;
 /// Local Pairs file reader supporting BGZF, GZIP, and plain text.
 pub enum PairsLocalReader {
     /// BGZF-compressed reader
-    BGZF(BufReader<bgzf::Reader<File>>),
+    BGZF(BufReader<bgzf::io::Reader<File>>),
     /// GZIP-compressed reader
     GZIP(Box<BufReader<MultiGzDecoder<File>>>),
     /// Plain text reader
@@ -69,7 +69,7 @@ pub fn get_local_pairs_header(
 
     if is_bgzf {
         let file = File::open(file_path)?;
-        let bgzf_reader = bgzf::Reader::new(file);
+        let bgzf_reader = bgzf::io::Reader::new(file);
         let mut buf_reader = BufReader::new(bgzf_reader);
         parse_pairs_header(&mut buf_reader)
     } else if is_gzip {
@@ -100,7 +100,7 @@ pub async fn new_local_reader(
     let file = File::open(file_path)?;
     match compression {
         CompressionType::BGZF => {
-            let bgzf_reader = bgzf::Reader::new(file);
+            let bgzf_reader = bgzf::io::Reader::new(file);
             Ok(PairsLocalReader::BGZF(BufReader::new(bgzf_reader)))
         }
         CompressionType::GZIP => {
@@ -117,8 +117,7 @@ pub async fn new_local_reader(
 /// BGZF-compressed, tabix-indexed Pairs files. Used when an index file (.tbi/.csi/.px2)
 /// is available and chr1/pos1 filters are present.
 pub struct IndexedPairsReader {
-    reader:
-        noodles_csi::io::IndexedReader<noodles_bgzf_pairs::io::Reader<File>, noodles_tabix::Index>,
+    reader: noodles_csi::io::IndexedReader<noodles_bgzf::io::Reader<File>, noodles_tabix::Index>,
     contig_names: Vec<String>,
     #[allow(dead_code)]
     header: PairsHeader,
@@ -151,7 +150,7 @@ impl IndexedPairsReader {
         // Parse header from the BGZF file for column info
         let header = {
             let file = File::open(file_path)?;
-            let bgzf_reader = bgzf::Reader::new(file);
+            let bgzf_reader = bgzf::io::Reader::new(file);
             let mut buf_reader = BufReader::new(bgzf_reader);
             parse_pairs_header(&mut buf_reader)?
         };

@@ -45,28 +45,42 @@
 
 ## 3. BCF Provider
 
-- [ ] 3.1 Add BCF input detection and explicit format selection to the VCF crate.
-- [ ] 3.2 Parse and validate BCF 2.2 headers and string dictionaries.
-- [ ] 3.3 Map BCF records to the existing VCF logical schema without API changes.
-- [ ] 3.4 Preserve scalar/vector missing values, vector-end markers, phase,
+- [x] 3.1 Add BCF input detection and explicit format selection to the VCF crate.
+- [x] 3.2 Parse and validate BCF 2.2 headers and string dictionaries.
+- [x] 3.3 Map BCF records to the existing VCF logical schema without API changes.
+- [x] 3.4 Preserve scalar/vector missing values, vector-end markers, phase,
   ploidy, multiallelic alleles, and case-sensitive INFO/FORMAT names.
-- [ ] 3.5 Add streaming BGZF BCF decoding with reusable record and value buffers.
-- [ ] 3.6 Apply INFO, FORMAT, and sample projection before Arrow conversion.
-- [ ] 3.7 Discover explicit and conventional CSI companions locally and through
+- [x] 3.5 Add streaming BGZF BCF decoding with reusable record and value buffers.
+- [x] 3.6 Apply INFO, FORMAT, and sample projection before Arrow conversion.
+- [x] 3.7 Discover explicit and conventional CSI companions locally and through
   the configured object store.
-- [ ] 3.8 Plan CSI regions, merge overlapping chunks, and balance compressed
+- [x] 3.8 Plan CSI regions, merge overlapping chunks, and balance compressed
   byte ranges across target partitions.
-- [ ] 3.9 Apply record-level validation after inexact CSI pruning and remove
+- [x] 3.9 Apply record-level validation after inexact CSI pruning and remove
   duplicate chunk records.
-- [ ] 3.10 Add a one-partition sequential fallback for unindexed BCF.
-- [ ] 3.11 Support local, HTTP, S3, GCS, and Azure range reads through existing
+- [x] 3.10 Add a one-partition sequential fallback for unindexed BCF.
+- [x] 3.11 Support local, HTTP, S3, GCS, and Azure range reads through existing
   storage abstractions.
 - [ ] 3.12 Add BCF corruption, truncation, invalid dictionary, and allocation
   limit tests.
-- [ ] 3.13 Add differential tests against htslib/bcftools and `noodles-bcf`.
-- [ ] 3.14 Add BCF-to-VCF logical equivalence fixtures for INFO/FORMAT schemas.
+- [x] 3.13 Add differential tests against htslib/bcftools and `noodles-bcf`.
+- [x] 3.14 Add BCF-to-VCF logical equivalence fixtures for INFO/FORMAT schemas.
 - [ ] 3.15 Benchmark sequential, indexed-region, metadata-only, sparse-sample,
   and parallel scans.
+- [x] 3.16 Add an explicit BCF genotype output mode while preserving string GT
+  and the current schema as the default.
+- [x] 3.17 Refactor BCF FORMAT parsing into borrowed validated series views and
+  an extensible projected typed-sink dispatch.
+- [x] 3.18 Implement fused biallelic GT validation and direct nullable `Int8`
+  ALT-dosage construction without intermediate genotype strings.
+- [x] 3.19 Cover dosage missingness, phase independence, sample selection,
+  encoded integer widths, dosage overflow independently of ploidy, and
+  multiallelic rejection.
+- [x] 3.20 Expose BCF dosage mode through polars-bio and verify complete output
+  equivalence against the independent snputils result.
+- [x] 3.21 On the representative public cohort, require the median of at least
+  three fresh one-thread release/native runs to beat the pinned snputils
+  baseline while reporting peak RSS.
 
 ## 4. PLINK 1 Provider
 
