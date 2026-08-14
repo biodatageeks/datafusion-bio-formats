@@ -159,6 +159,13 @@ intermediate per-sample string or dynamically boxed value representation.
 - **AND** no Arrow values or per-sample decoded objects are constructed for
   those children.
 
+#### Scenario: Cohort-scale FORMAT validation
+- **WHEN** FORMAT cardinality is validated across many source samples
+- **THEN** samples are checked incrementally without a sample-count-sized
+  temporary collection or per-sample diagnostic allocation
+- **AND** `Number=G` and `Number=P` payload descriptors retained from the first
+  pass are validated without reparsing the complete FORMAT byte slice.
+
 #### Scenario: Unsupported direct decoder
 - **WHEN** a requested representation has no direct typed sink
 - **THEN** the existing conformant decoder remains available

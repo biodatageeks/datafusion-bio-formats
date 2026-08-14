@@ -9,11 +9,11 @@ use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::{
-    AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
-    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
-    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY,
-    VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string,
-    to_json_string,
+    AltAlleleMetadata, ContigMetadata, FilterMetadata, GENOTYPE_SAMPLE_NAMES_KEY,
+    VCF_ALTERNATIVE_ALLELES_KEY, VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY,
+    VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
+    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
+    from_json_string, to_json_string,
 };
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use datafusion_bio_format_vcf::writer::VcfCompressionType;
@@ -768,10 +768,9 @@ async fn test_write_vcf_from_named_struct_genotypes() {
     cleanup_files(&[output_path]).await;
 }
 
-/// Tests that when the input schema has VCF_GENOTYPES_SAMPLE_NAMES_KEY metadata
-/// on the genotypes field, the writer uses those sample names instead of generating them.
+/// Tests that shared genotype sample metadata is sufficient for VCF writing.
 #[tokio::test]
-async fn test_write_vcf_input_schema_metadata_fallback() {
+async fn test_write_vcf_input_shared_schema_metadata_fallback() {
     let output_path = "/tmp/test_write_input_schema_metadata_fallback.vcf";
 
     let gt_list_field = Field::new(
@@ -783,7 +782,7 @@ async fn test_write_vcf_input_schema_metadata_fallback() {
     // Genotypes field WITH sample name metadata
     let mut genotypes_metadata = std::collections::HashMap::new();
     genotypes_metadata.insert(
-        VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
+        GENOTYPE_SAMPLE_NAMES_KEY.to_string(),
         to_json_string(&vec!["NA12878".to_string(), "NA12891".to_string()]),
     );
 

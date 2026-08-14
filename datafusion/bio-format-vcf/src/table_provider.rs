@@ -21,6 +21,7 @@ use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use datafusion_bio_format_core::{
     COORDINATE_SYSTEM_METADATA_KEY, GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY,
+    GENOTYPE_SAMPLE_NAMES_KEY,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -670,7 +671,10 @@ impl VcfTableProvider {
         // 1. Check genotypes field metadata (direct round-trip from multi-sample read)
         if let Ok(idx) = schema.index_of("genotypes") {
             let field = schema.field(idx);
-            if let Some(json) = field.metadata().get(VCF_GENOTYPES_SAMPLE_NAMES_KEY)
+            if let Some(json) = field
+                .metadata()
+                .get(VCF_GENOTYPES_SAMPLE_NAMES_KEY)
+                .or_else(|| field.metadata().get(GENOTYPE_SAMPLE_NAMES_KEY))
                 && let Some(names) = from_json_string::<Vec<String>>(json)
                 && !names.is_empty()
             {

@@ -6,6 +6,7 @@
 
 use datafusion::common::Result;
 use datafusion::prelude::SessionContext;
+use datafusion_bio_format_core::GENOTYPE_SAMPLE_NAMES_KEY;
 use datafusion_bio_format_core::metadata::VCF_GENOTYPES_SAMPLE_NAMES_KEY;
 
 /// Registers a `{table_name}_long` view that unnests columnar genotypes
@@ -93,6 +94,7 @@ pub async fn auto_register_vcf_long_view(ctx: &SessionContext, table_name: &str)
     let sample_names: Vec<String> = genotypes_field
         .metadata()
         .get(VCF_GENOTYPES_SAMPLE_NAMES_KEY)
+        .or_else(|| genotypes_field.metadata().get(GENOTYPE_SAMPLE_NAMES_KEY))
         .and_then(|json| serde_json::from_str(json).ok())
         .unwrap_or_default();
 
