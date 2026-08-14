@@ -99,9 +99,11 @@ where
 
     let body = (&mut *inner).take(header_len);
     let bounded = Cursor::new(prefix).chain(body);
-    bcf::io::Reader::from(bounded)
+    let header = bcf::io::Reader::from(bounded)
         .read_header()
-        .map_err(|e| execution_error("failed to parse BCF header", e))
+        .map_err(|e| execution_error("failed to parse BCF header", e))?;
+    validate_bcf_header(&header)?;
+    Ok(header)
 }
 
 async fn read_bcf_header_bounded_async<R>(inner: &mut R) -> Result<Header>
@@ -116,10 +118,28 @@ where
 
     let body = tokio::io::AsyncReadExt::take(&mut *inner, header_len);
     let bounded = tokio::io::AsyncReadExt::chain(Cursor::new(prefix), body);
-    bcf::r#async::io::Reader::from(bounded)
+    let header = bcf::r#async::io::Reader::from(bounded)
         .read_header()
         .await
-        .map_err(|e| execution_error("failed to parse BCF header", e))
+        .map_err(|e| execution_error("failed to parse BCF header", e))?;
+    validate_bcf_header(&header)?;
+    Ok(header)
+}
+
+fn validate_bcf_header(header: &Header) -> Result<()> {
+    let Some(gt) = header.formats().get("GT") else {
+        return Ok(());
+    };
+
+    // GT is physically encoded as an integer vector in BCF, but its logical
+    // VCF header declaration remains reserved as Number=1,Type=String.
+    if gt.number() != FormatNumber::Count(1) || gt.ty() != FormatType::String {
+        return Err(DataFusionError::Execution(
+            "invalid BCF GT header declaration: expected Number=1,Type=String".into(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn read_bcf_record_lengths(prefix: [u8; BCF_RECORD_LENGTH_PREFIX_SIZE]) -> io::Result<(u64, u64)> {
@@ -3251,6 +3271,38 @@ mod tests {
         let error = validate_version((2, 1)).unwrap_err().to_string();
         assert!(error.contains("bcftools view -Ob"));
         assert!(validate_version((3, 0)).is_err());
+    }
+
+    #[test]
+    fn validates_reserved_gt_header_declaration() {
+        let text = "##fileformat=VCFv4.3\n\
+                    ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                    #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n";
+        let mut reader = vcf::io::Reader::new(text.as_bytes());
+        let header = reader.read_header().unwrap();
+        assert!(validate_bcf_header(&header).is_ok());
+
+        let mut invalid_number = header.clone();
+        *invalid_number
+            .formats_mut()
+            .get_mut("GT")
+            .unwrap()
+            .number_mut() = FormatNumber::Count(2);
+        let error = validate_bcf_header(&invalid_number)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "Execution error: invalid BCF GT header declaration: expected Number=1,Type=String"
+        );
+
+        let mut invalid_type = header;
+        *invalid_type.formats_mut().get_mut("GT").unwrap().type_mut() = FormatType::Integer;
+        let error = validate_bcf_header(&invalid_type).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "Execution error: invalid BCF GT header declaration: expected Number=1,Type=String"
+        );
     }
 
     #[test]

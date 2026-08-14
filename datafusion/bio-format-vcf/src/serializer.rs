@@ -7,8 +7,60 @@ use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
     ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
 };
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
-use datafusion_bio_format_core::metadata::VCF_FIELD_FORMAT_ID_KEY;
+use datafusion_bio_format_core::{GENOTYPE_OUTPUT_MODE_KEY, metadata::VCF_FIELD_FORMAT_ID_KEY};
+
+const VCF_GENOTYPE_OUTPUT_MODE_KEY: &str = "bio.vcf.genotype_output_mode";
+const DOSAGE_MODE: &str = "dosage";
+
+fn field_is_gt(field: &Field) -> bool {
+    field.name() == "GT"
+        || field
+            .metadata()
+            .get(VCF_FIELD_FORMAT_ID_KEY)
+            .is_some_and(|format_id| format_id == "GT")
+}
+
+fn list_has_int8_items(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::List(item) | DataType::LargeList(item) => item.data_type() == &DataType::Int8,
+        _ => false,
+    }
+}
+
+fn schema_has_dosage_gt(schema: &SchemaRef) -> bool {
+    let declares_dosage = [GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY]
+        .into_iter()
+        .any(|key| {
+            schema
+                .metadata()
+                .get(key)
+                .is_some_and(|mode| mode == DOSAGE_MODE)
+        });
+
+    declares_dosage
+        || schema.fields().iter().any(|field| {
+            (field_is_gt(field) && field.data_type() == &DataType::Int8)
+                || (field.name() == "genotypes"
+                    && matches!(field.data_type(), DataType::Struct(children) if children
+                        .iter()
+                        .any(|child| field_is_gt(child) && list_has_int8_items(child.data_type()))))
+        })
+}
+
+pub(crate) fn validate_vcf_serializable_genotypes(schema: &SchemaRef) -> Result<()> {
+    if schema_has_dosage_gt(schema) {
+        return Err(DataFusionError::Plan(
+            "VCF serialization does not support genotype dosage input; nullable Int8 ALT counts \
+             cannot reconstruct the original GT allele calls, ploidy, or phase. Read BCF with \
+             string GT representation before writing VCF."
+                .into(),
+        ));
+    }
+
+    Ok(())
+}
 
 /// Enum to hold StringArray, LargeStringArray, or StringViewArray reference.
 /// This allows handling standard Arrow Utf8, Polars LargeUtf8, and DataFusion Utf8View types.
@@ -460,6 +512,8 @@ pub fn batch_to_vcf_lines(
     sample_names: &[String],
     coordinate_system_zero_based: bool,
 ) -> Result<Vec<VcfRecordLine>> {
+    validate_vcf_serializable_genotypes(&batch.schema())?;
+
     let num_rows = batch.num_rows();
     if num_rows == 0 {
         return Ok(Vec::new());
@@ -1090,6 +1144,80 @@ mod tests {
             Field::new("qual", DataType::Float64, true),
             Field::new("filter", DataType::Utf8, true),
         ]))
+    }
+
+    #[test]
+    fn rejects_flat_and_columnar_dosage_gt_schemas() {
+        let mut gt_metadata = std::collections::HashMap::new();
+        gt_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
+
+        let flat = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("GT", DataType::Int8, true).with_metadata(gt_metadata.clone()),
+        ]));
+        let error = validate_vcf_serializable_genotypes(&flat)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not support genotype dosage input"));
+
+        let nested_gt = Field::new(
+            "GT",
+            DataType::List(Arc::new(Field::new("item", DataType::Int8, true))),
+            true,
+        )
+        .with_metadata(gt_metadata);
+        let columnar = Arc::new(Schema::new(vec![Field::new(
+            "genotypes",
+            DataType::Struct(vec![nested_gt].into()),
+            true,
+        )]));
+        let error = validate_vcf_serializable_genotypes(&columnar)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot reconstruct the original GT allele calls"));
+    }
+
+    #[test]
+    fn rejects_dosage_metadata_even_after_gt_projection() {
+        for key in [GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY] {
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert(key.to_string(), DOSAGE_MODE.to_string());
+            let schema = Arc::new(
+                Schema::new(vec![Field::new("chrom", DataType::Utf8, false)])
+                    .with_metadata(metadata),
+            );
+            assert!(validate_vcf_serializable_genotypes(&schema).is_err());
+        }
+    }
+
+    #[test]
+    fn accepts_lossless_string_gt_schema() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("GT", DataType::Utf8, true).with_metadata(metadata),
+        ]));
+        assert!(validate_vcf_serializable_genotypes(&schema).is_ok());
+    }
+
+    #[test]
+    fn batch_serializer_rejects_dosage_before_emitting_missing_gt_calls() {
+        let mut fields = create_test_schema().fields().to_vec();
+        fields.push(Arc::new(Field::new("GT", DataType::Int8, true)));
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            GENOTYPE_OUTPUT_MODE_KEY.to_string(),
+            DOSAGE_MODE.to_string(),
+        );
+        let batch = RecordBatch::new_empty(Arc::new(Schema::new_with_metadata(fields, metadata)));
+
+        let error =
+            match batch_to_vcf_lines(&batch, &[], &["GT".to_string()], &["S1".to_string()], true) {
+                Ok(_) => panic!("dosage GT must not be serialized as missing VCF calls"),
+                Err(error) => error.to_string(),
+            };
+        assert!(error.contains("does not support genotype dosage input"));
     }
 
     #[test]

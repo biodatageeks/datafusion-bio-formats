@@ -169,15 +169,53 @@ impl RangeServer {
                     Err(error) => panic!("range server failed: {error}"),
                 };
                 stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
 
-                let mut request = [0u8; 8192];
-                let size = stream.read(&mut request).unwrap();
-                let request = String::from_utf8_lossy(&request[..size]);
+                // A TCP read is not an HTTP-message boundary, and clients can
+                // cancel speculative connections. Accumulate one bounded header
+                // and quietly discard incomplete requests instead of panicking
+                // the server thread (and subsequently `Drop::join`).
+                let mut request = Vec::with_capacity(1024);
+                let mut headers_complete = false;
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(size) if request.len() + size <= 8192 => {
+                            request.extend_from_slice(&chunk[..size]);
+                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                headers_complete = true;
+                                break;
+                            }
+                        }
+                        Ok(_) => break,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) =>
+                        {
+                            break;
+                        }
+                        Err(error) => panic!("range server failed to read request: {error}"),
+                    }
+                }
+                if !headers_complete {
+                    continue;
+                }
+
+                let request = String::from_utf8_lossy(&request);
                 let mut lines = request.lines();
-                let first_line = lines.next().unwrap();
+                let Some(first_line) = lines.next() else {
+                    continue;
+                };
                 let mut parts = first_line.split_whitespace();
-                let method = parts.next().unwrap();
-                let path = parts.next().unwrap().to_string();
+                let (Some(method), Some(path)) = (parts.next(), parts.next()) else {
+                    continue;
+                };
+                let path = path.to_string();
                 let range = lines.find_map(|line| {
                     let (name, value) = line.split_once(':')?;
                     if !name.eq_ignore_ascii_case("range") {
@@ -185,10 +223,7 @@ impl RangeServer {
                     }
                     let value = value.trim().strip_prefix("bytes=")?;
                     let (start, end) = value.split_once('-')?;
-                    Some((
-                        start.parse::<usize>().unwrap(),
-                        end.parse::<usize>().unwrap(),
-                    ))
+                    Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
                 });
                 server_requests.lock().unwrap().push(HttpRequest {
                     method: method.to_string(),
@@ -798,6 +833,62 @@ async fn bcf_rejects_record_sample_count_mismatch() -> Result<(), Box<dyn std::e
         error.contains("BCF record sample count 0 does not match header sample count 2"),
         "unexpected error: {error}"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bcf_rejects_invalid_reserved_gt_header_locally_and_remotely()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let mut decompressed = Vec::new();
+    noodles_bgzf::io::Reader::new(File::open(&bcf_path)?).read_to_end(&mut decompressed)?;
+
+    let header_len = u32::from_le_bytes(decompressed[5..9].try_into()?) as usize;
+    let header = &mut decompressed[9..9 + header_len];
+    let marker = b"ID=GT,Number=1,Type=String";
+    let marker_start = header
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .expect("fixture must contain the reserved GT header declaration");
+    let number_offset = marker_start + b"ID=GT,Number=".len();
+    assert_eq!(header[number_offset], b'1');
+    header[number_offset] = b'2';
+
+    let mut writer = noodles_bgzf::io::Writer::new(File::create(&bcf_path)?);
+    writer.write_all(&decompressed)?;
+    writer.try_finish()?;
+    drop(writer);
+
+    let expected = "invalid BCF GT header declaration: expected Number=1,Type=String";
+    let local_error = VcfTableProvider::new(
+        bcf_path.clone(),
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        true,
+    )
+    .expect_err("a malformed local GT declaration must fail during header loading")
+    .to_string();
+    assert!(
+        local_error.contains(expected),
+        "unexpected error: {local_error}"
+    );
+
+    let server = RangeServer::start(std::fs::read(&bcf_path)?, Vec::new());
+    let remote_error = VcfTableProvider::new(
+        server.url(),
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        true,
+    )
+    .expect_err("a malformed remote GT declaration must fail during header loading")
+    .to_string();
+    assert!(
+        remote_error.contains(expected),
+        "unexpected error: {remote_error}"
+    );
+
     Ok(())
 }
 
@@ -1603,6 +1694,48 @@ async fn bcf_dosage_validates_gt_with_dependent_formats_on_filtered_fast_path()
         .collect()
         .await
         .expect_err("filtered GT corruption must remain visible on the dependent FORMAT path")
+        .to_string();
+    assert!(
+        error.contains("reserved or invalid value"),
+        "unexpected error: {error}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_validates_gt_on_filtered_fast_path_without_gt_dependent_formats()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##contig=<ID=chr2,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT\t0/1\n\
+                chr2\t20\trs2\tG\tT\t50\tPASS\t.\tGT\t1/1\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-gt-only", body)?;
+    corrupt_bcf_gt_allele_value(&bcf_path, 1, 0x82)?;
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(provider))?;
+    let error = context
+        .sql("SELECT id, \"GT\" FROM variants WHERE chrom = 'chr2'")
+        .await?
+        .collect()
+        .await
+        .expect_err("filtered GT corruption must be validated on the direct dosage path")
         .to_string();
     assert!(
         error.contains("reserved or invalid value"),

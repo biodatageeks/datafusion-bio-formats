@@ -36,8 +36,10 @@ impl ByteRange {
 /// Coalesces sorted or unsorted byte ranges without hiding large sparse gaps.
 ///
 /// Overlapping ranges are always merged to guarantee unique physical
-/// ownership. Non-overlapping ranges are merged only when both the gap and
-/// combined range size are within their configured limits.
+/// ownership, even when their union exceeds `max_range_size`; that limit is
+/// not an upper bound for overlapping input. Non-overlapping ranges are merged
+/// only when both the gap and combined range size are within their configured
+/// limits.
 pub fn coalesce_byte_ranges(
     ranges: impl IntoIterator<Item = ByteRange>,
     max_gap: u64,

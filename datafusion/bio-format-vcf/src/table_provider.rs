@@ -1,5 +1,6 @@
 use crate::bcf::BcfExec;
 use crate::physical_exec::VcfExec;
+use crate::serializer::validate_vcf_serializable_genotypes;
 use crate::storage::{VcfRecordFields, get_header, resolve_single_sample_format_column_name};
 use crate::write_exec::VcfWriteExec;
 use crate::writer::VcfCompressionType;
@@ -1504,6 +1505,8 @@ impl TableProvider for VcfTableProvider {
 
         // Validate input schema has the required core columns
         let input_schema = input.schema();
+        validate_vcf_serializable_genotypes(&input_schema)?;
+        validate_vcf_serializable_genotypes(&self.schema)?;
         if input_schema.fields().len() < 8 {
             return Err(datafusion::common::DataFusionError::Plan(
                 "Input schema must have at least 8 columns: chrom, start, end, id, ref, alt, qual, filter"
