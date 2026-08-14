@@ -271,7 +271,7 @@ pub fn can_push_limit_below_filters(guarantees: &[PredicateGuarantee]) -> bool {
 }
 
 /// Counter exposed by genotype scans.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
 #[repr(usize)]
 pub enum GenotypeMetric {
     /// Bytes read from the primary genotype object.
@@ -313,7 +313,9 @@ pub enum GenotypeMetric {
 }
 
 impl GenotypeMetric {
-    const COUNT: usize = 18;
+    // Derive the count from the enum declaration. The typed ALL array then
+    // fails to compile whenever a new variant is not added below.
+    const COUNT: usize = <Self as strum::EnumCount>::COUNT;
 
     /// All counters in stable declaration order.
     pub const ALL: [Self; Self::COUNT] = [
@@ -529,6 +531,12 @@ mod tests {
         metrics.add(GenotypeMetric::EmittedVariants, 3);
         assert_eq!(metrics.value(GenotypeMetric::EmittedVariants), 5);
         assert_eq!(metrics.snapshot().len(), GenotypeMetric::COUNT);
+        for (index, metric) in GenotypeMetric::ALL.iter().enumerate() {
+            assert_eq!(
+                *metric as usize, index,
+                "GenotypeMetric::ALL must list every variant once in declaration order"
+            );
+        }
     }
 
     #[test]

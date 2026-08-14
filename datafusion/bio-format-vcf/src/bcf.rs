@@ -801,11 +801,31 @@ struct BcfFormatEncoding<'a> {
     payload: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BcfGtDependentNumber {
+    Genotypes,
+    Ploidy,
+}
+
+impl BcfGtDependentNumber {
+    fn label(self) -> char {
+        match self {
+            Self::Genotypes => 'G',
+            Self::Ploidy => 'P',
+        }
+    }
+}
+
 struct BcfGtDependentFormatEncoding<'header, 'payload> {
     key: &'header str,
-    format_number: FormatNumber,
+    number: BcfGtDependentNumber,
     format_type: FormatType,
     encoding: BcfFormatEncoding<'payload>,
+}
+
+struct BcfFormatValidation<'payload> {
+    gt_encoding: Option<BcfGtEncoding<'payload>>,
+    gt_values_validated: bool,
 }
 
 fn bcf_gt_sample_ploidy(gt: &BcfGtEncoding<'_>, sample_index: usize) -> Result<usize> {
@@ -982,36 +1002,58 @@ fn validate_bcf_format_cardinality(
 
 fn bcf_gt_dependent_cardinality_error(
     key: &str,
-    format_number: FormatNumber,
+    number: BcfGtDependentNumber,
     expected_count: usize,
     actual_count: usize,
     sample_index: usize,
     ploidy: usize,
 ) -> DataFusionError {
-    let number = match format_number {
-        FormatNumber::Samples => 'G',
-        FormatNumber::Ploidy => 'P',
-        _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
-    };
+    let label = number.label();
     DataFusionError::Execution(format!(
-        "FORMAT field '{key}' declares Number={number} ({expected_count} expected for sample \
+        "FORMAT field '{key}' declares Number={label} ({expected_count} expected for sample \
          {sample_index} with ploidy {ploidy}) but the sample encodes {actual_count} values"
     ))
 }
 
+#[derive(Clone, Copy)]
+enum BcfGtDependentPloidy<'gt, 'payload> {
+    AssumedDiploid,
+    Encoded(&'gt BcfGtEncoding<'payload>),
+}
+
+impl BcfGtDependentPloidy<'_, '_> {
+    fn for_sample(self, sample_index: usize) -> Result<usize> {
+        match self {
+            Self::AssumedDiploid => Ok(2),
+            Self::Encoded(gt) => bcf_gt_sample_ploidy(gt, sample_index),
+        }
+    }
+}
+
+fn bcf_gt_dependent_ploidy<'gt, 'payload>(
+    key: &str,
+    number: BcfGtDependentNumber,
+    gt: Option<&'gt BcfGtEncoding<'payload>>,
+) -> Result<BcfGtDependentPloidy<'gt, 'payload>> {
+    match (number, gt) {
+        (_, Some(gt)) => Ok(BcfGtDependentPloidy::Encoded(gt)),
+        // VCF specifies that Number=G values are diploid when GT is absent.
+        (BcfGtDependentNumber::Genotypes, None) => Ok(BcfGtDependentPloidy::AssumedDiploid),
+        (BcfGtDependentNumber::Ploidy, None) => Err(DataFusionError::Execution(format!(
+            "FORMAT field '{key}' declares Number=P but the record has no GT field"
+        ))),
+    }
+}
+
 fn validate_bcf_gt_dependent_payload(
     key: &str,
-    format_number: FormatNumber,
+    number: BcfGtDependentNumber,
     format_type: FormatType,
     encoding: BcfFormatEncoding<'_>,
     allele_count: usize,
     gt: Option<&BcfGtEncoding<'_>>,
 ) -> Result<()> {
-    if format_number == FormatNumber::Ploidy && gt.is_none() {
-        return Err(DataFusionError::Execution(format!(
-            "FORMAT field '{key}' declares Number=P but the record has no GT field"
-        )));
-    }
+    let ploidy = bcf_gt_dependent_ploidy(key, number, gt)?;
 
     let BcfFormatEncoding {
         encoded_type,
@@ -1037,20 +1079,21 @@ fn validate_bcf_gt_dependent_payload(
                 if bcf_numeric_vector_is_missing(encoded_type, sample) {
                     continue;
                 }
-                let ploidy = bcf_gt_dependent_ploidy(key, format_number, gt, sample_index)?;
-                let expected_count = match format_number {
-                    FormatNumber::Samples => bcf_genotype_cardinality(allele_count, ploidy)?,
-                    FormatNumber::Ploidy => ploidy,
-                    _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
+                let sample_ploidy = ploidy.for_sample(sample_index)?;
+                let expected_count = match number {
+                    BcfGtDependentNumber::Genotypes => {
+                        bcf_genotype_cardinality(allele_count, sample_ploidy)?
+                    }
+                    BcfGtDependentNumber::Ploidy => sample_ploidy,
                 };
                 if actual_count != expected_count {
                     return Err(bcf_gt_dependent_cardinality_error(
                         key,
-                        format_number,
+                        number,
                         expected_count,
                         actual_count,
                         sample_index,
-                        ploidy,
+                        sample_ploidy,
                     ));
                 }
             }
@@ -1069,20 +1112,21 @@ fn validate_bcf_gt_dependent_payload(
                     )?;
                 }
                 let actual_count = value.bytes().filter(|&byte| byte == b',').count() + 1;
-                let ploidy = bcf_gt_dependent_ploidy(key, format_number, gt, sample_index)?;
-                let expected_count = match format_number {
-                    FormatNumber::Samples => bcf_genotype_cardinality(allele_count, ploidy)?,
-                    FormatNumber::Ploidy => ploidy,
-                    _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
+                let sample_ploidy = ploidy.for_sample(sample_index)?;
+                let expected_count = match number {
+                    BcfGtDependentNumber::Genotypes => {
+                        bcf_genotype_cardinality(allele_count, sample_ploidy)?
+                    }
+                    BcfGtDependentNumber::Ploidy => sample_ploidy,
                 };
                 if actual_count != expected_count {
                     return Err(bcf_gt_dependent_cardinality_error(
                         key,
-                        format_number,
+                        number,
                         expected_count,
                         actual_count,
                         sample_index,
-                        ploidy,
+                        sample_ploidy,
                     ));
                 }
             }
@@ -1092,32 +1136,16 @@ fn validate_bcf_gt_dependent_payload(
     Ok(())
 }
 
-fn bcf_gt_dependent_ploidy(
-    key: &str,
-    format_number: FormatNumber,
-    gt: Option<&BcfGtEncoding<'_>>,
-    sample_index: usize,
-) -> Result<usize> {
-    match (format_number, gt) {
-        (_, Some(gt)) => bcf_gt_sample_ploidy(gt, sample_index),
-        // VCF specifies that Number=G values are diploid when GT is absent.
-        (FormatNumber::Samples, None) => Ok(2),
-        (FormatNumber::Ploidy, None) => Err(DataFusionError::Execution(format!(
-            "FORMAT field '{key}' declares Number=P but the record has no GT field"
-        ))),
-        _ => unreachable!("only Number=G and Number=P depend on GT ploidy"),
-    }
-}
-
 fn validate_bcf_format_encoding<'a>(
     samples: &'a bcf::record::Samples<'_>,
     header: &Header,
     allele_count: usize,
     validate_gt_values: bool,
-) -> Result<Option<BcfGtEncoding<'a>>> {
+) -> Result<BcfFormatValidation<'a>> {
     let sample_count = samples.len();
     let mut src = samples.as_ref();
     let mut gt_encoding = None;
+    let mut gt_values_validated = false;
     let mut gt_dependent_encodings = SmallVec::<[BcfGtDependentFormatEncoding<'_, 'a>; 4]>::new();
     let mut seen_key_indices = SmallVec::<[usize; 8]>::new();
 
@@ -1170,15 +1198,17 @@ fn validate_bcf_format_encoding<'a>(
             value_count,
             payload,
         };
-        if matches!(
-            format.number(),
-            FormatNumber::Samples | FormatNumber::Ploidy
-        ) {
+        let gt_dependent_number = match format.number() {
+            FormatNumber::Samples => Some(BcfGtDependentNumber::Genotypes),
+            FormatNumber::Ploidy => Some(BcfGtDependentNumber::Ploidy),
+            _ => None,
+        };
+        if let Some(number) = gt_dependent_number {
             // GT can occur after dependent fields, so retain only their small
             // borrowed descriptors and validate them once GT is known.
             gt_dependent_encodings.push(BcfGtDependentFormatEncoding {
                 key,
-                format_number: format.number(),
+                number,
                 format_type: format.ty(),
                 encoding,
             });
@@ -1196,6 +1226,7 @@ fn validate_bcf_format_encoding<'a>(
         if key == "GT" {
             if validate_gt_values {
                 validate_bcf_gt_payload(payload, encoded_type, value_count, allele_count)?;
+                gt_values_validated = true;
             }
             gt_encoding = Some(BcfGtEncoding {
                 payload,
@@ -1219,11 +1250,12 @@ fn validate_bcf_format_encoding<'a>(
         // assumes diploidy when GT is absent; Number=P requires GT.
         if !validate_gt_values && let Some(gt) = gt_encoding.as_ref() {
             validate_bcf_gt_payload(gt.payload, gt.encoded_type, gt.value_count, allele_count)?;
+            gt_values_validated = true;
         }
         for dependent in gt_dependent_encodings {
             validate_bcf_gt_dependent_payload(
                 dependent.key,
-                dependent.format_number,
+                dependent.number,
                 dependent.format_type,
                 dependent.encoding,
                 allele_count,
@@ -1232,7 +1264,10 @@ fn validate_bcf_format_encoding<'a>(
         }
     }
 
-    Ok(gt_encoding)
+    Ok(BcfFormatValidation {
+        gt_encoding,
+        gt_values_validated,
+    })
 }
 
 fn local_path(path: &str) -> &str {
@@ -2410,12 +2445,6 @@ impl BcfBatchDecoder {
             }
         }
         let allele_count = alternate_bases.len() + 1;
-        if self.genotype_output_mode == GenotypeOutputMode::Dosage {
-            // Dosage is a biallelic table contract, not merely a property of a
-            // projected column. Keep corruption/compatibility behavior stable
-            // for metadata-only and COUNT(*) scans as well.
-            validate_bcf_dosage_allele_count(allele_count)?;
-        }
         let quality_score = record
             .quality_score()
             .map_err(|e| execution_error("invalid BCF quality score", e))?
@@ -2448,8 +2477,9 @@ impl BcfBatchDecoder {
         // validates the complete untrusted GT payload before materializing the
         // requested cells, so integrity never depends on sample projection.
         let validate_gt_values = !self.format_mode.fuses_complete_gt_validation();
-        let gt_encoding =
+        let format_validation =
             validate_bcf_format_encoding(&samples, header, allele_count, validate_gt_values)?;
+        let gt_encoding = format_validation.gt_encoding;
 
         let has_filters = !self.residual_filters.is_empty();
         let needs_start = self.flags.start || has_filters;
@@ -2493,10 +2523,15 @@ impl BcfBatchDecoder {
                 end,
             };
             if !evaluate_record_filters(&fields, &self.residual_filters) {
-                if direct_dosage && let Some(gt) = gt_encoding.as_ref() {
+                if direct_dosage
+                    && !format_validation.gt_values_validated
+                    && let Some(gt) = gt_encoding.as_ref()
+                {
                     // Direct materialization performs GT validation for accepted
-                    // records. A filtered record still needs the same integrity
-                    // checks even though no Arrow value is constructed.
+                    // records. A filtered record without a GT-dependent FORMAT
+                    // field still needs the same integrity checks even though no
+                    // Arrow value is constructed. Number=G/P validation already
+                    // validated the complete GT payload in the first pass.
                     validate_bcf_gt_payload(
                         gt.payload,
                         gt.encoded_type,
@@ -2506,6 +2541,14 @@ impl BcfBatchDecoder {
                 }
                 return Ok(None);
             }
+        }
+
+        if self.genotype_output_mode == GenotypeOutputMode::Dosage {
+            // Dosage is a biallelic table contract, not merely a property of a
+            // projected column. Enforce it for every selected record, including
+            // metadata-only and COUNT(*) scans, but do not reject an unrelated
+            // multiallelic record that provider-owned predicates filtered out.
+            validate_bcf_dosage_allele_count(allele_count)?;
         }
 
         if self.flags.chrom {

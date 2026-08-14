@@ -1515,6 +1515,104 @@ async fn bcf_dosage_rejects_multiallelic_records_with_or_without_gt_projection()
 }
 
 #[tokio::test]
+async fn bcf_dosage_filters_unselected_multiallelic_records_consistently()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let sql = "SELECT id, genotypes FROM variants WHERE chrom = 'chr2'";
+
+    // Without a CSI companion, the sequential decoder sees the chr1
+    // multiallelic record before reaching the selected chr2 record.
+    let sequential_provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path.clone(),
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        None,
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    let sequential_rows = query("variants", sequential_provider, sql).await?;
+
+    // Adding CSI pushdown must change I/O planning, not query semantics.
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let indexed_provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_path,
+        Some(Vec::new()),
+        Some(vec!["GT".to_string()]),
+        None,
+        None,
+        true,
+        VcfInputFormat::Bcf,
+        Some(index_path),
+    )?
+    .with_genotype_output_mode(GenotypeOutputMode::Dosage)?;
+    let indexed_rows = query("variants", indexed_provider, sql).await?;
+
+    assert_eq!(sequential_rows, indexed_rows);
+    assert!(sequential_rows.contains("rs3"));
+    assert!(!sequential_rows.contains("rs1"));
+    assert!(!sequential_rows.contains("rs2"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn bcf_dosage_validates_gt_with_dependent_formats_on_filtered_fast_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let body = "##fileformat=VCFv4.3\n\
+                ##contig=<ID=chr1,length=1000>\n\
+                ##contig=<ID=chr2,length=1000>\n\
+                ##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n\
+                ##FORMAT=<ID=XG,Number=G,Type=Integer,Description=\"Genotype values\">\n\
+                #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n\
+                chr1\t10\trs1\tA\tC\t50\tPASS\t.\tGT:XG\t0/1:0,10,20\n\
+                chr2\t20\trs2\tG\tT\t50\tPASS\t.\tGT:XG\t1/1:20,10,0\n";
+    let (_vcf_path, bcf_path) = write_format_array_bcf(&dir, "dosage-number-g", body)?;
+
+    let dosage_provider = |path: String| {
+        VcfTableProvider::new_with_samples_and_format(
+            path,
+            Some(Vec::new()),
+            Some(vec!["GT".to_string()]),
+            None,
+            None,
+            true,
+            VcfInputFormat::Bcf,
+            None,
+        )?
+        .with_genotype_output_mode(GenotypeOutputMode::Dosage)
+    };
+    let sql = "SELECT id, \"GT\" FROM variants WHERE chrom = 'chr2'";
+
+    let rows = query("variants", dosage_provider(bcf_path.clone())?, sql).await?;
+    assert!(rows.contains("rs2"));
+
+    // Number=G makes the FORMAT validator validate the complete GT payload on
+    // the fast dosage path. A corrupt GT in the filtered chr1 record must still
+    // fail, even though dosage compatibility is checked only for selected rows.
+    corrupt_bcf_gt_allele_value(&bcf_path, 1, 0x82)?;
+    let context = SessionContext::new();
+    context.register_table("variants", Arc::new(dosage_provider(bcf_path)?))?;
+    let error = context
+        .sql(sql)
+        .await?
+        .collect()
+        .await
+        .expect_err("filtered GT corruption must remain visible on the dependent FORMAT path")
+        .to_string();
+    assert!(
+        error.contains("reserved or invalid value"),
+        "unexpected error: {error}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn bcf_dosage_validates_unselected_gt_samples() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let body = "##fileformat=VCFv4.3\n\
