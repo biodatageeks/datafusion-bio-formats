@@ -201,12 +201,22 @@ impl ExecutionPlan for BgenExec {
                                 "BGEN variant {variant_index} is outside its planned byte range"
                             ))
                         })?;
+                        // `phased` and `bits` come from the block header, so a
+                        // projection that wants only those must not reconstruct
+                        // per-sample genotypes: the arrays would be built and
+                        // then discarded, and a wide cohort would accumulate a
+                        // batch of them.
+                        let decode_samples = if genotype_projected {
+                            fileset.selected_samples.source_indices()
+                        } else {
+                            &[]
+                        };
                         let decoded = decode_variant(
                             &fileset.path,
                             variant,
                             &fileset.header,
                             payload,
-                            fileset.selected_samples.source_indices(),
+                            decode_samples,
                             &fileset.options,
                             &mut scratch,
                         )?;

@@ -1331,6 +1331,41 @@ async fn a_cached_bgi_survives_eviction_by_a_later_provider() {
     );
 }
 
+#[tokio::test]
+async fn a_large_in_list_does_not_fail_index_lookup() {
+    let fixture = fixture(Codec::Zlib, true);
+    create_bgi(&fixture, false);
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+
+    // SQLite refuses to prepare a statement with more host parameters than its
+    // compiled limit, so the index lookup must defer to catalog evaluation
+    // rather than fail a query the catalog can answer.
+    // Disjoint from the fixture's positions so the expected result is empty.
+    let positions: Vec<String> = (1_000_000..1_002_000)
+        .map(|value| value.to_string())
+        .collect();
+    let sql = format!(
+        "SELECT rsid FROM b WHERE start IN ({})",
+        positions.join(", ")
+    );
+    let batches = context
+        .sql(&sql)
+        .await
+        .expect("planning a large IN list must succeed")
+        .collect()
+        .await
+        .expect("executing a large IN list must succeed");
+    // None of those positions exist in the fixture.
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0
+    );
+}
+
 fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, required: bool) -> bool {
     let import_name = if name == "limix/bgen" { "bgen" } else { name };
     let available = Command::new(python)

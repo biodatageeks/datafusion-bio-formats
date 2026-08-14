@@ -18,6 +18,13 @@ use crate::table_provider::{BgenReadOptions, StaleBgiPolicy};
 
 static CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// Host parameters a single index lookup may bind.
+///
+/// SQLite's compiled `SQLITE_MAX_VARIABLE_NUMBER` is 999 in older builds, so
+/// staying under that keeps the lookup portable across the SQLite a host
+/// provides.
+const MAX_SQLITE_PARAMETERS: usize = 900;
+
 #[derive(Clone)]
 pub(crate) struct BgiIndex {
     pub(crate) row_indices: Arc<Vec<usize>>,
@@ -55,7 +62,13 @@ impl BgiIndex {
         for filter in filters {
             append_sql_predicate(filter, coordinate_system, &mut clauses, &mut parameters);
         }
-        if clauses.is_empty() {
+        // Every predicate pushed here is also evaluated against the catalog, so
+        // returning all candidates stays correct and only costs a scan of the
+        // metadata. That is the right trade when the index cannot answer the
+        // query: SQLite refuses to prepare a statement with more host
+        // parameters than its compiled limit, and a large `IN` list would
+        // otherwise fail a query the catalog can answer.
+        if clauses.is_empty() || parameters.len() > MAX_SQLITE_PARAMETERS {
             return Ok(self.row_indices.as_ref().clone());
         }
 

@@ -22,6 +22,9 @@ const READ_AHEAD_RECORDS: u64 = 64;
 /// The declared variant count is untrusted, so it only caps this reservation
 /// rather than driving it; the catalog grows normally beyond it.
 const INITIAL_VARIANT_CAPACITY: u64 = 65_536;
+/// Bytes a Layout 2 payload spends on its own length fields: the block length
+/// and, when compressed, the declared decompressed length.
+const BLOCK_FRAMING_BYTES: u64 = 8;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenVariant {
@@ -346,6 +349,24 @@ fn parse_variant(
         (BgenLayout::Layout2, BgenCompression::None) => payload_size.checked_sub(4),
         _ => None,
     };
+    // Every payload is also bounded before it is read, so a record declaring a
+    // multi-gigabyte serialized block cannot make execution download it. The
+    // ceiling is the decompressed limit plus the block framing, which a valid
+    // block never exceeds: a compressed block that serialized to more than its
+    // own decompressed limit would have to be pathologically incompressible.
+    let serialized_ceiling =
+        (options.max_decompressed_block_bytes as u64).saturating_add(BLOCK_FRAMING_BYTES);
+    if payload_size > serialized_ceiling {
+        return Err(ParseVariantError::Invalid(catalog_error(
+            path,
+            index,
+            record_offset,
+            &format!(
+                "serialized payload of {payload_size} bytes exceeds max_decompressed_block_bytes {} plus block framing",
+                options.max_decompressed_block_bytes
+            ),
+        )));
+    }
     if let Some(size) = declared_uncompressed
         && size > options.max_decompressed_block_bytes as u64
     {
