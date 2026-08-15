@@ -22,28 +22,33 @@ Criterion reports `[lower median upper]`; the table carries the median.
 
 ### `chr22.first-25000.unphased.bgen` — 25,000 x 2,548, uniform width 3
 
-| Mode | Layout | Partitions | Baseline | After batch buffers | Change |
+| Mode | Layout | Partitions | Baseline | After | Change |
 | --- | --- | --- | --- | --- | --- |
-| probability | nested | 1 | 1.0190 s | 779.95 ms | **-23%** |
-| probability | nested | 8 | 329.72 ms | 220.25 ms | **-33%** |
-| probability | fixed | 1 | 925.68 ms | 743.84 ms | **-20%** |
-| probability | fixed | 8 | 253.04 ms | 206.86 ms | **-18%** |
-| dosage | nested | 1 | 630.90 ms | 592.11 ms | -6% |
-| dosage | nested | 8 | 165.64 ms | 159.10 ms | -4% |
+| probability | nested | 1 | 1.0190 s | 783.36 ms | **-23%** |
+| probability | nested | 8 | 329.72 ms | 220.02 ms | **-33%** |
+| probability | fixed | 1 | 925.68 ms | 746.23 ms | **-19%** |
+| probability | fixed | 8 | 253.04 ms | 203.17 ms | **-20%** |
+| dosage | nested | 1 | 630.90 ms | 590.69 ms | -6% |
+| dosage | nested | 8 | 165.64 ms | 158.16 ms | -5% |
 
 ### `chr22.first-25000.bgen` — 25,000 x 2,548, mixed widths 3/4
 
-| Mode | Layout | Partitions | Baseline | After batch buffers | Change |
+| Mode | Layout | Partitions | Baseline | After | Change |
 | --- | --- | --- | --- | --- | --- |
-| probability | nested | 1 | 1.1211 s | 881.83 ms | **-21%** |
-| probability | nested | 8 | 524.85 ms | 256.22 ms | **-51%** |
-| probability | fixed | 1 | **unsupported** | 787.54 ms | **now runs** |
-| probability | fixed | 8 | **unsupported** | 217.71 ms | **now runs** |
-| dosage | nested | 1 | 633.00 ms | 585.32 ms | -8% |
-| dosage | nested | 8 | 169.67 ms | 157.12 ms | -7% |
+| probability | nested | 1 | 1.1211 s | 891.06 ms | **-21%** |
+| probability | nested | 8 | 524.85 ms | 253.88 ms | **-52%** |
+| probability | fixed | 1 | **unsupported** | 787.63 ms | **now runs** |
+| probability | fixed | 8 | **unsupported** | 225.67 ms | **now runs** |
+| dosage | nested | 1 | 633.00 ms | 583.03 ms | -8% |
+| dosage | nested | 8 | 169.67 ms | 156.41 ms | -8% |
 
 Every row improved, and dosage — already 1.9x ahead of snputils and the thing
 this rework most risked spending — improved too.
+
+The headline for the phased fixture is the pair of rows together: its best
+available probability read went from 524.85 ms (nested, 8 partitions, the only
+option) to 225.67 ms (fixed, 8 partitions, newly possible). That is 2.3x, and
+it is the fixture the project was furthest behind snputils on.
 
 **The mixed-width file gained the fixed layout early.** The plan expected this
 at task 9; it arrived with the batch buffers, because moving padding into the
