@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use datafusion::prelude::{SessionConfig, SessionContext};
-use datafusion_bio_format_bgen::{BgenOutputMode, BgenReadOptions, BgenTableProvider};
+use datafusion_bio_format_bgen::{
+    BgenOutputMode, BgenProbabilityLayout, BgenReadOptions, BgenTableProvider,
+};
 use flate2::Compression as FlateCompression;
 use flate2::write::ZlibEncoder;
 use rusqlite::{Connection, params};
@@ -234,6 +236,35 @@ async fn context(
     context
 }
 
+/// Builds a context and proves its scan works.
+///
+/// Returns `None` for a combination the file does not support, so one
+/// unsupported case is skipped rather than panicking the whole run. A
+/// mixed-width file cannot use the fixed probability layout today; that is the
+/// case this exists for, and its disappearance is a deliverable.
+async fn try_context(
+    path: &str,
+    name: &str,
+    options: BgenReadOptions,
+    partitions: usize,
+) -> Option<SessionContext> {
+    let provider = BgenTableProvider::try_new(path, options).await.ok()?;
+    let context =
+        SessionContext::new_with_config(SessionConfig::new().with_target_partitions(partitions));
+    context.register_table(name, Arc::new(provider)).ok()?;
+    // A whole scan, not a LIMIT: the case this guards against is a variant
+    // whose width differs from variant 0's, and a limited scan reads variant 0.
+    // The cost is one extra scan per benched combination at setup.
+    context
+        .sql(&format!("SELECT genotypes FROM {name}"))
+        .await
+        .ok()?
+        .collect()
+        .await
+        .ok()?;
+    Some(context)
+}
+
 async fn execute(context: &SessionContext, sql: &str) -> usize {
     context
         .sql(sql)
@@ -347,6 +378,53 @@ fn benchmarks(criterion: &mut Criterion) {
             black_box(execute(&parallel, "SELECT genotypes FROM bgen_parallel").await)
         });
     });
+
+    // A real cohort file is the only fixture that can guide probability-path
+    // work; the synthetic one above is 2,048 x 256 and dominated by fixed
+    // costs. Opt in with BGEN_BENCH_PATH so CI, which has no such file, keeps
+    // running the synthetic benches alone.
+    if let Ok(real_path) = std::env::var("BGEN_BENCH_PATH") {
+        let mut contexts = Vec::new();
+        for (mode_name, output_mode) in [
+            ("probability", BgenOutputMode::Probability),
+            ("dosage", BgenOutputMode::Dosage),
+        ] {
+            for (layout_name, layout) in [
+                ("nested", BgenProbabilityLayout::Nested),
+                ("fixed", BgenProbabilityLayout::Fixed),
+            ] {
+                // The layout only applies to probability output.
+                if output_mode == BgenOutputMode::Dosage && layout == BgenProbabilityLayout::Fixed {
+                    continue;
+                }
+                for partitions in [1_usize, 8] {
+                    let table = format!("real_{mode_name}_{layout_name}_p{partitions}");
+                    let context = runtime.block_on(try_context(
+                        &real_path,
+                        &table,
+                        BgenReadOptions {
+                            output_mode,
+                            probability_layout: layout,
+                            ..Default::default()
+                        },
+                        partitions,
+                    ));
+                    match context {
+                        Some(context) => contexts.push((table, context)),
+                        None => eprintln!("skipping {table}: this file does not support it"),
+                    }
+                }
+            }
+        }
+        for (table, context) in &contexts {
+            let sql = format!("SELECT genotypes FROM {table}");
+            group.bench_function(table, |bencher| {
+                bencher
+                    .to_async(&runtime)
+                    .iter(|| async { black_box(execute(context, &sql).await) });
+            });
+        }
+    }
     group.finish();
 }
 
