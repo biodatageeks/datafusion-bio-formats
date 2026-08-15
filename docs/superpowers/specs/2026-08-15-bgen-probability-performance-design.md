@@ -133,9 +133,19 @@ chr22 fixture — where plink2 left 461 of 25,000 variants unphased, so widths
 mix 3 and 4 — cannot use the fixed layout at all, and why it is the furthest
 behind.
 
-**Contract change:** a variant narrower than the schema width is padded with
-NaN to that width. A variant wider than the schema width still errors, with the
-existing "use the nested layout for this file" message.
+**Contract change:** padding is decided **per sample**, not per variant. A
+sample storing fewer states than the schema width is padded with NaN to that
+width; a sample storing more still errors, with the existing "use the nested
+layout for this file" message. Per-sample rather than per-variant falls out of
+where the padding has to happen anyway, and it comes with a bonus: a
+variable-ploidy variant, which today has no single width and is rejected
+outright, becomes representable because each of its samples pads to the same
+schema width.
+
+This retires the per-variant `state_width` equality check in
+`build_genotypes`. `fixed_probability_layout_rejects_a_mixed_width_file` is
+therefore testing a contract that no longer exists and must be rewritten to
+assert padding, with a new test covering the case that still errors.
 
 **Deriving the width without a full pre-scan.** A Layout 2 block header is
 inside the compressed payload, so learning each variant's exact width would
@@ -206,11 +216,20 @@ provider is that it is bit-identical to the `bgen` oracle where snputils is not
 - `benchmarks.bgen_verify`, zero tolerance, element-wise against the `bgen`
   package: all four fixtures x {1, 2, 4, 8} partitions x {dosage,
   probabilities} x {fixed, nested}.
-- **The verifier needs NaN-aware equality.** NaN != NaN, so every padded slot
-  this design introduces reads as a mismatch against itself under the current
-  comparison. Fix the comparison before trusting a single verification run, or
-  phase 2 will look broken when it is right — and, worse, could look right
-  later for the wrong reason.
+- **NaN comparison is already handled, in one of the two counters.**
+  `bgen_verify.py` excludes `isnan(left) & isnan(right)` from
+  `value_differences`, so padded slots compare equal there. `bitwise_differences`
+  does not: it compares raw `uint32` bit patterns, so it stays zero only while
+  every NaN this design emits carries the same payload as the oracle's
+  (`f32::NAN` and NumPy's float32 `nan` are both `0x7FC00000`, so it should —
+  but check the counter rather than assuming it).
+- **The Python side needs almost nothing.** `bgen_matrix.py` already takes a
+  zero-copy path for `FixedSizeList` and already NaN-pads mixed widths by hand
+  for the nested layout; phase 2 moves that padding into Rust. The change is to
+  run the phased fixture with `BGEN_PROBABILITY_LAYOUT=fixed`, which is already
+  an environment variable, and to update the now-false comment at
+  `benchmarks/bgen_matrix.py:58-61` claiming the fixed layout "requires every
+  variant to store the same number of states".
 - Row order is not stable above one partition. Sort by variant position before
   hashing or comparing across partition counts.
 - Re-run `run_bgen_benchmarks.py --runs 3` fresh-process on all four fixtures,
