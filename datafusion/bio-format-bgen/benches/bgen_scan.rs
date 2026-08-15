@@ -384,6 +384,24 @@ fn benchmarks(criterion: &mut Criterion) {
     // costs. Opt in with BGEN_BENCH_PATH so CI, which has no such file, keeps
     // running the synthetic benches alone.
     if let Ok(real_path) = std::env::var("BGEN_BENCH_PATH") {
+        // Criterion saves a baseline per benchmark id, so two fixtures sharing
+        // an id would compare against each other and report the difference
+        // between the files as a change in the code.
+        let fixture = std::path::Path::new(&real_path)
+            .file_stem()
+            .map(|stem| {
+                stem.to_string_lossy()
+                    .chars()
+                    .map(|character| {
+                        if character.is_alphanumeric() {
+                            character
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| "fixture".to_string());
         let mut contexts = Vec::new();
         for (mode_name, output_mode) in [
             ("probability", BgenOutputMode::Probability),
@@ -410,15 +428,19 @@ fn benchmarks(criterion: &mut Criterion) {
                         partitions,
                     ));
                     match context {
-                        Some(context) => contexts.push((table, context)),
-                        None => eprintln!("skipping {table}: this file does not support it"),
+                        Some(context) => {
+                            let id =
+                                format!("real_{fixture}_{mode_name}_{layout_name}_p{partitions}");
+                            contexts.push((id, table, context));
+                        }
+                        None => eprintln!("skipping {table} on {fixture}: unsupported"),
                     }
                 }
             }
         }
-        for (table, context) in &contexts {
+        for (id, table, context) in &contexts {
             let sql = format!("SELECT genotypes FROM {table}");
-            group.bench_function(table, |bencher| {
+            group.bench_function(id, |bencher| {
                 bencher
                     .to_async(&runtime)
                     .iter(|| async { black_box(execute(context, &sql).await) });

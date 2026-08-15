@@ -22,30 +22,46 @@ Criterion reports `[lower median upper]`; the table carries the median.
 
 ### `chr22.first-25000.unphased.bgen` — 25,000 x 2,548, uniform width 3
 
-| Mode | Layout | Partitions | Baseline | After tasks 4-5 | Change |
+| Mode | Layout | Partitions | Baseline | After batch buffers | Change |
 | --- | --- | --- | --- | --- | --- |
-| probability | nested | 1 | 1.0190 s | | |
-| probability | nested | 8 | 329.72 ms | | |
-| probability | fixed | 1 | 925.68 ms | | |
-| probability | fixed | 8 | 253.04 ms | | |
-| dosage | nested | 1 | 630.90 ms | | |
-| dosage | nested | 8 | 165.64 ms | | |
+| probability | nested | 1 | 1.0190 s | 779.95 ms | **-23%** |
+| probability | nested | 8 | 329.72 ms | 220.25 ms | **-33%** |
+| probability | fixed | 1 | 925.68 ms | 743.84 ms | **-20%** |
+| probability | fixed | 8 | 253.04 ms | 206.86 ms | **-18%** |
+| dosage | nested | 1 | 630.90 ms | 592.11 ms | -6% |
+| dosage | nested | 8 | 165.64 ms | 159.10 ms | -4% |
 
 ### `chr22.first-25000.bgen` — 25,000 x 2,548, mixed widths 3/4
 
-| Mode | Layout | Partitions | Baseline | After tasks 4-5 | Change |
+| Mode | Layout | Partitions | Baseline | After batch buffers | Change |
 | --- | --- | --- | --- | --- | --- |
-| probability | nested | 1 | 1.1211 s | | |
-| probability | nested | 8 | 524.85 ms | | |
-| probability | fixed | 1 | **unsupported** | | |
-| probability | fixed | 8 | **unsupported** | | |
-| dosage | nested | 1 | 633.00 ms | | |
-| dosage | nested | 8 | 169.67 ms | | |
+| probability | nested | 1 | 1.1211 s | 881.83 ms | **-21%** |
+| probability | nested | 8 | 524.85 ms | 256.22 ms | **-51%** |
+| probability | fixed | 1 | **unsupported** | 787.54 ms | **now runs** |
+| probability | fixed | 8 | **unsupported** | 217.71 ms | **now runs** |
+| dosage | nested | 1 | 633.00 ms | 585.32 ms | -8% |
+| dosage | nested | 8 | 169.67 ms | 157.12 ms | -7% |
 
-**"unsupported" is a baseline result, not a gap in the measurement.** The fixed
-layout rejects a mixed-width file, so the bench harness skips those two cases
-and says so on stderr. Task 9 is what makes them run; when they appear in the
-"after" column, that is the deliverable landing.
+Every row improved, and dosage — already 1.9x ahead of snputils and the thing
+this rework most risked spending — improved too.
+
+**The mixed-width file gained the fixed layout early.** The plan expected this
+at task 9; it arrived with the batch buffers, because moving padding into the
+buffers replaced the per-variant width equality check with a per-sample bound.
+Variant 0 of this fixture is phased and four states wide, which happens to be
+the file's widest, so the probed width already covers every sample and the
+narrower unphased variants pad to it. Task 8's catalog-derived width is still
+needed for the general case — a file whose variant 0 is *not* the widest.
+
+## A measurement bug found and fixed here
+
+The first run of this comparison reported the phased fixture as *regressed* by
+4-16%. It had not. Criterion saves a baseline per benchmark id, and the ids did
+not include the fixture, so the phased run compared itself against the unphased
+run's saved numbers — reporting the difference between two files as a change in
+the code. Ids are now `real_<fixture>_<mode>_<layout>_p<n>`. The absolute
+numbers above are unaffected; the change column is computed against the recorded
+baseline medians, not against criterion's `change:` line.
 
 ## Noise
 
