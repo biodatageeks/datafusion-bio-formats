@@ -30,6 +30,8 @@ pub(crate) struct BgenHeader {
     pub(crate) synthetic_sample_names: bool,
     pub(crate) object_size: u64,
     pub(crate) header_bytes_read: u64,
+    /// Bytes read from an external sample companion, if one was used.
+    pub(crate) companion_sample_bytes: u64,
 }
 
 impl BgenHeader {
@@ -156,6 +158,9 @@ impl BgenHeader {
             ));
         }
 
+        // Bytes read from an external sample companion are companion I/O, not
+        // primary object I/O, so they are tracked separately.
+        let mut companion_sample_bytes = 0_u64;
         let has_embedded_samples = flags & (1_u32 << 31) != 0;
         let (sample_names, synthetic_sample_names, sample_bytes_read) = if has_embedded_samples {
             let sample_block_start = full_header_end;
@@ -205,11 +210,9 @@ impl BgenHeader {
                 block_length,
             )
         } else if let Some(sample_path) = &options.sample_path {
-            (
-                read_external_samples(sample_path, sample_count, options).await?,
-                false,
-                0,
-            )
+            let (names, bytes) = read_external_samples(sample_path, sample_count, options).await?;
+            companion_sample_bytes = bytes;
+            (names, false, 0)
         } else {
             (
                 (1..=sample_count)
@@ -230,6 +233,7 @@ impl BgenHeader {
             synthetic_sample_names,
             object_size,
             header_bytes_read: full_header_end + sample_bytes_read,
+            companion_sample_bytes,
         })
     }
 }
@@ -238,7 +242,7 @@ async fn read_external_samples(
     path: &str,
     expected_count: u32,
     options: &BgenReadOptions,
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, u64)> {
     let source = ObjectAccess::open(
         path,
         &options.object_storage_options.clone().unwrap_or_default(),
@@ -305,7 +309,11 @@ async fn read_external_samples(
         }
         names.push(name.to_string());
     }
-    validate_sample_names(path, names, expected_count)
+    let companion_bytes = bytes.len() as u64;
+    Ok((
+        validate_sample_names(path, names, expected_count)?,
+        companion_bytes,
+    ))
 }
 
 fn parse_sample_block(

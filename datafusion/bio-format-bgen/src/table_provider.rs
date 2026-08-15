@@ -174,6 +174,8 @@ pub(crate) struct BgenFileset {
     pub(crate) probability_width: Option<usize>,
     /// Payload bytes read to resolve [`Self::probability_width`].
     pub(crate) probability_probe_bytes: u64,
+    /// Bytes the width probe decompressed.
+    pub(crate) probability_probe_decompressed: u64,
 }
 
 /// Read-only DataFusion table provider for BGEN 1.2/1.3 files.
@@ -201,16 +203,16 @@ impl BgenTableProvider {
         // The fixed layout puts the state count in the schema, so it has to be
         // known before any batch is produced. One variant's block header carries
         // it; every other variant is checked against it while scanning.
-        let (probability_width, probability_probe_bytes) = if options.output_mode
-            == BgenOutputMode::Probability
-            && options.probability_layout == BgenProbabilityLayout::Fixed
-        {
-            let (width, bytes) =
-                probe_probability_width(&path, &source, &header, &catalog, &options).await?;
-            (Some(width), bytes)
-        } else {
-            (None, 0)
-        };
+        let (probability_width, probability_probe_bytes, probability_probe_decompressed) =
+            if options.output_mode == BgenOutputMode::Probability
+                && options.probability_layout == BgenProbabilityLayout::Fixed
+            {
+                let (width, bytes, decompressed) =
+                    probe_probability_width(&path, &source, &header, &catalog, &options).await?;
+                (Some(width), bytes, decompressed)
+            } else {
+                (None, 0, 0)
+            };
         let fileset = Arc::new(BgenFileset {
             path,
             source,
@@ -221,6 +223,7 @@ impl BgenTableProvider {
             options,
             probability_width,
             probability_probe_bytes,
+            probability_probe_decompressed,
         });
         let schema = build_schema(&fileset)?;
         Ok(Self { fileset, schema })
@@ -352,7 +355,8 @@ impl TableProvider for BgenTableProvider {
             self.fileset
                 .bgi
                 .as_ref()
-                .map_or(0, |index| index.bytes_read),
+                .map_or(0, |index| index.bytes_read)
+                + self.fileset.header.companion_sample_bytes,
         );
         metrics.add(
             GenotypeMetric::MetadataCandidates,
@@ -360,6 +364,16 @@ impl TableProvider for BgenTableProvider {
         );
         metrics.add(GenotypeMetric::SelectedVariants, selected.len() as u64);
         metrics.add(GenotypeMetric::ExactFilterRejections, filter_rejections);
+        // The width probe decompresses one block, so it is counted like any
+        // other payload the scan reads.
+        metrics.add(
+            GenotypeMetric::CompressedBytes,
+            self.fileset.probability_probe_bytes,
+        );
+        metrics.add(
+            GenotypeMetric::DecompressedBytes,
+            self.fileset.probability_probe_decompressed,
+        );
         metrics.add(
             GenotypeMetric::SamplesRequested,
             self.fileset.selected_samples.source_indices().len() as u64,
@@ -441,7 +455,7 @@ async fn probe_probability_width(
     header: &BgenHeader,
     catalog: &BgenCatalog,
     options: &BgenReadOptions,
-) -> Result<(usize, u64)> {
+) -> Result<(usize, u64, u64)> {
     let variant = catalog.variants.first().ok_or_else(|| {
         DataFusionError::Plan(
             "BGEN fixed probability layout needs at least one variant to determine its width"
@@ -462,7 +476,11 @@ async fn probe_probability_width(
             sanitize_location(path)
         ))
     })?;
-    Ok((width, payload.len() as u64))
+    Ok((
+        width,
+        payload.len() as u64,
+        decoded.decompressed_bytes as u64,
+    ))
 }
 
 fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
