@@ -147,10 +147,10 @@ impl ExecutionPlan for BgenExec {
             // The decoder appends into these, and a finished batch moves them
             // into its Arrow arrays.
             let mut buffers = GenotypeBuffers::new(
-                match (fileset.options.output_mode, fileset.probability_width) {
+                match (fileset.options.output_mode, fileset.probability_shape) {
                     (BgenOutputMode::Dosage, _) => BufferLayout::Dosage,
-                    (BgenOutputMode::Probability, Some(width)) => {
-                        BufferLayout::FixedProbability(width)
+                    (BgenOutputMode::Probability, Some(shape)) => {
+                        BufferLayout::FixedProbability(shape.width)
                     }
                     (BgenOutputMode::Probability, None) => BufferLayout::NestedProbability,
                 },

@@ -17,6 +17,12 @@ pub(crate) struct DecodedGenotypes {
     /// declares one ploidy. `None` for a variable-ploidy variant, whose samples
     /// do not share a width.
     pub(crate) state_width: Option<usize>,
+    /// The one ploidy every sample of this variant declares, or `None` when the
+    /// variant declares a range.
+    ///
+    /// The width probe reads this without selecting any sample, so it cannot
+    /// come from the per-sample ploidy the batch buffers hold.
+    pub(crate) declared_ploidy: Option<u8>,
 }
 
 /// Buffers reused across the variants decoded by one partition.
@@ -203,6 +209,7 @@ fn decode_layout1(
         bits: 16,
         decompressed_bytes: data.len(),
         state_width: Some(3),
+        declared_ploidy: Some(2),
     })
 }
 
@@ -610,6 +617,7 @@ fn decode_layout2_block(
             bits,
             decompressed_bytes: block.len(),
             state_width: uniform_state_width,
+            declared_ploidy: uniform_stride_bits.map(|_| min_ploidy),
         });
     }
 
@@ -675,6 +683,7 @@ fn decode_layout2_block(
         bits,
         decompressed_bytes: block.len(),
         state_width: uniform_state_width,
+        declared_ploidy: uniform_stride_bits.map(|_| min_ploidy),
     })
 }
 
@@ -686,7 +695,11 @@ fn stored_probability_count(ploidy: u8, allele_count: usize, phased: bool) -> Re
         })
 }
 
-fn complete_probability_count(ploidy: u8, allele_count: usize, phased: bool) -> Result<u64> {
+pub(crate) fn complete_probability_count(
+    ploidy: u8,
+    allele_count: usize,
+    phased: bool,
+) -> Result<u64> {
     if phased {
         (ploidy as u64)
             .checked_mul(allele_count as u64)
