@@ -3,7 +3,7 @@ use datafusion_bio_format_core::companion::sanitize_location;
 
 use crate::catalog::BgenVariant;
 use crate::header::{BgenCompression, BgenHeader, BgenLayout};
-use crate::table_provider::{BgenOutputMode, BgenReadOptions};
+use crate::table_provider::{BgenOutputMode, BgenProbabilityLayout, BgenReadOptions};
 
 #[derive(Debug)]
 pub(crate) struct DecodedGenotypes {
@@ -12,6 +12,10 @@ pub(crate) struct DecodedGenotypes {
     pub(crate) ploidy: Vec<u8>,
     pub(crate) values: DecodedValues,
     pub(crate) decompressed_bytes: usize,
+    /// Probability states every sample of this variant stores, when the variant
+    /// declares one ploidy. `None` for a variable-ploidy variant, whose samples
+    /// do not share a width.
+    pub(crate) state_width: Option<usize>,
 }
 
 /// One variant's per-sample probability vectors in a flat layout.
@@ -39,6 +43,16 @@ impl ProbabilityValues {
             offsets,
             valid: Vec::with_capacity(samples),
         }
+    }
+
+    /// Records a sample with no called genotype.
+    ///
+    /// A fixed-width layout still reserves `pad` slots for a null sample,
+    /// because Arrow sizes its values buffer from the entry count rather than
+    /// from offsets. The padded values are never read.
+    fn finish_missing_sample(&mut self, pad: usize) -> Result<()> {
+        self.values.resize(self.values.len() + pad, 0.0);
+        self.finish_sample(false)
     }
 
     /// Records one sample whose probabilities are the tail of `values`.
@@ -204,6 +218,7 @@ fn decode_layout1(
         }
     };
 
+    let fixed_layout = options.probability_layout == BgenProbabilityLayout::Fixed;
     let mut probabilities = ProbabilityValues::with_sample_capacity(selected_samples.len());
     let mut dosages = Vec::with_capacity(selected_samples.len());
     for &sample in selected_samples {
@@ -217,7 +232,7 @@ fn decode_layout1(
         ];
         let sum: u64 = values.iter().sum();
         if sum == 0 {
-            probabilities.finish_sample(false)?;
+            probabilities.finish_missing_sample(if fixed_layout { 3 } else { 0 })?;
             dosages.push(None);
             continue;
         }
@@ -250,6 +265,7 @@ fn decode_layout1(
             BgenOutputMode::Dosage => DecodedValues::Dosages(dosages),
         },
         decompressed_bytes: data.len(),
+        state_width: Some(3),
     })
 }
 
@@ -479,6 +495,19 @@ fn decode_layout2_block(
         None
     };
 
+    let uniform_state_width = uniform_stride_bits
+        .map(|_| usize::try_from(state_counts[min_ploidy as usize].1))
+        .transpose()
+        .map_err(|_| execution_error(path, variant, "state count does not fit usize"))?;
+
+    // A fixed-width layout reserves the same slots for a missing sample as for a
+    // called one.
+    let missing_pad = if options.probability_layout == BgenProbabilityLayout::Fixed {
+        uniform_state_width.unwrap_or(0)
+    } else {
+        0
+    };
+
     sample_bit_offsets.clear();
     if uniform_stride_bits.is_some() {
         for (sample, &ploidy_missing) in ploidy_bytes.iter().enumerate() {
@@ -610,7 +639,9 @@ fn decode_layout2_block(
                     ));
                 }
                 match options.output_mode {
-                    BgenOutputMode::Probability => probabilities.finish_sample(false)?,
+                    BgenOutputMode::Probability => {
+                        probabilities.finish_missing_sample(missing_pad)?
+                    }
                     BgenOutputMode::Dosage => dosages.push(None),
                 }
                 continue;
@@ -661,6 +692,7 @@ fn decode_layout2_block(
                 BgenOutputMode::Dosage => DecodedValues::Dosages(dosages),
             },
             decompressed_bytes: block.len(),
+            state_width: uniform_state_width,
         });
     }
 
@@ -691,7 +723,7 @@ fn decode_layout2_block(
                     &format!("missing sample {sample} has non-zero stored probabilities"),
                 ));
             }
-            probabilities.finish_sample(false)?;
+            probabilities.finish_missing_sample(missing_pad)?;
             dosages.push(None);
             continue;
         }
@@ -738,6 +770,7 @@ fn decode_layout2_block(
             BgenOutputMode::Dosage => DecodedValues::Dosages(dosages),
         },
         decompressed_bytes: block.len(),
+        state_width: uniform_state_width,
     })
 }
 

@@ -16,7 +16,8 @@ use datafusion::logical_expr::{TableProviderFilterPushDown, col, lit};
 use datafusion::physical_plan::collect;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_bgen::{
-    BgenExec, BgenOutputMode, BgenReadOptions, BgenTableProvider, StaleBgiPolicy,
+    BgenExec, BgenOutputMode, BgenProbabilityLayout, BgenReadOptions, BgenTableProvider,
+    StaleBgiPolicy,
 };
 use datafusion_bio_format_core::genotype::{GenotypeMetric, MissingSamplePolicy};
 use flate2::Compression as FlateCompression;
@@ -1375,6 +1376,137 @@ async fn a_large_in_list_does_not_fail_index_lookup() {
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         0
     );
+}
+
+#[tokio::test]
+async fn fixed_probability_layout_matches_the_nested_layout() {
+    // Every fixture variant stores a different number of states (unphased
+    // biallelic, phased biallelic, multiallelic), so only one variant can share
+    // a fixed width. Breadth comes from the cross-reader benchmark, which checks
+    // 191 million cells of a real uniform-width file.
+    let fixture = fixture(Codec::Zlib, true);
+    let context = context(1024);
+
+    let nested = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    context.register_table("n", Arc::new(nested)).unwrap();
+    let nested_rows = context
+        .sql("SELECT genotypes FROM n WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let fixed = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    // The fixed layout has to advertise the width in the schema.
+    let schema = TableProvider::schema(&fixed);
+    let genotypes = schema.field_with_name("genotypes").unwrap();
+    assert!(
+        format!("{:?}", genotypes.data_type()).contains("FixedSizeList"),
+        "fixed layout must advertise a fixed-width sample list: {:?}",
+        genotypes.data_type()
+    );
+    context.register_table("f", Arc::new(fixed)).unwrap();
+    let fixed_rows = context
+        .sql("SELECT genotypes FROM f WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    // Same values, different physical layout.
+    for variant in 0..1 {
+        for sample in 0..3 {
+            assert_eq!(
+                probability_values_any(&nested_rows[0], 0, variant)[sample],
+                probability_values_any(&fixed_rows[0], 0, variant)[sample],
+                "variant {variant} sample {sample}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn fixed_probability_layout_rejects_a_mixed_width_file() {
+    // v3 is multiallelic, so it stores more states than the biallelic variants
+    // and cannot share one fixed width with them.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("fixed probability layout") && error.contains("nested layout"),
+        "{error}"
+    );
+}
+
+/// Reads probabilities from either the nested or the fixed sample layout.
+fn probability_values_any(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    column: usize,
+    row: usize,
+) -> Vec<Option<Vec<f32>>> {
+    let genotypes = batch
+        .column(column)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let gp = genotypes
+        .column_by_name("GP")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let samples = gp.value(row);
+    let read = |sample: usize, values: &dyn datafusion::arrow::array::Array| {
+        let values = values.as_any().downcast_ref::<Float32Array>().unwrap();
+        let _ = sample;
+        (0..values.len()).map(|index| values.value(index)).collect()
+    };
+    if let Some(list) = samples.as_any().downcast_ref::<ListArray>() {
+        (0..list.len())
+            .map(|sample| {
+                (!list.is_null(sample)).then(|| read(sample, list.value(sample).as_ref()))
+            })
+            .collect()
+    } else {
+        let list = samples
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::FixedSizeListArray>()
+            .unwrap();
+        (0..list.len())
+            .map(|sample| {
+                (!list.is_null(sample)).then(|| read(sample, list.value(sample).as_ref()))
+            })
+            .collect()
+    }
 }
 
 fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, required: bool) -> bool {

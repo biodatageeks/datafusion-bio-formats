@@ -23,8 +23,11 @@ use datafusion_bio_format_core::range_planning::{
     ByteRange, coalesce_byte_ranges, partition_byte_ranges_in_order,
 };
 
+use datafusion_bio_format_core::companion::sanitize_location;
+
 use crate::bgi::{BgiIndex, open_optional_bgi};
 use crate::catalog::{BgenCatalog, build_transient_catalog};
+use crate::decode::{DecodeScratch, decode_variant};
 use crate::filter::{evaluate_exact_filter, supports_exact_filter};
 use crate::header::{BgenHeader, BgenLayout};
 use crate::physical_exec::{BgenExec, BgenPartition, BgenReadRange};
@@ -43,6 +46,24 @@ pub enum BgenOutputMode {
     Dosage,
 }
 
+/// Arrow layout used for probability output.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BgenProbabilityLayout {
+    /// One variable-length list per sample.
+    ///
+    /// Always valid, including for a file whose variants store different
+    /// numbers of probability states.
+    #[default]
+    Nested,
+    /// One fixed-width list per sample.
+    ///
+    /// Drops the per-sample list offsets, which are a quarter of the emitted
+    /// bytes for a diploid biallelic cohort. Requires every variant to store the
+    /// same number of states; a file that mixes widths is rejected rather than
+    /// silently padded.
+    Fixed,
+}
+
 /// Policy for an inconsistent optional BGI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StaleBgiPolicy {
@@ -58,6 +79,8 @@ pub enum StaleBgiPolicy {
 pub struct BgenReadOptions {
     /// Probability-preserving or biallelic-dosage output.
     pub output_mode: BgenOutputMode,
+    /// Arrow layout used when `output_mode` is [`BgenOutputMode::Probability`].
+    pub probability_layout: BgenProbabilityLayout,
     /// Explicit external sample file used only when IDs are not embedded.
     pub sample_path: Option<String>,
     /// Explicit BGI location.
@@ -111,6 +134,7 @@ impl Default for BgenReadOptions {
     fn default() -> Self {
         Self {
             output_mode: BgenOutputMode::Probability,
+            probability_layout: BgenProbabilityLayout::Nested,
             sample_path: None,
             bgi_path: None,
             samples: None,
@@ -146,6 +170,8 @@ pub(crate) struct BgenFileset {
     pub(crate) bgi: Option<BgiIndex>,
     pub(crate) selected_samples: datafusion_bio_format_core::genotype::SampleSelection,
     pub(crate) options: BgenReadOptions,
+    /// States per sample when the fixed probability layout is in use.
+    pub(crate) probability_width: Option<usize>,
 }
 
 /// Read-only DataFusion table provider for BGEN 1.2/1.3 files.
@@ -170,6 +196,16 @@ impl BgenTableProvider {
         )?;
         let catalog = build_transient_catalog(&path, &source, &header, &options).await?;
         let bgi = open_optional_bgi(&path, &source, &header, &catalog, &options).await?;
+        // The fixed layout puts the state count in the schema, so it has to be
+        // known before any batch is produced. One variant's block header carries
+        // it; every other variant is checked against it while scanning.
+        let probability_width = if options.output_mode == BgenOutputMode::Probability
+            && options.probability_layout == BgenProbabilityLayout::Fixed
+        {
+            Some(probe_probability_width(&path, &source, &header, &catalog, &options).await?)
+        } else {
+            None
+        };
         let fileset = Arc::new(BgenFileset {
             path,
             source,
@@ -178,6 +214,7 @@ impl BgenTableProvider {
             bgi,
             selected_samples,
             options,
+            probability_width,
         });
         let schema = build_schema(&fileset)?;
         Ok(Self { fileset, schema })
@@ -384,6 +421,39 @@ fn validate_options(options: &BgenReadOptions) -> Result<()> {
     Ok(())
 }
 
+/// Reads the probability state count from the first variant's block.
+///
+/// Decoding with an empty sample selection reads the block header without
+/// reconstructing any sample, so this costs one block, not one scan.
+async fn probe_probability_width(
+    path: &str,
+    source: &ObjectAccess,
+    header: &BgenHeader,
+    catalog: &BgenCatalog,
+    options: &BgenReadOptions,
+) -> Result<usize> {
+    let variant = catalog.variants.first().ok_or_else(|| {
+        DataFusionError::Plan(
+            "BGEN fixed probability layout needs at least one variant to determine its width"
+                .to_string(),
+        )
+    })?;
+    let end = variant
+        .payload_offset
+        .checked_add(variant.payload_size)
+        .ok_or_else(|| DataFusionError::Plan("BGEN payload range overflowed".to_string()))?;
+    let payload = source.read_range(path, variant.payload_offset..end).await?;
+    let mut scratch = DecodeScratch::new();
+    let decoded = decode_variant(path, variant, header, &payload, &[], options, &mut scratch)?;
+    decoded.state_width.ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "BGEN {} variant 0 declares a variable ploidy, which has no single probability width; \
+             use the nested probability layout",
+            sanitize_location(path)
+        ))
+    })
+}
+
 fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
     let sample_metadata = fileset.selected_samples.field_metadata();
     let ploidy = Field::new(
@@ -396,7 +466,16 @@ fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
             "GP",
             DataType::List(Arc::new(Field::new(
                 "sample",
-                DataType::List(Arc::new(Field::new("state", DataType::Float32, false))),
+                match fileset.probability_width {
+                    // A fixed-width sample list needs no per-sample offsets.
+                    Some(width) => DataType::FixedSizeList(
+                        Arc::new(Field::new("state", DataType::Float32, false)),
+                        width as i32,
+                    ),
+                    None => {
+                        DataType::List(Arc::new(Field::new("state", DataType::Float32, false)))
+                    }
+                },
                 true,
             ))),
             false,

@@ -13,6 +13,6 @@ mod table_provider;
 
 pub use physical_exec::BgenExec;
 pub use table_provider::{
-    BGEN_SAMPLE_NAMES_SYNTHETIC_KEY, BgenOutputMode, BgenReadOptions, BgenTableProvider,
-    StaleBgiPolicy,
+    BGEN_SAMPLE_NAMES_SYNTHETIC_KEY, BgenOutputMode, BgenProbabilityLayout, BgenReadOptions,
+    BgenTableProvider, StaleBgiPolicy,
 };

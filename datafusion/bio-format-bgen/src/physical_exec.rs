@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use datafusion::arrow::array::{
-    ArrayRef, BooleanArray, Float32Array, Float32Builder, ListArray, ListBuilder, StringArray,
-    StringBuilder, StructArray, UInt8Array, UInt8Builder, UInt64Array,
+    ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float32Builder, ListArray,
+    ListBuilder, StringArray, StringBuilder, StructArray, UInt8Array, UInt8Builder, UInt64Array,
 };
 use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
@@ -271,6 +271,7 @@ impl ExecutionPlan for BgenExec {
 
 fn empty_genotypes(mode: BgenOutputMode) -> DecodedGenotypes {
     DecodedGenotypes {
+        state_width: None,
         phased: false,
         bits: 0,
         ploidy: Vec::new(),
@@ -370,6 +371,20 @@ fn build_alleles(fileset: &BgenFileset, rows: &[DecodedRow]) -> Result<ArrayRef>
     Ok(Arc::new(builder.finish()))
 }
 
+/// Returns the fixed state width the schema requires, if any.
+fn fixed_probability_width(data_type: &DataType) -> Option<i32> {
+    let DataType::Struct(fields) = data_type else {
+        return None;
+    };
+    let DataType::List(sample) = fields.first()?.data_type() else {
+        return None;
+    };
+    match sample.data_type() {
+        DataType::FixedSizeList(_, width) => Some(*width),
+        _ => None,
+    }
+}
+
 fn build_genotypes(
     data_type: &DataType,
     rows: &[DecodedRow],
@@ -382,10 +397,14 @@ fn build_genotypes(
     };
     let values: ArrayRef = match mode {
         BgenOutputMode::Probability => {
+            let width = fixed_probability_width(data_type);
             let state_field = Arc::new(Field::new("state", DataType::Float32, false));
             let sample_field = Arc::new(Field::new(
                 "sample",
-                DataType::List(state_field.clone()),
+                match width {
+                    Some(width) => DataType::FixedSizeList(state_field.clone(), width),
+                    None => DataType::List(state_field.clone()),
+                },
                 true,
             ));
             // The decoder already produced Arrow's own layout, so the states,
@@ -406,24 +425,41 @@ fn build_genotypes(
                         "BGEN decoded dosage in probability mode".to_string(),
                     ));
                 };
-                let base = i32::try_from(states.len()).map_err(|_| {
-                    DataFusionError::Execution(
-                        "BGEN probability offsets exceed the 32-bit Arrow list limit".to_string(),
-                    )
-                })?;
-                states.extend_from_slice(&samples.values);
-                // Each per-variant offset and the running base can both fit in
-                // i32 while their sum does not, so the sum is what must be
-                // checked; an unchecked add would wrap into a non-monotonic
-                // Arrow offset in release builds.
-                for offset in samples.offsets.iter().skip(1) {
-                    sample_offsets.push(offset.checked_add(base).ok_or_else(|| {
+                if let Some(width) = width {
+                    // The schema fixes the width, so a variant that stores a
+                    // different number of states cannot be represented and must
+                    // not be silently padded or truncated.
+                    if decoded.state_width != Some(width as usize) {
+                        return Err(DataFusionError::Execution(format!(
+                            "BGEN fixed probability layout expects {width} states per sample, \
+                             but a variant stores {}; use the nested layout for this file",
+                            decoded.state_width.map_or_else(
+                                || "a variable number".to_string(),
+                                |value| value.to_string()
+                            )
+                        )));
+                    }
+                } else {
+                    let base = i32::try_from(states.len()).map_err(|_| {
                         DataFusionError::Execution(
                             "BGEN probability offsets exceed the 32-bit Arrow list limit"
                                 .to_string(),
                         )
-                    })?);
+                    })?;
+                    // Each per-variant offset and the running base can both fit
+                    // in i32 while their sum does not, so the sum is what must
+                    // be checked; an unchecked add would wrap into a
+                    // non-monotonic Arrow offset in release builds.
+                    for offset in samples.offsets.iter().skip(1) {
+                        sample_offsets.push(offset.checked_add(base).ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "BGEN probability offsets exceed the 32-bit Arrow list limit"
+                                    .to_string(),
+                            )
+                        })?);
+                    }
                 }
+                states.extend_from_slice(&samples.values);
                 sample_valid.extend_from_slice(&samples.valid);
                 variant_offsets.push(i32::try_from(sample_valid.len()).map_err(|_| {
                     DataFusionError::Execution(
@@ -440,16 +476,24 @@ fn build_genotypes(
             } else {
                 Some(NullBuffer::from(sample_valid))
             };
-            let samples = ListArray::try_new(
-                state_field,
-                OffsetBuffer::new(ScalarBuffer::from(sample_offsets)),
-                states,
-                nulls,
-            )?;
+            let samples: ArrayRef = match width {
+                Some(width) => Arc::new(FixedSizeListArray::try_new(
+                    state_field,
+                    width,
+                    states,
+                    nulls,
+                )?),
+                None => Arc::new(ListArray::try_new(
+                    state_field,
+                    OffsetBuffer::new(ScalarBuffer::from(sample_offsets)),
+                    states,
+                    nulls,
+                )?),
+            };
             Arc::new(ListArray::try_new(
                 sample_field,
                 OffsetBuffer::new(ScalarBuffer::from(variant_offsets)),
-                Arc::new(samples) as ArrayRef,
+                samples,
                 None,
             )?)
         }
