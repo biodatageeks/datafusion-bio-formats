@@ -58,6 +58,52 @@ the file's widest, so the probed width already covers every sample and the
 narrower unphased variants pad to it. Task 8's catalog-derived width is still
 needed for the general case — a file whose variant 0 is *not* the widest.
 
+## End to end, against snputils
+
+`run_bgen_benchmarks.py --runs 3`, fresh process per reader, polars-bio through
+the fixed probability layout at 8 partitions. This is the comparison the goal is
+stated in; the tables above are the Rust scan inside it.
+
+### Probabilities, 25,000-variant slices
+
+| Fixture | Reader | Before | After |
+| --- | --- | --- | --- |
+| unphased | **polars-bio, 8 partitions** | 0.393 s | **0.292 s** |
+| unphased | snputils | 0.361 s | 0.363 s |
+| unphased | bgen | — | 0.319 s |
+| phased, mixed width | **polars-bio, 8 partitions** | 0.660 s | **0.340 s** |
+| phased, mixed width | snputils | 0.386 s | 0.397 s |
+| phased, mixed width | bgen | — | 0.332 s |
+
+Both goals are met. The unphased slice went from 9% behind snputils to **1.24x
+ahead**; the phased slice from 71% behind to **1.17x ahead**. Every reader
+produced the same `value_sha256` on each fixture.
+
+polars-bio is still marginally behind the `bgen` package on the phased fixture
+(0.340 s against 0.332 s) and ahead of it on the unphased one. `bgen` is the
+oracle, not the target, but it is the honest bound on what is left.
+
+### Dosage, full chromosome 22 — the number that must not move
+
+993,881 variants x 2,548 samples.
+
+| Reader | Published | Now |
+| --- | --- | --- |
+| polars-bio, 8 partitions | 7.073 s | 7.334 s |
+| snputils | 13.403 s | 13.665 s |
+| ratio | 1.895x | **1.86x** |
+
+Both readers came in about 3% slower than the published run, so the absolute
+shift is machine state rather than code; the ratio is what this row is for and
+it held. Dosage was the workload this rework most risked spending.
+
+## The inner loop was not touched
+
+The plan gated a `byte_probabilities_into` rewrite (23% of the profile) on this
+measurement: run it only if a fixture was still behind snputils. Neither is, so
+it was not run. That work remains available if the gap to the `bgen` package on
+the phased fixture is ever worth closing.
+
 ## A measurement bug found and fixed here
 
 The first run of this comparison reported the phased fixture as *regressed* by
