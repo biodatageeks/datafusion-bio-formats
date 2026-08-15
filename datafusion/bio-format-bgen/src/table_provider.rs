@@ -312,11 +312,10 @@ impl TableProvider for BgenTableProvider {
         {
             selected.truncate(limit);
         }
-        if selected.is_empty() {
-            return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
-                schema,
-            )));
-        }
+        // An all-rejected scan still reports what the filters removed, so it
+        // yields an empty BGEN partition rather than an EmptyExec that would
+        // drop the metrics.
+        let all_rejected = selected.is_empty();
 
         let projected_names: std::collections::HashSet<_> = schema
             .fields()
@@ -337,6 +336,16 @@ impl TableProvider for BgenTableProvider {
             )?
         } else {
             plan_metadata_partitions(&selected, state.config().target_partitions())
+        };
+        // Planning yields nothing when every candidate was filtered out, so one
+        // empty partition keeps the plan valid and its counters reportable.
+        let partitions = if all_rejected {
+            vec![BgenPartition {
+                variants: Vec::new(),
+                ranges: Vec::new(),
+            }]
+        } else {
+            partitions
         };
         let metrics = Arc::new(GenotypeScanMetrics::default());
         metrics.add(
@@ -469,6 +478,16 @@ async fn probe_probability_width(
     let payload = source.read_range(path, variant.payload_offset..end).await?;
     let mut scratch = DecodeScratch::new();
     let decoded = decode_variant(path, variant, header, &payload, &[], options, &mut scratch)?;
+    if let Some(states) = decoded.state_width
+        && states > options.max_states_per_sample
+    {
+        return Err(DataFusionError::Plan(format!(
+            "BGEN {} variant 0 has {states} probability states, exceeding \
+             max_states_per_sample {}",
+            sanitize_location(path),
+            options.max_states_per_sample
+        )));
+    }
     let width = decoded.state_width.ok_or_else(|| {
         DataFusionError::Plan(format!(
             "BGEN {} variant 0 declares a variable ploidy, which has no single probability width; \
@@ -481,6 +500,19 @@ async fn probe_probability_width(
         payload.len() as u64,
         decoded.decompressed_bytes as u64,
     ))
+}
+
+/// Converts a state count to Arrow's fixed-size list width.
+///
+/// Arrow stores that width as an `i32`, so a state count beyond its range would
+/// wrap to a negative width rather than fail.
+fn fixed_list_width(width: usize) -> Result<i32> {
+    i32::try_from(width).map_err(|_| {
+        DataFusionError::Plan(format!(
+            "BGEN probability width {width} exceeds the fixed-size list limit; \
+             use the nested probability layout"
+        ))
+    })
 }
 
 fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
@@ -499,7 +531,7 @@ fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
                     // A fixed-width sample list needs no per-sample offsets.
                     Some(width) => DataType::FixedSizeList(
                         Arc::new(Field::new("state", DataType::Float32, false)),
-                        width as i32,
+                        fixed_list_width(width)?,
                     ),
                     None => {
                         DataType::List(Arc::new(Field::new("state", DataType::Float32, false)))
@@ -709,6 +741,9 @@ fn plan_payload_partitions(
 }
 
 fn plan_metadata_partitions(selected: &[usize], target_partitions: usize) -> Vec<BgenPartition> {
+    if selected.is_empty() {
+        return Vec::new();
+    }
     let partition_count = target_partitions.max(1).min(selected.len());
     let chunk_size = selected.len().div_ceil(partition_count);
     selected

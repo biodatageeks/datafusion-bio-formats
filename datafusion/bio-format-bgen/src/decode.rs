@@ -644,13 +644,10 @@ fn decode_layout2_block(
                     execution_error(path, variant, "probability bitstream is truncated")
                 })?;
             if ploidy_missing & 0x80 != 0 {
-                if values.iter().any(|&value| value != 0) {
-                    return Err(execution_error(
-                        path,
-                        variant,
-                        &format!("missing sample {sample} has non-zero stored probabilities"),
-                    ));
-                }
+                // The format leaves the stored bytes of a missing sample
+                // undefined, so they are skipped rather than required to be
+                // zero. Writers differ here, and rejecting a non-zero slot
+                // would refuse files the specification allows.
                 match options.output_mode {
                     BgenOutputMode::Probability => {
                         probabilities.finish_missing_sample(missing_pad)?
@@ -729,13 +726,7 @@ fn decode_layout2_block(
             variant,
         )?;
         if missing {
-            if stored.iter().any(|&value| value != 0) {
-                return Err(execution_error(
-                    path,
-                    variant,
-                    &format!("missing sample {sample} has non-zero stored probabilities"),
-                ));
-            }
+            // See the fast path: a missing sample's stored bytes are undefined.
             probabilities.finish_missing_sample(missing_pad)?;
             dosages.push(None);
             continue;
