@@ -402,7 +402,10 @@ fn pack_bits(values: impl Iterator<Item = u32>, bits: u8) -> Vec<u8> {
 }
 
 fn encode_layout1(codec: Codec) -> Vec<u8> {
-    let values = [[32_768_u16, 0, 0], [0, 0, 0], [0, 32_768, 0]];
+    encode_layout1_with(codec, [[32_768_u16, 0, 0], [0, 0, 0], [0, 32_768, 0]])
+}
+
+fn encode_layout1_with(codec: Codec, values: [[u16; 3]; 3]) -> Vec<u8> {
     let mut payload = Vec::new();
     for sample in values {
         for value in sample {
@@ -1538,6 +1541,34 @@ async fn fixed_probability_layout_allows_an_empty_sample_selection() {
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         fixture.rows.len()
     );
+}
+
+#[tokio::test]
+async fn layout1_rejects_a_sample_that_does_not_sum_to_scale() {
+    // Layout 1 scales a called sample's probabilities to 32768. A total inside
+    // [1, 32766] is neither the missing sentinel nor a valid distribution, and
+    // accepting it would emit probabilities that do not sum to one.
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("undersummed.bgen");
+    fs::write(
+        &bgen,
+        encode_layout1_with(Codec::None, [[16_000, 0, 0], [0, 0, 0], [0, 32_768, 0]]),
+    )
+    .unwrap();
+    let provider = BgenTableProvider::try_new(path(&bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("32767..=32769"), "{error}");
 }
 
 fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, required: bool) -> bool {

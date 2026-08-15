@@ -236,11 +236,18 @@ fn decode_layout1(
             dosages.push(None);
             continue;
         }
-        if sum > 32_769 {
+        // Layout 1 scales each called sample's three probabilities to 32768,
+        // give or take one unit in the last place. A zero total is the missing
+        // sentinel handled above; anything else outside that band is malformed,
+        // and accepting it would silently emit probabilities that do not sum to
+        // one.
+        if !(32_767..=32_769).contains(&sum) {
             return Err(execution_error(
                 path,
                 variant,
-                &format!("Layout 1 sample {sample} probability total {sum} exceeds 32769"),
+                &format!(
+                    "Layout 1 sample {sample} probability total {sum} is outside 32767..=32769"
+                ),
             ));
         }
         match options.output_mode {
