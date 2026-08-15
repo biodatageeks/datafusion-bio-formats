@@ -172,6 +172,8 @@ pub(crate) struct BgenFileset {
     pub(crate) options: BgenReadOptions,
     /// States per sample when the fixed probability layout is in use.
     pub(crate) probability_width: Option<usize>,
+    /// Payload bytes read to resolve [`Self::probability_width`].
+    pub(crate) probability_probe_bytes: u64,
 }
 
 /// Read-only DataFusion table provider for BGEN 1.2/1.3 files.
@@ -199,12 +201,15 @@ impl BgenTableProvider {
         // The fixed layout puts the state count in the schema, so it has to be
         // known before any batch is produced. One variant's block header carries
         // it; every other variant is checked against it while scanning.
-        let probability_width = if options.output_mode == BgenOutputMode::Probability
+        let (probability_width, probability_probe_bytes) = if options.output_mode
+            == BgenOutputMode::Probability
             && options.probability_layout == BgenProbabilityLayout::Fixed
         {
-            Some(probe_probability_width(&path, &source, &header, &catalog, &options).await?)
+            let (width, bytes) =
+                probe_probability_width(&path, &source, &header, &catalog, &options).await?;
+            (Some(width), bytes)
         } else {
-            None
+            (None, 0)
         };
         let fileset = Arc::new(BgenFileset {
             path,
@@ -215,6 +220,7 @@ impl BgenTableProvider {
             selected_samples,
             options,
             probability_width,
+            probability_probe_bytes,
         });
         let schema = build_schema(&fileset)?;
         Ok(Self { fileset, schema })
@@ -332,6 +338,7 @@ impl TableProvider for BgenTableProvider {
             GenotypeMetric::PrimaryBytesRead,
             self.fileset.header.header_bytes_read
                 + self.fileset.catalog.bytes_read
+                + self.fileset.probability_probe_bytes
                 + self
                     .fileset
                     .bgi
@@ -431,7 +438,7 @@ async fn probe_probability_width(
     header: &BgenHeader,
     catalog: &BgenCatalog,
     options: &BgenReadOptions,
-) -> Result<usize> {
+) -> Result<(usize, u64)> {
     let variant = catalog.variants.first().ok_or_else(|| {
         DataFusionError::Plan(
             "BGEN fixed probability layout needs at least one variant to determine its width"
@@ -445,13 +452,14 @@ async fn probe_probability_width(
     let payload = source.read_range(path, variant.payload_offset..end).await?;
     let mut scratch = DecodeScratch::new();
     let decoded = decode_variant(path, variant, header, &payload, &[], options, &mut scratch)?;
-    decoded.state_width.ok_or_else(|| {
+    let width = decoded.state_width.ok_or_else(|| {
         DataFusionError::Plan(format!(
             "BGEN {} variant 0 declares a variable ploidy, which has no single probability width; \
              use the nested probability layout",
             sanitize_location(path)
         ))
-    })
+    })?;
+    Ok((width, payload.len() as u64))
 }
 
 fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {

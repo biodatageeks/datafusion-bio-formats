@@ -189,6 +189,18 @@ async fn open_and_validate(
         let connection = open_retained_index(&path)?;
         (path, connection)
     } else {
+        // The index is about to be cached, so an index the cache cannot hold is
+        // rejected before it is downloaded. Otherwise a stale-BGI policy that
+        // ignores the failure would re-download it on every open.
+        if bgi_size > options.max_bgi_cache_bytes as u64 {
+            return Err(index_error(
+                bgi_path,
+                &format!(
+                    "index size {bgi_size} exceeds max_bgi_cache_bytes {}",
+                    options.max_bgi_cache_bytes
+                ),
+            ));
+        }
         let bytes = bgi_source
             .read_all_bounded(bgi_path, options.max_bgi_bytes)
             .await?;
