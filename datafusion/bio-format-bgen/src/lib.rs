@@ -3,6 +3,7 @@
 #![warn(missing_docs)]
 
 mod bgi;
+mod buffers;
 mod catalog;
 mod decode;
 mod filter;
