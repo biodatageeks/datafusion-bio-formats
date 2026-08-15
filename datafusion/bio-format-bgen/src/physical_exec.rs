@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use datafusion::arrow::array::{
-    ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, Float32Builder, ListArray,
-    ListBuilder, StringArray, StringBuilder, StructArray, UInt8Array, UInt8Builder, UInt64Array,
+    ArrayRef, BooleanArray, FixedSizeListArray, Float32Array, ListArray, ListBuilder, StringArray,
+    StringBuilder, StructArray, UInt8Array, UInt64Array,
 };
-use datafusion::arrow::buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+use datafusion::arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::common::{DataFusionError, Result};
@@ -19,7 +19,8 @@ use datafusion_bio_format_core::genotype::{
 };
 use datafusion_bio_format_core::range_planning::ByteRange;
 
-use crate::decode::{DecodeScratch, DecodedGenotypes, DecodedValues, decode_variant};
+use crate::buffers::{BufferLayout, GenotypeBuffers, TakenBuffers};
+use crate::decode::{DecodeScratch, decode_variant};
 use crate::table_provider::{BgenFileset, BgenOutputMode};
 
 #[derive(Clone, Debug)]
@@ -34,10 +35,16 @@ pub(crate) struct BgenPartition {
     pub(crate) ranges: Vec<BgenReadRange>,
 }
 
+/// One emitted row's per-variant metadata.
+///
+/// The genotypes themselves are not here: the decoder writes them straight into
+/// the batch's [`GenotypeBuffers`], so a row carries only what the block header
+/// says about it.
 #[derive(Debug)]
 struct DecodedRow {
     variant_index: usize,
-    genotypes: Option<DecodedGenotypes>,
+    phased: bool,
+    bits: u8,
 }
 
 /// Physical execution plan for a BGEN scan.
@@ -130,9 +137,6 @@ impl ExecutionPlan for BgenExec {
         let max_rows = context.session_config().batch_size();
         let soft_bytes = self.batch_soft_byte_limit;
         let genotype_projected = schema.index_of("genotypes").is_ok();
-        let payload_derived_projected = genotype_projected
-            || schema.index_of("phased").is_ok()
-            || schema.index_of("bits").is_ok();
 
         let stream = try_stream! {
             let mut sizer = GenotypeBatchSizer::new(max_rows, soft_bytes)?;
@@ -140,25 +144,37 @@ impl ExecutionPlan for BgenExec {
             // Decoding buffers live for the whole partition so per-variant work
             // reuses one decompressor and one set of probability buffers.
             let mut scratch = DecodeScratch::new();
+            // The decoder appends into these, and a finished batch moves them
+            // into its Arrow arrays.
+            let mut buffers = GenotypeBuffers::new(
+                match (fileset.options.output_mode, fileset.probability_width) {
+                    (BgenOutputMode::Dosage, _) => BufferLayout::Dosage,
+                    (BgenOutputMode::Probability, Some(width)) => {
+                        BufferLayout::FixedProbability(width)
+                    }
+                    (BgenOutputMode::Probability, None) => BufferLayout::NestedProbability,
+                },
+            );
 
             if assignment.ranges.is_empty() {
                 for variant_index in assignment.variants {
                     let estimated_row_bytes = 0;
                     if sizer.should_flush_before(estimated_row_bytes) {
                         let row_count = rows.len();
-                        let batch = build_batch(&fileset, schema.clone(), &rows)?;
+                        let batch = build_batch(&fileset, schema.clone(), &rows, buffers.take())?;
                         record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
                         yield batch;
                         rows.clear();
                         sizer.reset();
                     }
+                    // No payload was read, so the row has no samples and no
+                    // header-derived values; it still closes a variant, because
+                    // the batch's row count comes from the variant offsets.
+                    buffers.finish_variant()?;
                     rows.push(DecodedRow {
                         variant_index,
-                        genotypes: if genotype_projected {
-                            Some(empty_genotypes(fileset.options.output_mode))
-                        } else {
-                            None
-                        },
+                        phased: false,
+                        bits: 0,
                     });
                     sizer.push_row(estimated_row_bytes);
                 }
@@ -211,7 +227,8 @@ impl ExecutionPlan for BgenExec {
                         } else {
                             &[]
                         };
-                        let decoded = decode_variant(
+                        let mark = buffers.mark();
+                        let decoded = match decode_variant(
                             &fileset.path,
                             variant,
                             &fileset.header,
@@ -219,20 +236,19 @@ impl ExecutionPlan for BgenExec {
                             decode_samples,
                             &fileset.options,
                             &mut scratch,
-                        )?;
-                        let estimated_row_bytes = if genotype_projected {
-                            decoded.estimated_arrow_bytes()
-                        } else {
-                            0
+                            &mut buffers,
+                        ) {
+                            Ok(decoded) => decoded,
+                            Err(error) => {
+                                // A failed variant leaves a partial row behind;
+                                // drop it so the buffers stay a valid Arrow
+                                // prefix rather than a torn row.
+                                buffers.rollback(mark);
+                                Err(error)?
+                            }
                         };
-                        if sizer.should_flush_before(estimated_row_bytes) {
-                            let row_count = rows.len();
-                            let batch = build_batch(&fileset, schema.clone(), &rows)?;
-                            record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
-                            yield batch;
-                            rows.clear();
-                            sizer.reset();
-                        }
+                        buffers.finish_variant()?;
+                        let estimated_row_bytes = buffers.bytes_since(mark);
                         metrics.add(
                             GenotypeMetric::DecompressedBytes,
                             decoded.decompressed_bytes as u64,
@@ -249,15 +265,26 @@ impl ExecutionPlan for BgenExec {
                         );
                         rows.push(DecodedRow {
                             variant_index,
-                            genotypes: payload_derived_projected.then_some(decoded),
+                            phased: decoded.phased,
+                            bits: decoded.bits,
                         });
                         sizer.push_row(estimated_row_bytes);
+                        // The row is already in the buffers, so the flush
+                        // decision comes after it rather than before.
+                        if sizer.should_flush_after() {
+                            let row_count = rows.len();
+                            let batch = build_batch(&fileset, schema.clone(), &rows, buffers.take())?;
+                            record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
+                            yield batch;
+                            rows.clear();
+                            sizer.reset();
+                        }
                     }
                 }
             }
             if !rows.is_empty() {
                 let row_count = rows.len();
-                let batch = build_batch(&fileset, schema.clone(), &rows)?;
+                let batch = build_batch(&fileset, schema.clone(), &rows, buffers.take())?;
                 record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
                 yield batch;
             }
@@ -266,22 +293,6 @@ impl ExecutionPlan for BgenExec {
             stream_schema,
             stream,
         )))
-    }
-}
-
-fn empty_genotypes(mode: BgenOutputMode) -> DecodedGenotypes {
-    DecodedGenotypes {
-        state_width: None,
-        phased: false,
-        bits: 0,
-        ploidy: Vec::new(),
-        values: match mode {
-            BgenOutputMode::Probability => {
-                DecodedValues::Probabilities(crate::decode::ProbabilityValues::default())
-            }
-            BgenOutputMode::Dosage => DecodedValues::Dosages(Vec::new()),
-        },
-        decompressed_bytes: 0,
     }
 }
 
@@ -296,12 +307,16 @@ fn build_batch(
     fileset: &BgenFileset,
     schema: SchemaRef,
     rows: &[DecodedRow],
+    buffers: TakenBuffers,
 ) -> Result<RecordBatch> {
     if schema.fields().is_empty() {
         let options = RecordBatchOptions::new().with_row_count(Some(rows.len()));
         return RecordBatch::try_new_with_options(schema, Vec::new(), &options)
             .map_err(DataFusionError::from);
     }
+    // The genotype buffers can only be moved into one array, and a projection
+    // names each column at most once.
+    let mut buffers = Some(buffers);
     let arrays = schema
         .fields()
         .iter()
@@ -330,24 +345,20 @@ fn build_batch(
             )) as ArrayRef),
             "alleles" => build_alleles(fileset, rows),
             "phased" => Ok(Arc::new(BooleanArray::from(
-                rows.iter()
-                    .map(|row| {
-                        row.genotypes
-                            .as_ref()
-                            .map(|decoded| decoded.phased)
-                            .unwrap_or(false)
-                    })
-                    .collect::<Vec<_>>(),
+                rows.iter().map(|row| row.phased).collect::<Vec<_>>(),
             )) as ArrayRef),
-            "bits" => Ok(
-                Arc::new(UInt8Array::from_iter_values(rows.iter().map(|row| {
-                    row.genotypes
-                        .as_ref()
-                        .map(|decoded| decoded.bits)
-                        .unwrap_or(0)
-                }))) as ArrayRef,
+            "bits" => Ok(Arc::new(UInt8Array::from_iter_values(
+                rows.iter().map(|row| row.bits),
+            )) as ArrayRef),
+            "genotypes" => build_genotypes(
+                field.data_type(),
+                buffers.take().ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "BGEN genotype buffers were already consumed by this batch".to_string(),
+                    )
+                })?,
+                fileset.options.output_mode,
             ),
-            "genotypes" => build_genotypes(field.data_type(), rows, fileset.options.output_mode),
             name => Err(DataFusionError::Execution(format!(
                 "unsupported BGEN projected field {name}"
             ))),
@@ -387,7 +398,7 @@ fn fixed_probability_width(data_type: &DataType) -> Option<i32> {
 
 fn build_genotypes(
     data_type: &DataType,
-    rows: &[DecodedRow],
+    buffers: TakenBuffers,
     mode: BgenOutputMode,
 ) -> Result<ArrayRef> {
     let DataType::Struct(fields) = data_type else {
@@ -395,7 +406,17 @@ fn build_genotypes(
             "BGEN genotypes field is not a struct".to_string(),
         ));
     };
-    let values: ArrayRef = match mode {
+    // The decoder wrote Arrow's own layout as it went, so every buffer moves
+    // into its array here. Nothing in this function copies a probability.
+    let TakenBuffers {
+        values,
+        sample_offsets,
+        nulls,
+        variant_offsets,
+        ploidy,
+        ploidy_offsets,
+    } = buffers;
+    let genotype_values: ArrayRef = match mode {
         BgenOutputMode::Probability => {
             let width = fixed_probability_width(data_type);
             let state_field = Arc::new(Field::new("state", DataType::Float32, false));
@@ -407,77 +428,7 @@ fn build_genotypes(
                 },
                 true,
             ));
-            // The decoder already produced Arrow's own layout, so the states,
-            // sample offsets, and sample validity move into the arrays without
-            // being appended value by value.
-            let mut states: Vec<f32> = Vec::new();
-            let mut sample_offsets: Vec<i32> = vec![0];
-            let mut sample_valid: Vec<bool> = Vec::new();
-            let mut variant_offsets: Vec<i32> = vec![0];
-            for row in rows {
-                let decoded = row.genotypes.as_ref().ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "BGEN genotype projection has no decoded payload".to_string(),
-                    )
-                })?;
-                let DecodedValues::Probabilities(samples) = &decoded.values else {
-                    return Err(DataFusionError::Execution(
-                        "BGEN decoded dosage in probability mode".to_string(),
-                    ));
-                };
-                if let Some(width) = width {
-                    // The schema fixes the width, so a variant that stores a
-                    // different number of states cannot be represented and must
-                    // not be silently padded or truncated. A row that emits no
-                    // sample has no states to check, which is what an empty
-                    // sample selection produces without reading any payload.
-                    if !samples.valid.is_empty() && decoded.state_width != Some(width as usize) {
-                        return Err(DataFusionError::Execution(format!(
-                            "BGEN fixed probability layout expects {width} states per sample, \
-                             but a variant stores {}; use the nested layout for this file",
-                            decoded.state_width.map_or_else(
-                                || "a variable number".to_string(),
-                                |value| value.to_string()
-                            )
-                        )));
-                    }
-                } else {
-                    let base = i32::try_from(states.len()).map_err(|_| {
-                        DataFusionError::Execution(
-                            "BGEN probability offsets exceed the 32-bit Arrow list limit"
-                                .to_string(),
-                        )
-                    })?;
-                    // Each per-variant offset and the running base can both fit
-                    // in i32 while their sum does not, so the sum is what must
-                    // be checked; an unchecked add would wrap into a
-                    // non-monotonic Arrow offset in release builds.
-                    for offset in samples.offsets.iter().skip(1) {
-                        sample_offsets.push(offset.checked_add(base).ok_or_else(|| {
-                            DataFusionError::Execution(
-                                "BGEN probability offsets exceed the 32-bit Arrow list limit"
-                                    .to_string(),
-                            )
-                        })?);
-                    }
-                }
-                states.extend_from_slice(&samples.values);
-                sample_valid.extend_from_slice(&samples.valid);
-                variant_offsets.push(i32::try_from(sample_valid.len()).map_err(|_| {
-                    DataFusionError::Execution(
-                        "BGEN sample offsets exceed the 32-bit Arrow list limit".to_string(),
-                    )
-                })?);
-            }
-            let states = Arc::new(Float32Array::from(states)) as ArrayRef;
-            // Converting a bool per sample into a bitmap is a measurable share of
-            // a whole-cohort probability scan, and a file where every genotype is
-            // called needs no validity buffer at all.
-            let nulls = if sample_valid.iter().all(|valid| *valid) {
-                None
-            } else {
-                Some(NullBuffer::from(sample_valid))
-            };
+            let states = Arc::new(Float32Array::from(values)) as ArrayRef;
             let samples: ArrayRef = match width {
                 Some(width) => Arc::new(FixedSizeListArray::try_new(
                     state_field,
@@ -500,43 +451,27 @@ fn build_genotypes(
             )?)
         }
         BgenOutputMode::Dosage => {
-            let mut builder = ListBuilder::new(Float32Builder::new())
-                .with_field(Arc::new(Field::new("item", DataType::Float32, true)));
-            for row in rows {
-                let decoded = row.genotypes.as_ref().ok_or_else(|| {
-                    DataFusionError::Execution(
-                        "BGEN genotype projection has no decoded payload".to_string(),
-                    )
-                })?;
-                let DecodedValues::Dosages(samples) = &decoded.values else {
-                    return Err(DataFusionError::Execution(
-                        "BGEN decoded probabilities in dosage mode".to_string(),
-                    ));
-                };
-                for dosage in samples {
-                    builder.values().append_option(*dosage);
-                }
-                builder.append(true);
-            }
-            Arc::new(builder.finish())
+            // A dosage is one value per sample, so the validity belongs to the
+            // values array rather than to a per-sample list.
+            let dosages = Arc::new(Float32Array::new(ScalarBuffer::from(values), nulls));
+            Arc::new(ListArray::try_new(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                OffsetBuffer::new(ScalarBuffer::from(variant_offsets)),
+                dosages,
+                None,
+            )?)
         }
     };
-    let mut ploidy = ListBuilder::new(UInt8Builder::new()).with_field(Arc::new(Field::new(
-        "item",
-        DataType::UInt8,
-        false,
-    )));
-    for row in rows {
-        let decoded = row.genotypes.as_ref().ok_or_else(|| {
-            DataFusionError::Execution("BGEN genotype projection has no decoded ploidy".to_string())
-        })?;
-        // Declared ploidy is never null, so the whole row is one bulk append.
-        ploidy.values().append_slice(&decoded.ploidy);
-        ploidy.append(true);
-    }
+    // Declared ploidy is never null.
+    let ploidy = Arc::new(ListArray::try_new(
+        Arc::new(Field::new("item", DataType::UInt8, false)),
+        OffsetBuffer::new(ScalarBuffer::from(ploidy_offsets)),
+        Arc::new(UInt8Array::from(ploidy)),
+        None,
+    )?);
     Ok(Arc::new(StructArray::try_new(
         fields.clone(),
-        vec![values, Arc::new(ploidy.finish())],
+        vec![genotype_values, ploidy],
         None,
     )?))
 }

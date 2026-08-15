@@ -1,91 +1,22 @@
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::companion::sanitize_location;
 
+use crate::buffers::GenotypeBuffers;
 use crate::catalog::BgenVariant;
 use crate::header::{BgenCompression, BgenHeader, BgenLayout};
-use crate::table_provider::{BgenOutputMode, BgenProbabilityLayout, BgenReadOptions};
+use crate::table_provider::{BgenOutputMode, BgenReadOptions};
 
+/// What a decoded variant reports beyond the values it wrote into the batch
+/// buffers.
 #[derive(Debug)]
 pub(crate) struct DecodedGenotypes {
     pub(crate) phased: bool,
     pub(crate) bits: u8,
-    pub(crate) ploidy: Vec<u8>,
-    pub(crate) values: DecodedValues,
     pub(crate) decompressed_bytes: usize,
     /// Probability states every sample of this variant stores, when the variant
     /// declares one ploidy. `None` for a variable-ploidy variant, whose samples
     /// do not share a width.
     pub(crate) state_width: Option<usize>,
-}
-
-/// One variant's per-sample probability vectors in a flat layout.
-///
-/// A vector per sample would allocate once per sample per variant, which
-/// dominates a whole-cohort probability scan. Values are concatenated instead,
-/// with one offset per sample; this is also the layout Arrow's list arrays use,
-/// so no per-value copy is needed when the batch is built.
-#[derive(Debug, Default)]
-pub(crate) struct ProbabilityValues {
-    /// Concatenated probabilities of every emitted sample.
-    pub(crate) values: Vec<f32>,
-    /// Start of each sample's states, with a trailing total length.
-    pub(crate) offsets: Vec<i32>,
-    /// False for a sample with no called genotype.
-    pub(crate) valid: Vec<bool>,
-}
-
-impl ProbabilityValues {
-    fn with_sample_capacity(samples: usize) -> Self {
-        let mut offsets = Vec::with_capacity(samples + 1);
-        offsets.push(0);
-        Self {
-            values: Vec::new(),
-            offsets,
-            valid: Vec::with_capacity(samples),
-        }
-    }
-
-    /// Records a sample with no called genotype.
-    ///
-    /// A fixed-width layout still reserves `pad` slots for a null sample,
-    /// because Arrow sizes its values buffer from the entry count rather than
-    /// from offsets. The padded values are never read.
-    fn finish_missing_sample(&mut self, pad: usize) -> Result<()> {
-        self.values.resize(self.values.len() + pad, 0.0);
-        self.finish_sample(false)
-    }
-
-    /// Records one sample whose probabilities are the tail of `values`.
-    fn finish_sample(&mut self, valid: bool) -> Result<()> {
-        let end = i32::try_from(self.values.len()).map_err(|_| {
-            DataFusionError::Execution(
-                "BGEN probability offsets exceed the 32-bit Arrow list limit".to_string(),
-            )
-        })?;
-        self.offsets.push(end);
-        self.valid.push(valid);
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub(crate) enum DecodedValues {
-    Probabilities(ProbabilityValues),
-    Dosages(Vec<Option<f32>>),
-}
-
-impl DecodedGenotypes {
-    pub(crate) fn estimated_arrow_bytes(&self) -> usize {
-        let value_bytes = match &self.values {
-            DecodedValues::Probabilities(samples) => {
-                samples.values.len().saturating_mul(size_of::<f32>())
-            }
-            DecodedValues::Dosages(samples) => samples.len().saturating_mul(size_of::<f32>()),
-        };
-        value_bytes
-            .saturating_add(self.ploidy.len())
-            .saturating_add(self.ploidy.len().saturating_mul(size_of::<i32>()))
-    }
 }
 
 /// Buffers reused across the variants decoded by one partition.
@@ -122,6 +53,7 @@ impl std::fmt::Debug for DecodeScratch {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decode_variant(
     path: &str,
     variant: &BgenVariant,
@@ -130,6 +62,7 @@ pub(crate) fn decode_variant(
     selected_samples: &[usize],
     options: &BgenReadOptions,
     scratch: &mut DecodeScratch,
+    buffers: &mut GenotypeBuffers,
 ) -> Result<DecodedGenotypes> {
     match header.layout {
         BgenLayout::Layout1 => decode_layout1(
@@ -140,6 +73,7 @@ pub(crate) fn decode_variant(
             selected_samples,
             options,
             scratch,
+            buffers,
         ),
         BgenLayout::Layout2 => decode_layout2(
             path,
@@ -149,10 +83,12 @@ pub(crate) fn decode_variant(
             selected_samples,
             options,
             scratch,
+            buffers,
         ),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_layout1(
     path: &str,
     variant: &BgenVariant,
@@ -161,6 +97,7 @@ fn decode_layout1(
     selected_samples: &[usize],
     options: &BgenReadOptions,
     scratch: &mut DecodeScratch,
+    buffers: &mut GenotypeBuffers,
 ) -> Result<DecodedGenotypes> {
     let DecodeScratch {
         zlib,
@@ -218,9 +155,6 @@ fn decode_layout1(
         }
     };
 
-    let fixed_layout = options.probability_layout == BgenProbabilityLayout::Fixed;
-    let mut probabilities = ProbabilityValues::with_sample_capacity(selected_samples.len());
-    let mut dosages = Vec::with_capacity(selected_samples.len());
     for &sample in selected_samples {
         let start = sample.checked_mul(6).ok_or_else(|| {
             execution_error(path, variant, "sample probability offset overflowed")
@@ -231,9 +165,11 @@ fn decode_layout1(
             read_u16(data, start + 4)? as u64,
         ];
         let sum: u64 = values.iter().sum();
+        // Layout 1 is always diploid, and ploidy is recorded for a missing
+        // sample too.
+        buffers.push_ploidy(2);
         if sum == 0 {
-            probabilities.finish_missing_sample(if fixed_layout { 3 } else { 0 })?;
-            dosages.push(None);
+            buffers.finish_missing_sample()?;
             continue;
         }
         // Layout 1 scales each called sample's three probabilities to 32768,
@@ -252,13 +188,12 @@ fn decode_layout1(
         }
         match options.output_mode {
             BgenOutputMode::Probability => {
-                probabilities
-                    .values
-                    .extend(values.iter().map(|value| *value as f32 / 32_768.0));
-                probabilities.finish_sample(true)?;
+                buffers.extend_states(values.iter().map(|value| *value as f32 / 32_768.0));
+                buffers.finish_sample()?;
             }
             BgenOutputMode::Dosage => {
-                dosages.push(Some((values[1] + 2 * values[2]) as f32 / 32_768.0));
+                buffers.push_state((values[1] + 2 * values[2]) as f32 / 32_768.0);
+                buffers.finish_sample()?;
             }
         }
     }
@@ -266,16 +201,12 @@ fn decode_layout1(
     Ok(DecodedGenotypes {
         phased: false,
         bits: 16,
-        ploidy: vec![2; selected_samples.len()],
-        values: match options.output_mode {
-            BgenOutputMode::Probability => DecodedValues::Probabilities(probabilities),
-            BgenOutputMode::Dosage => DecodedValues::Dosages(dosages),
-        },
         decompressed_bytes: data.len(),
         state_width: Some(3),
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decode_layout2(
     path: &str,
     variant: &BgenVariant,
@@ -284,6 +215,7 @@ fn decode_layout2(
     selected_samples: &[usize],
     options: &BgenReadOptions,
     scratch: &mut DecodeScratch,
+    buffers: &mut GenotypeBuffers,
 ) -> Result<DecodedGenotypes> {
     let DecodeScratch {
         zlib,
@@ -366,6 +298,7 @@ fn decode_layout2(
         stored,
         complete,
         sample_bit_offsets,
+        buffers,
     )
 }
 
@@ -380,6 +313,7 @@ fn decode_layout2_block(
     stored: &mut Vec<u64>,
     complete: &mut Vec<u64>,
     sample_bit_offsets: &mut Vec<u64>,
+    buffers: &mut GenotypeBuffers,
 ) -> Result<DecodedGenotypes> {
     let sample_count = read_u32(block, 0)?;
     let allele_count = read_u16(block, 4)? as usize;
@@ -511,16 +445,6 @@ fn decode_layout2_block(
         .transpose()
         .map_err(|_| execution_error(path, variant, "state count does not fit usize"))?;
 
-    // A fixed-width layout reserves the same slots for a missing sample as for a
-    // called one.
-    let missing_pad = if options.output_mode == BgenOutputMode::Probability
-        && options.probability_layout == BgenProbabilityLayout::Fixed
-    {
-        uniform_state_width.unwrap_or(0)
-    } else {
-        0
-    };
-
     sample_bit_offsets.clear();
     if uniform_stride_bits.is_some() {
         for (sample, &ploidy_missing) in ploidy_bytes.iter().enumerate() {
@@ -623,9 +547,6 @@ fn decode_layout2_block(
     }
 
     let denominator = (1_u64 << bits) - 1;
-    let mut ploidies = Vec::with_capacity(selected_samples.len());
-    let mut probabilities = ProbabilityValues::with_sample_capacity(selected_samples.len());
-    let mut dosages = Vec::with_capacity(selected_samples.len());
 
     // Whole-cohort scans of biallelic 8-bit blocks with one declared ploidy are
     // the dominant workload, and there every sample occupies the same whole
@@ -636,7 +557,7 @@ fn decode_layout2_block(
         let stride = min_ploidy as usize;
         for &sample in selected_samples {
             let ploidy_missing = ploidy_bytes[sample];
-            ploidies.push(ploidy_missing & 0x3f);
+            buffers.push_ploidy(ploidy_missing & 0x3f);
             let start = sample * stride;
             let values = probability_bytes
                 .get(start..start + stride)
@@ -648,23 +569,13 @@ fn decode_layout2_block(
                 // undefined, so they are skipped rather than required to be
                 // zero. Writers differ here, and rejecting a non-zero slot
                 // would refuse files the specification allows.
-                match options.output_mode {
-                    BgenOutputMode::Probability => {
-                        probabilities.finish_missing_sample(missing_pad)?
-                    }
-                    BgenOutputMode::Dosage => dosages.push(None),
-                }
+                buffers.finish_missing_sample()?;
                 continue;
             }
             match options.output_mode {
                 BgenOutputMode::Probability => {
-                    byte_probabilities_into(
-                        &mut probabilities.values,
-                        values,
-                        denominator,
-                        phased,
-                    )
-                    .ok_or_else(|| {
+                    byte_probabilities_into(buffers.values_mut(), values, denominator, phased)
+                        .ok_or_else(|| {
                         let sum: u64 = values.iter().map(|&value| value as u64).sum();
                         execution_error(
                             path,
@@ -674,7 +585,7 @@ fn decode_layout2_block(
                             ),
                         )
                     })?;
-                    probabilities.finish_sample(true)?;
+                    buffers.finish_sample()?;
                 }
                 BgenOutputMode::Dosage => {
                     let numerator = byte_dosage_numerator(values, denominator, min_ploidy, phased)
@@ -688,7 +599,8 @@ fn decode_layout2_block(
                                 ),
                             )
                         })?;
-                    dosages.push(Some(numerator as f32 / denominator as f32));
+                    buffers.push_state(numerator as f32 / denominator as f32);
+                    buffers.finish_sample()?;
                 }
             }
         }
@@ -696,11 +608,6 @@ fn decode_layout2_block(
         return Ok(DecodedGenotypes {
             phased,
             bits,
-            ploidy: ploidies,
-            values: match options.output_mode {
-                BgenOutputMode::Probability => DecodedValues::Probabilities(probabilities),
-                BgenOutputMode::Dosage => DecodedValues::Dosages(dosages),
-            },
             decompressed_bytes: block.len(),
             state_width: uniform_state_width,
         });
@@ -710,7 +617,7 @@ fn decode_layout2_block(
         let ploidy_missing = ploidy_bytes[sample];
         let ploidy = ploidy_missing & 0x3f;
         let missing = ploidy_missing & 0x80 != 0;
-        ploidies.push(ploidy);
+        buffers.push_ploidy(ploidy);
         let offset = match uniform_stride_bits {
             Some(stride) => sample as u64 * stride,
             None => sample_bit_offsets[sample],
@@ -727,8 +634,7 @@ fn decode_layout2_block(
         )?;
         if missing {
             // See the fast path: a missing sample's stored bytes are undefined.
-            probabilities.finish_missing_sample(missing_pad)?;
-            dosages.push(None);
+            buffers.finish_missing_sample()?;
             continue;
         }
         let context = ProbabilityContext {
@@ -748,10 +654,8 @@ fn decode_layout2_block(
                     context,
                 )?;
                 let scale = denominator as f32;
-                probabilities
-                    .values
-                    .extend(complete.iter().map(|value| *value as f32 / scale));
-                probabilities.finish_sample(true)?;
+                buffers.extend_states(complete.iter().map(|value| *value as f32 / scale));
+                buffers.finish_sample()?;
             }
             BgenOutputMode::Dosage => {
                 // Dosage rejects multiallelic variants above, so the omitted
@@ -760,7 +664,8 @@ fn decode_layout2_block(
                 // complete probability vector.
                 let numerator =
                     biallelic_dosage_numerator(stored, denominator, ploidy, phased, context)?;
-                dosages.push(Some(numerator as f32 / denominator as f32));
+                buffers.push_state(numerator as f32 / denominator as f32);
+                buffers.finish_sample()?;
             }
         }
     }
@@ -768,11 +673,6 @@ fn decode_layout2_block(
     Ok(DecodedGenotypes {
         phased,
         bits,
-        ploidy: ploidies,
-        values: match options.output_mode {
-            BgenOutputMode::Probability => DecodedValues::Probabilities(probabilities),
-            BgenOutputMode::Dosage => DecodedValues::Dosages(dosages),
-        },
         decompressed_bytes: block.len(),
         state_width: uniform_state_width,
     })

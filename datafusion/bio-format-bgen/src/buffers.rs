@@ -6,11 +6,6 @@
 //! moved into Arrow arrays when the batch is emitted, so a probability makes
 //! one trip from the bitstream to the output.
 
-// Nothing calls this yet: the decoder is moved onto it in the next commit, and
-// this attribute goes with that move. It exists so this commit is one
-// reviewable unit rather than a rewrite of the decoder and its buffers at once.
-#![allow(dead_code)]
-
 use datafusion::arrow::array::BooleanBufferBuilder;
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::common::{DataFusionError, Result};
@@ -82,10 +77,6 @@ impl GenotypeBuffers {
             ploidy: Vec::new(),
             ploidy_offsets: vec![0],
         }
-    }
-
-    pub(crate) fn rows(&self) -> usize {
-        self.variant_offsets.len() - 1
     }
 
     /// The values buffer, for a decoder that appends a whole sample at once.
@@ -428,13 +419,12 @@ mod tests {
         let taken = buffers.take();
         assert_eq!(taken.values.len(), 2);
 
-        assert_eq!(buffers.rows(), 0, "take leaves an empty batch");
         let second = buffers.take();
         assert!(second.values.is_empty());
         assert_eq!(
             second.variant_offsets,
             vec![0],
-            "a reset batch still carries its leading zero offset"
+            "take leaves an empty batch that still carries its leading zero offset"
         );
     }
 }

@@ -26,6 +26,7 @@ use datafusion_bio_format_core::range_planning::{
 use datafusion_bio_format_core::companion::sanitize_location;
 
 use crate::bgi::{BgiIndex, open_optional_bgi};
+use crate::buffers::{BufferLayout, GenotypeBuffers};
 use crate::catalog::{BgenCatalog, build_transient_catalog};
 use crate::decode::{DecodeScratch, decode_variant};
 use crate::filter::{evaluate_exact_filter, supports_exact_filter};
@@ -477,7 +478,18 @@ async fn probe_probability_width(
         .ok_or_else(|| DataFusionError::Plan("BGEN payload range overflowed".to_string()))?;
     let payload = source.read_range(path, variant.payload_offset..end).await?;
     let mut scratch = DecodeScratch::new();
-    let decoded = decode_variant(path, variant, header, &payload, &[], options, &mut scratch)?;
+    // The probe selects no sample, so nothing is written into these.
+    let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability);
+    let decoded = decode_variant(
+        path,
+        variant,
+        header,
+        &payload,
+        &[],
+        options,
+        &mut scratch,
+        &mut buffers,
+    )?;
     if let Some(states) = decoded.state_width
         && states > options.max_states_per_sample
     {
