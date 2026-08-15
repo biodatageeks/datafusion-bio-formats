@@ -271,6 +271,35 @@ or dosage values only for selected samples.
 - **WHEN** the explicit sample set is empty
 - **THEN** probability payload decompression is skipped.
 
+### Requirement: BGEN Probability Output Layout
+
+The system SHALL emit probability states as a variable-length list per sample by
+default, and SHALL offer a fixed-width layout for files whose variants all store
+the same number of states.
+
+#### Scenario: Default variable-length layout
+- **WHEN** probability output is requested without selecting a layout
+- **THEN** each sample's states are emitted as a variable-length list
+- **AND** variants storing different numbers of states are all representable.
+
+#### Scenario: Fixed-width layout
+- **WHEN** the fixed probability layout is selected
+- **THEN** the emitted schema declares the state count per sample
+- **AND** no per-sample list offsets are emitted
+- **AND** a sample with no called genotype is null while still occupying its
+  declared width.
+
+#### Scenario: Fixed-width layout rejects a differing variant
+- **WHEN** the fixed probability layout is selected and a variant stores a
+  number of states other than the declared width
+- **THEN** the scan fails naming both counts
+- **AND** the values are neither padded nor truncated to fit.
+
+#### Scenario: Fixed-width layout needs a determinable width
+- **WHEN** the fixed probability layout is selected and the first variant
+  declares a variable ploidy, which has no single state count
+- **THEN** planning fails and directs the caller to the default layout.
+
 ### Requirement: Independent BGEN Block Partitioning
 
 The system SHALL partition selected independent variant blocks by estimated
