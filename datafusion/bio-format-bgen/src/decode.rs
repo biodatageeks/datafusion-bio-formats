@@ -859,27 +859,43 @@ fn byte_probabilities_into(
     denominator: u64,
     phased: bool,
 ) -> Option<()> {
-    let scale = denominator as f32;
+    // This path only runs for 8-bit blocks, so every numerator is a byte and the
+    // scaled value can be looked up instead of converted and divided per state.
+    // The table stores exactly `numerator as f32 / 255.0`, so results are
+    // identical to the general path rather than merely close.
+    debug_assert_eq!(denominator, u8::MAX as u64);
+    let table = &*EIGHT_BIT_PROBABILITY;
     if phased {
         // Each byte is P(allele 0) for one haplotype, followed by its complement.
+        out.reserve(values.len() * 2);
         for &value in values {
-            out.push(value as f32 / scale);
-            out.push((denominator - value as u64) as f32 / scale);
+            out.push(table[value as usize]);
+            out.push(table[(u8::MAX - value) as usize]);
         }
         return Some(());
     }
-    let mut sum = 0_u64;
+    let mut sum = 0_u32;
+    out.reserve(values.len() + 1);
     for &value in values {
-        sum += value as u64;
-        out.push(value as f32 / scale);
+        sum += value as u32;
+        out.push(table[value as usize]);
     }
-    if sum > denominator {
+    if sum > u8::MAX as u32 {
         out.truncate(out.len() - values.len());
         return None;
     }
-    out.push((denominator - sum) as f32 / scale);
+    out.push(table[(u8::MAX as u32 - sum) as usize]);
     Some(())
 }
+
+/// `numerator / 255.0` for every 8-bit numerator.
+static EIGHT_BIT_PROBABILITY: std::sync::LazyLock<[f32; 256]> = std::sync::LazyLock::new(|| {
+    let mut table = [0.0_f32; 256];
+    for (numerator, slot) in table.iter_mut().enumerate() {
+        *slot = numerator as f32 / u8::MAX as f32;
+    }
+    table
+});
 
 /// [`biallelic_dosage_numerator`] for whole-byte stored values.
 ///

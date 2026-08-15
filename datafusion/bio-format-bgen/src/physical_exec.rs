@@ -432,11 +432,19 @@ fn build_genotypes(
                 })?);
             }
             let states = Arc::new(Float32Array::from(states)) as ArrayRef;
+            // Converting a bool per sample into a bitmap is a measurable share of
+            // a whole-cohort probability scan, and a file where every genotype is
+            // called needs no validity buffer at all.
+            let nulls = if sample_valid.iter().all(|valid| *valid) {
+                None
+            } else {
+                Some(NullBuffer::from(sample_valid))
+            };
             let samples = ListArray::try_new(
                 state_field,
                 OffsetBuffer::new(ScalarBuffer::from(sample_offsets)),
                 states,
-                Some(NullBuffer::from(sample_valid)),
+                nulls,
             )?;
             Arc::new(ListArray::try_new(
                 sample_field,
