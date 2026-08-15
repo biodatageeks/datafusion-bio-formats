@@ -244,7 +244,7 @@ impl ExecutionPlan for BgenExec {
                         metrics.add(
                             GenotypeMetric::SampleValuesSkipped,
                             (fileset.header.sample_count as usize)
-                                .saturating_sub(fileset.selected_samples.source_indices().len())
+                                .saturating_sub(decode_samples.len())
                                 as u64,
                         );
                         rows.push(DecodedRow {

@@ -506,7 +506,9 @@ fn decode_layout2_block(
 
     // A fixed-width layout reserves the same slots for a missing sample as for a
     // called one.
-    let missing_pad = if options.probability_layout == BgenProbabilityLayout::Fixed {
+    let missing_pad = if options.output_mode == BgenOutputMode::Probability
+        && options.probability_layout == BgenProbabilityLayout::Fixed
+    {
         uniform_state_width.unwrap_or(0)
     } else {
         0

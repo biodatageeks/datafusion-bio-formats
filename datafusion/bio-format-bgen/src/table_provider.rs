@@ -293,6 +293,7 @@ impl TableProvider for BgenTableProvider {
             })
             .transpose()?
             .unwrap_or_else(|| (0..self.fileset.catalog.variants.len()).collect());
+        let candidate_count = candidates.len();
         let mut selected: Vec<usize> = candidates
             .into_iter()
             .filter(|&index| {
@@ -302,6 +303,7 @@ impl TableProvider for BgenTableProvider {
                     .all(|filter| evaluate_exact_filter(variant, filter))
             })
             .collect();
+        let filter_rejections = (candidate_count - selected.len()) as u64;
         if can_push_limit_below_filters(&guarantees)
             && let Some(limit) = limit
         {
@@ -357,6 +359,7 @@ impl TableProvider for BgenTableProvider {
             self.fileset.catalog.variants.len() as u64,
         );
         metrics.add(GenotypeMetric::SelectedVariants, selected.len() as u64);
+        metrics.add(GenotypeMetric::ExactFilterRejections, filter_rejections);
         metrics.add(
             GenotypeMetric::SamplesRequested,
             self.fileset.selected_samples.source_indices().len() as u64,
