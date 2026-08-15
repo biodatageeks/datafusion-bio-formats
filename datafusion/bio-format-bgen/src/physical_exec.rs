@@ -239,7 +239,7 @@ impl ExecutionPlan for BgenExec {
                         );
                         metrics.add(
                             GenotypeMetric::SamplesDecoded,
-                            fileset.selected_samples.source_indices().len() as u64,
+                            decode_samples.len() as u64,
                         );
                         metrics.add(
                             GenotypeMetric::SampleValuesSkipped,

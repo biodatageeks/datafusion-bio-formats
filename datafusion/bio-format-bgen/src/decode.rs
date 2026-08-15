@@ -476,9 +476,13 @@ fn decode_layout2_block(
     // One declared ploidy means every sample occupies the same number of bits,
     // so the offset table collapses to a constant stride and the per-sample
     // state lookups and checked accumulation are hoisted out of the scan.
+    // The limit bounds the states reconstructed for a sample, so it only applies
+    // when samples are actually decoded. A projection of `phased` or `bits`
+    // alone builds nothing and must not be rejected by it.
+    let builds_states = !selected_samples.is_empty();
     let uniform_stride_bits = if min_ploidy == max_ploidy {
         let (stored_states, complete_states) = state_counts[min_ploidy as usize];
-        if complete_states > options.max_states_per_sample as u64 {
+        if builds_states && complete_states > options.max_states_per_sample as u64 {
             return Err(execution_error(
                 path,
                 variant,
@@ -549,7 +553,7 @@ fn decode_layout2_block(
                 ));
             }
             let (stored_states, complete_states) = state_counts[ploidy as usize];
-            if complete_states > options.max_states_per_sample as u64 {
+            if builds_states && complete_states > options.max_states_per_sample as u64 {
                 return Err(execution_error(
                     path,
                     variant,
