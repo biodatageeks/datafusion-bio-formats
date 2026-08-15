@@ -428,8 +428,10 @@ fn build_genotypes(
                 if let Some(width) = width {
                     // The schema fixes the width, so a variant that stores a
                     // different number of states cannot be represented and must
-                    // not be silently padded or truncated.
-                    if decoded.state_width != Some(width as usize) {
+                    // not be silently padded or truncated. A row that emits no
+                    // sample has no states to check, which is what an empty
+                    // sample selection produces without reading any payload.
+                    if !samples.valid.is_empty() && decoded.state_width != Some(width as usize) {
                         return Err(DataFusionError::Execution(format!(
                             "BGEN fixed probability layout expects {width} states per sample, \
                              but a variant stores {}; use the nested layout for this file",

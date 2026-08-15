@@ -1509,6 +1509,37 @@ fn probability_values_any(
     }
 }
 
+#[tokio::test]
+async fn fixed_probability_layout_allows_an_empty_sample_selection() {
+    // Selecting no sample skips payload reads, so no variant reports a state
+    // width. There is nothing to check against the schema width, and the scan
+    // must not reject every row for it.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            samples: Some(Vec::new()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("an empty sample selection must not trip the width check");
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        fixture.rows.len()
+    );
+}
+
 fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, required: bool) -> bool {
     let import_name = if name == "limix/bgen" { "bgen" } else { name };
     let available = Command::new(python)
