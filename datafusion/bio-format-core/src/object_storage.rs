@@ -1,3 +1,4 @@
+use crate::companion::sanitize_location;
 use async_compression::tokio::bufread::GzipDecoder;
 use futures::StreamExt;
 use log;
@@ -181,9 +182,30 @@ pub async fn get_compression_type(
     let buffer = if matches!(storage_type, StorageType::LOCAL) {
         let local_path = file_path.strip_prefix("file://").unwrap_or(&file_path);
         // For local files, read directly
-        let mut file = tokio::fs::File::open(local_path).await.unwrap();
+        // A missing or unreadable path is a normal error for a caller that
+        // passed one, not a reason to take the process down; the signature
+        // already carries it.
+        let mut file = tokio::fs::File::open(local_path).await.map_err(|error| {
+            opendal::Error::new(
+                opendal::ErrorKind::NotFound,
+                format!(
+                    "cannot open {} to detect its compression",
+                    sanitize_location(local_path)
+                ),
+            )
+            .set_source(error)
+        })?;
         let mut buffer = vec![0; 18];
-        let n = file.read(&mut buffer).await.unwrap();
+        let n = file.read(&mut buffer).await.map_err(|error| {
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                format!(
+                    "cannot read {} to detect its compression",
+                    sanitize_location(local_path)
+                ),
+            )
+            .set_source(error)
+        })?;
         buffer.truncate(n);
         buffer
     } else {
