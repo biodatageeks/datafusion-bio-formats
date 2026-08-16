@@ -18,7 +18,7 @@ use datafusion_bio_format_core::genotype::{
     PredicateGuarantee, can_push_limit_below_filters, resolve_genotype_fields,
 };
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
-use datafusion_bio_format_core::range_planning::{ByteRange, coalesce_byte_ranges};
+use datafusion_bio_format_core::range_planning::{ByteRange, try_coalesce_sorted_byte_ranges};
 
 use crate::fileset::{PGEN_SPEC_BASELINE, PgenFileset};
 use crate::filter::{evaluate_exact_filter, supports_exact_filter};
@@ -519,18 +519,17 @@ fn plan_payload_partitions(
             }
             let mut required = required.into_iter().collect::<Vec<_>>();
             required.sort_unstable();
-            let required_ranges = required
-                .iter()
-                .map(|&index| {
+            let ranges = try_coalesce_sorted_byte_ranges(
+                required.iter().map(|&index| {
                     let record = fileset.records.record(index)?;
                     Ok(ByteRange {
                         start: record.offset,
                         end: record.end(),
                     })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let ranges =
-                coalesce_byte_ranges(required_ranges.into_iter(), max_gap, max_range_bytes)?;
+                }),
+                max_gap,
+                max_range_bytes,
+            )?;
             Ok(PgenPartition {
                 owned,
                 required,

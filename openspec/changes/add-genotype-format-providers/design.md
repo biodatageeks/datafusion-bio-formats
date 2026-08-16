@@ -466,9 +466,11 @@ reads. Object-store scans retain bounded coalesced range reads. Variable-width
 header indexes retain their encoded `2^16`-variant blocks, packed block-relative
 offsets, and 16-bit within-block LD deltas; fixed-width modes retain only their
 offset formula. Record descriptors are reconstructed on demand instead of being
-allocated per variant. PVAR/PSAM parsing is streaming or compactly interned so
-metadata memory does not multiply the source text with per-cell `String`
-allocations.
+allocated per variant. Dependency discovery folds directly into the retained
+base set, and sorted record ranges stream into a fallible coalescer without a
+second catalog-sized staging buffer. PVAR/PSAM parsing is streaming or compactly
+interned so metadata memory does not multiply the source text with per-cell
+`String` allocations.
 
 Partitions remain contiguous for locality and are balanced with a cost model
 combining encoded bytes, projected decoded values, record representation, and

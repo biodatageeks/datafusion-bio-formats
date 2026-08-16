@@ -177,14 +177,12 @@ impl ExecutionPlan for PgenExec {
                 }
             } else {
                 let owned = assignment.owned.iter().copied().collect::<HashSet<_>>();
-                let retained_bases = assignment
-                    .required
-                    .iter()
-                    .map(|&index| fileset.records.record(index).map(|record| record.ld_base))
-                    .collect::<Result<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<HashSet<_>>();
+                let mut retained_bases = HashSet::new();
+                for &index in &assignment.required {
+                    if let Some(base) = fileset.records.record(index)?.ld_base {
+                        retained_bases.insert(base);
+                    }
+                }
                 // The index assigns every LD record to the most recent eligible
                 // non-LD record. Required records are processed in source order,
                 // so one current base is sufficient and older bases can be
@@ -543,14 +541,12 @@ fn execute_gt_only(
         let mut workspace = GtDecodeWorkspace::new(fileset.sample_count, selected_samples)?;
 
         let owned = assignment.owned.iter().copied().collect::<HashSet<_>>();
-        let retained_bases = assignment
-            .required
-            .iter()
-            .map(|&index| fileset.records.record(index).map(|record| record.ld_base))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<HashSet<_>>();
+        let mut retained_bases = HashSet::new();
+        for &index in &assignment.required {
+            if let Some(base) = fileset.records.record(index)?.ld_base {
+                retained_bases.insert(base);
+            }
+        }
         let mut ld_base_index = None;
         let mut ld_base = Vec::with_capacity(fileset.sample_count);
         let mut required_position = 0;
