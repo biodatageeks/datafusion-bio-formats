@@ -293,6 +293,24 @@ pub async fn get_remote_stream_bgzf_async(
     Ok(bgzf::r#async::io::Reader::new(remote_stream))
 }
 
+/// Opens a BGZF reader over one sequential request, without a size preflight.
+///
+/// [`get_remote_stream_bgzf_async`] streams the whole object through the
+/// configured reader chunking, which asks the backend for the object length and
+/// so issues a HEAD. A pre-signed URL that authorizes GET and range requests but
+/// not HEAD therefore fails there, even though every later read the caller makes
+/// would have succeeded. Reading a bounded prefix — a header — needs no length,
+/// so it goes through a single request instead. The caller is responsible for
+/// bounding how much it consumes.
+pub async fn get_remote_stream_bgzf_single_request(
+    file_path: String,
+    object_storage_options: ObjectStorageOptions,
+) -> Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
+    let object = RemoteObject::open(file_path, object_storage_options).await?;
+    let remote_stream = StreamReader::new(object.stream_single_request().await?);
+    Ok(bgzf::r#async::io::Reader::new(remote_stream))
+}
+
 /// Builds a gzip decoder that decodes **all** members of a multi-member
 /// (concatenated / block) gzip stream, not just the first one.
 ///

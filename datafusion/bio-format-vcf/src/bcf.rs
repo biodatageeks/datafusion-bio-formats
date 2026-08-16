@@ -15,7 +15,8 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
-    ObjectStorageOptions, RemoteObject, StorageType, get_remote_stream_bgzf_async, get_storage_type,
+    ObjectStorageOptions, RemoteObject, StorageType, get_remote_stream_bgzf_async,
+    get_remote_stream_bgzf_single_request, get_storage_type,
 };
 use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
 use datafusion_bio_format_core::partition_balancer::RegionSizeEstimate;
@@ -1306,7 +1307,11 @@ async fn read_remote_header(
     path: &str,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<Header> {
-    let mut inner = get_remote_stream_bgzf_async(path.to_string(), object_storage_options)
+    // A bounded header read needs no object length, so it goes through a single
+    // request: the chunked whole-object path asks the backend for the size and
+    // so issues a HEAD, which a pre-signed GET/range URL can reject even though
+    // every read this provider actually makes would succeed.
+    let mut inner = get_remote_stream_bgzf_single_request(path.to_string(), object_storage_options)
         .await
         .map_err(|e| execution_error("failed to open remote BCF", e))?;
     read_bcf_header_bounded_async(&mut inner).await

@@ -141,6 +141,13 @@ impl RangeServer {
         Self::start_inner(bcf, csi, false, true, false)
     }
 
+    /// Rejects every BCF HEAD from the start, mimicking a pre-signed URL that
+    /// authorizes GET and range requests but not HEAD — including while the
+    /// provider is being constructed and reads the header.
+    fn start_denying_bcf_head(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
+        Self::start_inner(bcf, csi, false, false, true)
+    }
+
     fn start_inner(
         bcf: Vec<u8>,
         csi: Vec<u8>,
@@ -3939,6 +3946,53 @@ async fn write_provider_rejects_bcf_destination_path() -> Result<(), Box<dyn std
     assert!(
         error.contains("BCF write is not supported"),
         "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn header_read_avoids_head_for_get_only_remote_bcf() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Schema discovery reads the BCF header. Streaming the whole object applies
+    // the reader's chunking, which asks the backend for the object length and so
+    // issues a HEAD; a pre-signed URL that authorizes GET and range requests but
+    // not HEAD then fails before the indexed scan ever runs, even though every
+    // read the scan makes would have succeeded.
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server =
+        RangeServer::start_denying_bcf_head(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+    let bcf_url = server.url();
+    let csi_url = format!("{bcf_url}.csi");
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_url,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        None,
+        true,
+        VcfInputFormat::Auto,
+        Some(csi_url),
+    )?;
+    let rows = query(
+        "variants",
+        provider,
+        "SELECT id FROM variants WHERE chrom = 'chr2'",
+    )
+    .await?;
+    assert!(rows.contains("rs3"));
+
+    let requests = server.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.path.starts_with("/remote.bcf")
+                && !request.path.starts_with("/remote.bcf.csi"))
+            .all(|request| request.method != "HEAD"),
+        "reading the header must not probe a GET-only signed URL with HEAD: {requests:?}"
     );
     Ok(())
 }
