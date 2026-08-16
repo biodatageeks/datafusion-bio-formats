@@ -93,10 +93,8 @@ impl DosageTrack<'_> {
     }
 
     fn effective_at(&self, entry: usize, calls: &[Option<[u16; 2]>]) -> Option<f32> {
-        self.stored_at(entry).or_else(|| {
-            calls[self.sample_at(entry)]
-                .map(|call| (u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32)
-        })
+        self.stored_at(entry)
+            .or_else(|| calls[self.sample_at(entry)].map(|call| alt1_hardcall_dosage(&call)))
     }
 }
 
@@ -586,7 +584,7 @@ pub(crate) fn decode_record_and_main(
             if dosage.is_none()
                 && let Some(call) = call
             {
-                *dosage = Some((u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32);
+                *dosage = Some(alt1_hardcall_dosage(call));
             }
         }
     }
@@ -1346,7 +1344,7 @@ fn decode_dosage<'a>(
         }
         let dosage = f32::from(value) / DOSAGE_SCALE;
         if let Some(call) = calls[sample] {
-            let hardcall = (u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32;
+            let hardcall = alt1_hardcall_dosage(&call);
             if (hardcall - dosage).abs() > 0.5001 {
                 return Err(cursor.error(format!(
                     "dosage {dosage} is inconsistent with hardcall ALT count {hardcall} for sample {sample}"
@@ -1479,6 +1477,10 @@ fn implicit_haplotype_dosages(
             }
         })
         .collect()
+}
+
+fn alt1_hardcall_dosage(call: &[u16; 2]) -> f32 {
+    call.iter().filter(|&&allele| allele == 1).count() as f32
 }
 
 fn category_call(category: u8) -> Option<[u16; 2]> {

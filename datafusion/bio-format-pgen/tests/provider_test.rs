@@ -661,6 +661,10 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
             vec![Some(vec![0, 2]), Some(vec![1, 2]), Some(vec![0, 0]), None]
         );
         assert_eq!(
+            ds_values(batch, 1, 7),
+            vec![Some(0.0), Some(1.0), Some(0.0), None]
+        );
+        assert_eq!(
             gt_values(batch, 1, 8),
             vec![Some(vec![1, 0]), Some(vec![0, 1]), Some(vec![0, 0]), None]
         );

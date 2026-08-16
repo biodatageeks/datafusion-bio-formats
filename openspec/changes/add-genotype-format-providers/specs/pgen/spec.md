@@ -189,6 +189,11 @@ counting PVAR alternate allele index one.
 - **AND** `DS_STORED` is null when projected
 - **AND** `GT` remains available when requested.
 
+#### Scenario: Multiallelic hardcall fallback
+- **WHEN** a multiallelic hardcall has no stored dosage
+- **THEN** `DS` counts only alleles equal to PVAR allele index one
+- **AND** higher alternate alleles do not contribute to `DS`.
+
 #### Scenario: Missing genotype and dosage
 - **WHEN** both hardcall and dosage are missing
 - **THEN** `DS`, `DS_STORED`, and `GT` are null when projected.

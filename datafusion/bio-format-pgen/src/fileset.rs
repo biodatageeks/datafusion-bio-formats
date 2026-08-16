@@ -1007,6 +1007,9 @@ async fn parse_index(
         if allele_width > 0 {
             let raw = take(&body, &mut cursor, count * allele_width, "allele counts")?;
             for index in 0..count {
+                // The PGEN header stores total allele count verbatim. The
+                // pinned pgenlib reader compares this raw value directly with
+                // the accompanying PVAR allele-index offset delta.
                 allele_counts.push(read_le(raw, index * allele_width, allele_width)? as usize);
             }
         }
