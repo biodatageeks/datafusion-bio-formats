@@ -9,7 +9,373 @@ pub(crate) struct DecodedRecord {
     pub(crate) gt: Vec<Option<[u16; 2]>>,
     pub(crate) phased: Vec<Option<bool>>,
     pub(crate) ds: Vec<Option<f32>>,
+    pub(crate) ds_stored: Vec<Option<f32>>,
     pub(crate) hds: Vec<Option<[f32; 2]>>,
+}
+
+/// Reusable state for the projection-specialized biallelic `GT` decoder.
+///
+/// The source-to-output map is built once per physical partition. Record
+/// decoding then reuses both vectors instead of allocating full-cohort phase,
+/// dosage, and phased-dosage intermediates for every variant.
+pub(crate) struct GtDecodeWorkspace {
+    categories: Vec<u8>,
+    selected_codes: Vec<u8>,
+    source_to_output: Vec<usize>,
+    identity_selection: bool,
+    retained_main: Vec<u8>,
+    retained_main_valid: bool,
+}
+
+impl GtDecodeWorkspace {
+    pub(crate) fn new(sample_count: usize, selected_samples: &[usize]) -> Result<Self> {
+        let mut source_to_output = vec![usize::MAX; sample_count];
+        for (output, &source) in selected_samples.iter().enumerate() {
+            let slot = source_to_output.get_mut(source).ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "selected sample index {source} is out of bounds for {sample_count} samples"
+                ))
+            })?;
+            if *slot != usize::MAX {
+                return Err(DataFusionError::Execution(format!(
+                    "selected sample index {source} appears more than once"
+                )));
+            }
+            *slot = output;
+        }
+        Ok(Self {
+            categories: Vec::with_capacity(sample_count),
+            selected_codes: Vec::with_capacity(selected_samples.len()),
+            source_to_output,
+            identity_selection: selected_samples.len() == sample_count
+                && selected_samples
+                    .iter()
+                    .enumerate()
+                    .all(|(index, &sample)| index == sample),
+            retained_main: Vec::with_capacity(sample_count),
+            retained_main_valid: false,
+        })
+    }
+
+    pub(crate) fn selected_codes(&self) -> &[u8] {
+        if self.identity_selection {
+            &self.categories
+        } else {
+            &self.selected_codes
+        }
+    }
+
+    pub(crate) fn has_identity_selection(&self) -> bool {
+        self.identity_selection
+    }
+
+    pub(crate) fn swap_main_track(&mut self, track: &mut Vec<u8>) {
+        if self.retained_main_valid {
+            std::mem::swap(&mut self.retained_main, track);
+            self.retained_main_valid = false;
+        } else {
+            std::mem::swap(&mut self.categories, track);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_dense_biallelic_gt<F>(
+    bytes: &[u8],
+    mode: PgenMode,
+    record_type: u8,
+    variant_index: usize,
+    sample_count: usize,
+    mut emit: F,
+) -> Result<()>
+where
+    F: FnMut(&[u16], u8, usize),
+{
+    if !supports_biallelic_gt_fast_path(record_type, 2)
+        || mode != PgenMode::Plink1 && record_type & 7 != 0
+    {
+        return Err(DataFusionError::Execution(format!(
+            "PGEN variant {variant_index} is not eligible for direct dense GT decoding"
+        )));
+    }
+
+    let mut cursor = Cursor::new(bytes, variant_index);
+    let packed = cursor.take(sample_count.div_ceil(4), "dense hardcalls")?;
+    validate_packed_padding(packed, sample_count, 2, &cursor)?;
+    if mode == PgenMode::Plink1 {
+        for sample in 0..sample_count {
+            let code = match packed_two_bit(packed, sample) {
+                0 => 2,
+                1 => 3,
+                2 => 1,
+                3 => 0,
+                _ => unreachable!(),
+            };
+            emit_gt(code, &mut emit);
+        }
+    } else if record_type == 0xff || record_type & 0x10 == 0 {
+        emit_dense_quads(packed, sample_count, |_| 0, &mut emit);
+    } else {
+        let heterozygous_count = packed
+            .iter()
+            .map(|&byte| usize::from(HETEROZYGOUS_PER_BYTE[usize::from(byte)]))
+            .sum::<usize>();
+        if heterozygous_count == 0 {
+            return Err(cursor
+                .error("hardcall-phase track is present without heterozygous calls".to_string()));
+        }
+        let first = *cursor
+            .bytes
+            .get(cursor.position)
+            .ok_or_else(|| cursor.error("truncated hardcall-phase track".to_string()))?;
+        let explicit_present = first & 1 != 0;
+        if explicit_present {
+            let present = cursor.take(
+                (heterozygous_count + 1).div_ceil(8),
+                "phase-present bitarray",
+            )?;
+            validate_phase_padding(present, heterozygous_count + 1, &cursor)?;
+            let phased_count = (0..heterozygous_count)
+                .filter(|&index| bit(present, index + 1))
+                .count();
+            let info = cursor.take(phased_count.div_ceil(8), "phase-info bitarray")?;
+            validate_packed_padding(info, phased_count, 1, &cursor)?;
+            let mut heterozygous_index = 0;
+            let mut info_index = 0;
+            for sample in 0..sample_count {
+                let mut code = packed_two_bit(packed, sample);
+                if code == 1 {
+                    if bit(present, heterozygous_index + 1) {
+                        if bit(info, info_index) {
+                            code = 4;
+                        }
+                        info_index += 1;
+                    }
+                    heterozygous_index += 1;
+                }
+                emit_gt(code, &mut emit);
+            }
+        } else {
+            let info = cursor.take(
+                (heterozygous_count + 1).div_ceil(8),
+                "implicit phase-info bitarray",
+            )?;
+            if info.first().is_some_and(|byte| byte & 1 != 0) {
+                return Err(
+                    cursor.error("implicit phase track has phase-present marker set".to_string())
+                );
+            }
+            validate_phase_padding(info, heterozygous_count + 1, &cursor)?;
+            let mut phase_offset = 1;
+            emit_dense_quads(
+                packed,
+                sample_count,
+                |byte| {
+                    let count = usize::from(HETEROZYGOUS_PER_BYTE[usize::from(byte)]);
+                    let pattern = read_packed_bits(info, phase_offset, count);
+                    phase_offset += count;
+                    pattern
+                },
+                &mut emit,
+            );
+        }
+    }
+
+    if !cursor.is_finished() {
+        return Err(cursor.error(format!(
+            "{} trailing bytes remain after direct dense GT decoding",
+            cursor.remaining()
+        )));
+    }
+    Ok(())
+}
+
+fn emit_dense_quads<F, P>(packed: &[u8], sample_count: usize, mut phase_pattern: P, emit: &mut F)
+where
+    F: FnMut(&[u16], u8, usize),
+    P: FnMut(u8) -> u8,
+{
+    let full_bytes = sample_count / 4;
+    for &byte in &packed[..full_bytes] {
+        let decoded = &DENSE_QUADS[usize::from(byte)][usize::from(phase_pattern(byte))];
+        emit(&decoded.alleles, decoded.validity, 4);
+    }
+    if !sample_count.is_multiple_of(4) {
+        let byte = packed[full_bytes];
+        let decoded = &DENSE_QUADS[usize::from(byte)][usize::from(phase_pattern(byte))];
+        for sample in 0..sample_count % 4 {
+            emit(
+                &decoded.alleles[sample * 2..sample * 2 + 2],
+                (decoded.validity >> sample) & 1,
+                1,
+            );
+        }
+    }
+}
+
+#[inline]
+fn read_packed_bits(bytes: &[u8], offset: usize, count: usize) -> u8 {
+    if count == 0 {
+        return 0;
+    }
+    let byte = offset / 8;
+    let shift = offset % 8;
+    let mut value = bytes[byte] >> shift;
+    if shift + count > 8 {
+        value |= bytes[byte + 1] << (8 - shift);
+    }
+    value & ((1 << count) - 1)
+}
+
+#[derive(Clone, Copy)]
+struct DecodedQuad {
+    alleles: [u16; 8],
+    validity: u8,
+}
+
+static DENSE_QUADS: [[DecodedQuad; 16]; 256] = build_dense_quads();
+
+const fn build_dense_quads() -> [[DecodedQuad; 16]; 256] {
+    const EMPTY: DecodedQuad = DecodedQuad {
+        alleles: [0; 8],
+        validity: 0,
+    };
+    let mut output = [[EMPTY; 16]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut pattern = 0;
+        while pattern < 16 {
+            let mut heterozygous_index = 0;
+            let mut sample = 0;
+            while sample < 4 {
+                let code = (byte >> (sample * 2)) & 3;
+                let allele_offset = sample * 2;
+                if code == 0 {
+                    output[byte][pattern].validity |= 1 << sample;
+                } else if code == 1 {
+                    output[byte][pattern].validity |= 1 << sample;
+                    if pattern & (1 << heterozygous_index) == 0 {
+                        output[byte][pattern].alleles[allele_offset + 1] = 1;
+                    } else {
+                        output[byte][pattern].alleles[allele_offset] = 1;
+                    }
+                    heterozygous_index += 1;
+                } else if code == 2 {
+                    output[byte][pattern].validity |= 1 << sample;
+                    output[byte][pattern].alleles[allele_offset] = 1;
+                    output[byte][pattern].alleles[allele_offset + 1] = 1;
+                }
+                sample += 1;
+            }
+            pattern += 1;
+        }
+        byte += 1;
+    }
+    output
+}
+
+#[inline]
+fn emit_gt<F: FnMut(&[u16], u8, usize)>(code: u8, emit: &mut F) {
+    const ALLELES: [[u16; 2]; 5] = [[0, 0], [0, 1], [1, 1], [0, 0], [1, 0]];
+    let alleles = ALLELES[usize::from(code)];
+    emit(&alleles, u8::from(code != 3), 1);
+}
+
+const HETEROZYGOUS_PER_BYTE: [u8; 256] = build_heterozygous_per_byte();
+
+const fn build_heterozygous_per_byte() -> [u8; 256] {
+    let mut output = [0_u8; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut count = 0;
+        let mut shift = 0;
+        while shift < 8 {
+            if (byte >> shift) & 3 == 1 {
+                count += 1;
+            }
+            shift += 2;
+        }
+        output[byte] = count;
+        byte += 1;
+    }
+    output
+}
+
+#[inline]
+fn packed_two_bit(bytes: &[u8], sample: usize) -> u8 {
+    (bytes[sample / 4] >> ((sample % 4) * 2)) & 3
+}
+
+pub(crate) fn supports_biallelic_gt_fast_path(record_type: u8, allele_count: usize) -> bool {
+    allele_count == 2
+        && (record_type == 0xff
+            || record_type & 0x08 == 0 && (record_type >> 5) & 3 == 0 && record_type & 0x80 == 0)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_biallelic_gt_into(
+    workspace: &mut GtDecodeWorkspace,
+    bytes: &[u8],
+    mode: PgenMode,
+    record_type: u8,
+    variant_index: usize,
+    sample_count: usize,
+    selected_samples: &[usize],
+    ld_base: Option<&[u8]>,
+    retain_main: bool,
+) -> Result<()> {
+    if !supports_biallelic_gt_fast_path(record_type, 2) {
+        return Err(DataFusionError::Execution(format!(
+            "PGEN variant {variant_index} is not eligible for the biallelic GT fast path"
+        )));
+    }
+    let mut cursor = Cursor::new(bytes, variant_index);
+    decode_main_into(
+        &mut cursor,
+        mode,
+        record_type,
+        sample_count,
+        ld_base,
+        &mut workspace.categories,
+    )?;
+
+    workspace.retained_main_valid = false;
+    if !workspace.identity_selection {
+        workspace.selected_codes.clear();
+        for &sample in selected_samples {
+            let category = *workspace.categories.get(sample).ok_or_else(|| {
+                cursor.error(format!(
+                    "selected sample index {sample} is out of bounds for {sample_count} samples"
+                ))
+            })?;
+            workspace.selected_codes.push(category);
+        }
+    }
+
+    if record_type != 0xff && record_type & 0x10 != 0 {
+        if retain_main && workspace.identity_selection {
+            workspace.retained_main.clear();
+            workspace
+                .retained_main
+                .extend_from_slice(&workspace.categories);
+            workspace.retained_main_valid = true;
+        }
+        decode_phase_for_selected_gt(
+            &mut cursor,
+            &mut workspace.categories,
+            &workspace.source_to_output,
+            &mut workspace.selected_codes,
+            workspace.identity_selection,
+        )?;
+    }
+
+    if !cursor.is_finished() {
+        return Err(cursor.error(format!(
+            "{} trailing bytes remain after decoding the declared GT tracks",
+            cursor.remaining()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -90,18 +456,20 @@ pub(crate) fn decode_record_and_main(
             "unsupported multiallelic PGEN dosage track; hardcalls remain supported".to_string(),
         ));
     }
-    let (mut dosages, dosage_sample_ids) =
+    let (stored_dosages, dosage_sample_ids) =
         decode_dosage(&mut cursor, dosage_encoding, sample_count)?;
-    if dosage_encoding != 0 {
-        for (dosage, call) in dosages.iter_mut().zip(&calls) {
-            if dosage.is_none()
-                && let Some(call) = call
-            {
-                *dosage = Some((u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32);
-            }
+    if dosage_encoding == 2 {
+        validate_fixed_dosage_missingness(&calls, &stored_dosages, &cursor)?;
+    }
+    validate_dosage_hardcall_consistency(&calls, &stored_dosages, &cursor)?;
+    let mut dosages = stored_dosages.clone();
+    for (dosage, call) in dosages.iter_mut().zip(&calls) {
+        if dosage.is_none()
+            && let Some(call) = call
+        {
+            *dosage = Some((u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32);
         }
     }
-    validate_dosage_hardcall_consistency(&calls, &dosages, &cursor)?;
     let hds = if record_type != 0xff && record_type & 0x80 != 0 {
         decode_phased_dosage(
             &mut cursor,
@@ -128,6 +496,7 @@ pub(crate) fn decode_record_and_main(
     let mut selected_gt = Vec::with_capacity(selected_samples.len());
     let mut selected_phased = Vec::with_capacity(selected_samples.len());
     let mut selected_ds = Vec::with_capacity(selected_samples.len());
+    let mut selected_ds_stored = Vec::with_capacity(selected_samples.len());
     let mut selected_hds = Vec::with_capacity(selected_samples.len());
     for &sample in selected_samples {
         if sample >= sample_count {
@@ -138,14 +507,15 @@ pub(crate) fn decode_record_and_main(
         selected_gt.push(calls[sample]);
         selected_phased.push(phased[sample]);
         selected_ds.push(dosages[sample]);
+        selected_ds_stored.push(stored_dosages[sample]);
         selected_hds.push(hds[sample]);
     }
-    dosages.clear();
     Ok((
         DecodedRecord {
             gt: selected_gt,
             phased: selected_phased,
             ds: selected_ds,
+            ds_stored: selected_ds_stored,
             hds: selected_hds,
         },
         categories,
@@ -171,29 +541,51 @@ fn decode_main(
     sample_count: usize,
     ld_base: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(sample_count);
+    decode_main_into(
+        cursor,
+        mode,
+        record_type,
+        sample_count,
+        ld_base,
+        &mut output,
+    )?;
+    Ok(output)
+}
+
+fn decode_main_into(
+    cursor: &mut Cursor<'_>,
+    mode: PgenMode,
+    record_type: u8,
+    sample_count: usize,
+    ld_base: Option<&[u8]>,
+    output: &mut Vec<u8>,
+) -> Result<()> {
+    output.clear();
     if mode == PgenMode::Plink1 {
         let bytes = cursor.take(sample_count.div_ceil(4), "PLINK 1 hardcalls")?;
         validate_packed_padding(bytes, sample_count, 2, cursor)?;
-        return Ok((0..sample_count)
-            .map(|sample| match packed_value(bytes, sample, 2) as u8 {
+        unpack_two_bit(bytes, sample_count, output);
+        for category in output {
+            *category = match *category {
                 0 => 2,
                 1 => 3,
                 2 => 1,
                 3 => 0,
                 _ => unreachable!(),
-            })
-            .collect());
+            };
+        }
+        return Ok(());
     }
 
     match record_type & 7 {
         0 => {
             let bytes = cursor.take(sample_count.div_ceil(4), "dense hardcalls")?;
             validate_packed_padding(bytes, sample_count, 2, cursor)?;
-            Ok((0..sample_count)
-                .map(|sample| packed_value(bytes, sample, 2) as u8)
-                .collect())
+            unpack_two_bit(bytes, sample_count, output);
+            Ok(())
         }
-        1 => decode_onebit(cursor, sample_count),
+        1 => decode_onebit_into(cursor, sample_count, output),
         2 | 3 => {
             let base = ld_base.ok_or_else(|| {
                 cursor.error("LD-compressed record was decoded without its base".to_string())
@@ -204,14 +596,14 @@ fn decode_main(
                     base.len()
                 )));
             }
-            let mut result = base.to_vec();
+            output.extend_from_slice(base);
             for (sample, value) in decode_difflist(cursor, sample_count, true)? {
-                result[sample] = value.ok_or_else(|| {
+                output[sample] = value.ok_or_else(|| {
                     cursor.error("LD difflist omitted a genotype value".to_string())
                 })?;
             }
             if record_type & 1 != 0 {
-                for category in &mut result {
+                for category in output {
                     *category = match *category {
                         0 => 2,
                         2 => 0,
@@ -219,24 +611,28 @@ fn decode_main(
                     };
                 }
             }
-            Ok(result)
+            Ok(())
         }
         common @ (4 | 6 | 7) => {
             let common = common & 3;
-            let mut result = vec![common; sample_count];
+            output.resize(sample_count, common);
             for (sample, value) in decode_difflist(cursor, sample_count, true)? {
-                result[sample] = value.ok_or_else(|| {
+                output[sample] = value.ok_or_else(|| {
                     cursor.error("hardcall difflist omitted a genotype value".to_string())
                 })?;
             }
-            Ok(result)
+            Ok(())
         }
         5 => Err(cursor.error("reserved PGEN main-track representation 5".to_string())),
         _ => unreachable!(),
     }
 }
 
-fn decode_onebit(cursor: &mut Cursor<'_>, sample_count: usize) -> Result<Vec<u8>> {
+fn decode_onebit_into(
+    cursor: &mut Cursor<'_>,
+    sample_count: usize,
+    output: &mut Vec<u8>,
+) -> Result<()> {
     let code = cursor.byte("one-bit common-category code")?;
     let lower = code / 4;
     let delta = code & 3;
@@ -245,15 +641,27 @@ fn decode_onebit(cursor: &mut Cursor<'_>, sample_count: usize) -> Result<Vec<u8>
     }
     let bits = cursor.take(sample_count.div_ceil(8), "one-bit hardcall array")?;
     validate_packed_padding(bits, sample_count, 1, cursor)?;
-    let mut result = (0..sample_count)
-        .map(|sample| lower + (bit(bits, sample) as u8) * delta)
-        .collect::<Vec<_>>();
+    output.clear();
+    output.reserve(sample_count);
+    for sample in 0..sample_count {
+        output.push(lower + (bit(bits, sample) as u8) * delta);
+    }
     for (sample, value) in decode_difflist(cursor, sample_count, true)? {
-        result[sample] = value.ok_or_else(|| {
+        output[sample] = value.ok_or_else(|| {
             cursor.error("one-bit exception omitted a genotype value".to_string())
         })?;
     }
-    Ok(result)
+    Ok(())
+}
+
+#[inline]
+fn unpack_two_bit(bytes: &[u8], sample_count: usize, output: &mut Vec<u8>) {
+    output.clear();
+    output.reserve(sample_count);
+    for &byte in bytes {
+        output.extend_from_slice(&[byte & 3, (byte >> 2) & 3, (byte >> 4) & 3, (byte >> 6) & 3]);
+    }
+    output.truncate(sample_count);
 }
 
 fn decode_difflist(
@@ -560,7 +968,12 @@ fn decode_phase(
     for (heterozygous_index, &sample) in heterozygous.iter().enumerate() {
         if present[heterozygous_index] {
             if info[info_index] {
-                calls[sample].as_mut().unwrap().swap(0, 1);
+                let call = calls[sample].as_mut().ok_or_else(|| {
+                    cursor.error(format!(
+                        "phase information addresses a missing hardcall for sample {sample}"
+                    ))
+                })?;
+                call.swap(0, 1);
             }
             phased[sample] = Some(true);
             info_index += 1;
@@ -573,6 +986,117 @@ fn decode_phase(
             phased[sample] = Some(false);
         }
     }
+    Ok(())
+}
+
+fn decode_phase_for_selected_gt(
+    cursor: &mut Cursor<'_>,
+    categories: &mut [u8],
+    source_to_output: &[usize],
+    selected_codes: &mut [u8],
+    identity_selection: bool,
+) -> Result<()> {
+    let heterozygous_count = categories.iter().filter(|&&category| category == 1).count();
+    if heterozygous_count == 0 {
+        return Err(
+            cursor.error("hardcall-phase track is present without heterozygous calls".to_string())
+        );
+    }
+
+    let first = *cursor
+        .bytes
+        .get(cursor.position)
+        .ok_or_else(|| cursor.error("truncated hardcall-phase track".to_string()))?;
+    let explicit_present = first & 1 != 0;
+    if explicit_present {
+        let present = cursor.take(
+            (heterozygous_count + 1).div_ceil(8),
+            "phase-present bitarray",
+        )?;
+        validate_phase_padding(present, heterozygous_count + 1, cursor)?;
+        let phased_count = (0..heterozygous_count)
+            .filter(|&index| bit(present, index + 1))
+            .count();
+        let info = cursor.take(phased_count.div_ceil(8), "phase-info bitarray")?;
+        validate_packed_padding(info, phased_count, 1, cursor)?;
+
+        let mut heterozygous_index = 0;
+        let mut info_index = 0;
+        for source in 0..categories.len() {
+            let category = categories[source];
+            if category != 1 {
+                continue;
+            }
+            if bit(present, heterozygous_index + 1) {
+                if bit(info, info_index) {
+                    orient_selected_call(
+                        source,
+                        categories,
+                        source_to_output,
+                        selected_codes,
+                        identity_selection,
+                        cursor,
+                    )?;
+                }
+                info_index += 1;
+            }
+            heterozygous_index += 1;
+        }
+    } else {
+        let info = cursor.take(
+            (heterozygous_count + 1).div_ceil(8),
+            "implicit phase-info bitarray",
+        )?;
+        if info.first().is_some_and(|byte| byte & 1 != 0) {
+            return Err(
+                cursor.error("implicit phase track has phase-present marker set".to_string())
+            );
+        }
+        validate_phase_padding(info, heterozygous_count + 1, cursor)?;
+        let mut heterozygous_index = 0;
+        for source in 0..categories.len() {
+            let category = categories[source];
+            if category != 1 {
+                continue;
+            }
+            if bit(info, heterozygous_index + 1) {
+                orient_selected_call(
+                    source,
+                    categories,
+                    source_to_output,
+                    selected_codes,
+                    identity_selection,
+                    cursor,
+                )?;
+            }
+            heterozygous_index += 1;
+        }
+    }
+    Ok(())
+}
+
+fn orient_selected_call(
+    source: usize,
+    categories: &mut [u8],
+    source_to_output: &[usize],
+    selected_codes: &mut [u8],
+    identity_selection: bool,
+    cursor: &Cursor<'_>,
+) -> Result<()> {
+    if identity_selection {
+        categories[source] = 4;
+        return Ok(());
+    }
+    let output = source_to_output[source];
+    if output == usize::MAX {
+        return Ok(());
+    }
+    let code = selected_codes.get_mut(output).ok_or_else(|| {
+        cursor.error(format!(
+            "phase information addresses an invalid selected call for sample {source}"
+        ))
+    })?;
+    *code = 4;
     Ok(())
 }
 
@@ -633,6 +1157,21 @@ fn validate_dosage_hardcall_consistency(
         if (hardcall - dosage).abs() > 0.5001 {
             return Err(cursor.error(format!(
                 "dosage {dosage} is inconsistent with hardcall ALT count {hardcall} for sample {sample}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_fixed_dosage_missingness(
+    calls: &[Option<[u16; 2]>],
+    stored_dosages: &[Option<f32>],
+    cursor: &Cursor<'_>,
+) -> Result<()> {
+    for (sample, (call, dosage)) in calls.iter().zip(stored_dosages).enumerate() {
+        if dosage.is_none() && call.is_some() {
+            return Err(cursor.error(format!(
+                "fixed-width dosage is missing while the hardcall is present for sample {sample}"
             )));
         }
     }
@@ -953,5 +1492,55 @@ mod tests {
             bytes[index / 4] |= value << ((index % 4) * 2);
         }
         bytes
+    }
+
+    fn decode_direct_dense(
+        bytes: &[u8],
+        mode: PgenMode,
+        record_type: u8,
+        sample_count: usize,
+    ) -> Vec<Option<[u16; 2]>> {
+        let mut output = Vec::new();
+        decode_dense_biallelic_gt(
+            bytes,
+            mode,
+            record_type,
+            0,
+            sample_count,
+            |alleles, validity, samples| {
+                for sample in 0..samples {
+                    output.push(
+                        (validity & (1 << sample) != 0)
+                            .then(|| [alleles[sample * 2], alleles[sample * 2 + 1]]),
+                    );
+                }
+            },
+        )
+        .unwrap();
+        output
+    }
+
+    #[test]
+    fn direct_dense_decodes_implicit_phase_in_quad_chunks() {
+        assert_eq!(
+            decode_direct_dense(&[0b11_00_01_01, 0b0000_0100], PgenMode::Variable, 0x10, 4,),
+            vec![Some([0, 1]), Some([1, 0]), Some([0, 0]), None]
+        );
+    }
+
+    #[test]
+    fn direct_dense_handles_partial_final_byte() {
+        assert_eq!(
+            decode_direct_dense(&[0b00_11_01_00, 0b0000_0010], PgenMode::Variable, 0x10, 3,),
+            vec![Some([0, 0]), Some([1, 0]), None]
+        );
+    }
+
+    #[test]
+    fn direct_dense_preserves_unphased_and_missing_calls() {
+        assert_eq!(
+            decode_direct_dense(&[0b11_10_01_00], PgenMode::Variable, 0, 4,),
+            vec![Some([0, 0]), Some([0, 1]), Some([1, 1]), None]
+        );
     }
 }

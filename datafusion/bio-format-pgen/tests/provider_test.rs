@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float32Array, ListArray, StringArray, StructArray, UInt16Array,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, ListArray, StringArray, StructArray,
+    UInt16Array,
 };
 use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::{TableProviderFilterPushDown, col, lit};
@@ -391,7 +392,10 @@ fn gt_values(
         .downcast_ref::<ListArray>()
         .unwrap();
     let samples = gt.value(row);
-    let samples = samples.as_any().downcast_ref::<ListArray>().unwrap();
+    let samples = samples
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .unwrap();
     (0..samples.len())
         .map(|sample| {
             if samples.is_null(sample) {
@@ -427,8 +431,25 @@ fn ds_values(
     column: usize,
     row: usize,
 ) -> Vec<Option<f32>> {
+    float_sample_values(batch, column, row, "DS")
+}
+
+fn ds_stored_values(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    column: usize,
+    row: usize,
+) -> Vec<Option<f32>> {
+    float_sample_values(batch, column, row, "DS_STORED")
+}
+
+fn float_sample_values(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    column: usize,
+    row: usize,
+    field: &str,
+) -> Vec<Option<f32>> {
     let values = genotype_struct(batch, column)
-        .column_by_name("DS")
+        .column_by_name(field)
         .unwrap()
         .as_any()
         .downcast_ref::<ListArray>()
@@ -478,6 +499,24 @@ async fn decodes_all_fixed_width_and_plink1_modes() {
         )
         .await
         .unwrap();
+        if mode == 2 {
+            let schema = provider.schema();
+            let genotypes = schema.field_with_name("genotypes").unwrap();
+            let datafusion::arrow::datatypes::DataType::Struct(children) = genotypes.data_type()
+            else {
+                panic!("PGEN genotypes field is not a struct");
+            };
+            assert_eq!(
+                children
+                    .find("GT")
+                    .unwrap()
+                    .1
+                    .metadata()
+                    .get("bio.pgen.ploidy_semantics")
+                    .map(String::as_str),
+                Some("encoded_diploid")
+            );
+        }
         let context = context(1);
         context.register_table("p", Arc::new(provider)).unwrap();
         let batches = context
@@ -491,14 +530,18 @@ async fn decodes_all_fixed_width_and_plink1_modes() {
             gt_values(&batches[0], 1, 0),
             vec![Some(vec![1, 1]), Some(vec![0, 0]), None]
         );
-        if mode >= 3 {
-            assert_eq!(
-                ds_values(&batches[0], 1, 0),
+        assert_eq!(
+            ds_values(&batches[0], 1, 0),
+            vec![Some(2.0), Some(0.0), None]
+        );
+        assert_eq!(
+            ds_stored_values(&batches[0], 1, 0),
+            if mode >= 3 {
                 vec![Some(2.0), Some(0.0), None]
-            );
-        } else {
-            assert_eq!(ds_values(&batches[0], 1, 0), vec![None, None, None]);
-        }
+            } else {
+                vec![None, None, None]
+            }
+        );
         if mode == 4 {
             assert_eq!(
                 hds_values(&batches[0], 1, 0),
@@ -535,9 +578,11 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
             .await
             .unwrap();
         assert_eq!(provider.pgi_path().is_some(), mode >= 0x20);
-        let context = context(3);
-        context.register_table("p", Arc::new(provider)).unwrap();
-        let batches = context
+        let query_context = context(3);
+        query_context
+            .register_table("p", Arc::new(provider))
+            .unwrap();
+        let batches = query_context
             .sql("SELECT id, genotypes FROM p ORDER BY start")
             .await
             .unwrap()
@@ -571,6 +616,10 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
             vec![Some(0.0), Some(1.0), Some(2.0), None]
         );
         assert_eq!(
+            ds_stored_values(batch, 1, 5),
+            vec![Some(0.0), None, Some(2.0), None]
+        );
+        assert_eq!(
             hds_values(batch, 1, 6),
             vec![Some(vec![0.5, 0.5]), None, None, None]
         );
@@ -585,6 +634,31 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
         assert_eq!(
             phased_values(batch, 1, 8),
             vec![Some(true), Some(false), Some(false), None]
+        );
+
+        let gt_provider = PgenTableProvider::try_new(
+            path(&fixture.pgen),
+            PgenReadOptions {
+                genotype_fields: Some(vec!["GT".to_string()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let gt_context = context(1);
+        gt_context
+            .register_table("gt", Arc::new(gt_provider))
+            .unwrap();
+        let gt_batches = gt_context
+            .sql("SELECT genotypes FROM gt ORDER BY start")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            gt_values(&gt_batches[0], 0, 8),
+            vec![Some(vec![1, 0]), Some(vec![0, 1]), Some(vec![0, 0]), None]
         );
     }
 }
@@ -788,6 +862,27 @@ async fn rejects_malformed_indexes_records_and_unsupported_multiallelic_dosage()
     let provider = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
         .await
         .unwrap();
+    let invalid_context = context(1);
+    invalid_context
+        .register_table("p", Arc::new(provider))
+        .unwrap();
+    let error = invalid_context
+        .sql("SELECT genotypes FROM p")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unsupported multiallelic"), "{error}");
+
+    let fixture = fixed_fixture(3);
+    let mut bytes = fs::read(&fixture.pgen).unwrap();
+    bytes[13..15].copy_from_slice(&u16::MAX.to_le_bytes());
+    fs::write(&fixture.pgen, bytes).unwrap();
+    let provider = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap();
     let context = context(1);
     context.register_table("p", Arc::new(provider)).unwrap();
     let error = context
@@ -798,7 +893,10 @@ async fn rejects_malformed_indexes_records_and_unsupported_multiallelic_dosage()
         .await
         .unwrap_err()
         .to_string();
-    assert!(error.contains("unsupported multiallelic"), "{error}");
+    assert!(
+        error.contains("fixed-width dosage is missing while the hardcall is present"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

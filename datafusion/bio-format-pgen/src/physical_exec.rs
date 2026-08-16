@@ -2,14 +2,16 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use bytes::Bytes;
 use datafusion::arrow::array::{
-    ArrayRef, BooleanBuilder, Float32Builder, ListBuilder, StringArray, StringBuilder, StructArray,
-    UInt16Builder, UInt64Array,
+    ArrayRef, BooleanBuilder, FixedSizeListArray, FixedSizeListBuilder, Float32Builder, ListArray,
+    ListBuilder, StringArray, StringBuilder, StructArray, UInt16Array, UInt16Builder, UInt64Array,
 };
-use datafusion::arrow::datatypes::{DataType, Fields, SchemaRef};
+use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer};
+use datafusion::arrow::datatypes::{DataType, FieldRef, Fields, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -20,8 +22,11 @@ use datafusion_bio_format_core::genotype::{
 };
 use datafusion_bio_format_core::range_planning::ByteRange;
 
-use crate::decode::{DecodedRecord, decode_main_track, decode_record_and_main};
-use crate::fileset::PgenFileset;
+use crate::decode::{
+    DecodedRecord, GtDecodeWorkspace, decode_biallelic_gt_into, decode_dense_biallelic_gt,
+    decode_main_track, decode_record_and_main, supports_biallelic_gt_fast_path,
+};
+use crate::fileset::{PgenFileset, PgenMode};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PgenPartition {
@@ -129,6 +134,13 @@ impl ExecutionPlan for PgenExec {
         let genotype_fields = self.genotype_fields.clone();
         let genotypes_projected = schema.index_of("genotypes").is_ok();
 
+        if genotypes_projected
+            && !assignment.ranges.is_empty()
+            && genotype_fields.as_slice() == ["GT"]
+        {
+            return execute_gt_only(assignment, fileset, schema, metrics, max_rows, soft_bytes);
+        }
+
         let stream_schema = schema.clone();
         let stream = try_stream! {
             let selected_sample_count = fileset.selected_samples.source_indices().len();
@@ -156,6 +168,7 @@ impl ExecutionPlan for PgenExec {
                             gt: Vec::new(),
                             phased: Vec::new(),
                             ds: Vec::new(),
+                            ds_stored: Vec::new(),
                             hds: Vec::new(),
                         }),
                     });
@@ -282,6 +295,453 @@ impl ExecutionPlan for PgenExec {
     }
 }
 
+struct GtBatchBuilder {
+    variant_indices: Vec<usize>,
+    allele_values: Vec<u16>,
+    sample_validity: PackedValidityBuilder,
+    selected_sample_count: usize,
+    row_capacity: usize,
+    sample_field: FieldRef,
+    allele_field: FieldRef,
+}
+
+impl GtBatchBuilder {
+    fn new(schema: &SchemaRef, row_capacity: usize, selected_sample_count: usize) -> Result<Self> {
+        let genotype_field = schema.field_with_name("genotypes")?;
+        let DataType::Struct(children) = genotype_field.data_type() else {
+            return Err(DataFusionError::Execution(
+                "PGEN genotypes field is not a struct".to_string(),
+            ));
+        };
+        if children.len() != 1 || children[0].name() != "GT" {
+            return Err(DataFusionError::Execution(
+                "PGEN GT fast path requires an exact GT-only genotype projection".to_string(),
+            ));
+        }
+        let DataType::List(sample_field) = children[0].data_type() else {
+            return Err(DataFusionError::Execution(
+                "PGEN GT field is not a list".to_string(),
+            ));
+        };
+        let DataType::FixedSizeList(allele_field, 2) = sample_field.data_type() else {
+            return Err(DataFusionError::Execution(
+                "PGEN GT sample field is not a fixed-size allele pair".to_string(),
+            ));
+        };
+        Ok(Self {
+            variant_indices: Vec::with_capacity(row_capacity),
+            allele_values: Vec::with_capacity(
+                row_capacity
+                    .saturating_mul(selected_sample_count)
+                    .saturating_mul(2),
+            ),
+            sample_validity: PackedValidityBuilder::new(
+                row_capacity.saturating_mul(selected_sample_count),
+            ),
+            selected_sample_count,
+            row_capacity,
+            sample_field: sample_field.clone(),
+            allele_field: allele_field.clone(),
+        })
+    }
+
+    fn append(&mut self, variant_index: usize, calls: &[Option<[u16; 2]>]) {
+        for call in calls {
+            if let Some(call) = call {
+                self.allele_values.extend_from_slice(call);
+                self.sample_validity.append(true);
+            } else {
+                self.allele_values.extend_from_slice(&[0, 0]);
+                self.sample_validity.append(false);
+            }
+        }
+        self.variant_indices.push(variant_index);
+    }
+
+    fn append_codes(&mut self, variant_index: usize, codes: &[u8]) -> Result<()> {
+        for &code in codes {
+            let (left, right, valid) = match code {
+                0 => (0, 0, true),
+                1 => (0, 1, true),
+                2 => (1, 1, true),
+                3 => (0, 0, false),
+                4 => (1, 0, true),
+                _ => {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid internal biallelic GT code {code}"
+                    )));
+                }
+            };
+            self.append_values(left, right, valid);
+        }
+        self.finish_variant(variant_index);
+        Ok(())
+    }
+
+    #[inline]
+    fn append_values(&mut self, left: u16, right: u16, valid: bool) {
+        self.allele_values.push(left);
+        self.allele_values.push(right);
+        self.sample_validity.append(valid);
+    }
+
+    #[inline]
+    fn append_chunk(&mut self, alleles: &[u16], validity: u8, sample_count: usize) {
+        self.allele_values.extend_from_slice(alleles);
+        self.sample_validity.append_packed(validity, sample_count);
+    }
+
+    fn finish_variant(&mut self, variant_index: usize) {
+        self.variant_indices.push(variant_index);
+    }
+
+    fn len(&self) -> usize {
+        self.variant_indices.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.variant_indices.is_empty()
+    }
+
+    fn finish(&mut self, fileset: &PgenFileset, schema: SchemaRef) -> Result<RecordBatch> {
+        let validity = self.sample_validity.finish();
+        let allele_values = std::mem::replace(
+            &mut self.allele_values,
+            Vec::with_capacity(
+                self.row_capacity
+                    .saturating_mul(self.selected_sample_count)
+                    .saturating_mul(2),
+            ),
+        );
+        self.sample_validity = PackedValidityBuilder::new(
+            self.row_capacity.saturating_mul(self.selected_sample_count),
+        );
+        let alleles = Arc::new(UInt16Array::from(allele_values)) as ArrayRef;
+        let samples = Arc::new(FixedSizeListArray::new(
+            self.allele_field.clone(),
+            2,
+            alleles,
+            validity,
+        )) as ArrayRef;
+        let gt = Arc::new(ListArray::new(
+            self.sample_field.clone(),
+            OffsetBuffer::from_repeated_length(self.selected_sample_count, self.len()),
+            samples,
+            None,
+        )) as ArrayRef;
+        let batch = build_gt_batch(fileset, schema, &self.variant_indices, gt)?;
+        self.variant_indices.clear();
+        Ok(batch)
+    }
+}
+
+struct PackedValidityBuilder {
+    bytes: Vec<u8>,
+    len: usize,
+    null_count: usize,
+    capacity: usize,
+}
+
+impl PackedValidityBuilder {
+    fn new(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity.div_ceil(8)),
+            len: 0,
+            null_count: 0,
+            capacity,
+        }
+    }
+
+    #[inline]
+    fn append(&mut self, valid: bool) {
+        let shift = self.len % 8;
+        if shift == 0 {
+            self.bytes.push(0);
+        }
+        if valid {
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= 1 << shift;
+        } else {
+            self.null_count += 1;
+        }
+        self.len += 1;
+    }
+
+    #[inline]
+    fn append_packed(&mut self, bits: u8, count: usize) {
+        debug_assert!(count <= 8);
+        if count == 4 && self.len.is_multiple_of(4) {
+            let bits = bits & 0x0f;
+            if self.len.is_multiple_of(8) {
+                self.bytes.push(bits);
+            } else {
+                let last = self.bytes.len() - 1;
+                self.bytes[last] |= bits << 4;
+            }
+            self.len += 4;
+            self.null_count += 4 - bits.count_ones() as usize;
+            return;
+        }
+        let mask = if count == 8 {
+            u8::MAX
+        } else {
+            (1_u8 << count) - 1
+        };
+        let bits = bits & mask;
+        let byte_index = self.len / 8;
+        let shift = self.len % 8;
+        let new_len = self.len + count;
+        self.bytes.resize(new_len.div_ceil(8), 0);
+        self.bytes[byte_index] |= bits << shift;
+        if shift + count > 8 {
+            self.bytes[byte_index + 1] |= bits >> (8 - shift);
+        }
+        self.len = new_len;
+        self.null_count += count - bits.count_ones() as usize;
+    }
+
+    fn finish(&mut self) -> Option<NullBuffer> {
+        let bytes = std::mem::replace(
+            &mut self.bytes,
+            Vec::with_capacity(self.capacity.div_ceil(8)),
+        );
+        let len = std::mem::take(&mut self.len);
+        let null_count = std::mem::take(&mut self.null_count);
+        (null_count != 0).then(|| NullBuffer::new(BooleanBuffer::new(Buffer::from(bytes), 0, len)))
+    }
+}
+
+fn execute_gt_only(
+    assignment: PgenPartition,
+    fileset: Arc<PgenFileset>,
+    schema: SchemaRef,
+    metrics: Arc<GenotypeScanMetrics>,
+    max_rows: usize,
+    soft_bytes: usize,
+) -> Result<SendableRecordBatchStream> {
+    let stream_schema = schema.clone();
+    let stream = try_stream! {
+        let profile_enabled = std::env::var_os("PGEN_PROFILE").is_some();
+        let profile_started = Instant::now();
+        let mut read_elapsed = Duration::ZERO;
+        let mut decode_elapsed = Duration::ZERO;
+        let mut append_elapsed = Duration::ZERO;
+        let mut finish_elapsed = Duration::ZERO;
+        let mut representation_counts = [0_u64; 8];
+        let mut fast_records = 0_u64;
+        let mut fallback_records = 0_u64;
+        let selected_samples = fileset.selected_samples.source_indices();
+        let selected_sample_count = selected_samples.len();
+        let estimated_row_bytes = estimate_genotype_bytes(selected_sample_count, &["GT".to_string()]);
+        let mut sizer = GenotypeBatchSizer::new(max_rows, soft_bytes)?;
+        let partition_row_capacity = max_rows.min(assignment.owned.len()).max(1);
+        let mut batch =
+            GtBatchBuilder::new(&schema, partition_row_capacity, selected_sample_count)?;
+        let mut workspace = GtDecodeWorkspace::new(fileset.sample_count, selected_samples)?;
+
+        let owned = assignment.owned.iter().copied().collect::<HashSet<_>>();
+        let retained_bases = assignment
+            .required
+            .iter()
+            .filter_map(|&index| fileset.records[index].ld_base)
+            .collect::<HashSet<_>>();
+        let mut ld_base_index = None;
+        let mut ld_base = Vec::with_capacity(fileset.sample_count);
+        let mut required_position = 0;
+
+        for range in assignment.ranges {
+            let read_started = profile_enabled.then(Instant::now);
+            let bytes = fileset
+                .source
+                .read_range(&fileset.pgen_path, range.start..range.end)
+                .await?;
+            if let Some(started) = read_started {
+                read_elapsed += started.elapsed();
+            }
+            metrics.add(GenotypeMetric::RangeRequests, 1);
+            metrics.add(GenotypeMetric::CoalescedRanges, 1);
+            metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
+
+            while let Some(&variant_index) = assignment.required.get(required_position) {
+                let record = &fileset.records[variant_index];
+                if record.offset >= range.end {
+                    break;
+                }
+                if record.offset < range.start || record.end() > range.end {
+                    Err(DataFusionError::Execution(format!(
+                        "PGEN variant {variant_index} range {}..{} is not contained in planned range {}..{}",
+                        record.offset,
+                        record.end(),
+                        range.start,
+                        range.end
+                    )))?;
+                }
+                let payload =
+                    record_payload(range, &bytes, record.offset, record.end(), variant_index)?;
+                let base = record
+                    .ld_base
+                    .map(|base_index| {
+                        if ld_base_index != Some(base_index) {
+                            return Err(DataFusionError::Execution(format!(
+                                "PGEN variant {variant_index} dependency base {base_index} was not decoded first"
+                            )));
+                        }
+                        Ok(ld_base.as_slice())
+                    })
+                    .transpose()?;
+
+                if !owned.contains(&variant_index) {
+                    let main = decode_main_track(
+                        payload,
+                        fileset.mode,
+                        record.record_type,
+                        variant_index,
+                        fileset.sample_count,
+                        base,
+                    )?;
+                    if retained_bases.contains(&variant_index) {
+                        ld_base = main;
+                        ld_base_index = Some(variant_index);
+                    }
+                    metrics.add(GenotypeMetric::DependencyRecords, 1);
+                    required_position += 1;
+                    continue;
+                }
+
+                if sizer.should_flush_before(estimated_row_bytes) {
+                    let row_count = batch.len();
+                    let finish_started = profile_enabled.then(Instant::now);
+                    let finished = batch.finish(&fileset, schema.clone())?;
+                    if let Some(started) = finish_started {
+                        finish_elapsed += started.elapsed();
+                    }
+                    record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
+                    yield finished;
+                    sizer.reset();
+                }
+
+                let allele_count = fileset.variants[variant_index].allele_count();
+                representation_counts[usize::from(record.record_type & 7)] += 1;
+                let retain_main = retained_bases.contains(&variant_index);
+                let direct_dense = workspace.has_identity_selection()
+                    && !retain_main
+                    && supports_biallelic_gt_fast_path(record.record_type, allele_count)
+                    && (fileset.mode == PgenMode::Plink1 || record.record_type & 7 == 0);
+                if direct_dense {
+                    fast_records += 1;
+                    let decode_started = profile_enabled.then(Instant::now);
+                    decode_dense_biallelic_gt(
+                        payload,
+                        fileset.mode,
+                        record.record_type,
+                        variant_index,
+                        fileset.sample_count,
+                        |alleles, validity, samples| {
+                            batch.append_chunk(alleles, validity, samples)
+                        },
+                    )?;
+                    batch.finish_variant(variant_index);
+                    if let Some(started) = decode_started {
+                        decode_elapsed += started.elapsed();
+                    }
+                } else if supports_biallelic_gt_fast_path(record.record_type, allele_count) {
+                    fast_records += 1;
+                    let decode_started = profile_enabled.then(Instant::now);
+                    decode_biallelic_gt_into(
+                        &mut workspace,
+                        payload,
+                        fileset.mode,
+                        record.record_type,
+                        variant_index,
+                        fileset.sample_count,
+                        selected_samples,
+                        base,
+                        retain_main,
+                    )?;
+                    if let Some(started) = decode_started {
+                        decode_elapsed += started.elapsed();
+                    }
+                    let append_started = profile_enabled.then(Instant::now);
+                    batch.append_codes(variant_index, workspace.selected_codes())?;
+                    if let Some(started) = append_started {
+                        append_elapsed += started.elapsed();
+                    }
+                    if retained_bases.contains(&variant_index) {
+                        workspace.swap_main_track(&mut ld_base);
+                        ld_base_index = Some(variant_index);
+                    }
+                } else {
+                    fallback_records += 1;
+                    let decode_started = profile_enabled.then(Instant::now);
+                    let (decoded, main) = decode_record_and_main(
+                        payload,
+                        fileset.mode,
+                        record.record_type,
+                        variant_index,
+                        fileset.sample_count,
+                        allele_count,
+                        selected_samples,
+                        base,
+                    )?;
+                    if let Some(started) = decode_started {
+                        decode_elapsed += started.elapsed();
+                    }
+                    let append_started = profile_enabled.then(Instant::now);
+                    batch.append(variant_index, &decoded.gt);
+                    if let Some(started) = append_started {
+                        append_elapsed += started.elapsed();
+                    }
+                    if retained_bases.contains(&variant_index) {
+                        ld_base = main;
+                        ld_base_index = Some(variant_index);
+                    }
+                }
+                metrics.add(GenotypeMetric::SamplesDecoded, selected_sample_count as u64);
+                metrics.add(
+                    GenotypeMetric::SampleValuesSkipped,
+                    fileset.sample_count.saturating_sub(selected_sample_count) as u64,
+                );
+                sizer.push_row(estimated_row_bytes);
+                required_position += 1;
+            }
+        }
+
+        if required_position != assignment.required.len() {
+            Err(DataFusionError::Execution(format!(
+                "{} required PGEN records were not covered by planned ranges",
+                assignment.required.len() - required_position
+            )))?;
+        }
+        if !batch.is_empty() {
+            let row_count = batch.len();
+            let finish_started = profile_enabled.then(Instant::now);
+            let finished = batch.finish(&fileset, schema.clone())?;
+            if let Some(started) = finish_started {
+                finish_elapsed += started.elapsed();
+            }
+            record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
+            yield finished;
+        }
+        if profile_enabled {
+            eprintln!(
+                "PGEN_PROFILE total_ns={} read_ns={} decode_ns={} append_ns={} finish_ns={} fast_records={} fallback_records={} representations={representation_counts:?}",
+                profile_started.elapsed().as_nanos(),
+                read_elapsed.as_nanos(),
+                decode_elapsed.as_nanos(),
+                append_elapsed.as_nanos(),
+                finish_elapsed.as_nanos(),
+                fast_records,
+                fallback_records,
+            );
+        }
+    };
+
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        stream_schema,
+        stream,
+    )))
+}
+
 fn record_payload(
     range: ByteRange,
     bytes: &Bytes,
@@ -308,6 +768,7 @@ fn estimate_genotype_bytes(samples: usize, fields: &[String]) -> usize {
             "GT" => samples.saturating_mul(5),
             "PHASED" => samples.saturating_mul(2),
             "DS" => samples.saturating_mul(5),
+            "DS_STORED" => samples.saturating_mul(5),
             "HDS" => samples.saturating_mul(9),
             _ => 0,
         })
@@ -319,6 +780,84 @@ fn record_batch_metrics(metrics: &GenotypeScanMetrics, rows: usize, genotype_byt
     metrics.add(GenotypeMetric::BatchRows, rows as u64);
     metrics.add(GenotypeMetric::EmittedVariants, rows as u64);
     metrics.add(GenotypeMetric::GenotypeBytes, genotype_bytes as u64);
+}
+
+fn build_gt_batch(
+    fileset: &PgenFileset,
+    schema: SchemaRef,
+    variant_indices: &[usize],
+    gt: ArrayRef,
+) -> Result<RecordBatch> {
+    let arrays = schema
+        .fields()
+        .iter()
+        .map(|field| match field.name().as_str() {
+            "chrom" => Ok(Arc::new(StringArray::from_iter_values(
+                variant_indices
+                    .iter()
+                    .map(|&index| fileset.variants[index].chrom.as_str()),
+            )) as ArrayRef),
+            "start" => Ok(Arc::new(UInt64Array::from_iter_values(
+                variant_indices
+                    .iter()
+                    .map(|&index| fileset.variants[index].start),
+            )) as ArrayRef),
+            "end" => Ok(Arc::new(UInt64Array::from_iter_values(
+                variant_indices
+                    .iter()
+                    .map(|&index| fileset.variants[index].end),
+            )) as ArrayRef),
+            "id" => Ok(Arc::new(StringArray::from(
+                variant_indices
+                    .iter()
+                    .map(|&index| fileset.variants[index].id.as_deref())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef),
+            "ref" => Ok(Arc::new(StringArray::from_iter_values(
+                variant_indices
+                    .iter()
+                    .map(|&index| fileset.variants[index].reference.as_str()),
+            )) as ArrayRef),
+            "alt" => build_alt_index_array(fileset, field.data_type(), variant_indices),
+            "genotypes" => {
+                let DataType::Struct(fields) = field.data_type() else {
+                    return Err(DataFusionError::Execution(
+                        "PGEN genotypes field is not a struct".to_string(),
+                    ));
+                };
+                Ok(Arc::new(StructArray::new(fields.clone(), vec![gt.clone()], None)) as ArrayRef)
+            }
+            name => Err(DataFusionError::Execution(format!(
+                "unsupported projected PGEN column {name}"
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new_with_options(
+        schema,
+        arrays,
+        &RecordBatchOptions::new().with_row_count(Some(variant_indices.len())),
+    )
+    .map_err(DataFusionError::from)
+}
+
+fn build_alt_index_array(
+    fileset: &PgenFileset,
+    data_type: &DataType,
+    variant_indices: &[usize],
+) -> Result<ArrayRef> {
+    let DataType::List(allele_field) = data_type else {
+        return Err(DataFusionError::Execution(
+            "PGEN alt field is not a list".to_string(),
+        ));
+    };
+    let mut builder = ListBuilder::new(StringBuilder::new()).with_field(allele_field.clone());
+    for &variant_index in variant_indices {
+        for allele in &fileset.variants[variant_index].alternate {
+            builder.values().append_value(allele);
+        }
+        builder.append(true);
+    }
+    Ok(Arc::new(builder.finish()))
 }
 
 fn build_batch(
@@ -404,6 +943,7 @@ fn build_genotype_array(
             "GT" => build_gt_array(field.data_type(), rows),
             "PHASED" => build_phased_array(field.data_type(), rows),
             "DS" => build_ds_array(field.data_type(), rows),
+            "DS_STORED" => build_ds_stored_array(field.data_type(), rows),
             "HDS" => build_hds_array(field.data_type(), rows),
             _ => Err(DataFusionError::Execution(format!(
                 "unsupported PGEN genotype child {name}"
@@ -423,12 +963,13 @@ fn build_gt_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef>
             "PGEN GT field is not a list".to_string(),
         ));
     };
-    let DataType::List(allele_field) = sample_field.data_type() else {
+    let DataType::FixedSizeList(allele_field, 2) = sample_field.data_type() else {
         return Err(DataFusionError::Execution(
-            "PGEN GT sample field is not a list".to_string(),
+            "PGEN GT sample field is not a fixed-size allele pair".to_string(),
         ));
     };
-    let samples = ListBuilder::new(UInt16Builder::new()).with_field(allele_field.clone());
+    let samples =
+        FixedSizeListBuilder::new(UInt16Builder::new(), 2).with_field(allele_field.clone());
     let mut builder = ListBuilder::new(samples).with_field(sample_field.clone());
     for row in rows {
         let decoded = row.genotypes.as_ref().ok_or_else(|| {
@@ -439,6 +980,7 @@ fn build_gt_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef>
                 builder.values().values().append_slice(call);
                 builder.values().append(true);
             } else {
+                builder.values().values().append_slice(&[0, 0]);
                 builder.values().append(false);
             }
         }
@@ -467,17 +1009,30 @@ fn build_phased_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<Array
 }
 
 fn build_ds_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef> {
+    build_float_sample_array(data_type, rows, "DS", |decoded| &decoded.ds)
+}
+
+fn build_ds_stored_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef> {
+    build_float_sample_array(data_type, rows, "DS_STORED", |decoded| &decoded.ds_stored)
+}
+
+fn build_float_sample_array<'a>(
+    data_type: &DataType,
+    rows: &'a [DecodedRow],
+    name: &str,
+    values: impl Fn(&'a DecodedRecord) -> &'a [Option<f32>],
+) -> Result<ArrayRef> {
     let DataType::List(sample_field) = data_type else {
-        return Err(DataFusionError::Execution(
-            "PGEN DS field is not a list".to_string(),
-        ));
+        return Err(DataFusionError::Execution(format!(
+            "PGEN {name} field is not a list"
+        )));
     };
     let mut builder = ListBuilder::new(Float32Builder::new()).with_field(sample_field.clone());
     for row in rows {
         let decoded = row.genotypes.as_ref().ok_or_else(|| {
             DataFusionError::Execution("PGEN genotype row was not decoded".to_string())
         })?;
-        for value in &decoded.ds {
+        for value in values(decoded) {
             builder.values().append_option(*value);
         }
         builder.append(true);

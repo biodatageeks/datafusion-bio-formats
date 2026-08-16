@@ -12,10 +12,15 @@ The nested `genotypes` struct can contain:
 
 | Field | Value |
 | --- | --- |
-| `GT` | Per-sample nullable raw allele-index pair |
+| `GT` | Per-sample nullable fixed-size pair of encoded allele slots (`UInt16`) |
 | `PHASED` | Per-sample nullable hardcall phase flag |
-| `DS` | Per-sample nullable dosage of ALT allele index 1 |
+| `DS` | Effective nullable dosage of ALT allele index 1 (stored value, then hardcall fallback) |
+| `DS_STORED` | Physically stored nullable dosage of ALT allele index 1 |
 | `HDS` | Per-sample nullable pair of ALT-1 haplotype dosages |
+
+PGEN does not carry biological ploidy. `GT` therefore exposes its two encoded
+allele slots with `bio.pgen.ploidy_semantics=encoded_diploid` metadata and does
+not infer chromosome-, sex-, build-, or PAR-dependent ploidy.
 
 ```rust,no_run
 use std::sync::Arc;

@@ -27,7 +27,7 @@ The validated reference versions are:
 | Oracle | Version | Role |
 | --- | --- | --- |
 | PLINK `pgenlib` | 0.94.1 | Authoritative writer and hardcall/phase/dosage reader |
-| `snputils` | 1.1.0 | Independent high-level hardcall and phased-call reader |
+| `snputils` | 1.1.1.dev19+g482c6d1df | Independent high-level hardcall and phased-call reader |
 | PLINK 2 CLI | 2.0.0-a.7.1 (4 May 2026) | End-to-end PGEN-to-VCF hardcall export |
 
 External tools are test-only. The regular suite executes `pgenlib` and

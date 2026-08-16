@@ -54,7 +54,7 @@ pub struct PgenReadOptions {
     pub missing_sample_policy: MissingSamplePolicy,
     /// PSAM identifier policy.
     pub psam_id_mode: PsamIdMode,
-    /// Selected genotype children from `GT`, `PHASED`, `DS`, and `HDS`.
+    /// Selected genotype children from `GT`, `PHASED`, `DS`, `DS_STORED`, and `HDS`.
     pub genotype_fields: Option<Vec<String>>,
     /// Output coordinate presentation.
     pub coordinate_system: CoordinateSystem,
@@ -118,7 +118,7 @@ impl PgenTableProvider {
     /// Opens and validates a local or remote PGEN/PVAR/PSAM fileset.
     pub async fn try_new(pgen_path: impl Into<String>, options: PgenReadOptions) -> Result<Self> {
         validate_options(&options)?;
-        let available = ["GT", "PHASED", "DS", "HDS"]
+        let available = ["GT", "PHASED", "DS", "DS_STORED", "HDS"]
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -323,7 +323,10 @@ fn build_schema(
                 "GT",
                 DataType::List(Arc::new(Field::new(
                     "sample",
-                    DataType::List(Arc::new(Field::new("allele", DataType::UInt16, false))),
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new("allele", DataType::UInt16, false)),
+                        2,
+                    ),
                     true,
                 ))),
                 false,
@@ -336,6 +339,10 @@ fn build_schema(
                 (
                     GENOTYPE_ALLELE_ORDER_KEY.to_string(),
                     "PVAR REF=0, ALT source order=1..n".to_string(),
+                ),
+                (
+                    "bio.pgen.ploidy_semantics".to_string(),
+                    "encoded_diploid".to_string(),
                 ),
             ])),
             "PHASED" => Field::new(
@@ -350,6 +357,25 @@ fn build_schema(
             )
             .with_metadata(HashMap::from([
                 (GENOTYPE_OUTPUT_MODE_KEY.to_string(), "dosage".to_string()),
+                (
+                    GENOTYPE_COUNTED_ALLELE_KEY.to_string(),
+                    "PVAR ALT allele index 1".to_string(),
+                ),
+                (
+                    "bio.pgen.dosage_scale".to_string(),
+                    "uint16/16384".to_string(),
+                ),
+            ])),
+            "DS_STORED" => Field::new(
+                "DS_STORED",
+                DataType::List(Arc::new(Field::new("sample", DataType::Float32, true))),
+                false,
+            )
+            .with_metadata(HashMap::from([
+                (
+                    GENOTYPE_OUTPUT_MODE_KEY.to_string(),
+                    "stored_dosage".to_string(),
+                ),
                 (
                     GENOTYPE_COUNTED_ALLELE_KEY.to_string(),
                     "PVAR ALT allele index 1".to_string(),

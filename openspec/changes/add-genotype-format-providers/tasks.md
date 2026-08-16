@@ -184,6 +184,24 @@
   allele patches, and dosage bounds.
 - [x] 6.22 Benchmark each record representation, sparse variants, sparse
   samples, LD-heavy files, dosage output, and parallel record blocks.
+- [x] 6.23 Build projection and sample plans once per scan and use reusable
+  partition-local decode workspaces.
+- [x] 6.24 Replace generic dense per-sample bit extraction with a specialized
+  packed-byte/word kernel and direct selected-sample gather path.
+- [ ] 6.25 Append decoded values directly to Arrow builders without retaining
+  full-cohort `DecodedRecord` and `DecodedRow` copies.
+- [ ] 6.26 Retain only the latest eligible LD base, update it in place, and add
+  allocation/copy assertions for LD-heavy scans.
+- [ ] 6.27 Reuse one local read handle and bounded range buffer per partition;
+  decode header indexes by block and compact or stream PVAR/PSAM catalogs.
+- [x] 6.28 Define effective `DS`, optional `DS_STORED`, missingness, and stored
+  dosage override behavior in oracle and hand-checked tests.
+- [ ] 6.29 Publish encoded-diploid ploidy metadata and reject unsupported
+  chromosome-aware requests instead of inferring genome-build/PAR rules.
+- [ ] 6.30 Enforce the public `UInt16` allele-width limit and maintain a separate
+  current-`pgenlib` oracle compatibility limit.
+- [x] 6.31 Rebase the PGEN implementation on the current genotype-core head and
+  verify that it does not revert intervening BCF/core changes.
 
 ## 7. GRG Provider
 
@@ -252,3 +270,11 @@
   sample/allele semantics, and benchmark results.
 - [ ] 9.12 Obtain per-format approval before enabling it in default release
   artifacts.
+- [x] 9.13 Add a pinned, official-writer PGEN parity harness that constrains all
+  runtime pools to one thread and compares at least ten post-warmup medians with
+  `snputils`/`pgenlib` on identical selections.
+- [x] 9.14 Require PGEN one-thread biallelic phased `GT` decode-plus-materialize
+  time to be no slower than the pinned `snputils` median; report provider-open,
+  full-fileset, output-byte, and peak-RSS results separately.
+- [ ] 9.15 Publish PGEN 1/2/4/8-partition scaling, balance, dependency-prelude,
+  decoded-value, allocation, and peak-memory metrics without nested pools.

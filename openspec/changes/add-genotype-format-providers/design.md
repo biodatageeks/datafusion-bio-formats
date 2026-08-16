@@ -42,20 +42,23 @@ PLINK 2 `pgenlib` for PGEN, and Python `grgl` for GRG. `snputils` is useful for
 cross-format behavioral comparisons, but its whole-file and delegated-reader
 paths are not the target execution architecture.
 
-### Reference baseline (2026-07-27)
+### Reference baseline (reviewed 2026-08-16)
 
 | Capability | Normative source | Implementation/oracle snapshot |
 | --- | --- | --- |
 | BCF | [`BCFv2_qref`](https://github.com/samtools/hts-specs/blob/da617203a9527537746e200abda2885bec3a822c/BCFv2_qref.pdf) and [`CSIv1`](https://github.com/samtools/hts-specs/blob/da617203a9527537746e200abda2885bec3a822c/CSIv1.pdf) | `noodles` `fe2b112566a5d509910303841bb9df47dd007fcf`; htslib/bcftools |
 | PLINK 1 | [PLINK binary format appendix](https://www.cog-genomics.org/plink/1.9/formats#bed) | Apache-2.0 `bed-reader` `0128fc755745c8e1cbe49d677479e5cfc3b2f49e`; PLINK |
 | BGEN | [BGEN v1.3 latest specification](https://www.chg.ox.ac.uk/~gav/bgen_format/spec/latest.html) | MIT `limix/bgen` `0c3bae807d00e03499f8b04ac0db83f7f20dd1c4`; bgenix/qctool |
-| PGEN | [`pgen_spec` draft](https://github.com/chrchang/plink-ng/tree/9ee41ce224ea7cd091760d69392a98835715b5b2/pgen_spec) | PLINK 2/`pgenlib` at `9ee41ce224ea7cd091760d69392a98835715b5b2`; external oracle only for LGPL components |
+| PGEN | [`pgen_spec` draft](https://github.com/chrchang/plink-ng/tree/9ee41ce224ea7cd091760d69392a98835715b5b2/pgen_spec) | PLINK 2 at `7b30cf1733c4f50c6699268a9f07fb6af206ed49` and Python `pgenlib` 0.94.1; external oracle only for LGPL components |
 | GRG | [Official GRG model/documentation](https://github.com/aprilweilab/grgl/tree/7b896a00d8b23821e5a779048580f64ae9c34368) plus the required independent on-disk contract | Python/C++ GRGL at `7b896a00d8b23821e5a779048580f64ae9c34368`; external GPL oracle only |
-| Cross-format | Format sources above | BSD-3-Clause `snputils` at `2cf1511ef1c1fb2effddb969075cce69202e079e` |
+| Cross-format | Format sources above | BSD-3-Clause `snputils` at `482c6d1dfd6c4001935dfaec81ae01a5e0ec3e53` |
 
 These commit pins make conformance results reproducible; they are not permission
 to copy implementation code. Before implementation, each pin is reviewed for
 newer format corrections and upgraded only with corresponding fixture changes.
+The PGEN specification tree at the PLINK 2 oracle commit above is byte-for-byte
+unchanged from the normative `9ee41ce` pin. The newer PLINK 2 commit is therefore
+an implementation-oracle update, not a format-contract update.
 
 ## Goals
 
@@ -70,6 +73,8 @@ newer format corrections and upgraded only with corresponding fixture changes.
 - Support local files and object stores where the format admits range access.
 - Keep DataFusion in control of scan concurrency.
 - Make compatibility and performance independently testable.
+- Meet or beat the pinned `snputils` single-thread biallelic `GT` baseline before
+  enabling PGEN in release artifacts, while retaining bounded-memory streaming.
 
 ## Non-Goals
 
@@ -162,8 +167,8 @@ The format-specific child fields are:
 | PLINK 1 | `GT: List<UInt8>` containing A1 dosage 0, 1, 2, or null |
 | BGEN probability | `GP: List<List<Float32>>`, `PLOIDY: List<UInt8>`, and variant `phased` |
 | BGEN dosage | `DS: List<Float32>` and `PLOIDY: List<UInt8>` |
-| PGEN allele | `GT: List<List<UInt16>>`, `PHASED: List<Boolean>` |
-| PGEN dosage | available `DS` and `HDS` fields plus requested hardcall fields |
+| PGEN allele | `GT: List<FixedSizeList<UInt16, 2>>`, `PHASED: List<Boolean>` |
+| PGEN dosage | effective `DS`, optional source-only `DS_STORED`, `HDS`, and requested hardcall fields |
 | GRG haplotype | `GT: List<UInt8>` with mutation presence 0/1 or null |
 | GRG individual | `GT: List<UInt8>` with alternate count 0..ploidy or null |
 
@@ -395,6 +400,33 @@ the first owned record. Unsupported or not-yet-standardized multiallelic dosage
 sections fail explicitly. Hybrid `.pgen + .bim + .fam` filesets are outside the
 initial contract.
 
+PGEN itself does not encode biological ploidy. Initial raw `GT` output therefore
+reports the two encoded allele slots and labels them with
+`ploidy_semantics=encoded_diploid`; it does not guess chromosome build, PAR
+boundaries, or sex-chromosome ploidy from PVAR/PSAM. A future chromosome-aware
+mode requires an explicit genome-build/ploidy policy. The performance oracle is
+run with `snputils`' `chromosome_ploidy="autosomal"` so both sides implement the
+same contract.
+
+The two encoded allele slots use an Arrow `FixedSizeList<UInt16, 2>` per sample
+instead of a variable inner list. Missing samples remain null at the fixed-size
+list level. This removes one 32-bit offset per sample while preserving the exact
+two-slot PGEN representation and materially reduces wide-cohort memory traffic.
+
+`DS` uses effective biallelic alternate-allele dosage semantics, matching
+PLINK 2/`pgenlib`: a stored dosage overrides the hardcall, an otherwise-called
+hardcall contributes exact dosage 0, 1, or 2, and the value is null only when
+both are missing. `DS_STORED`, when projected, exposes only the physically
+stored dosage and is null for hardcall fallback. This keeps the common fast path
+oracle-compatible without losing the distinction between source dosage and a
+hardcall-derived value.
+
+The first implementation supports allele indices representable by the public
+`UInt16` schema (at most 65,536 alleles per variant) and rejects larger encoded
+widths before allocation. Differential fixtures additionally stay within the
+current official `pgenlib` limit of 255 alleles; this oracle limit is not
+misreported as a file-format limit.
+
 #### GRG
 
 GRG is graph-native rather than record-native. The provider opens one immutable
@@ -408,7 +440,88 @@ counts. Graph missingness maps to null. A `contig_name` option supplies `chrom`
 when the graph does not store one. Remote GRG access and graph analytics remain
 out of scope for the first provider.
 
-### 14. Error model
+### 14. PGEN hot-path and workspace design
+
+PGEN has a dedicated projection-driven decode pipeline. Planning creates a
+`ProjectionPlan` bitset and a `SamplePlan` once. Each physical partition owns a
+single reusable `DecodeWorkspace` containing its range buffer, packed hardcall
+scratch, selected-sample scratch, auxiliary-track scratch, Arrow builders, and
+one LD-base workspace. The partition appends decoded values directly to Arrow
+builders; it does not retain a `DecodedRecord` or a second row representation.
+
+Unprojected tracks are validated and skipped from declared lengths without
+allocating logical values. A `GT`-only scan does not allocate `PHASED`, `DS`,
+`DS_STORED`, or `HDS`; a metadata-only scan does not read record payloads. The
+identity-sample path uses specialized packed-byte/word decoding, while sparse
+selection gathers directly into request order. Generic per-sample bit readers
+remain a correctness fallback, not the dense hot loop.
+
+LD state contains only the most recent eligible non-LD base required by the
+specification. It is updated in place and represented at the narrowest level
+needed by the projection/sample plan. The decoder does not keep a map of every
+base variant and does not clone a full cohort vector for each LD record.
+
+Local scans open one read handle per partition and reuse buffers with positional
+reads. Object-store scans retain bounded coalesced range reads. The header index
+is decoded by `2^16`-variant blocks on demand instead of requiring an owned
+record descriptor for every variant. PVAR/PSAM parsing is streaming or compactly
+interned so metadata memory does not multiply the source text with per-cell
+`String` allocations.
+
+Partitions remain contiguous for locality and are balanced with a cost model
+combining encoded bytes, projected decoded values, record representation, and
+LD prelude work. Boundaries prefer valid non-LD anchors. DataFusion target
+partitions are the only outer parallelism; the decoder creates no nested pool.
+
+### 15. PGEN performance qualification
+
+The initial audit of draft PR #221 used an official-writer, fully phased
+biallelic fixture with 16,384 variants and 1,024 samples on an Apple M3 Max.
+Both implementations read all variants and samples and materialized `GT`; all
+Python/native numerical thread pools and DataFusion target partitions were set
+to one for the single-thread comparison.
+
+| Implementation | Median/representative wall time | Materialized value bytes |
+| --- | ---: | ---: |
+| `snputils` `482c6d1` / `pgenlib` 0.94.1 | 70.4 ms | 32.0 MiB compact `int8` alleles |
+| Draft Rust PR #221, one partition | 391.4 ms | 203.6 MB Arrow array estimate |
+| Draft Rust PR #221, four partitions | 114.3 ms | 203.6 MB Arrow array estimate |
+
+The formats differ in output width, so qualification reports output bytes and
+does not claim identical memory bandwidth. The observed roughly 5.5x
+single-partition gap is nevertheless a release blocker. The dominant structural
+causes are eager construction of every genotype child, full-cohort intermediate
+rows, generic per-sample packed reads, repeated LD-base copies, and per-range
+file/buffer setup.
+
+The hard gate uses a release build, identical fixture and selection, warm page
+cache, one DataFusion partition/Tokio worker, one thread for every oracle pool,
+and at least ten measured iterations after warmup. It compares median steady
+state decode-plus-materialize time for biallelic phased `GT`; provider-open and
+full-fileset end-to-end times are reported separately. Rust SHALL be no slower
+than the pinned `snputils` median on the same host. The benchmark command,
+fixture generator seed, hardware, compiler flags, oracle versions, result
+samples, output bytes, and peak RSS are published with the result.
+
+Additional suites cover dense, one-bit, difflist, LD-heavy, phase, dosage,
+multiallelic hardcall, metadata-only, sparse-variant, sparse-sample, local, and
+object-store paths. Multi-partition results must remain complete and bounded;
+on a host with at least four physical cores, four partitions target at least
+2.5x the one-partition throughput without nested concurrency. A noisy general
+CI runner may track regressions with a tolerance, but cannot waive the dedicated
+no-slower-than-`snputils` release gate.
+
+Gate 1 implementation on 2026-08-16 replaced the draft row intermediates with
+a direct fixed-size allele-pair Arrow path and a four-call dense/phase lookup
+kernel. On the pinned generated fixture, ten post-warmup iterations produced
+32.92 ms for one Rust partition versus 71.60 ms for one-thread `snputils`.
+Rust output was 69,272,392 bytes with maximum RSS 163,889,152 bytes; `snputils`
+output was 33,554,432 bytes with maximum RSS 587,841,536 bytes. Both produced
+the same genotype digest. Rust scans measured 18.26, 9.72, and 7.03 ms with two,
+four, and eight partitions respectively, so the one-thread parity and four-core
+scaling gates pass for this fixture.
+
+### 16. Error model
 
 Format, version, count, offset, compression, allocation-limit, and companion
 errors are detected as early as possible and include the primary object and
@@ -420,7 +533,7 @@ No hot-path decoder uses `unwrap` or trusts file-declared sizes without checked
 arithmetic. Partial output followed by a corruption error is allowed for
 streaming execution, but the error is not suppressed.
 
-### 15. Metrics and observability
+### 17. Metrics and observability
 
 Every scan exposes, at minimum:
 
@@ -437,7 +550,7 @@ Every scan exposes, at minimum:
 Metrics permit proving that a pushdown avoided I/O rather than merely discarding
 values after decoding.
 
-### 16. Testing and benchmarking
+### 18. Testing and benchmarking
 
 Each format receives:
 
@@ -462,7 +575,7 @@ interleaved runs are summarized by their median. The optimized streaming BCF
 path must have a lower median wall time than the pinned independent snputils
 GT-dosage baseline before the performance task is complete.
 
-### 17. Licensing boundary
+### 19. Licensing boundary
 
 Runtime code may depend on libraries with project-compatible licenses after
 normal dependency review. LGPL `pgenlib` and GPL `grgl` SHALL NOT be linked,

@@ -106,7 +106,7 @@ PGEN.
 ### Requirement: PGEN Raw Allele Output
 
 The system SHALL provide a raw allele mode with
-`GT: List<List<UInt16>>` containing PVAR allele indices and
+`GT: List<FixedSizeList<UInt16, 2>>` containing PVAR allele indices and
 `PHASED: List<Boolean>` describing whether allele order is phased for each
 selected sample.
 
@@ -165,8 +165,9 @@ eligible heterozygous hardcalls and SHALL reject inconsistent phase bits.
 
 ### Requirement: PGEN Biallelic Dosage Output
 
-The system SHALL decode stored biallelic dosage and dosage-presence tracks into
-`DS: List<Float32>` where values count PVAR alternate allele index one.
+The system SHALL expose effective biallelic dosage as `DS: List<Float32>` and
+optionally stored-only dosage as `DS_STORED: List<Float32>`, with both fields
+counting PVAR alternate allele index one.
 
 #### Scenario: Stored dosage
 - **WHEN** a selected sample has a stored dosage value
@@ -175,12 +176,18 @@ The system SHALL decode stored biallelic dosage and dosage-presence tracks into
 
 #### Scenario: No stored dosage
 - **WHEN** a selected sample has a hardcall but no stored dosage
-- **THEN** `DS` is null
+- **THEN** `DS` contains exact hardcall-derived dosage 0, 1, or 2
+- **AND** `DS_STORED` is null when projected
 - **AND** `GT` remains available when requested.
 
 #### Scenario: Missing genotype and dosage
 - **WHEN** both hardcall and dosage are missing
-- **THEN** their output values are null.
+- **THEN** `DS`, `DS_STORED`, and `GT` are null when projected.
+
+#### Scenario: Stored dosage overrides hardcall
+- **WHEN** a selected sample has a valid stored dosage value
+- **THEN** `DS` and `DS_STORED` contain that specification-scaled value
+- **AND** `DS` does not substitute the hardcall-derived integer.
 
 #### Scenario: Invalid dosage
 - **WHEN** a dosage integer or presence track violates bounds or record length
@@ -289,16 +296,114 @@ representation.
 
 #### Scenario: Hardcall-only projection
 - **WHEN** `GT` is requested but dosage fields are not
-- **THEN** dosage tracks are skipped by their declared lengths.
+- **THEN** dosage tracks are validated and skipped by their declared lengths
+- **AND** no dosage, phase, or phased-dosage logical vectors are allocated.
 
 #### Scenario: Dosage-only projection
 - **WHEN** `DS` is requested but phase and phased dosage are not
-- **THEN** unrequested phase tracks are not converted into Arrow arrays.
+- **THEN** unrequested phase tracks are not converted into Arrow arrays
+- **AND** only the minimum hardcall state needed for effective dosage fallback
+  is retained.
 
 #### Scenario: Sparse sample selection
 - **WHEN** a sample subset is selected
 - **THEN** dense and sparse record paths append only selected sample values
 - **AND** difflist membership tests preserve request order.
+
+#### Scenario: Direct batch construction
+- **WHEN** projected PGEN values are decoded
+- **THEN** they are appended directly to reusable Arrow builders
+- **AND** the provider does not retain a full-cohort decoded-row copy until
+  batch flush.
+
+### Requirement: Explicit PGEN Ploidy Semantics
+
+The system SHALL treat the initial PGEN raw allele representation as two
+encoded allele slots and SHALL NOT infer biological chromosome ploidy without
+an explicit future ploidy policy.
+
+#### Scenario: Encoded diploid output
+- **WHEN** a caller reads raw `GT` with the initial provider
+- **THEN** each called sample contains the two allele slots encoded by PGEN
+- **AND** schema metadata declares `ploidy_semantics=encoded_diploid`.
+
+#### Scenario: Oracle comparison
+- **WHEN** output is compared with `snputils` or `pgenlib`
+- **THEN** the oracle uses its autosomal/diploid mode
+- **AND** no chromosome-derived haploid rewrite is included in the comparison.
+
+#### Scenario: Biological ploidy request
+- **WHEN** a caller requests chromosome-aware biological ploidy without a
+  supported explicit genome-build and ploidy policy
+- **THEN** planning fails as unsupported rather than guessing PAR or sex rules.
+
+### Requirement: Bounded PGEN Decoder State
+
+The system SHALL reuse partition-local decode workspaces and SHALL bound
+intermediate state by selected sample width, projected fields, batch budget,
+range buffer limits, and one current LD base.
+
+#### Scenario: LD-heavy partition
+- **WHEN** a partition decodes many LD-compressed records
+- **THEN** only the most recent eligible base is retained
+- **AND** no full-cohort base vector is cloned per dependent record.
+
+#### Scenario: Wide cohort
+- **WHEN** the selected cohort makes one Arrow row large
+- **THEN** the row may be emitted alone under the documented soft budget
+- **AND** completed decoded rows are not duplicated in an intermediate batch.
+
+#### Scenario: Large variant catalog
+- **WHEN** a PGEN contains many `2^16`-variant index blocks
+- **THEN** record metadata is decoded blockwise or compactly
+- **AND** planning does not require an independently allocated descriptor for
+  every record before the first partition can scan.
+
+### Requirement: PGEN Single-Thread Performance Parity
+
+The system SHALL meet or beat the pinned `snputils` single-thread baseline for
+an equivalent full-cohort biallelic phased `GT` scan before PGEN is enabled in
+release artifacts.
+
+#### Scenario: Reproducible parity benchmark
+- **WHEN** the PGEN release benchmark is run
+- **THEN** Rust and the pinned oracle use the same official-writer fixture,
+  variant/sample selection, warm-cache policy, and release/native-code policy
+- **AND** DataFusion, Tokio, Python, BLAS, Rayon, and OpenMP concurrency are each
+  constrained to one thread
+- **AND** the Rust median decode-plus-materialize time over at least ten measured
+  iterations is no greater than the oracle median.
+
+#### Scenario: Transparent output cost
+- **WHEN** benchmark output layouts use different physical widths
+- **THEN** materialized bytes and peak RSS are reported beside wall time
+- **AND** the layout difference does not silently relax the parity gate.
+
+#### Scenario: Multicore scaling
+- **WHEN** the same scan uses two, four, or more DataFusion target partitions
+- **THEN** no nested decoder thread pool is created
+- **AND** throughput, efficiency, peak RSS, partition balance, and LD prelude
+  work are reported.
+
+### Requirement: Explicit PGEN Allele-Width Support
+
+The system SHALL publish and enforce the allele-index width supported by its
+Arrow schema independently of the narrower limits of a selected oracle.
+
+#### Scenario: Supported allele width
+- **WHEN** all PVAR allele indices fit in `UInt16`
+- **THEN** multiallelic hardcalls preserve those exact indices.
+
+#### Scenario: Unsupported allele width
+- **WHEN** a record requires an allele index not representable by `UInt16`
+- **THEN** planning or decoding fails with a distinct unsupported-width error
+- **AND** no index is truncated or wrapped.
+
+#### Scenario: Oracle-limited fixture
+- **WHEN** differential testing uses the current official `pgenlib` oracle
+- **THEN** fixtures respect that oracle's current allele-count limit
+- **AND** documentation does not claim that limit is imposed by the PGEN file
+  specification.
 
 ### Requirement: PGEN Object-Store Range Access
 
