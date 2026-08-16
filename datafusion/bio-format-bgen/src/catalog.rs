@@ -11,6 +11,14 @@ use crate::table_provider::BgenReadOptions;
 const INITIAL_METADATA_WINDOW: usize = 4 * 1024;
 /// Bytes fetched per catalog read so one object read covers many variant records.
 const METADATA_CHUNK_BYTES: u64 = 1024 * 1024;
+
+/// Bytes of payload framing that follow a Layout 2 or compressed Layout 1
+/// record's metadata.
+///
+/// `parse_variant` reads this block-length word after recording
+/// `payload_offset`, so it is payload rather than metadata and has to remain
+/// visible when the parser's view is capped.
+const PAYLOAD_FRAMING_BYTES: usize = 4;
 /// Fewest records a read-ahead must be expected to cover to be worth its bytes.
 ///
 /// Metadata and genotype payloads are interleaved, so any read spanning several
@@ -194,9 +202,33 @@ pub(crate) async fn build_transient_catalog(
             // that whole buffer would let a record walk past
             // `max_variant_metadata_bytes` without ever reporting `NeedMore`, so
             // the doubling loop below — and with it the limit — would never run.
-            let bytes = &bytes[..bytes.len().min(window_size)];
+            //
+            // The block-length word sits after the metadata and belongs to the
+            // payload, not to it, so it stays available: truncating to exactly
+            // the metadata allowance would reject a record whose metadata ends
+            // within four bytes of the limit without having exceeded it.
+            let visible = window_size.saturating_add(PAYLOAD_FRAMING_BYTES);
+            let bytes = &bytes[..bytes.len().min(visible)];
             match parse_variant(path, index, record_offset, bytes, header, options) {
-                Ok(variant) => break variant,
+                Ok(variant) => {
+                    // Those extra framing bytes must not become extra allowance,
+                    // so the metadata a successful parse actually consumed is
+                    // measured against the limit.
+                    let metadata_size = variant.payload_offset.saturating_sub(record_offset);
+                    if metadata_size > options.max_variant_metadata_bytes as u64 {
+                        return Err(catalog_error(
+                            path,
+                            index,
+                            record_offset,
+                            &format!(
+                                "variant metadata is {metadata_size} bytes, exceeding \
+                                 max_variant_metadata_bytes {}",
+                                options.max_variant_metadata_bytes
+                            ),
+                        ));
+                    }
+                    break variant;
+                }
                 Err(ParseVariantError::NeedMore) if read_size < remaining => {
                     if window_size >= options.max_variant_metadata_bytes {
                         return Err(catalog_error(

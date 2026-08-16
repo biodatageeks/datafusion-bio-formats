@@ -1861,3 +1861,81 @@ async fn a_variant_cannot_reconstruct_more_than_the_block_byte_budget() {
         "the block-size check must not be what rejected this: {error}"
     );
 }
+
+#[tokio::test]
+async fn the_reconstruction_budget_counts_fixed_layout_padding() {
+    // A fixed layout pads every sample to the catalog-derived width, so what a
+    // variant emits is that width rather than what it stores. Sizing the budget
+    // from the variant's own states would let a scan filtered to a narrow
+    // variant allocate the full padded width unchecked.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            // rs1 stores three states per sample: 3 x 3 x 4 = 36 bytes, inside
+            // this budget. Padded to the schema's six-state width it needs
+            // 3 x 6 x 4 = 72, which is not.
+            max_decompressed_block_bytes: 50,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("f", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM f WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reconstructing") && error.contains("probability states"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn the_reconstruction_budget_applies_to_layout1() {
+    // Layout 1 stores six bytes per sample and emits three f32 values, so its
+    // block passes a budget its reconstruction does not. The bound is promised
+    // for both layouts.
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("budget.bgen");
+    fs::write(
+        &bgen,
+        encode_layout1_with(
+            Codec::None,
+            [[32_768, 0, 0], [0, 32_768, 0], [0, 0, 32_768]],
+        ),
+    )
+    .unwrap();
+    let provider = BgenTableProvider::try_new(
+        path(&bgen),
+        BgenReadOptions {
+            // The block is three samples x six bytes = 18, inside this budget;
+            // the reconstruction is three samples x three states x four = 36.
+            max_decompressed_block_bytes: 24,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reconstructing") && error.contains("probability states"),
+        "{error}"
+    );
+}

@@ -1,7 +1,7 @@
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::companion::sanitize_location;
 
-use crate::buffers::GenotypeBuffers;
+use crate::buffers::{BufferLayout, GenotypeBuffers};
 use crate::catalog::BgenVariant;
 use crate::header::{BgenCompression, BgenHeader, BgenLayout};
 use crate::table_provider::{BgenOutputMode, BgenReadOptions};
@@ -57,6 +57,46 @@ impl std::fmt::Debug for DecodeScratch {
             .field("block_capacity", &self.block.capacity())
             .finish_non_exhaustive()
     }
+}
+
+/// States every emitted sample occupies when a fixed layout is in use.
+///
+/// A fixed layout pads each sample to its width, so that width is what a
+/// reconstruction costs regardless of how many states the variant stores.
+fn fixed_states_per_sample(buffers: &GenotypeBuffers) -> Option<u64> {
+    match buffers.layout() {
+        BufferLayout::FixedProbability(width) => Some(width as u64),
+        _ => None,
+    }
+}
+
+/// Rejects a reconstruction that would need more memory than the block budget.
+///
+/// Every sample can sit under `max_states_per_sample` while their sum decodes to
+/// far more than the block occupies: low bit precision expands each stored state
+/// into an `f32`, up to a 32-fold amplification. The Arrow 32-bit offset check
+/// does not stand in for this — it fires only after roughly eight gigabytes are
+/// written — and the batch byte limit is consulted between variants, not inside
+/// one.
+fn check_reconstruction_budget(
+    path: &str,
+    variant: &BgenVariant,
+    options: &BgenReadOptions,
+    total_states: u64,
+) -> Result<()> {
+    let decoded_bytes = total_states.saturating_mul(size_of::<f32>() as u64);
+    if decoded_bytes > options.max_decompressed_block_bytes as u64 {
+        return Err(execution_error(
+            path,
+            variant,
+            &format!(
+                "reconstructing {total_states} probability states for the selected samples \
+                 needs {decoded_bytes} bytes, exceeding max_decompressed_block_bytes {}",
+                options.max_decompressed_block_bytes
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -160,6 +200,17 @@ fn decode_layout1(
             ));
         }
     };
+
+    // Layout 1 stores six bytes per sample and emits three f32 values, so its
+    // reconstruction is twice the block it came from — a smaller amplification
+    // than Layout 2's, but the budget is promised for both.
+    if !selected_samples.is_empty() && options.output_mode == BgenOutputMode::Probability {
+        let states_per_sample = fixed_states_per_sample(buffers).unwrap_or(3);
+        let total_states = (selected_samples.len() as u64)
+            .checked_mul(states_per_sample)
+            .ok_or_else(|| execution_error(path, variant, "probability state count overflowed"))?;
+        check_reconstruction_budget(path, variant, options, total_states)?;
+    }
 
     for &sample in selected_samples {
         let start = sample.checked_mul(6).ok_or_else(|| {
@@ -527,33 +578,33 @@ fn decode_layout2_block(
     // the batch byte limit is consulted between variants, not inside one. Bound
     // the reconstruction here, before any of it is built.
     if builds_states && options.output_mode == BgenOutputMode::Probability {
-        let total_states = match uniform_stride_bits {
-            Some(_) => (selected_samples.len() as u64)
-                .checked_mul(state_counts[min_ploidy as usize].1)
+        let total_states = match fixed_states_per_sample(buffers) {
+            // A fixed layout pads every sample to its width, so that width is
+            // what gets emitted regardless of what this variant stores. Sizing
+            // from the variant's own states would let a scan filtered to a
+            // narrow variant allocate the full padded width unchecked.
+            Some(width) => (selected_samples.len() as u64)
+                .checked_mul(width)
                 .ok_or_else(|| {
                     execution_error(path, variant, "probability state count overflowed")
                 })?,
-            None => selected_samples.iter().try_fold(0_u64, |total, &sample| {
-                let ploidy = ploidy_bytes[sample] & 0x3f;
-                total
-                    .checked_add(state_counts[ploidy as usize].1)
+            None => match uniform_stride_bits {
+                Some(_) => (selected_samples.len() as u64)
+                    .checked_mul(state_counts[min_ploidy as usize].1)
                     .ok_or_else(|| {
                         execution_error(path, variant, "probability state count overflowed")
-                    })
-            })?,
+                    })?,
+                None => selected_samples.iter().try_fold(0_u64, |total, &sample| {
+                    let ploidy = ploidy_bytes[sample] & 0x3f;
+                    total
+                        .checked_add(state_counts[ploidy as usize].1)
+                        .ok_or_else(|| {
+                            execution_error(path, variant, "probability state count overflowed")
+                        })
+                })?,
+            },
         };
-        let decoded_bytes = total_states.saturating_mul(size_of::<f32>() as u64);
-        if decoded_bytes > options.max_decompressed_block_bytes as u64 {
-            return Err(execution_error(
-                path,
-                variant,
-                &format!(
-                    "reconstructing {total_states} probability states for the selected samples \
-                     needs {decoded_bytes} bytes, exceeding max_decompressed_block_bytes {}",
-                    options.max_decompressed_block_bytes
-                ),
-            ));
-        }
+        check_reconstruction_budget(path, variant, options, total_states)?;
     }
 
     let total_bits = match uniform_stride_bits {
