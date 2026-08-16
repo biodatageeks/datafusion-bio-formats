@@ -59,6 +59,9 @@ impl std::fmt::Debug for DecodeScratch {
     }
 }
 
+/// Probability states a Layout 1 sample always emits.
+const LAYOUT1_STATES: u64 = 3;
+
 /// States every emitted sample occupies when a fixed layout is in use.
 ///
 /// A fixed layout pads each sample to its width, so that width is what a
@@ -205,10 +208,38 @@ fn decode_layout1(
     // reconstruction is twice the block it came from — a smaller amplification
     // than Layout 2's, but the budget is promised for both.
     if !selected_samples.is_empty() && options.output_mode == BgenOutputMode::Probability {
-        let states_per_sample = fixed_states_per_sample(buffers).unwrap_or(3);
-        let total_states = (selected_samples.len() as u64)
-            .checked_mul(states_per_sample)
+        let fixed_width = fixed_states_per_sample(buffers);
+        let widest = fixed_width.unwrap_or(0).max(LAYOUT1_STATES);
+        let upper_bound = (selected_samples.len() as u64)
+            .checked_mul(widest)
             .ok_or_else(|| execution_error(path, variant, "probability state count overflowed"))?;
+        // As in Layout 2: charging every sample exactly costs a pass over the
+        // cohort, so it runs only when the O(1) bound already breaches the
+        // budget. A Layout 1 sample whose three values are all zero is missing
+        // and, in the nested layout, contributes nothing to rebuild.
+        let total_states = if upper_bound.saturating_mul(size_of::<f32>() as u64)
+            > options.max_decompressed_block_bytes as u64
+        {
+            selected_samples.iter().try_fold(0_u64, |total, &sample| {
+                let start = sample.checked_mul(6).ok_or_else(|| {
+                    execution_error(path, variant, "sample probability offset overflowed")
+                })?;
+                let missing = read_u16(data, start)? == 0
+                    && read_u16(data, start + 2)? == 0
+                    && read_u16(data, start + 4)? == 0;
+                let charged = match fixed_width {
+                    Some(width) if missing => width,
+                    Some(width) => width.max(LAYOUT1_STATES),
+                    None if missing => 0,
+                    None => LAYOUT1_STATES,
+                };
+                total.checked_add(charged).ok_or_else(|| {
+                    execution_error(path, variant, "probability state count overflowed")
+                })
+            })?
+        } else {
+            upper_bound
+        };
         check_reconstruction_budget(path, variant, options, total_states)?;
     }
 

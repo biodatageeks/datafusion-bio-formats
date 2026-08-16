@@ -1971,3 +1971,41 @@ async fn the_reconstruction_budget_ignores_states_it_never_builds() {
         1
     );
 }
+
+#[tokio::test]
+async fn the_layout1_budget_ignores_missing_samples() {
+    // A Layout 1 sample whose three values are all zero is the missing
+    // sentinel; the nested layout builds nothing for it, so charging it would
+    // reject a scan whose reconstruction fits. Two called samples of three
+    // states are 24 bytes, inside this budget; counting the third would make it
+    // 36 and fail.
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("missing.bgen");
+    fs::write(
+        &bgen,
+        encode_layout1_with(Codec::None, [[32_768, 0, 0], [0, 32_768, 0], [0, 0, 0]]),
+    )
+    .unwrap();
+    let provider = BgenTableProvider::try_new(
+        path(&bgen),
+        BgenReadOptions {
+            max_decompressed_block_bytes: 30,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a missing Layout 1 sample builds no states and must not be charged");
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+}
