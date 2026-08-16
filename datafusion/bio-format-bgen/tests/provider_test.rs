@@ -1428,25 +1428,202 @@ async fn fixed_probability_layout_matches_the_nested_layout() {
         .await
         .unwrap();
 
-    // Same values, different physical layout.
-    for variant in 0..1 {
-        for sample in 0..3 {
-            assert_eq!(
-                probability_values_any(&nested_rows[0], 0, variant)[sample],
-                probability_values_any(&fixed_rows[0], 0, variant)[sample],
-                "variant {variant} sample {sample}"
-            );
+    // Same values, different physical layout. The fixed layout pads every
+    // sample to the schema width, so the nested vector is the prefix and the
+    // remainder is padding.
+    let nested = probability_values_any(&nested_rows[0], 0, 0);
+    let fixed = probability_values_any(&fixed_rows[0], 0, 0);
+    for sample in 0..3 {
+        match (&nested[sample], &fixed[sample]) {
+            (None, None) => {}
+            (Some(nested), Some(fixed)) => {
+                assert_eq!(
+                    &fixed[..nested.len()],
+                    nested.as_slice(),
+                    "sample {sample} states differ between layouts"
+                );
+                assert!(
+                    fixed[nested.len()..].iter().all(|value| value.is_nan()),
+                    "sample {sample} padding must be NaN: {fixed:?}"
+                );
+            }
+            (nested, fixed) => panic!("sample {sample} validity differs: {nested:?} {fixed:?}"),
         }
     }
 }
 
 #[tokio::test]
-async fn fixed_probability_layout_rejects_a_mixed_width_file() {
-    // v3 is multiallelic, so it stores more states than the biallelic variants
-    // and cannot share one fixed width with them.
+async fn the_fixed_width_covers_the_widest_catalog_variant() {
+    // v1 is unphased biallelic diploid, so the probe reports ploidy 2 and
+    // unphased. v3 is triallelic, and an unphased triallelic diploid sample
+    // stores six states, so the schema has to be six wide rather than v1's
+    // three — the width follows from the catalog's allele counts, not from
+    // variant 0 alone.
     let fixture = fixture(Codec::Zlib, true);
     let provider = BgenTableProvider::try_new(
         path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let schema = TableProvider::schema(&provider);
+    let genotypes = schema.field_with_name("genotypes").unwrap();
+    let rendered = format!("{:?}", genotypes.data_type());
+    assert!(
+        rendered.contains("FixedSizeList"),
+        "the fixed layout must advertise a fixed-width sample list: {rendered}"
+    );
+    assert!(
+        rendered.contains(", 6)"),
+        "the width must cover the widest catalog variant, not just variant 0: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn the_derived_fixed_width_respects_max_states_per_sample() {
+    // The width covers the widest catalog variant, so it can exceed the
+    // per-sample state limit even when variant 0 is well inside it. Every
+    // selected sample is padded to that width whether or not the wide variant
+    // is ever decoded, so a filter that excludes it would otherwise allocate
+    // the padding without the limit ever being consulted.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            // Variant 0 stores three states and passes; the triallelic variant
+            // pushes the derived width to six.
+            max_states_per_sample: 5,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a derived width above the limit must fail planning")
+    .to_string();
+    assert!(
+        error.contains("max_states_per_sample") && error.contains("nested"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn fixed_probability_layout_pads_a_narrower_variant_with_nan() {
+    // The fixture mixes widths on purpose: rs1 is unphased biallelic (three
+    // states) and rs3 is triallelic (six for a diploid sample). The schema is
+    // six wide and every narrower sample pads rather than being rejected.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("f", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM f WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a mixed-width file is padded, not rejected");
+
+    let samples = probability_values_any(&batches[0], 0, 0);
+    let called = samples[0].as_ref().expect("sample 0 is called");
+    assert_eq!(called.len(), 6, "every sample is the schema width");
+    assert_eq!(&called[..3], &[1.0, 0.0, 0.0]);
+    assert!(
+        called[3..].iter().all(|value| value.is_nan()),
+        "padding is NaN: {called:?}"
+    );
+    assert!(
+        samples[2].is_none(),
+        "the third sample is missing and stays null"
+    );
+}
+
+#[tokio::test]
+async fn fixed_probability_layout_pads_a_variable_ploidy_variant() {
+    // rs3 declares ploidy 1..=2, so it has no single width and the old
+    // per-variant check rejected it outright. Padding is decided per sample, so
+    // its haploid samples pad to the schema width alongside its diploid one.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("f", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM f WHERE rsid = 'rs3'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a variable-ploidy variant pads per sample");
+    let samples = probability_values_any(&batches[0], 0, 0);
+    let haploid = samples[0].as_ref().expect("sample 0 is called");
+    assert_eq!(haploid.len(), 6);
+    assert!(
+        haploid[3..].iter().all(|value| value.is_nan()),
+        "a haploid triallelic sample stores three states and pads to six: {haploid:?}"
+    );
+}
+
+#[tokio::test]
+async fn fixed_probability_layout_reports_a_sample_wider_than_the_schema() {
+    // The width is derived from variant 0's ploidy, so a later variant whose
+    // samples are triploid stores four states where the schema has three.
+    // Padding cannot represent that, and truncating would emit a distribution
+    // that is not the file's.
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("wider.bgen");
+    let variants = vec![
+        Variant {
+            id: "v1",
+            rsid: "rs1",
+            chrom: "1",
+            position: 10,
+            alleles: vec!["A", "C"],
+            phased: false,
+            bits: 8,
+            samples: vec![
+                sample(2, false, &[255, 0]),
+                sample(2, false, &[0, 255]),
+                sample(2, false, &[0, 0]),
+            ],
+        },
+        Variant {
+            id: "v2",
+            rsid: "rs2",
+            chrom: "1",
+            position: 20,
+            alleles: vec!["A", "C"],
+            phased: false,
+            bits: 8,
+            samples: vec![
+                sample(3, false, &[255, 0, 0]),
+                sample(3, false, &[0, 255, 0]),
+                sample(3, false, &[0, 0, 255]),
+            ],
+        },
+    ];
+    let (bytes, _rows) = encode_layout2(Codec::Zlib, true, &variants);
+    fs::write(&bgen, bytes).unwrap();
+
+    let provider = BgenTableProvider::try_new(
+        path(&bgen),
         BgenReadOptions {
             probability_layout: BgenProbabilityLayout::Fixed,
             ..Default::default()

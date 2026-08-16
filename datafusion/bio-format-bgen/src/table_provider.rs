@@ -26,8 +26,9 @@ use datafusion_bio_format_core::range_planning::{
 use datafusion_bio_format_core::companion::sanitize_location;
 
 use crate::bgi::{BgiIndex, open_optional_bgi};
+use crate::buffers::{BufferLayout, GenotypeBuffers};
 use crate::catalog::{BgenCatalog, build_transient_catalog};
-use crate::decode::{DecodeScratch, decode_variant};
+use crate::decode::{DecodeScratch, complete_probability_count, decode_variant};
 use crate::filter::{evaluate_exact_filter, supports_exact_filter};
 use crate::header::{BgenHeader, BgenLayout};
 use crate::physical_exec::{BgenExec, BgenPartition, BgenReadRange};
@@ -58,9 +59,15 @@ pub enum BgenProbabilityLayout {
     /// One fixed-width list per sample.
     ///
     /// Drops the per-sample list offsets, which are a quarter of the emitted
-    /// bytes for a diploid biallelic cohort. Requires every variant to store the
-    /// same number of states; a file that mixes widths is rejected rather than
-    /// silently padded.
+    /// bytes for a diploid biallelic cohort.
+    ///
+    /// The width covers the widest sample the catalog allows, and a narrower
+    /// sample is padded with NaN — including a missing sample, whose slots are
+    /// never read through Arrow but must exist because a fixed-size list sizes
+    /// its values buffer from the entry count. Padding is decided per sample,
+    /// so a file that mixes widths, and even a variant that declares a variable
+    /// ploidy, are both representable. A sample storing more states than the
+    /// width is rejected; use [`Self::Nested`] for such a file.
     Fixed,
 }
 
@@ -170,9 +177,9 @@ pub(crate) struct BgenFileset {
     pub(crate) bgi: Option<BgiIndex>,
     pub(crate) selected_samples: datafusion_bio_format_core::genotype::SampleSelection,
     pub(crate) options: BgenReadOptions,
-    /// States per sample when the fixed probability layout is in use.
-    pub(crate) probability_width: Option<usize>,
-    /// Payload bytes read to resolve [`Self::probability_width`].
+    /// Probability shape when the fixed layout is in use.
+    pub(crate) probability_shape: Option<ProbeShape>,
+    /// Payload bytes read to resolve [`Self::probability_shape`].
     pub(crate) probability_probe_bytes: u64,
     /// Bytes the width probe decompressed.
     pub(crate) probability_probe_decompressed: u64,
@@ -203,13 +210,17 @@ impl BgenTableProvider {
         // The fixed layout puts the state count in the schema, so it has to be
         // known before any batch is produced. One variant's block header carries
         // it; every other variant is checked against it while scanning.
-        let (probability_width, probability_probe_bytes, probability_probe_decompressed) =
+        let (probability_shape, probability_probe_bytes, probability_probe_decompressed) =
             if options.output_mode == BgenOutputMode::Probability
                 && options.probability_layout == BgenProbabilityLayout::Fixed
             {
-                let (width, bytes, decompressed) =
+                let (mut shape, bytes, decompressed) =
                     probe_probability_width(&path, &source, &header, &catalog, &options).await?;
-                (Some(width), bytes, decompressed)
+                // One width is in play from here on: the schema and the scan
+                // buffers both read `shape.width`, so neither has to know
+                // whether it came from the probe or from the catalog.
+                shape.width = derive_fixed_width(&path, &catalog, shape, &options)?;
+                (Some(shape), bytes, decompressed)
             } else {
                 (None, 0, 0)
             };
@@ -221,7 +232,7 @@ impl BgenTableProvider {
             bgi,
             selected_samples,
             options,
-            probability_width,
+            probability_shape,
             probability_probe_bytes,
             probability_probe_decompressed,
         });
@@ -458,13 +469,66 @@ fn validate_options(options: &BgenReadOptions) -> Result<()> {
 ///
 /// Decoding with an empty sample selection reads the block header without
 /// reconstructing any sample, so this costs one block, not one scan.
+/// What variant 0 says about the file's probability shape.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProbeShape {
+    /// States per sample the fixed layout emits.
+    ///
+    /// This starts as variant 0's own width and is widened by
+    /// [`derive_fixed_width`] to cover every catalog variant.
+    pub(crate) width: usize,
+    ploidy: u8,
+    phased: bool,
+}
+
+/// Widest sample any catalog variant can store, given the shape variant 0
+/// declares.
+///
+/// A Layout 2 block header lives inside the compressed payload, so learning
+/// every variant's exact width would mean decompressing the whole file at plan
+/// time. Allele counts are already in the catalog, and ploidy and phasing are
+/// constant across a file in practice, so the widest state count follows from
+/// the probe plus the catalog at no I/O cost. A sample that turns out to store
+/// more than this is rejected during the scan rather than silently truncated.
+///
+/// The derived width is checked against `max_states_per_sample` here rather than
+/// only per decoded variant. Every emitted sample is padded to this width, so a
+/// query filtered to the narrow variants of a file that also holds a very wide
+/// one would allocate the padding without the widest variant ever being decoded
+/// — the per-variant check would never run.
+fn derive_fixed_width(
+    path: &str,
+    catalog: &BgenCatalog,
+    shape: ProbeShape,
+    options: &BgenReadOptions,
+) -> Result<usize> {
+    let mut width = shape.width as u64;
+    for variant in catalog.variants.iter() {
+        width = width.max(complete_probability_count(
+            shape.ploidy,
+            variant.alleles.len(),
+            shape.phased,
+        )?);
+    }
+    if width > options.max_states_per_sample as u64 {
+        return Err(DataFusionError::Plan(format!(
+            "BGEN {} needs a fixed probability width of {width} to cover its widest variant, \
+             exceeding max_states_per_sample {}; use the nested probability layout",
+            sanitize_location(path),
+            options.max_states_per_sample
+        )));
+    }
+    usize::try_from(width)
+        .map_err(|_| DataFusionError::Plan("BGEN probability width does not fit usize".to_string()))
+}
+
 async fn probe_probability_width(
     path: &str,
     source: &ObjectAccess,
     header: &BgenHeader,
     catalog: &BgenCatalog,
     options: &BgenReadOptions,
-) -> Result<(usize, u64, u64)> {
+) -> Result<(ProbeShape, u64, u64)> {
     let variant = catalog.variants.first().ok_or_else(|| {
         DataFusionError::Plan(
             "BGEN fixed probability layout needs at least one variant to determine its width"
@@ -477,7 +541,18 @@ async fn probe_probability_width(
         .ok_or_else(|| DataFusionError::Plan("BGEN payload range overflowed".to_string()))?;
     let payload = source.read_range(path, variant.payload_offset..end).await?;
     let mut scratch = DecodeScratch::new();
-    let decoded = decode_variant(path, variant, header, &payload, &[], options, &mut scratch)?;
+    // The probe selects no sample, so nothing is written into these.
+    let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability);
+    let decoded = decode_variant(
+        path,
+        variant,
+        header,
+        &payload,
+        &[],
+        options,
+        &mut scratch,
+        &mut buffers,
+    )?;
     if let Some(states) = decoded.state_width
         && states > options.max_states_per_sample
     {
@@ -488,15 +563,20 @@ async fn probe_probability_width(
             options.max_states_per_sample
         )));
     }
-    let width = decoded.state_width.ok_or_else(|| {
+    let variable_ploidy = || {
         DataFusionError::Plan(format!(
             "BGEN {} variant 0 declares a variable ploidy, which has no single probability width; \
              use the nested probability layout",
             sanitize_location(path)
         ))
-    })?;
+    };
+    let shape = ProbeShape {
+        width: decoded.state_width.ok_or_else(variable_ploidy)?,
+        ploidy: decoded.declared_ploidy.ok_or_else(variable_ploidy)?,
+        phased: decoded.phased,
+    };
     Ok((
-        width,
+        shape,
         payload.len() as u64,
         decoded.decompressed_bytes as u64,
     ))
@@ -527,7 +607,7 @@ fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
             "GP",
             DataType::List(Arc::new(Field::new(
                 "sample",
-                match fileset.probability_width {
+                match fileset.probability_shape.map(|shape| shape.width) {
                     // A fixed-width sample list needs no per-sample offsets.
                     Some(width) => DataType::FixedSizeList(
                         Arc::new(Field::new("state", DataType::Float32, false)),
