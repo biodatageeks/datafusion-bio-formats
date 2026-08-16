@@ -523,10 +523,6 @@ pub(crate) fn decode_record_and_main(
             sample_count,
             allele_count,
         )?;
-    } else if allele_count > 2 {
-        return Err(cursor.error(format!(
-            "multiallelic PVAR row has {allele_count} alleles but its PGEN record has no hardcall patch track"
-        )));
     }
 
     let mut phased = (projection.phased || projection.hds).then(|| vec![None; sample_count]);

@@ -242,6 +242,11 @@ PVAR allele indices without collapsing alternate alleles.
 - **WHEN** both allele positions are patched
 - **THEN** both exact allele indices and stored phase order are preserved.
 
+#### Scenario: Declared higher alternate is unused
+- **WHEN** PVAR declares ALT2 or higher but all hardcalls use only REF and ALT1
+- **THEN** a record without a multiallelic patch track retains its main-track
+  calls.
+
 #### Scenario: Invalid patch allele
 - **WHEN** a patch references an allele outside the PVAR allele list
 - **THEN** decoding fails with variant and sample context.

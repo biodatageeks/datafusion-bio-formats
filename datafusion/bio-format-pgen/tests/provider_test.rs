@@ -754,6 +754,30 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
             vec![Some(vec![1, 1]), Some(vec![0, 0])]
         );
     }
+
+    // pgenlib's multiallelic writer emits an ordinary biallelic main track
+    // when no sample uses ALT2+, while PVAR still supplies the larger allele
+    // count. Such a record has no patch payload and remains valid.
+    let fixture =
+        variable_fixture_without_header_allele_counts(0x00, &pack_codes(&[0, 1, 2, 3]), 3);
+    let provider = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap();
+    let no_patch_context = context(1);
+    no_patch_context
+        .register_table("no_patch", Arc::new(provider))
+        .unwrap();
+    let batches = no_patch_context
+        .sql("SELECT genotypes FROM no_patch")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        gt_values(&batches[0], 0, 0),
+        vec![Some(vec![0, 0]), Some(vec![0, 1]), Some(vec![1, 1]), None]
+    );
 }
 
 #[tokio::test]
@@ -1280,6 +1304,22 @@ observed_dosages = np.empty(4, dtype=np.float64)
 reader.read_dosages(0, observed_dosages)
 reader.close()
 np.testing.assert_allclose(observed_dosages, dosages)
+
+unused_alt = p.parent / 'unused_alt'
+unused_alt_alleles = np.array([0, 0, 0, 1, 1, 1, -9, -9], dtype=np.int32)
+with pgenlib.PgenWriter(bytes(unused_alt.with_suffix('.pgen')), 4, 1, False,
+                        allele_ct_limit=3) as writer:
+    writer.append_alleles(unused_alt_alleles, allele_ct=3)
+unused_alt.with_suffix('.pvar').write_text(
+    '#CHROM\tPOS\tID\tREF\tALT\n1\t10\tunused-alt\tA\tC,G\n')
+unused_alt.with_suffix('.psam').write_text('#IID\ns1\ns2\ns3\ns4\n')
+reader = pgenlib.PgenReader(
+    bytes(unused_alt.with_suffix('.pgen')),
+    allele_idx_offsets=np.array([0, 3], dtype=np.uintp))
+observed_unused_alt = np.empty(8, dtype=np.int32)
+reader.read_alleles(0, observed_unused_alt)
+reader.close()
+np.testing.assert_array_equal(observed_unused_alt, unused_alt_alleles)
 "#;
     let mut command = Command::new(&python);
     command.args(["-c", script, prefix.to_str().unwrap()]);
@@ -1392,6 +1432,28 @@ np.testing.assert_allclose(observed_dosages, dosages)
     assert_eq!(
         phased_values(&phase_batches[0], 0, 0),
         vec![Some(true), Some(true), Some(false), None]
+    );
+
+    let unused_alt_provider = PgenTableProvider::try_new(
+        path(&temp.path().join("unused_alt.pgen")),
+        Default::default(),
+    )
+    .await
+    .unwrap();
+    let unused_alt_context = context(1);
+    unused_alt_context
+        .register_table("unused_alt", Arc::new(unused_alt_provider))
+        .unwrap();
+    let unused_alt_batches = unused_alt_context
+        .sql("SELECT genotypes FROM unused_alt")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        gt_values(&unused_alt_batches[0], 0, 0),
+        vec![Some(vec![0, 0]), Some(vec![0, 1]), Some(vec![1, 1]), None]
     );
 
     let dosage_provider = PgenTableProvider::try_new(
