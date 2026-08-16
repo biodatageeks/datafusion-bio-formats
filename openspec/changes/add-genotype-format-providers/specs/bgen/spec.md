@@ -212,8 +212,10 @@ local cache when the BGI object is remote.
 
 ### Requirement: Exact BGI Predicate Pushdown
 
-The system SHALL evaluate supported predicates over chromosome, position,
-variant identifier, and RS identifier through BGI before BGEN block reads.
+The system SHALL evaluate supported predicates over standard BGI chromosome,
+position, and RS identifier columns through SQLite before BGEN block reads,
+then apply variant-identifier predicates to the transient BGEN metadata catalog
+because standard BGI does not store the BGEN variant identifier.
 
 #### Scenario: Indexed RS identifier query
 - **WHEN** an equality or `IN` predicate selects RS identifiers
@@ -223,6 +225,11 @@ variant identifier, and RS identifier through BGI before BGEN block reads.
 #### Scenario: Indexed genomic query
 - **WHEN** supported chromosome and position predicates are supplied
 - **THEN** BGI selects the exact site rows under the requested coordinate mode.
+
+#### Scenario: Variant identifier query
+- **WHEN** an exact predicate selects the BGEN variant identifier
+- **THEN** the provider evaluates it against parsed BGEN identifying metadata
+- **AND** does not claim that the standard BGI schema contains that identifier.
 
 #### Scenario: BGI filtered limit
 - **WHEN** an exact BGI predicate and safe limit are supplied
@@ -264,6 +271,66 @@ or dosage values only for selected samples.
 - **WHEN** the explicit sample set is empty
 - **THEN** probability payload decompression is skipped.
 
+### Requirement: BGEN Probability Output Layout
+
+The system SHALL emit probability states as a variable-length list per sample by
+default, and SHALL offer a fixed-width layout whose width covers the widest
+sample the file's catalog allows.
+
+#### Scenario: Default variable-length layout
+- **WHEN** probability output is requested without selecting a layout
+- **THEN** each sample's states are emitted as a variable-length list
+- **AND** variants storing different numbers of states are all representable.
+
+#### Scenario: Fixed-width layout
+- **WHEN** the fixed probability layout is selected
+- **THEN** the emitted schema declares the state count per sample
+- **AND** no per-sample list offsets are emitted
+- **AND** a sample with no called genotype is null while still occupying its
+  declared width.
+
+#### Scenario: Fixed-width layout derives its width from the catalog
+- **WHEN** the fixed probability layout is selected
+- **THEN** the width is the widest state count implied by the first variant's
+  declared ploidy and phasing together with every catalog variant's allele count
+- **AND** no probability payload beyond the first variant is read to determine
+  it.
+
+#### Scenario: Fixed-width layout pads a narrower sample
+- **WHEN** the fixed probability layout is selected and a sample stores fewer
+  states than the declared width
+- **THEN** its remaining states are emitted as NaN
+- **AND** the sample's own states are unchanged
+- **AND** a variant declaring a variable ploidy is representable, because
+  padding is decided per sample rather than per variant.
+
+#### Scenario: A missing sample's reserved states read as NaN
+- **WHEN** the fixed probability layout is selected and a sample has no called
+  genotype
+- **THEN** the sample is null
+- **AND** the states it reserves are NaN rather than zero, so a consumer reading
+  the values buffer directly does not observe a probability of zero where there
+  is no genotype.
+
+#### Scenario: Fixed-width layout rejects a wider sample
+- **WHEN** the fixed probability layout is selected and a sample stores more
+  states than the declared width
+- **THEN** the scan fails naming both counts and directs the caller to the
+  default layout
+- **AND** the values are neither padded nor truncated to fit.
+
+#### Scenario: A derived width honours the per-sample state limit
+- **WHEN** the fixed probability layout is selected and the width the catalog
+  implies exceeds the configured maximum states per sample
+- **THEN** planning fails naming both counts and directs the caller to the
+  default layout, because every emitted sample is padded to that width whether
+  or not the widest variant is selected by a filter.
+
+#### Scenario: Fixed-width layout needs a determinable width
+- **WHEN** the fixed probability layout is selected and the first variant
+  declares a variable ploidy, which has no single state count
+- **THEN** planning fails and directs the caller to the default layout.
+
 ### Requirement: Independent BGEN Block Partitioning
 
 The system SHALL partition selected independent variant blocks by estimated
@@ -274,6 +341,38 @@ compressed/decompressed work and coalesce only nearby bounded byte ranges.
   one
 - **THEN** blocks are assigned to no more than target partitions
 - **AND** each selected variant is emitted once.
+
+#### Scenario: Coalescing preserves requested parallelism
+- **WHEN** consecutive selected payloads are separated only by the following
+  variant's metadata and target partitions exceed one
+- **THEN** the metadata gaps are bridged so a sequential scan does not issue one
+  object read per variant
+- **AND** coalesced ranges stay small enough to fill the requested partitions.
+
+#### Scenario: Coalesced reads are attributed to the right counters
+- **WHEN** a coalesced range bridges the metadata between consecutive payloads
+- **THEN** every byte fetched is reported as primary bytes read
+- **AND** only the genotype payload bytes are reported as compressed bytes, so a
+  compression ratio derived from the counters is not skewed by bridged metadata.
+
+#### Scenario: Coalescing leaves partitions comparably loaded
+- **WHEN** payload ranges are coalesced for a scan with more than one partition
+- **THEN** a coalesced range covers at most a fraction of one partition's byte
+  share, so several ranges are available to each partition
+- **AND** no partition is assigned materially more than its share of the
+  selected payload bytes.
+
+Sizing a coalesced range at exactly one partition's share cannot balance the
+scan: a variant's payload is indivisible, so the plan is handed one more chunk
+than there are partitions, and one partition always takes two of them.
+
+#### Scenario: Range sizing has a floor that never starves a partition
+- **WHEN** the byte share implied by the partition count falls below the minimum
+  useful object read
+- **THEN** ranges are not split further, so a scan does not issue many reads far
+  below a useful size
+- **AND** a payload smaller than that minimum is still divided across the
+  requested partitions rather than collapsing into one range.
 
 #### Scenario: Decompression isolation
 - **WHEN** one selected BGEN block is malformed
@@ -295,6 +394,22 @@ BGEN readers within source quantization tolerance.
 #### Scenario: Decompression size limit
 - **WHEN** a block declares or expands beyond the configured hard limit
 - **THEN** decompression is aborted with a resource-limit error.
+
+#### Scenario: Reconstruction size limit
+- **WHEN** the probability states the selected samples of one variant would
+  reconstruct need more memory than the configured decompressed-block budget
+- **THEN** the variant is rejected before any of that reconstruction is built,
+  because low bit precision expands each stored state into a wider output value
+  and a block inside the limit can otherwise reconstruct into many times it
+- **AND** a per-sample state limit does not substitute for this, since every
+  sample may sit under it while their sum does not.
+
+#### Scenario: Metadata limit binds on parsed bytes
+- **WHEN** variant metadata exceeds the configured maximum but the read-ahead
+  buffer happens to hold it
+- **THEN** parsing is still rejected with a resource-limit error, because the
+  limit binds on the bytes handed to the parser rather than on the bytes
+  fetched.
 
 #### Scenario: Cross-tool probability fixture
 - **WHEN** a supported file is read by this provider and bgenix/qctool or an

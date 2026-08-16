@@ -412,6 +412,17 @@ impl GenotypeBatchSizer {
                 || self.estimated_bytes.saturating_add(estimated_row_bytes) > self.soft_byte_limit)
     }
 
+    /// Returns true when the current batch should be emitted now that its rows
+    /// are appended.
+    ///
+    /// A caller that writes a row directly into its output buffers cannot
+    /// consult [`Self::should_flush_before`], because the row's size is not
+    /// known until it is written. Such a batch can exceed `soft_byte_limit` by
+    /// one row, which is the same slack the first row of every batch has.
+    pub fn should_flush_after(&self) -> bool {
+        self.rows > 0 && (self.rows >= self.max_rows || self.estimated_bytes > self.soft_byte_limit)
+    }
+
     /// Records an appended row and its estimated genotype bytes.
     pub fn push_row(&mut self, estimated_row_bytes: usize) {
         self.rows = self.rows.saturating_add(1);
@@ -441,6 +452,26 @@ mod tests {
 
     fn strings(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn should_flush_after_reports_a_full_batch() {
+        let mut sizer = GenotypeBatchSizer::new(2, 100).unwrap();
+        assert!(!sizer.should_flush_after(), "an empty batch never flushes");
+
+        sizer.push_row(10);
+        assert!(!sizer.should_flush_after(), "one small row is not full");
+
+        sizer.push_row(10);
+        assert!(sizer.should_flush_after(), "max_rows reached");
+
+        let mut sizer = GenotypeBatchSizer::new(100, 50).unwrap();
+        sizer.push_row(60);
+        assert!(
+            sizer.should_flush_after(),
+            "a single row over the soft limit flushes after it is appended, \
+             because it is already in the buffers"
+        );
     }
 
     #[test]
