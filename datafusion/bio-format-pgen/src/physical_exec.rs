@@ -948,6 +948,9 @@ fn build_genotype_array(
             "PGEN genotypes field is not a struct".to_string(),
         ));
     };
+    if fields.is_empty() {
+        return Ok(Arc::new(StructArray::new_empty_fields(rows.len(), None)));
+    }
     let arrays = genotype_fields
         .iter()
         .zip(fields)

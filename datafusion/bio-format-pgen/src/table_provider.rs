@@ -232,7 +232,9 @@ impl TableProvider for PgenTableProvider {
         }
 
         let genotype_projected = schema.index_of("genotypes").is_ok();
-        let needs_payload = genotype_projected && !self.fileset.selected_samples.is_empty();
+        let needs_payload = genotype_projected
+            && !self.genotype_fields.is_empty()
+            && !self.fileset.selected_samples.is_empty();
         let selected = Arc::new(selected);
         let partitions = if needs_payload {
             plan_payload_partitions(

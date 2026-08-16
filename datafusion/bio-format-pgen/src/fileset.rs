@@ -1117,6 +1117,11 @@ async fn parse_index(
                     "PGEN variant {absolute_index} uses reserved main-track representation 5 under {PGEN_SPEC_BASELINE}"
                 )));
             }
+            if record_type & 0x80 != 0 && (record_type >> 5) & 3 == 0 {
+                return Err(DataFusionError::Plan(format!(
+                    "PGEN variant {absolute_index} has a phased-dosage track without a dosage track"
+                )));
+            }
             if length == 0 {
                 return Err(DataFusionError::Plan(format!(
                     "PGEN variant {absolute_index} has an empty record"

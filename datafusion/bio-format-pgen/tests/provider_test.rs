@@ -838,6 +838,32 @@ async fn honors_empty_sample_and_genotype_field_selection() {
     )
     .await
     .unwrap();
+    let empty_context = context(2);
+    let state = empty_context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![6]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let batches = collect(plan.clone(), empty_context.task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(ds_values(&batches[0], 0, 0), Vec::<Option<f32>>::new());
+    assert_eq!(
+        exec.metrics_snapshot()[GenotypeMetric::RangeRequests as usize].1,
+        0
+    );
+
+    let fixture = fixed_fixture(3);
+    let provider = PgenTableProvider::try_new(
+        path(&fixture.pgen),
+        PgenReadOptions {
+            genotype_fields: Some(Vec::new()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
     let context = context(2);
     let state = context.state();
     let plan = provider
@@ -846,10 +872,20 @@ async fn honors_empty_sample_and_genotype_field_selection() {
         .unwrap();
     let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
     let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
-    assert_eq!(ds_values(&batches[0], 0, 0), Vec::<Option<f32>>::new());
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        2
+    );
+    let genotypes = genotype_struct(&batches[0], 0);
+    assert_eq!(genotypes.len(), batches[0].num_rows());
+    assert_eq!(genotypes.num_columns(), 0);
     assert_eq!(
         exec.metrics_snapshot()[GenotypeMetric::RangeRequests as usize].1,
         0
+    );
+    assert_eq!(
+        exec.metrics_snapshot()[GenotypeMetric::PayloadsSkipped as usize].1,
+        2
     );
 }
 
@@ -979,6 +1015,16 @@ async fn rejects_malformed_indexes_records_and_unsupported_multiallelic_dosage()
         .unwrap_err()
         .to_string();
     assert!(error.contains("has no base"), "{error}");
+
+    let fixture = variable_fixture(0x10, &[0x80], &[vec![0]], &[2]);
+    let error = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("phased-dosage track without a dosage track"),
+        "{error}"
+    );
 
     let fixture = variable_fixture(0x10, &[0x01], &[vec![0; 5]], &[2]);
     let error = PgenTableProvider::try_new(

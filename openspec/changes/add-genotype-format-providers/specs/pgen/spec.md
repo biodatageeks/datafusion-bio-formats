@@ -39,6 +39,11 @@ PGEN specification.
 - **WHEN** required header fields, control bytes, or offsets are inconsistent
 - **THEN** planning fails before genotype record decoding.
 
+#### Scenario: Phased dosage without dosage
+- **WHEN** a variable-width record type declares phased dosage without a dosage
+  track
+- **THEN** provider construction fails before metadata-only rows are exposed.
+
 ### Requirement: PGEN Index Support
 
 The system SHALL use mode-appropriate embedded indexes and supported external
@@ -307,6 +312,12 @@ representation.
 - **THEN** no PGEN variant record payload bytes are read
 - **AND** minimal PGEN header/index bytes may still be read for fileset
   validation.
+
+#### Scenario: Explicit empty genotype child selection
+- **WHEN** the configured genotype-field selection is explicitly empty and the
+  zero-child `genotypes` struct is projected
+- **THEN** the struct preserves the selected variant row count
+- **AND** no PGEN variant record payload bytes are read.
 
 #### Scenario: Hardcall-only projection
 - **WHEN** `GT` is requested but dosage fields are not
