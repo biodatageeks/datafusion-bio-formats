@@ -467,10 +467,14 @@ header indexes retain their encoded `2^16`-variant blocks, packed block-relative
 offsets, and 16-bit within-block LD deltas; fixed-width modes retain only their
 offset formula. Record descriptors are reconstructed on demand instead of being
 allocated per variant. Dependency discovery folds directly into the retained
-base set, and sorted record ranges stream into a fallible coalescer without a
-second catalog-sized staging buffer. PVAR/PSAM parsing is streaming or compactly
-interned so metadata memory does not multiply the source text with per-cell
-`String` allocations.
+base set. The sorted selected-index buffer is shared across partitions; each
+partition stores only slice bounds and its true out-of-slice LD dependencies.
+Byte-balanced boundaries are computed in two streaming passes, required record
+indexes are merged without materialization, and their ranges stream into a
+fallible coalescer. Planning therefore does not clone or stage another
+catalog-sized selection or range buffer. PVAR/PSAM parsing is streaming or
+compactly interned so metadata memory does not multiply the source text with
+per-cell `String` allocations.
 
 Partitions remain contiguous for locality and are balanced with a cost model
 combining encoded bytes, projected decoded values, record representation, and

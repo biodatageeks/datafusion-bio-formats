@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_stream::try_stream;
@@ -30,9 +31,64 @@ use crate::fileset::{PgenFileset, PgenMode};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PgenPartition {
-    pub(crate) owned: Vec<usize>,
-    pub(crate) required: Vec<usize>,
+    pub(crate) selection: Arc<Vec<usize>>,
+    pub(crate) owned: Range<usize>,
+    pub(crate) dependencies: Vec<usize>,
     pub(crate) ranges: Vec<ByteRange>,
+}
+
+impl PgenPartition {
+    pub(crate) fn owned(&self) -> &[usize] {
+        &self.selection[self.owned.clone()]
+    }
+
+    pub(crate) fn required(&self) -> impl Iterator<Item = usize> + '_ {
+        MergedIndices {
+            owned: self.owned(),
+            dependencies: &self.dependencies,
+            owned_position: 0,
+            dependency_position: 0,
+        }
+    }
+}
+
+struct MergedIndices<'a> {
+    owned: &'a [usize],
+    dependencies: &'a [usize],
+    owned_position: usize,
+    dependency_position: usize,
+}
+
+impl Iterator for MergedIndices<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match (
+            self.owned.get(self.owned_position).copied(),
+            self.dependencies.get(self.dependency_position).copied(),
+        ) {
+            (Some(owned), Some(dependency)) if owned <= dependency => {
+                self.owned_position += 1;
+                if owned == dependency {
+                    self.dependency_position += 1;
+                }
+                Some(owned)
+            }
+            (Some(_), Some(dependency)) => {
+                self.dependency_position += 1;
+                Some(dependency)
+            }
+            (Some(owned), None) => {
+                self.owned_position += 1;
+                Some(owned)
+            }
+            (None, Some(dependency)) => {
+                self.dependency_position += 1;
+                Some(dependency)
+            }
+            (None, None) => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -154,7 +210,7 @@ impl ExecutionPlan for PgenExec {
             let mut rows = Vec::with_capacity(max_rows);
 
             if assignment.ranges.is_empty() {
-                for variant_index in assignment.owned {
+                for &variant_index in assignment.owned() {
                     if sizer.should_flush_before(estimated_row_bytes) {
                         let row_count = rows.len();
                         let batch = build_batch(&fileset, schema.clone(), &genotype_fields, &rows)?;
@@ -176,9 +232,9 @@ impl ExecutionPlan for PgenExec {
                     sizer.push_row(estimated_row_bytes);
                 }
             } else {
-                let owned = assignment.owned.iter().copied().collect::<HashSet<_>>();
+                let owned = assignment.owned();
                 let mut retained_bases = HashSet::new();
-                for &index in &assignment.required {
+                for index in assignment.required() {
                     if let Some(base) = fileset.records.record(index)?.ld_base {
                         retained_bases.insert(base);
                     }
@@ -189,8 +245,8 @@ impl ExecutionPlan for PgenExec {
                 // dropped as soon as a newer retained base is decoded.
                 let mut ld_base_index = None;
                 let mut ld_base = Vec::with_capacity(fileset.sample_count);
-                let mut required_position = 0;
-                for range in assignment.ranges {
+                let mut required = assignment.required().peekable();
+                for range in assignment.ranges.iter().copied() {
                     let bytes = fileset
                         .source
                         .read_range(&fileset.pgen_path, range.start..range.end)
@@ -198,7 +254,7 @@ impl ExecutionPlan for PgenExec {
                     metrics.add(GenotypeMetric::RangeRequests, 1);
                     metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
-                    while let Some(&variant_index) = assignment.required.get(required_position) {
+                    while let Some(&variant_index) = required.peek() {
                         let record = fileset.records.record(variant_index)?;
                         if record.offset >= range.end {
                             break;
@@ -214,78 +270,78 @@ impl ExecutionPlan for PgenExec {
                         }
                         let payload =
                             record_payload(range, &bytes, record.offset, record.end(), variant_index)?;
-                    let base = record
-                        .ld_base
-                        .map(|base_index| {
-                            if ld_base_index != Some(base_index) {
-                                return Err(DataFusionError::Execution(format!(
-                                    "PGEN variant {variant_index} dependency base {base_index} was not decoded first"
-                                )));
+                        let base = record
+                            .ld_base
+                            .map(|base_index| {
+                                if ld_base_index != Some(base_index) {
+                                    return Err(DataFusionError::Execution(format!(
+                                        "PGEN variant {variant_index} dependency base {base_index} was not decoded first"
+                                    )));
+                                }
+                                Ok(ld_base.as_slice())
+                            })
+                            .transpose()?;
+                        if owned.binary_search(&variant_index).is_err() {
+                            let main = decode_main_track(
+                                payload,
+                                fileset.mode,
+                                record.record_type,
+                                variant_index,
+                                fileset.sample_count,
+                                base,
+                            )?;
+                            if retained_bases.contains(&variant_index) {
+                                ld_base = main;
+                                ld_base_index = Some(variant_index);
                             }
-                            Ok(ld_base.as_slice())
-                        })
-                        .transpose()?;
-                    if !owned.contains(&variant_index) {
-                        let main = decode_main_track(
+                            metrics.add(GenotypeMetric::DependencyRecords, 1);
+                            required.next();
+                            continue;
+                        }
+
+                        if sizer.should_flush_before(estimated_row_bytes) {
+                            let row_count = rows.len();
+                            let batch =
+                                build_batch(&fileset, schema.clone(), &genotype_fields, &rows)?;
+                            record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
+                            yield batch;
+                            rows.clear();
+                            sizer.reset();
+                        }
+                        let (decoded, main) = decode_record_and_main(
                             payload,
                             fileset.mode,
                             record.record_type,
                             variant_index,
                             fileset.sample_count,
+                            fileset.variants[variant_index].allele_count(),
+                            genotype_projection,
+                            fileset.selected_samples.source_indices(),
                             base,
                         )?;
                         if retained_bases.contains(&variant_index) {
                             ld_base = main;
                             ld_base_index = Some(variant_index);
                         }
-                        metrics.add(GenotypeMetric::DependencyRecords, 1);
-                        required_position += 1;
-                        continue;
-                    }
-
-                    if sizer.should_flush_before(estimated_row_bytes) {
-                        let row_count = rows.len();
-                        let batch = build_batch(&fileset, schema.clone(), &genotype_fields, &rows)?;
-                        record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
-                        yield batch;
-                        rows.clear();
-                        sizer.reset();
-                    }
-                    let (decoded, main) = decode_record_and_main(
-                        payload,
-                        fileset.mode,
-                        record.record_type,
-                        variant_index,
-                        fileset.sample_count,
-                        fileset.variants[variant_index].allele_count(),
-                        genotype_projection,
-                        fileset.selected_samples.source_indices(),
-                        base,
-                    )?;
-                    if retained_bases.contains(&variant_index) {
-                        ld_base = main;
-                        ld_base_index = Some(variant_index);
-                    }
-                    metrics.add(
-                        GenotypeMetric::SamplesDecoded,
-                        selected_sample_count as u64,
-                    );
-                    metrics.add(
-                        GenotypeMetric::SampleValuesSkipped,
-                        fileset.sample_count.saturating_sub(selected_sample_count) as u64,
-                    );
-                    rows.push(DecodedRow {
-                        variant_index,
-                        genotypes: Some(decoded),
-                    });
-                    sizer.push_row(estimated_row_bytes);
-                    required_position += 1;
+                        metrics.add(
+                            GenotypeMetric::SamplesDecoded,
+                            selected_sample_count as u64,
+                        );
+                        metrics.add(
+                            GenotypeMetric::SampleValuesSkipped,
+                            fileset.sample_count.saturating_sub(selected_sample_count) as u64,
+                        );
+                        rows.push(DecodedRow {
+                            variant_index,
+                            genotypes: Some(decoded),
+                        });
+                        sizer.push_row(estimated_row_bytes);
+                        required.next();
                     }
                 }
-                if required_position != assignment.required.len() {
+                if let Some(next) = required.next() {
                     Err(DataFusionError::Execution(format!(
-                        "{} required PGEN records were not covered by planned ranges",
-                        assignment.required.len() - required_position
+                        "required PGEN record {next} was not covered by planned ranges"
                     )))?;
                 }
             }
@@ -535,24 +591,24 @@ fn execute_gt_only(
         let selected_sample_count = selected_samples.len();
         let estimated_row_bytes = estimate_genotype_bytes(selected_sample_count, &["GT".to_string()]);
         let mut sizer = GenotypeBatchSizer::new(max_rows, soft_bytes)?;
-        let partition_row_capacity = max_rows.min(assignment.owned.len()).max(1);
+        let partition_row_capacity = max_rows.min(assignment.owned().len()).max(1);
         let mut batch =
             GtBatchBuilder::new(&schema, partition_row_capacity, selected_sample_count)?;
         let mut workspace = GtDecodeWorkspace::new(fileset.sample_count, selected_samples)?;
 
-        let owned = assignment.owned.iter().copied().collect::<HashSet<_>>();
+        let owned = assignment.owned();
         let mut retained_bases = HashSet::new();
-        for &index in &assignment.required {
+        for index in assignment.required() {
             if let Some(base) = fileset.records.record(index)?.ld_base {
                 retained_bases.insert(base);
             }
         }
         let mut ld_base_index = None;
         let mut ld_base = Vec::with_capacity(fileset.sample_count);
-        let mut required_position = 0;
+        let mut required = assignment.required().peekable();
         let genotype_projection = GenotypeProjection::gt_only();
 
-        for range in assignment.ranges {
+        for range in assignment.ranges.iter().copied() {
             let bytes = fileset
                 .source
                 .read_range(&fileset.pgen_path, range.start..range.end)
@@ -560,7 +616,7 @@ fn execute_gt_only(
             metrics.add(GenotypeMetric::RangeRequests, 1);
             metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
-            while let Some(&variant_index) = assignment.required.get(required_position) {
+            while let Some(&variant_index) = required.peek() {
                 let record = fileset.records.record(variant_index)?;
                 if record.offset >= range.end {
                     break;
@@ -588,7 +644,7 @@ fn execute_gt_only(
                     })
                     .transpose()?;
 
-                if !owned.contains(&variant_index) {
+                if owned.binary_search(&variant_index).is_err() {
                     let main = decode_main_track(
                         payload,
                         fileset.mode,
@@ -602,7 +658,7 @@ fn execute_gt_only(
                         ld_base_index = Some(variant_index);
                     }
                     metrics.add(GenotypeMetric::DependencyRecords, 1);
-                    required_position += 1;
+                    required.next();
                     continue;
                 }
 
@@ -673,14 +729,13 @@ fn execute_gt_only(
                     fileset.sample_count.saturating_sub(selected_sample_count) as u64,
                 );
                 sizer.push_row(estimated_row_bytes);
-                required_position += 1;
+                required.next();
             }
         }
 
-        if required_position != assignment.required.len() {
+        if let Some(next) = required.next() {
             Err(DataFusionError::Execution(format!(
-                "{} required PGEN records were not covered by planned ranges",
-                assignment.required.len() - required_position
+                "required PGEN record {next} was not covered by planned ranges"
             )))?;
         }
         if !batch.is_empty() {

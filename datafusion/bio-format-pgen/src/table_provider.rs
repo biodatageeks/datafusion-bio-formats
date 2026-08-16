@@ -1,5 +1,6 @@
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -232,16 +233,17 @@ impl TableProvider for PgenTableProvider {
 
         let genotype_projected = schema.index_of("genotypes").is_ok();
         let needs_payload = genotype_projected && !self.fileset.selected_samples.is_empty();
+        let selected = Arc::new(selected);
         let partitions = if needs_payload {
             plan_payload_partitions(
-                &selected,
+                selected.clone(),
                 &self.fileset,
                 state.config().target_partitions(),
                 self.options.max_range_gap,
                 self.options.max_range_bytes,
             )?
         } else {
-            plan_metadata_partitions(&selected, state.config().target_partitions())
+            plan_metadata_partitions(selected.clone(), state.config().target_partitions())
         };
         let metrics = Arc::new(GenotypeScanMetrics::default());
         // CoalescedRanges describes the planned post-coalescing ranges;
@@ -490,37 +492,37 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Result
 }
 
 fn plan_payload_partitions(
-    selected: &[usize],
+    selected: Arc<Vec<usize>>,
     fileset: &PgenFileset,
     target_partitions: usize,
     max_gap: u64,
     max_range_bytes: u64,
 ) -> Result<Vec<PgenPartition>> {
-    let selected_ranges = selected
-        .iter()
-        .map(|&index| {
-            let record = fileset.records.record(index)?;
-            ByteRange::new(record.offset, record.end()).map(|range| (index, range))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let assignments = contiguous_byte_partitions(&selected_ranges, target_partitions)?;
+    let assignments = contiguous_partition_bounds(&selected, target_partitions, |index| {
+        Ok(u64::from(fileset.records.record(index)?.length))
+    })?;
     assignments
         .into_iter()
-        .map(|assignment| {
-            let owned = assignment
-                .iter()
-                .map(|(index, _)| *index)
-                .collect::<Vec<_>>();
-            let mut required = owned.iter().copied().collect::<HashSet<_>>();
-            for &index in &owned {
-                if let Some(base) = fileset.records.record(index)?.ld_base {
-                    required.insert(base);
+        .map(|owned| {
+            let owned_indices = &selected[owned.clone()];
+            let mut dependencies = Vec::new();
+            for &index in owned_indices {
+                if let Some(base) = fileset.records.record(index)?.ld_base
+                    && owned_indices.binary_search(&base).is_err()
+                {
+                    dependencies.push(base);
                 }
             }
-            let mut required = required.into_iter().collect::<Vec<_>>();
-            required.sort_unstable();
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            let mut partition = PgenPartition {
+                selection: selected.clone(),
+                owned,
+                dependencies,
+                ranges: Vec::new(),
+            };
             let ranges = try_coalesce_sorted_byte_ranges(
-                required.iter().map(|&index| {
+                partition.required().map(|index| {
                     let record = fileset.records.record(index)?;
                     Ok(ByteRange {
                         start: record.offset,
@@ -530,25 +532,23 @@ fn plan_payload_partitions(
                 max_gap,
                 max_range_bytes,
             )?;
-            Ok(PgenPartition {
-                owned,
-                required,
-                ranges,
-            })
+            partition.ranges = ranges;
+            Ok(partition)
         })
         .collect()
 }
 
-fn contiguous_byte_partitions(
-    ranges: &[(usize, ByteRange)],
+fn contiguous_partition_bounds(
+    selected: &[usize],
     target_partitions: usize,
-) -> Result<Vec<Vec<(usize, ByteRange)>>> {
-    if ranges.is_empty() {
+    mut record_bytes: impl FnMut(usize) -> Result<u64>,
+) -> Result<Vec<Range<usize>>> {
+    if selected.is_empty() {
         return Ok(Vec::new());
     }
-    let partition_count = target_partitions.max(1).min(ranges.len());
-    let mut remaining_bytes = ranges.iter().try_fold(0_u64, |total, (_, range)| {
-        total.checked_add(range.len()).ok_or_else(|| {
+    let partition_count = target_partitions.max(1).min(selected.len());
+    let mut remaining_bytes = selected.iter().try_fold(0_u64, |total, &index| {
+        total.checked_add(record_bytes(index)?).ok_or_else(|| {
             DataFusionError::Plan("PGEN selected payload byte count overflowed".to_string())
         })
     })?;
@@ -556,34 +556,38 @@ fn contiguous_byte_partitions(
     let mut partitions = Vec::with_capacity(partition_count);
     for partition_index in 0..partition_count {
         let remaining_partitions = partition_count - partition_index;
-        let max_take = ranges.len() - cursor - (remaining_partitions - 1);
+        let max_take = selected.len() - cursor - (remaining_partitions - 1);
         let target_bytes = remaining_bytes.div_ceil(remaining_partitions as u64);
         let mut bytes = 0_u64;
         let mut take = 0;
         while take < max_take && (take == 0 || bytes < target_bytes) {
             bytes = bytes
-                .checked_add(ranges[cursor + take].1.len())
+                .checked_add(record_bytes(selected[cursor + take])?)
                 .ok_or_else(|| {
                     DataFusionError::Plan("PGEN partition byte count overflowed".to_string())
                 })?;
             take += 1;
         }
-        partitions.push(ranges[cursor..cursor + take].to_vec());
+        partitions.push(cursor..cursor + take);
         cursor += take;
         remaining_bytes -= bytes;
     }
-    debug_assert_eq!(cursor, ranges.len());
+    debug_assert_eq!(cursor, selected.len());
     Ok(partitions)
 }
 
-fn plan_metadata_partitions(selected: &[usize], target_partitions: usize) -> Vec<PgenPartition> {
+fn plan_metadata_partitions(
+    selected: Arc<Vec<usize>>,
+    target_partitions: usize,
+) -> Vec<PgenPartition> {
     let partition_count = target_partitions.max(1).min(selected.len());
     let chunk_size = selected.len().div_ceil(partition_count);
-    selected
-        .chunks(chunk_size)
-        .map(|variants| PgenPartition {
-            owned: variants.to_vec(),
-            required: Vec::new(),
+    (0..selected.len())
+        .step_by(chunk_size)
+        .map(|start| PgenPartition {
+            selection: selected.clone(),
+            owned: start..(start + chunk_size).min(selected.len()),
+            dependencies: Vec::new(),
             ranges: Vec::new(),
         })
         .collect()
@@ -629,34 +633,19 @@ mod tests {
             companion_bytes: 0,
             header_bytes: 0,
         };
-        let partitions = plan_payload_partitions(&[1], &fileset, 4, 0, 1024).unwrap();
-        assert_eq!(partitions[0].owned, vec![1]);
-        assert_eq!(partitions[0].required, vec![0, 1]);
+        let partitions = plan_payload_partitions(Arc::new(vec![1]), &fileset, 4, 0, 1024).unwrap();
+        assert_eq!(partitions[0].owned(), &[1]);
+        assert_eq!(partitions[0].required().collect::<Vec<_>>(), vec![0, 1]);
     }
 
     #[test]
     fn preserves_locality_while_balancing_equal_records() {
-        let ranges = (0..8)
-            .map(|index| {
-                (
-                    index,
-                    ByteRange {
-                        start: index as u64 * 10,
-                        end: (index as u64 + 1) * 10,
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        let partitions = contiguous_byte_partitions(&ranges, 4).unwrap();
+        let selected = (0..8).collect::<Vec<_>>();
+        let partitions = contiguous_partition_bounds(&selected, 4, |_| Ok(10)).unwrap();
         assert_eq!(
             partitions
                 .iter()
-                .map(|partition| {
-                    partition
-                        .iter()
-                        .map(|(index, _)| *index)
-                        .collect::<Vec<_>>()
-                })
+                .map(|partition| selected[partition.clone()].to_vec())
                 .collect::<Vec<_>>(),
             vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7]]
         );
