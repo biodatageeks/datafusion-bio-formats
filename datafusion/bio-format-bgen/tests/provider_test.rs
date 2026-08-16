@@ -1032,6 +1032,101 @@ async fn opening_an_indexed_bgen_does_not_read_the_variant_region() {
 const IDENTITY_PREFIX_BYTES: u64 = 1000;
 
 #[tokio::test]
+async fn verifying_index_records_catches_a_stale_row_that_pruning_would_hide() {
+    // Predicates are pushed into the index, so a row with a stale RS identifier
+    // is pruned before its record is ever read: the deferred per-record check
+    // cannot fire for a variant the index never offers as a candidate, and the
+    // query quietly returns nothing. Verification is what closes that, at the
+    // cost of walking the object once.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let connection = Connection::open(&fixture.bgi).unwrap();
+    connection
+        .execute(
+            "UPDATE Variant SET rsid = 'rs-wrong' WHERE rsid = 'rs2'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    // Trusting the index: the variant really does carry rs2, and it is missed.
+    let trusting = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(trusting)).unwrap();
+    let batches = context
+        .sql("SELECT id FROM b WHERE rsid = 'rs2'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0,
+        "pruning trusts the index, so the stale row hides the variant"
+    );
+
+    // Verifying: the same index is rejected when the table is opened.
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            verify_index_records: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("verification must reject an index that describes other variants")
+    .to_string();
+    assert!(
+        error.contains("RS identifier") && error.contains("does not describe this object"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn metadata_longer_than_the_probe_still_resolves() {
+    // Resolving an indexed record reads a bounded prefix rather than the whole
+    // record, so a variant whose identifier runs past that prefix exercises the
+    // widening loop. It has to converge and return the real identifier.
+    let long_id: &'static str = Box::leak("v".repeat(9_000).into_boxed_str());
+    let mut variants = many_variants(3);
+    variants[1].id = long_id;
+    let fixture = fixture_with_variants(Codec::Zstd, true, &variants);
+    create_bgi(&fixture, false);
+
+    // Without this the probe reads coalesce into one range that happens to
+    // cover the long record whole, and the widening loop is never entered.
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            max_range_gap: 0,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT id FROM b ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let ids = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(ids.value(1), long_id);
+    assert_eq!(ids.value(0), "v0");
+    assert_eq!(ids.value(2), "v2");
+}
+
+#[tokio::test]
 async fn an_indexed_scan_matches_an_unindexed_one_column_for_column() {
     // With an index the catalog comes from the BGI, and the variant identifier,
     // the alleles past the second and the payload position are parsed from each
@@ -1095,7 +1190,15 @@ async fn a_scan_rejects_an_index_that_describes_different_variants() {
         .await
         .expect("the index still identifies this object");
 
-    for sql in ["SELECT id FROM b", "SELECT genotypes FROM b"] {
+    // Including the columns the index carries itself: emitting those straight
+    // from the index would hand back its stale values as though they were the
+    // object's.
+    for sql in [
+        "SELECT id FROM b",
+        "SELECT genotypes FROM b",
+        "SELECT rsid FROM b",
+        "SELECT chrom, start FROM b",
+    ] {
         let context = context(1024);
         context
             .register_table("b", Arc::new(provider.clone()))

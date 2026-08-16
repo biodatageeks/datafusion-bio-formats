@@ -28,8 +28,8 @@ use datafusion_bio_format_core::companion::sanitize_location;
 use crate::bgi::{BgiIndex, open_optional_bgi};
 use crate::buffers::{BufferLayout, GenotypeBuffers};
 use crate::catalog::{
-    BgenCatalog, BgenVariant, ResolveOutcome, build_transient_catalog, catalog_from_index,
-    resolve_variant, try_resolve_variant,
+    BgenCatalog, BgenVariant, PAYLOAD_FRAMING_BYTES, ResolveOutcome, build_transient_catalog,
+    catalog_from_index, resolve_variant, try_resolve_variant,
 };
 use crate::decode::{DecodeScratch, complete_probability_count, decode_variant};
 use crate::filter::{evaluate_exact_filter, references_id, supports_exact_filter};
@@ -124,6 +124,21 @@ pub struct BgenReadOptions {
     pub object_storage_options: Option<ObjectStorageOptions>,
     /// Policy for an inconsistent BGI.
     pub stale_bgi_policy: StaleBgiPolicy,
+    /// Check every index row against the record it describes when opening.
+    ///
+    /// Opening an indexed BGEN normally checks the object's size, its
+    /// identifying prefix, the row count, and that the rows tile the variant
+    /// region; each row's contents are then checked against its record when a
+    /// scan reads it. That leaves one gap: predicates are pushed into the index,
+    /// so a row whose recorded chromosome, position or RS identifier is stale
+    /// can be pruned before its record is ever read, and the query silently
+    /// omits a variant that does match.
+    ///
+    /// Closing that gap means reading every variant's metadata at open, which is
+    /// what the index exists to avoid — for a large object it is the difference
+    /// between a few kilobytes and the whole file. So it is off by default and
+    /// available to callers who would rather pay for it than trust the index.
+    pub verify_index_records: bool,
     /// Maximum declared variants.
     pub max_variants: usize,
     /// Maximum declared samples.
@@ -171,6 +186,7 @@ impl Default for BgenReadOptions {
             coordinate_system: CoordinateSystem::ZeroBasedHalfOpen,
             object_storage_options: None,
             stale_bgi_policy: StaleBgiPolicy::Ignore,
+            verify_index_records: false,
             max_variants: 100_000_000,
             max_samples: 10_000_000,
             max_sample_block_bytes: 256 * 1024 * 1024,
@@ -239,6 +255,16 @@ impl BgenTableProvider {
             // reported against the index itself.
             Some(index) => catalog_from_index(&path, &index.variants, &header, &options, 0)?,
             None => build_transient_catalog(&path, &source, &header, &options).await?,
+        };
+        // Opting into full verification walks the object once and checks every
+        // row against its record. The walked catalog is kept afterwards: it is
+        // already resolved, so nothing downstream has to read records again.
+        let catalog = if bgi.is_some() && options.verify_index_records {
+            let walked = build_transient_catalog(&path, &source, &header, &options).await?;
+            verify_index_against_records(&path, &catalog, &walked)?;
+            walked
+        } else {
+            catalog
         };
         // The fixed layout puts the state count in the schema, so it has to be
         // known before any batch is produced. One variant's block header carries
@@ -344,8 +370,9 @@ impl TableProvider for BgenTableProvider {
         // A variant identifier lives only in the record, never in the index, so
         // a predicate naming it needs those records parsed before the filter can
         // be applied exactly. Only their metadata is read, not their payloads.
+        let mut metadata_cost = MetadataReadCost::default();
         let mut resolved = if exact_filters.iter().any(|filter| references_id(filter)) {
-            resolve_variant_metadata(
+            let (resolved, cost) = resolve_variant_metadata(
                 &self.fileset.path,
                 &self.fileset.source,
                 &self.fileset.header,
@@ -353,7 +380,9 @@ impl TableProvider for BgenTableProvider {
                 &self.fileset.catalog,
                 &candidates,
             )
-            .await?
+            .await?;
+            metadata_cost = cost;
+            resolved
         } else {
             HashMap::new()
         };
@@ -388,23 +417,32 @@ impl TableProvider for BgenTableProvider {
         let needs_payload = projected_names.contains("phased")
             || projected_names.contains("bits")
             || (genotype_projected && !self.fileset.selected_samples.is_empty());
-        // `id` and a multiallelic variant's full allele list are in the record,
-        // not the index. A scan that reads payloads picks them up on the way; one
-        // that does not has to read the records' metadata for them.
+        // Every variant column is served from the record, never from the index.
+        //
+        // `id` and a multiallelic variant's full allele list are only in the
+        // record to begin with. The rest — chromosome, coordinates, RS
+        // identifier — the index does carry, but emitting its copy would hand
+        // back an index's values as though they were the object's, and a row
+        // whose record is never read is a row whose index entry is never
+        // checked. A scan that reads payloads picks all of this up on the way;
+        // one that does not reads the records' metadata for it.
         let needs_record_metadata = !needs_payload
-            && (projected_names.contains("id") || projected_names.contains("alleles"));
+            && projected_names
+                .iter()
+                .any(|name| matches!(*name, "chrom" | "start" | "end" | "id" | "rsid" | "alleles"));
         if needs_record_metadata {
-            resolved.extend(
-                resolve_variant_metadata(
-                    &self.fileset.path,
-                    &self.fileset.source,
-                    &self.fileset.header,
-                    &self.fileset.options,
-                    &self.fileset.catalog,
-                    &selected,
-                )
-                .await?,
-            );
+            let (records, cost) = resolve_variant_metadata(
+                &self.fileset.path,
+                &self.fileset.source,
+                &self.fileset.header,
+                &self.fileset.options,
+                &self.fileset.catalog,
+                &selected,
+            )
+            .await?;
+            resolved.extend(records);
+            metadata_cost.bytes += cost.bytes;
+            metadata_cost.requests += cost.requests;
         }
 
         let partitions = if needs_payload {
@@ -438,8 +476,10 @@ impl TableProvider for BgenTableProvider {
                     .fileset
                     .bgi
                     .as_ref()
-                    .map_or(0, |index| index.primary_bytes_read),
+                    .map_or(0, |index| index.primary_bytes_read)
+                + metadata_cost.bytes,
         );
+        metrics.add(GenotypeMetric::RangeRequests, metadata_cost.requests);
         metrics.add(
             GenotypeMetric::CompanionBytesRead,
             self.fileset
@@ -832,6 +872,107 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Result
 /// A record whose metadata runs past it is re-read in full.
 const METADATA_PROBE_BYTES: u64 = 4 * 1024;
 
+/// Checks every index-derived variant against the record walked from the object.
+///
+/// Used only when a caller asks for it: this is the check that costs a walk of
+/// the whole object, and the reason the index is otherwise trusted for the
+/// fields it records.
+fn verify_index_against_records(
+    path: &str,
+    indexed: &BgenCatalog,
+    walked: &BgenCatalog,
+) -> Result<()> {
+    if indexed.variants.len() != walked.variants.len() {
+        return Err(DataFusionError::Plan(format!(
+            "BGEN {}: the index describes {} variants, the object has {}",
+            sanitize_location(path),
+            indexed.variants.len(),
+            walked.variants.len()
+        )));
+    }
+    for (row, record) in indexed.variants.iter().zip(walked.variants.iter()) {
+        let mismatch = |field: &str| {
+            Err(DataFusionError::Plan(format!(
+                "BGEN {} variant {} at byte {}: the index's {field} does not match the record; \
+                 the index does not describe this object",
+                sanitize_location(path),
+                record.index,
+                record.record_offset
+            )))
+        };
+        if row.record_offset != record.record_offset || row.record_size != record.record_size {
+            return mismatch("record range");
+        }
+        if row.chrom != record.chrom {
+            return mismatch("chromosome");
+        }
+        if row.position != record.position {
+            return mismatch("position");
+        }
+        if row.rsid != record.rsid {
+            return mismatch("RS identifier");
+        }
+        if row.allele_count != record.allele_count {
+            return mismatch("allele count");
+        }
+        if record.alleles[..row.alleles.len()] != row.alleles[..] {
+            return mismatch("alleles");
+        }
+    }
+    Ok(())
+}
+
+/// Object reads spent resolving variant metadata during planning.
+///
+/// These happen before the scan's own counters exist, so they are carried back
+/// and folded in; otherwise a query that filters or projects a field the index
+/// lacks would report reads it never made.
+#[derive(Debug, Default, Clone, Copy)]
+struct MetadataReadCost {
+    bytes: u64,
+    requests: u64,
+}
+
+/// Re-reads one variant's metadata with a growing prefix until it parses.
+///
+/// The prefix doubles rather than jumping to the whole record: a record's
+/// payload can be hundreds of megabytes, and reading it to recover a long
+/// identifier would give up exactly the bound this path exists to keep. The
+/// configured metadata ceiling stops the growth, so a record that never parses
+/// fails on its own limit instead of reading without end.
+async fn widen_metadata_probe(
+    path: &str,
+    source: &ObjectAccess,
+    variant: &BgenVariant,
+    header: &BgenHeader,
+    options: &BgenReadOptions,
+    from: u64,
+    cost: &mut MetadataReadCost,
+) -> Result<BgenVariant> {
+    let record = variant.record_span();
+    let ceiling = (options.max_variant_metadata_bytes as u64)
+        .saturating_add(PAYLOAD_FRAMING_BYTES)
+        .min(record.end.saturating_sub(record.start));
+    let mut probe = from;
+    loop {
+        probe = probe.saturating_mul(2).min(ceiling);
+        let bytes = source
+            .read_range(path, record.start..record.start.saturating_add(probe))
+            .await?;
+        cost.requests += 1;
+        cost.bytes += bytes.len() as u64;
+        match try_resolve_variant(path, variant, &bytes, header, options)? {
+            ResolveOutcome::Resolved(variant) => return Ok(variant),
+            ResolveOutcome::NeedMore if probe < ceiling => continue,
+            // At the ceiling the record itself is the problem, and
+            // `resolve_variant` reports it against the configured limit.
+            ResolveOutcome::NeedMore => {
+                return resolve_variant(path, variant, &bytes, header, options);
+            }
+        }
+    }
+}
+
 /// Parses the metadata of indexed variants without reading their payloads.
 ///
 /// A BGI records neither the variant identifier nor the alleles past the
@@ -840,8 +981,18 @@ const METADATA_PROBE_BYTES: u64 = 4 * 1024;
 /// are coalesced under the configured gap budget, so this costs the metadata
 /// rather than the payloads sitting behind it.
 ///
-/// Returns the resolved variants by catalog index; variants the catalog already
-/// knows in full are absent, because the caller already has them.
+/// Returns the resolved variants by catalog index, and what reading them cost,
+/// so the scan's counters include the object reads planning made. Variants the
+/// catalog already knows in full are absent, because the caller already has them.
+///
+/// # Precondition
+///
+/// `indices` must be ascending by `catalog.variants[index].record_offset`. Both
+/// call sites satisfy it — index candidates arrive ordered by
+/// `file_start_position`, a walked catalog is built front to back, and filtering
+/// preserves order — and one cursor walks the variants alongside the coalesced
+/// ranges on that basis. Out-of-order input would leave variants unvisited,
+/// which the count check at the end reports rather than passing over.
 async fn resolve_variant_metadata(
     path: &str,
     source: &ObjectAccess,
@@ -849,17 +1000,25 @@ async fn resolve_variant_metadata(
     options: &BgenReadOptions,
     catalog: &BgenCatalog,
     indices: &[usize],
-) -> Result<HashMap<usize, Arc<BgenVariant>>> {
+) -> Result<(HashMap<usize, Arc<BgenVariant>>, MetadataReadCost)> {
     let mut resolved = HashMap::new();
+    let mut cost = MetadataReadCost::default();
     let pending: Vec<usize> = indices
         .iter()
         .copied()
         .filter(|&index| !catalog.variants[index].is_resolved())
         .collect();
     if pending.is_empty() {
-        return Ok(resolved);
+        return Ok((resolved, cost));
     }
 
+    debug_assert!(
+        pending
+            .windows(2)
+            .all(|pair| catalog.variants[pair[0]].record_offset
+                <= catalog.variants[pair[1]].record_offset),
+        "resolve_variant_metadata needs indices in record order"
+    );
     let probe = METADATA_PROBE_BYTES
         .min(options.max_variant_metadata_bytes as u64)
         .max(1);
@@ -881,6 +1040,8 @@ async fn resolve_variant_metadata(
     let mut next = 0;
     for range in coalesced {
         let bytes = source.read_range(path, range.start..range.end).await?;
+        cost.requests += 1;
+        cost.bytes += bytes.len() as u64;
         while let Some(&index) = pending.get(next) {
             let variant = &catalog.variants[index];
             let start = variant.record_offset;
@@ -897,12 +1058,12 @@ async fn resolve_variant_metadata(
             })?;
             let variant = match try_resolve_variant(path, variant, slice, header, options)? {
                 ResolveOutcome::Resolved(variant) => variant,
-                // Longer metadata than the probe covers, which is rare enough to
-                // be worth a second read rather than a larger read for every
-                // record.
+                // Metadata longer than the probe covers. Widen it rather than
+                // reading the record, whose payload is the thing this whole
+                // path exists to avoid downloading.
                 ResolveOutcome::NeedMore => {
-                    let record = source.read_range(path, variant.record_span()).await?;
-                    resolve_variant(path, variant, &record, header, options)?
+                    widen_metadata_probe(path, source, variant, header, options, probe, &mut cost)
+                        .await?
                 }
             };
             resolved.insert(index, Arc::new(variant));
@@ -915,7 +1076,7 @@ async fn resolve_variant_metadata(
             pending.len()
         )));
     }
-    Ok(resolved)
+    Ok((resolved, cost))
 }
 
 fn plan_payload_partitions(

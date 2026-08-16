@@ -201,6 +201,11 @@ run when the index is opened. The comparison of each row's contents against the
 record it points at SHALL run when a scan reads that record, so that opening a
 table never walks the object.
 
+The system SHALL therefore trust the index for the fields it records when
+pruning candidates, and SHALL offer an explicit option that checks every row
+against its record when the table is opened, for callers who would rather walk
+the object than trust it.
+
 #### Scenario: Local BGI
 - **WHEN** a valid local BGI is resolved
 - **THEN** it is queried directly without copying the complete BGEN file.
@@ -230,7 +235,16 @@ table never walks the object.
   position, RS identifier, allele count, leading alleles, or record size differs
   from the record it points at
 - **THEN** the scan reading that record fails and names the mismatched field
-- **AND** it never emits the index's values in place of the object's.
+- **AND** it never emits the index's values in place of the object's, including
+  for a projection of columns the index itself records.
+
+#### Scenario: Stale row hidden by pushdown
+- **WHEN** a stale row's recorded chromosome, position or RS identifier causes
+  index pushdown to prune the variant, so no scan ever reads its record
+- **THEN** the omission is not detected, because the index is trusted for the
+  fields it records
+- **AND** enabling record verification rejects that index when the table is
+  opened instead.
 
 ### Requirement: Exact BGI Predicate Pushdown
 

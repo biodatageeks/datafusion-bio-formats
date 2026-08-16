@@ -19,7 +19,7 @@ const METADATA_CHUNK_BYTES: u64 = 1024 * 1024;
 /// `parse_variant` reads this block-length word after recording
 /// `payload_offset`, so it is payload rather than metadata and has to remain
 /// visible when the parser's view is capped.
-const PAYLOAD_FRAMING_BYTES: usize = 4;
+pub(crate) const PAYLOAD_FRAMING_BYTES: u64 = 4;
 /// Fewest records a read-ahead must be expected to cover to be worth its bytes.
 ///
 /// Metadata and genotype payloads are interleaved, so any read spanning several
@@ -268,7 +268,7 @@ pub(crate) async fn build_transient_catalog(
                 ));
             }
             let read_size = remaining.min(window_size as u64);
-            let visible = window_size.saturating_add(PAYLOAD_FRAMING_BYTES);
+            let visible = window_size.saturating_add(PAYLOAD_FRAMING_BYTES as usize);
             let bytes = window.bytes_at(record_offset, visible).await?;
             // The window serves whatever its read-ahead buffer holds, which is
             // up to METADATA_CHUNK_BYTES and unrelated to `window_size`. Parsing

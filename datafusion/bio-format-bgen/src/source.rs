@@ -31,10 +31,10 @@ impl ObjectAccess {
                 let object = RemoteObject::open(path.to_string(), options.clone())
                     .await
                     .map_err(|error| external_error("open", path, error))?;
-                object
-                    .size()
-                    .await
-                    .map_err(|error| external_error("stat", path, error))?;
+                // No existence probe here: reading the header asks for the
+                // object's size as its first act, so a missing object still
+                // fails immediately, and a second stat only doubles the round
+                // trips against remote storage.
                 Ok(Self::Remote(object))
             }
         }
