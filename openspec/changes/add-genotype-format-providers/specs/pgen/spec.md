@@ -446,7 +446,8 @@ PLINK 2 for supported features.
 #### Scenario: Empty embedded extension-mode fileset
 - **WHEN** an embedded extension-mode PGEN declares zero variants
 - **THEN** the provider parses the header and footer extension-flag varints
-- **AND** validates that the declared data boundary follows those varints.
+- **AND** validates that the declared data boundary follows the header extensions
+- **AND** does not fetch a declared footer while locating that boundary.
 
 #### Scenario: Differential fixture
 - **WHEN** a supported synthetic fileset is read by this provider and PLINK 2

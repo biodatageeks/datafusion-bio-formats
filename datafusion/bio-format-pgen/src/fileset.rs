@@ -1046,7 +1046,8 @@ async fn parse_index(
         }
     }
 
-    let mut header_bytes = body_len as u64;
+    let mut header_end = body_len as u64;
+    let mut extension_bytes_read = 0_u64;
     let mut footer_offset = None;
     if mode.has_extensions() {
         let known_extension_end = if external.is_some() {
@@ -1054,37 +1055,44 @@ async fn parse_index(
         } else {
             block_offsets.first().copied()
         };
-        let extension_end = known_extension_end
-            .unwrap_or_else(|| pgen_size.min(u64::try_from(max_header_bytes).unwrap_or(u64::MAX)));
-        if extension_end < body_len as u64 {
-            return Err(DataFusionError::Plan(
-                "PGEN header extensions overlap the fixed header body".to_string(),
-            ));
-        }
-        let extension_len = usize::try_from(extension_end - body_len as u64).map_err(|_| {
-            DataFusionError::Plan("PGEN extension region does not fit usize".to_string())
-        })?;
-        if body_len.saturating_add(extension_len) > max_header_bytes {
-            return Err(DataFusionError::Plan(format!(
-                "PGEN header with extensions exceeds configured max_header_bytes {max_header_bytes}"
-            )));
-        }
-        let extensions = header_object
-            .read_range(header_path, body_len as u64..extension_end)
-            .await?;
-        if known_extension_end.is_some() {
+        if let Some(extension_end) = known_extension_end {
+            if extension_end < body_len as u64 {
+                return Err(DataFusionError::Plan(
+                    "PGEN header extensions overlap the fixed header body".to_string(),
+                ));
+            }
+            let extension_len = usize::try_from(extension_end - body_len as u64).map_err(|_| {
+                DataFusionError::Plan("PGEN extension region does not fit usize".to_string())
+            })?;
+            if body_len.saturating_add(extension_len) > max_header_bytes {
+                return Err(DataFusionError::Plan(format!(
+                    "PGEN header with extensions exceeds configured max_header_bytes {max_header_bytes}"
+                )));
+            }
+            let extensions = header_object
+                .read_range(header_path, body_len as u64..extension_end)
+                .await?;
             footer_offset = validate_extensions(&extensions, pgen_size)?;
-            header_bytes = extension_end;
+            header_end = extension_end;
+            extension_bytes_read = extension_end - body_len as u64;
         } else {
-            let (parsed_footer_offset, parsed_len) = parse_extensions(&extensions, pgen_size)?;
+            let (parsed_footer_offset, parsed_len, bytes_read) = read_empty_embedded_extensions(
+                header_object,
+                header_path,
+                body_len,
+                pgen_size,
+                max_header_bytes,
+            )
+            .await?;
             footer_offset = parsed_footer_offset;
-            header_bytes = (body_len as u64)
+            header_end = (body_len as u64)
                 .checked_add(u64::try_from(parsed_len).map_err(|_| {
                     DataFusionError::Plan("PGEN extension length does not fit u64".to_string())
                 })?)
                 .ok_or_else(|| {
                     DataFusionError::Plan("PGEN extension end overflowed".to_string())
                 })?;
+            extension_bytes_read = bytes_read;
         }
     } else if external.is_some() {
         let observed = header_object.size(header_path).await?;
@@ -1108,7 +1116,7 @@ async fn parse_index(
     let data_end = records
         .last()
         .map(RecordInfo::end)
-        .unwrap_or_else(|| if external.is_some() { 3 } else { header_bytes });
+        .unwrap_or_else(|| if external.is_some() { 3 } else { header_end });
     let expected_data_end = footer_offset.unwrap_or(pgen_size);
     if data_end != expected_data_end {
         return Err(DataFusionError::Plan(format!(
@@ -1120,7 +1128,90 @@ async fn parse_index(
             }
         )));
     }
-    Ok((records, 12 + header_bytes, sample_count, variant_count))
+    Ok((
+        records,
+        12 + body_len as u64 + extension_bytes_read,
+        sample_count,
+        variant_count,
+    ))
+}
+
+async fn read_empty_embedded_extensions(
+    header_object: &ObjectAccess,
+    header_path: &str,
+    body_len: usize,
+    pgen_size: u64,
+    max_header_bytes: usize,
+) -> Result<(Option<u64>, usize, u64)> {
+    // A zero-variant embedded index has no first block offset to delimit its
+    // extension region. Grow the probe only to the next parser requirement so
+    // a declared footer is never downloaded as if it were header metadata.
+    let body_start = body_len as u64;
+    let available = pgen_size.checked_sub(body_start).ok_or_else(|| {
+        DataFusionError::Plan("PGEN header extensions overlap the fixed header body".to_string())
+    })?;
+    let max_extension_bytes = max_header_bytes.checked_sub(body_len).ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "PGEN header with extensions exceeds configured max_header_bytes {max_header_bytes}"
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    let initial_len = available.min(2) as usize;
+    if initial_len > max_extension_bytes {
+        return Err(DataFusionError::Plan(format!(
+            "PGEN header with extensions exceeds configured max_header_bytes {max_header_bytes}"
+        )));
+    }
+    if initial_len > 0 {
+        bytes.extend_from_slice(
+            &header_object
+                .read_range(header_path, body_start..body_start + initial_len as u64)
+                .await?,
+        );
+    }
+
+    loop {
+        match parse_extension_layout(&bytes, pgen_size)? {
+            ExtensionLayoutStatus::NeedMore(required) => {
+                if required > max_extension_bytes {
+                    return Err(DataFusionError::Plan(format!(
+                        "PGEN header with extensions exceeds configured max_header_bytes {max_header_bytes}"
+                    )));
+                }
+                if required as u64 > available {
+                    return Err(DataFusionError::Plan(
+                        "truncated PGEN header extension metadata".to_string(),
+                    ));
+                }
+                let start = body_start + bytes.len() as u64;
+                let end = body_start + required as u64;
+                bytes.extend_from_slice(&header_object.read_range(header_path, start..end).await?);
+            }
+            ExtensionLayoutStatus::Complete {
+                footer_offset,
+                total_len,
+            } => {
+                if total_len > max_extension_bytes {
+                    return Err(DataFusionError::Plan(format!(
+                        "PGEN header with extensions exceeds configured max_header_bytes {max_header_bytes}"
+                    )));
+                }
+                if total_len as u64 > available {
+                    return Err(DataFusionError::Plan(
+                        "truncated PGEN header extension body".to_string(),
+                    ));
+                }
+                if total_len > bytes.len() {
+                    let start = body_start + bytes.len() as u64;
+                    let end = body_start + total_len as u64;
+                    bytes.extend_from_slice(
+                        &header_object.read_range(header_path, start..end).await?,
+                    );
+                }
+                return Ok((footer_offset, total_len, bytes.len() as u64));
+            }
+        }
+    }
 }
 
 fn validate_extensions(bytes: &[u8], pgen_size: u64) -> Result<Option<u64>> {
@@ -1135,10 +1226,50 @@ fn validate_extensions(bytes: &[u8], pgen_size: u64) -> Result<Option<u64>> {
 }
 
 fn parse_extensions(bytes: &[u8], pgen_size: u64) -> Result<(Option<u64>, usize)> {
+    let (footer_offset, cursor) = match parse_extension_layout(bytes, pgen_size)? {
+        ExtensionLayoutStatus::Complete {
+            footer_offset,
+            total_len,
+        } => (footer_offset, total_len),
+        ExtensionLayoutStatus::NeedMore(_) => {
+            return Err(DataFusionError::Plan(
+                "truncated PGEN header extension metadata".to_string(),
+            ));
+        }
+    };
+    if cursor > bytes.len() {
+        return Err(DataFusionError::Plan(
+            "truncated PGEN header extension body".to_string(),
+        ));
+    }
+    Ok((footer_offset, cursor))
+}
+
+enum ExtensionLayoutStatus {
+    NeedMore(usize),
+    Complete {
+        footer_offset: Option<u64>,
+        total_len: usize,
+    },
+}
+
+fn parse_extension_layout(bytes: &[u8], pgen_size: u64) -> Result<ExtensionLayoutStatus> {
     let mut cursor = 0;
-    let header_flags = read_flag_varint(bytes, &mut cursor)?;
-    let footer_flags = read_flag_varint(bytes, &mut cursor)?;
+    let header_flags = match read_flag_varint_prefix(bytes, &mut cursor)? {
+        Some(value) => value,
+        None => return Ok(ExtensionLayoutStatus::NeedMore(cursor + 1)),
+    };
+    let footer_flags = match read_flag_varint_prefix(bytes, &mut cursor)? {
+        Some(value) => value,
+        None => return Ok(ExtensionLayoutStatus::NeedMore(cursor + 1)),
+    };
     let footer_offset = if footer_flags > 0 {
+        let required = cursor
+            .checked_add(8)
+            .ok_or_else(|| DataFusionError::Plan("PGEN extension cursor overflowed".to_string()))?;
+        if required > bytes.len() {
+            return Ok(ExtensionLayoutStatus::NeedMore(required));
+        }
         let footer_offset = read_le(bytes, cursor, 8)?;
         cursor += 8;
         if footer_offset > pgen_size {
@@ -1152,30 +1283,31 @@ fn parse_extensions(bytes: &[u8], pgen_size: u64) -> Result<(Option<u64>, usize)
     };
     let mut body_bytes = 0_usize;
     for _ in 0..header_flags {
-        let length = read_varint(bytes, &mut cursor)?;
+        let length = match read_varint_prefix(bytes, &mut cursor)? {
+            Some(value) => value,
+            None => return Ok(ExtensionLayoutStatus::NeedMore(cursor + 1)),
+        };
         body_bytes = body_bytes
             .checked_add(usize::try_from(length).map_err(|_| {
                 DataFusionError::Plan("PGEN header extension length does not fit usize".to_string())
             })?)
             .ok_or_else(|| DataFusionError::Plan("PGEN extension length overflowed".to_string()))?;
     }
-    cursor = cursor
+    let total_len = cursor
         .checked_add(body_bytes)
         .ok_or_else(|| DataFusionError::Plan("PGEN extension cursor overflowed".to_string()))?;
-    if cursor > bytes.len() {
-        return Err(DataFusionError::Plan(
-            "truncated PGEN header extension body".to_string(),
-        ));
-    }
-    Ok((footer_offset, cursor))
+    Ok(ExtensionLayoutStatus::Complete {
+        footer_offset,
+        total_len,
+    })
 }
 
-fn read_flag_varint(bytes: &[u8], cursor: &mut usize) -> Result<usize> {
+fn read_flag_varint_prefix(bytes: &[u8], cursor: &mut usize) -> Result<Option<usize>> {
     let mut set_bits = 0_usize;
     for index in 0..37 {
-        let byte = *bytes.get(*cursor).ok_or_else(|| {
-            DataFusionError::Plan("truncated PGEN extension flag varint".to_string())
-        })?;
+        let Some(&byte) = bytes.get(*cursor) else {
+            return Ok(None);
+        };
         *cursor += 1;
         set_bits = set_bits
             .checked_add((byte & 0x7f).count_ones() as usize)
@@ -1186,7 +1318,7 @@ fn read_flag_varint(bytes: &[u8], cursor: &mut usize) -> Result<usize> {
                     "PGEN extension flags exceed 256 bits".to_string(),
                 ));
             }
-            return Ok(set_bits);
+            return Ok(Some(set_bits));
         }
     }
     Err(DataFusionError::Plan(
@@ -1194,12 +1326,12 @@ fn read_flag_varint(bytes: &[u8], cursor: &mut usize) -> Result<usize> {
     ))
 }
 
-pub(crate) fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
+fn read_varint_prefix(bytes: &[u8], cursor: &mut usize) -> Result<Option<u64>> {
     let mut value = 0_u64;
     for shift in (0..=63).step_by(7) {
-        let byte = *bytes.get(*cursor).ok_or_else(|| {
-            DataFusionError::Execution("truncated PGEN base-128 varint".to_string())
-        })?;
+        let Some(&byte) = bytes.get(*cursor) else {
+            return Ok(None);
+        };
         *cursor += 1;
         if shift == 63 && byte > 1 {
             return Err(DataFusionError::Execution(
@@ -1208,11 +1340,20 @@ pub(crate) fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
         }
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
-            return Ok(value);
+            return Ok(Some(value));
         }
     }
     Err(DataFusionError::Execution(
         "PGEN base-128 varint exceeds ten bytes".to_string(),
+    ))
+}
+
+pub(crate) fn read_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64> {
+    if let Some(value) = read_varint_prefix(bytes, cursor)? {
+        return Ok(value);
+    }
+    Err(DataFusionError::Execution(
+        "truncated PGEN base-128 varint".to_string(),
     ))
 }
 

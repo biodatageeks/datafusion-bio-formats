@@ -61,6 +61,7 @@ impl RangeServer {
                     }
                     Err(error) => panic!("range server failed: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 let mut request_bytes = [0_u8; 8192];
                 let size = stream.read(&mut request_bytes).unwrap();
                 let request = String::from_utf8_lossy(&request_bytes[..size]);
@@ -356,6 +357,10 @@ fn plink1_mode_fixture() -> Fixture {
 }
 
 fn empty_extension_fixture() -> Fixture {
+    empty_extension_fixture_with_footer(0)
+}
+
+fn empty_extension_fixture_with_footer(footer_bytes: usize) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let pgen = root.join("cohort.pgen");
@@ -364,7 +369,13 @@ fn empty_extension_fixture() -> Fixture {
     bytes.extend(0_u32.to_le_bytes());
     bytes.extend(1_u32.to_le_bytes());
     bytes.push(0x40);
-    bytes.extend([0, 0]);
+    if footer_bytes == 0 {
+        bytes.extend([0, 0]);
+    } else {
+        bytes.extend([0, 1]);
+        bytes.extend(22_u64.to_le_bytes());
+        bytes.resize(bytes.len() + footer_bytes, 0xa5);
+    }
     fs::write(&pgen, bytes).unwrap();
     Fixture {
         _temp: temp,
@@ -1105,6 +1116,43 @@ async fn remote_sparse_scan_uses_bounded_pgen_ranges() {
     );
     assert_eq!(snapshot[GenotypeMetric::RangeRequests as usize].1, 1);
     assert_eq!(snapshot[GenotypeMetric::CoalescedRanges as usize].1, 1);
+}
+
+#[tokio::test]
+async fn empty_extension_footer_is_not_fetched_during_open() {
+    let fixture = empty_extension_fixture_with_footer(1024 * 1024);
+    let server = RangeServer::start(
+        fs::read(&fixture.pgen).unwrap(),
+        fs::read(&fixture.pvar).unwrap(),
+        fs::read(&fixture.psam).unwrap(),
+    );
+    let provider = PgenTableProvider::try_new(server.url("cohort.pgen"), Default::default())
+        .await
+        .unwrap();
+    let context = context(1);
+    provider
+        .scan(&context.state(), None, &[], None)
+        .await
+        .unwrap();
+    let requests = server.get_requests("cohort.pgen");
+    assert!(
+        requests.iter().all(|request| {
+            request
+                .range
+                .is_some_and(|(_, inclusive_end)| inclusive_end < 22)
+        }),
+        "empty-file header reads must stop before the footer: {requests:?}"
+    );
+    let requested_bytes = requests
+        .iter()
+        .map(|request| {
+            request
+                .range
+                .map(|(start, end)| (end - start + 1) as u64)
+                .unwrap_or(0)
+        })
+        .sum::<u64>();
+    assert_eq!(requested_bytes, 37);
 }
 
 #[tokio::test]
