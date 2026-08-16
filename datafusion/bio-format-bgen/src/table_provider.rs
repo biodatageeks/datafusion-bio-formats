@@ -614,6 +614,20 @@ pub(crate) struct ProbeShape {
 /// the probe plus the catalog at no I/O cost. A sample that turns out to store
 /// more than this is rejected during the scan rather than silently truncated.
 ///
+/// # Assumption
+///
+/// Ploidy and phasing are taken from variant 0 and applied to every variant.
+/// The format permits both to vary per variant, and even per sample within a
+/// variant, so a file whose later variants are more ploid than its first — a
+/// diploid autosome followed by a triploid call, say — derives a width too
+/// narrow for them. That does not corrupt output: the scan rejects a sample
+/// storing more states than the schema declares, naming the variant. Only the
+/// allele count, which the catalog holds for every variant, widens the estimate
+/// here; ploidy cannot, because it is inside the payload.
+///
+/// The remedy for such a file is [`BgenProbabilityLayout::Nested`], which needs
+/// no single width.
+///
 /// The derived width is checked against `max_states_per_sample` here rather than
 /// only per decoded variant. Every emitted sample is padded to this width, so a
 /// query filtered to the narrow variants of a file that also holds a very wide

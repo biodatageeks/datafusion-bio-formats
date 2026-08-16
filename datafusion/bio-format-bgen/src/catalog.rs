@@ -42,6 +42,11 @@ const BLOCK_FRAMING_BYTES: u64 = 8;
 /// what a malformed record can make the reader download.
 const COMPRESSION_EXPANSION_DIVISOR: u64 = 16;
 const COMPRESSION_EXPANSION_BYTES: u64 = 1024;
+/// Fewest alleles a variant can declare.
+///
+/// Probability states are counts over a variant's alleles, so one allele yields
+/// a single state per sample and encodes no genotype at all.
+const MIN_ALLELES: usize = 2;
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenVariant {
@@ -407,13 +412,13 @@ pub(crate) fn catalog_from_index(
                     &format!("invalid one-based position {}: {error}", row.position),
                 )
             })?;
-        if row.allele_count == 0 || row.allele_count > options.max_alleles {
+        if row.allele_count < MIN_ALLELES || row.allele_count > options.max_alleles {
             return Err(catalog_error(
                 path,
                 index,
                 row.record_offset,
                 &format!(
-                    "allele count {} is outside supported range 1..={}",
+                    "allele count {} is outside supported range {MIN_ALLELES}..={}",
                     row.allele_count, options.max_alleles
                 ),
             ));
@@ -570,13 +575,18 @@ fn parse_variant(
         BgenLayout::Layout1 => 2,
         BgenLayout::Layout2 => cursor.u16()? as usize,
     };
-    if allele_count == 0 || allele_count > options.max_alleles {
+    // A variant needs two alleles for its probabilities to mean anything: the
+    // states are counts over the alleles, so a single-allele variant encodes one
+    // state per sample carrying no genotype. Layout 1 fixes the count at two;
+    // Layout 2 reads it from the record, so a malformed one is rejected here
+    // rather than decoded into a column of degenerate values.
+    if allele_count < MIN_ALLELES || allele_count > options.max_alleles {
         return Err(ParseVariantError::Invalid(catalog_error(
             path,
             index,
             record_offset,
             &format!(
-                "allele count {allele_count} is outside supported range 1..={}",
+                "allele count {allele_count} is outside supported range {MIN_ALLELES}..={}",
                 options.max_alleles
             ),
         )));

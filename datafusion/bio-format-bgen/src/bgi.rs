@@ -6,6 +6,7 @@ use datafusion::common::{DataFusionError, Result, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator, expr::InList};
 use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion, sanitize_location};
 use datafusion_bio_format_core::genotype::CoordinateSystem;
+use log::debug;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 use tokio::io::AsyncWriteExt;
@@ -768,10 +769,19 @@ async fn evict_cache_entries(
         if total.saturating_add(incoming) <= limit {
             break;
         }
-        tokio::fs::remove_file(&path)
-            .await
-            .map_err(|error| index_error("BGI cache", &format!("evict cache entry: {error}")))?;
-        total = total.saturating_sub(size);
+        // An entry another provider still holds open cannot be removed on
+        // Windows, which locks open files, and a shared cache is exactly where
+        // that happens. Failing the open over it would make an unrelated
+        // concurrent reader break this one, so an entry that will not go is
+        // left in place and its bytes stay counted; the shortfall is reported
+        // below only if the cache genuinely cannot fit the incoming index.
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => total = total.saturating_sub(size),
+            Err(error) => debug!(
+                "BGI cache: leaving {} in place: {error}",
+                sanitize_location(&path.to_string_lossy())
+            ),
+        }
     }
     if total.saturating_add(incoming) > limit {
         return Err(index_error(

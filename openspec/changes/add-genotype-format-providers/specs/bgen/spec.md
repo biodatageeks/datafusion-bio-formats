@@ -84,9 +84,11 @@ as `rsid`, chromosome, site coordinates, and all encoded alleles in ordered
 - **AND** allele indices are documented as zero-based positions in `alleles`.
 
 #### Scenario: Invalid allele count or length
-- **WHEN** a variant declares zero alleles, an unsupported allele count, or a
-  string length beyond configured limits
-- **THEN** decoding fails with variant byte-offset context.
+- **WHEN** a variant declares fewer than two alleles, an allele count beyond the
+  configured maximum, or a string length beyond configured limits
+- **THEN** decoding fails with variant byte-offset context
+- **AND** the two-allele floor applies because probability states are counts
+  over a variant's alleles, so a single-allele variant encodes no genotype.
 
 ### Requirement: Layout 2 Probability Decode
 

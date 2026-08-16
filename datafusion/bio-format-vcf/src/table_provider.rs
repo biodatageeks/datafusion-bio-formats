@@ -49,22 +49,6 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-/// Determines the Arrow schema for a VCF file by reading its header.
-///
-/// This function extracts VCF header information and stores it in Arrow schema metadata
-/// for round-trip preservation:
-/// - Schema-level metadata: file format, filters, contigs, ALT alleles, sample names (as JSON)
-/// - Field-level metadata: INFO/FORMAT field descriptions, types, and numbers using `bio.vcf.field.*` keys
-/// - Coordinate system metadata: `bio.coordinate_system_zero_based`
-///
-/// # Arguments
-///
-/// * `file_path` - Path to the VCF file
-/// * `info_fields` - Optional list of INFO fields to include (if None, all are included)
-/// * `format_fields` - Optional list of FORMAT fields to include (if None, all are included)
-/// * `object_storage_options` - Configuration for cloud storage access
-/// * `coordinate_system_zero_based` - If true, coordinates are 0-based half-open; if false, 1-based closed
-///
 /// Resolves the subset of sample names to include in output.
 ///
 /// Matching is exact and case-sensitive. The returned order follows

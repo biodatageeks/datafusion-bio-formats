@@ -281,9 +281,18 @@ fn validate_version(version: (u8, u8)) -> Result<()> {
         Ok(())
     } else {
         Err(DataFusionError::Plan(format!(
-            "unsupported BCF version {}.{}; expected 2.2; transcode the input first (for \
-             example, with `bcftools view -Ob input.bcf -o output.bcf`)",
-            version.0, version.1
+            "unsupported BCF version {}.{}; only BCF 2.2 is read{}; transcode the input \
+             first (for example, with `bcftools view -Ob input.bcf -o output.bcf`)",
+            version.0,
+            version.1,
+            // BCF 2.1 is the version still found in older archives, and it is
+            // the one a reader is most likely to be handed, so say plainly that
+            // it is not read rather than leaving "expected 2.2" to imply it.
+            if version == (2, 1) {
+                " — BCF 2.1 is not"
+            } else {
+                ""
+            }
         )))
     }
 }

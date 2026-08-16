@@ -72,14 +72,23 @@ impl CompressionType {
     ///
     /// # Panics
     ///
-    /// Panics if the compression type string is not recognized
+    /// Panics if the compression type string is not recognized. Prefer
+    /// [`Self::try_from_string`] for anything derived from user input.
     pub fn from_string(compression_type: String) -> Self {
+        match Self::try_from_string(&compression_type) {
+            Some(parsed) => parsed,
+            None => panic!("Invalid compression type: {compression_type}"),
+        }
+    }
+
+    /// Creates a CompressionType from a string, or `None` if unrecognized.
+    pub fn try_from_string(compression_type: &str) -> Option<Self> {
         match compression_type.to_lowercase().as_str() {
-            "gz" => CompressionType::GZIP,
-            "bgz" => CompressionType::BGZF,
-            "none" => CompressionType::NONE,
-            "auto" => CompressionType::AUTO,
-            _ => panic!("Invalid compression type: {compression_type}"),
+            "gz" => Some(CompressionType::GZIP),
+            "bgz" => Some(CompressionType::BGZF),
+            "none" => Some(CompressionType::NONE),
+            "auto" => Some(CompressionType::AUTO),
+            _ => None,
         }
     }
 }
@@ -121,16 +130,24 @@ impl StorageType {
     ///
     /// # Panics
     ///
-    /// Panics if the storage type prefix is not recognized
+    /// Panics if the storage type prefix is not recognized. Prefer
+    /// [`Self::try_from_prefix`] for anything derived from user input.
     pub fn from_prefix(object_storage_type: String) -> Self {
+        match Self::try_from_prefix(&object_storage_type) {
+            Some(parsed) => parsed,
+            None => panic!("Invalid object storage type: {object_storage_type}"),
+        }
+    }
+
+    /// Creates a StorageType from a URL prefix, or `None` if unrecognized.
+    pub fn try_from_prefix(object_storage_type: &str) -> Option<Self> {
         match object_storage_type.to_lowercase().as_str() {
-            "gs" => StorageType::GCS,
-            "s3" => StorageType::S3,
-            "abfs" => StorageType::AZBLOB,
-            "local" => StorageType::LOCAL,
-            "file" => StorageType::LOCAL,
-            "http" | "https" => StorageType::HTTP,
-            _ => panic!("Invalid object storage type"),
+            "gs" => Some(StorageType::GCS),
+            "s3" => Some(StorageType::S3),
+            "abfs" => Some(StorageType::AZBLOB),
+            "local" | "file" => Some(StorageType::LOCAL),
+            "http" | "https" => Some(StorageType::HTTP),
+            _ => None,
         }
     }
 }
@@ -221,17 +238,37 @@ pub async fn get_compression_type(
                                 break;
                             }
                         }
-                        Err(_) => {
-                            // If we get an error but have some data, use what we have
-                            break;
+                        // A failed read is not an absence of compression. Using
+                        // the bytes that did arrive would guess from a truncated
+                        // magic number and hand the caller a plain reader for a
+                        // BGZF file, which fails later and further away.
+                        Err(error) => {
+                            return Err(opendal::Error::new(
+                                opendal::ErrorKind::Unexpected,
+                                format!(
+                                    "cannot read {} to detect its compression",
+                                    sanitize_location(&file_path)
+                                ),
+                            )
+                            .set_source(error));
                         }
                     }
                 }
                 buffer
             }
-            Err(e) => {
-                log::error!("Failed to get remote stream for compression detection: {e}");
-                return Ok(CompressionType::NONE);
+            // Reporting an unreadable object as uncompressed sends the caller on
+            // to open it as plain text, so the real failure — a bad credential,
+            // a missing object — surfaces later as a parse error against the
+            // wrong reader. The local path already propagates this.
+            Err(error) => {
+                return Err(opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    format!(
+                        "cannot open {} to detect its compression",
+                        sanitize_location(&file_path)
+                    ),
+                )
+                .set_source(error));
             }
         }
     };
@@ -407,7 +444,11 @@ pub fn get_storage_type(file_path: String) -> StorageType {
         {
             StorageType::AZBLOB
         }
-        Some(prefix) => StorageType::from_prefix(prefix.to_string()),
+        // A path this crate does not recognize is treated as a local one, so an
+        // unsupported scheme surfaces as a normal "cannot open" error naming the
+        // path. Panicking here would take the process down over a string a user
+        // typed into a query.
+        Some(prefix) => StorageType::try_from_prefix(prefix).unwrap_or(StorageType::LOCAL),
         None => StorageType::LOCAL,
     }
 }

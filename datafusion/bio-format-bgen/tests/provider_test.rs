@@ -1190,6 +1190,40 @@ async fn resolving_metadata_does_not_bridge_genotype_payloads() {
 const METADATA_PROBE_BYTES: u64 = 4 * 1024;
 
 #[tokio::test]
+async fn a_layout2_variant_declaring_one_allele_is_rejected() {
+    // Probability states are counts over a variant's alleles, so a single-allele
+    // variant encodes one state per sample and carries no genotype. Layout 1
+    // fixes the count at two; Layout 2 reads it from the record, so a malformed
+    // one has to be rejected rather than decoded into degenerate values.
+    let single_allele = vec![Variant {
+        id: "v1",
+        rsid: "rs1",
+        chrom: "1",
+        position: 10,
+        alleles: vec!["A"],
+        phased: false,
+        bits: 8,
+        samples: vec![
+            sample(2, false, &[255]),
+            sample(2, false, &[0]),
+            sample(2, true, &[0]),
+        ],
+    }];
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("cohort.bgen");
+    fs::write(&bgen, encode_layout2(Codec::None, true, &single_allele).0).unwrap();
+
+    let error = BgenTableProvider::try_new(path(&bgen), BgenReadOptions::default())
+        .await
+        .expect_err("a one-allele Layout 2 variant must be rejected")
+        .to_string();
+    assert!(
+        error.contains("allele count 1 is outside supported range 2..="),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn planning_reads_each_record_once_when_a_query_filters_and_projects_it() {
     // A query that both filters on `id` and projects a variant column resolves
     // records twice over: once to filter the candidates exactly, once to supply
