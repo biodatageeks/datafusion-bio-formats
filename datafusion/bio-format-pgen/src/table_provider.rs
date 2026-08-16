@@ -220,15 +220,11 @@ impl TableProvider for PgenTableProvider {
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
+        let exact_filter_rejections = (self.fileset.variants.len() - selected.len()) as u64;
         if can_push_limit_below_filters(&guarantees)
             && let Some(limit) = limit
         {
             selected.truncate(limit);
-        }
-        if selected.is_empty() {
-            return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
-                schema,
-            )));
         }
 
         let genotype_projected = schema.index_of("genotypes").is_ok();
@@ -236,7 +232,14 @@ impl TableProvider for PgenTableProvider {
             && !self.genotype_fields.is_empty()
             && !self.fileset.selected_samples.is_empty();
         let selected = Arc::new(selected);
-        let partitions = if needs_payload {
+        let partitions = if selected.is_empty() {
+            vec![PgenPartition {
+                selection: selected.clone(),
+                owned: 0..0,
+                dependencies: Vec::new(),
+                ranges: Vec::new(),
+            }]
+        } else if needs_payload {
             plan_payload_partitions(
                 selected.clone(),
                 &self.fileset,
@@ -267,6 +270,10 @@ impl TableProvider for PgenTableProvider {
             self.fileset.variants.len() as u64,
         );
         metrics.add(GenotypeMetric::SelectedVariants, selected.len() as u64);
+        metrics.add(
+            GenotypeMetric::ExactFilterRejections,
+            exact_filter_rejections,
+        );
         metrics.add(
             GenotypeMetric::SamplesRequested,
             self.fileset.selected_samples.source_indices().len() as u64,

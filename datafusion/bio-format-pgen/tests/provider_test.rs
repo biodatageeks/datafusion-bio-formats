@@ -815,6 +815,10 @@ async fn applies_exact_pvar_pushdowns_limits_and_metadata_projection() {
         2
     );
     assert_eq!(
+        exec.metrics_snapshot()[GenotypeMetric::ExactFilterRejections as usize].1,
+        1
+    );
+    assert_eq!(
         exec.metrics_snapshot()[GenotypeMetric::RangeRequests as usize].1,
         0
     );
@@ -846,6 +850,31 @@ async fn applies_exact_pvar_pushdowns_limits_and_metadata_projection() {
     assert_eq!(
         count_exec.metrics_snapshot()[GenotypeMetric::RangeRequests as usize].1,
         0
+    );
+    assert_eq!(
+        count_exec.metrics_snapshot()[GenotypeMetric::ExactFilterRejections as usize].1,
+        7
+    );
+
+    let rejected_plan = provider
+        .scan(
+            &state,
+            Some(&Vec::new()),
+            &[col("id").eq(lit("absent"))],
+            None,
+        )
+        .await
+        .unwrap();
+    let rejected_exec = rejected_plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    assert!(
+        collect(rejected_plan.clone(), context.task_ctx())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        rejected_exec.metrics_snapshot()[GenotypeMetric::ExactFilterRejections as usize].1,
+        9
     );
 }
 
@@ -1022,6 +1051,20 @@ async fn rejects_malformed_indexes_records_and_unsupported_multiallelic_dosage()
             .await
             .is_err()
     );
+
+    let fixture = variable_fixture(0x20, &[0x00], &[pack_codes(&[0, 1, 2, 3])], &[2]);
+    let pgi = fixture.pgen.with_extension("pgen.pgi");
+    let mut index_bytes = fs::read(&pgi).unwrap();
+    index_bytes[12..20].copy_from_slice(&4_u64.to_le_bytes());
+    fs::write(&pgi, index_bytes).unwrap();
+    let mut primary_bytes = fs::read(&fixture.pgen).unwrap();
+    primary_bytes.insert(3, 0);
+    fs::write(&fixture.pgen, primary_bytes).unwrap();
+    let error = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("must start at byte 3"), "{error}");
 
     let fixture = variable_fixture(0x10, &[0x00], &[vec![0]], &[2]);
     let mut bytes = fs::read(&fixture.pgen).unwrap();

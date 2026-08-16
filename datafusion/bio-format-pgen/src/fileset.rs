@@ -1066,10 +1066,18 @@ async fn parse_index(
     let block_offsets = (0..block_count)
         .map(|index| read_le(&body, 12 + index * 8, 8))
         .collect::<Result<Vec<_>>>()?;
-    if variant_count > 0 && block_offsets.first().copied().unwrap_or(0) < 3 {
-        return Err(DataFusionError::Plan(
-            "PGEN first variant block starts inside the file magic".to_string(),
-        ));
+    if variant_count > 0 {
+        let first_offset = block_offsets.first().copied().unwrap_or(0);
+        if external.is_some() && first_offset != 3 {
+            return Err(DataFusionError::Plan(format!(
+                "external-index PGEN variant data must start at byte 3, observed {first_offset}"
+            )));
+        }
+        if first_offset < 3 {
+            return Err(DataFusionError::Plan(
+                "PGEN first variant block starts inside the file magic".to_string(),
+            ));
+        }
     }
 
     let mut cursor = 12 + offsets_bytes;

@@ -66,6 +66,11 @@ length and record order.
 - **WHEN** an index offset is out of bounds or not monotonic where required
 - **THEN** the fileset is rejected with index and variant context.
 
+#### Scenario: External-index data boundary
+- **WHEN** an external PGI declares a nonempty primary PGEN's first record
+  offset
+- **THEN** that offset is exactly byte 3, immediately after the primary magic.
+
 ### Requirement: PVAR Variant Semantics
 
 The system SHALL expose PVAR chromosome, site coordinates, variant ID,
@@ -311,6 +316,11 @@ predicates exactly against PVAR before PGEN payload planning.
 - **WHEN** a safe limit follows only exact PVAR predicates
 - **THEN** owned output record planning may stop after the required matches
 - **AND** required LD preludes are still included.
+
+#### Scenario: Exact PVAR rejection metric
+- **WHEN** exact PVAR predicates reject some or all catalog rows
+- **THEN** `ExactFilterRejections` reports the rejected count before any safe
+  limit truncation.
 
 ### Requirement: PGEN Projection And Sample Pushdown
 
