@@ -264,7 +264,8 @@ impl BgenTableProvider {
         // duplicate the index, and since metadata and genotype payloads are
         // interleaved, the walk pulls the payloads with it — so opening a table
         // could download the whole file before a single query ran.
-        let mut bgi = open_optional_bgi(&path, &source, &header, &options).await?;
+        let (mut bgi, mut discarded_index_cost) =
+            open_optional_bgi(&path, &source, &header, &options).await?;
         // Building the catalog validates the index's rows one by one — their
         // coordinates, allele counts and record ranges — and that happens after
         // the index has been opened. A discovered index whose rows turn out to
@@ -276,7 +277,6 @@ impl BgenTableProvider {
         // so pushing predicates through it against a walked catalog would
         // resolve to the wrong variants.
         let mut catalog = None;
-        let mut discarded_index_cost = IndexReadCost::default();
         if let Some(index) = &bgi {
             // No bytes of the object go into building this catalog: the index
             // supplied it, and the prefix its identity check read is already

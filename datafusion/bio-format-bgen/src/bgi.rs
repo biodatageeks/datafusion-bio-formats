@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use crate::catalog::IndexedVariant;
 use crate::header::BgenHeader;
 use crate::source::ObjectAccess;
-use crate::table_provider::{BgenReadOptions, StaleBgiPolicy};
+use crate::table_provider::{BgenReadOptions, IndexReadCost, StaleBgiPolicy};
 
 static CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -129,12 +129,18 @@ struct BgiRow {
     size: u64,
 }
 
+/// Opens the index a BGEN object should use, if there is a usable one.
+///
+/// Returns the index alongside what a *rejected* index cost: an index that was
+/// read and then found stale is dropped, but its bytes were still fetched, and a
+/// scan that omits them reports less I/O than it performed. The cost is zero
+/// when an index is returned, because the index carries its own.
 pub(crate) async fn open_optional_bgi(
     primary_path: &str,
     primary_source: &ObjectAccess,
     header: &BgenHeader,
     options: &BgenReadOptions,
-) -> Result<Option<BgiIndex>> {
+) -> Result<(Option<BgiIndex>, IndexReadCost)> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
     let bgi_path = resolve_companion(
         primary_path,
@@ -149,14 +155,29 @@ pub(crate) async fn open_optional_bgi(
     )
     .await?;
     let Some(bgi_path) = bgi_path else {
-        return Ok(None);
+        return Ok((None, IndexReadCost::default()));
     };
 
     let explicit = options.bgi_path.is_some();
-    let result = open_and_validate(primary_path, primary_source, &bgi_path, header, options).await;
+    let mut cost = IndexReadCost::default();
+    let result = open_and_validate(
+        primary_path,
+        primary_source,
+        &bgi_path,
+        header,
+        options,
+        &mut cost,
+    )
+    .await;
     match result {
-        Ok(index) => Ok(Some(index)),
-        Err(_) if !explicit && options.stale_bgi_policy == StaleBgiPolicy::Ignore => Ok(None),
+        Ok(index) => Ok((Some(index), IndexReadCost::default())),
+        Err(error) if !explicit && options.stale_bgi_policy == StaleBgiPolicy::Ignore => {
+            debug!(
+                "BGI {}: ignoring a stale index: {error}",
+                sanitize_location(&bgi_path)
+            );
+            Ok((None, cost))
+        }
         Err(error) => Err(error),
     }
 }
@@ -167,6 +188,7 @@ async fn open_and_validate(
     bgi_path: &str,
     header: &BgenHeader,
     options: &BgenReadOptions,
+    cost: &mut IndexReadCost,
 ) -> Result<BgiIndex> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
     let bgi_source = ObjectAccess::open(bgi_path, &storage_options).await?;
@@ -209,6 +231,9 @@ async fn open_and_validate(
         .await?
     };
 
+    // The index is in hand from here, so its bytes are spent whether or not it
+    // survives validation.
+    cost.companion_bytes = bgi_size;
     // Validation runs through the connection opened under the cache lease, so an
     // entry evicted by a concurrent provider cannot make it fail on a path that
     // no longer exists.
@@ -230,6 +255,7 @@ async fn open_and_validate(
         &metadata,
         &rows,
         bgi_path,
+        cost,
     )
     .await?;
 
@@ -562,6 +588,7 @@ async fn validate_identity(
     metadata: &BgiMetadata,
     rows: &[BgiRow],
     bgi_path: &str,
+    cost: &mut IndexReadCost,
 ) -> Result<()> {
     if metadata.file_size != header.object_size {
         return Err(index_error(
@@ -576,6 +603,9 @@ async fn validate_identity(
     let primary_prefix = primary_source
         .read_range(primary_path, 0..identity_length)
         .await?;
+    // Read on the index's behalf, so it belongs to the index's cost whether or
+    // not the comparison below passes.
+    cost.primary_bytes = identity_length;
     if metadata.first_bytes != primary_prefix.as_ref() {
         return Err(index_error(
             bgi_path,

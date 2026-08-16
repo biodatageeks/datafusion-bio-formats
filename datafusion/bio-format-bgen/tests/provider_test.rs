@@ -1190,6 +1190,32 @@ async fn resolving_metadata_does_not_bridge_genotype_payloads() {
 const METADATA_PROBE_BYTES: u64 = 4 * 1024;
 
 #[tokio::test]
+async fn an_index_dropped_by_open_time_validation_still_reports_what_it_cost() {
+    // The same accounting applies wherever the index is dropped. Identity
+    // validation rejects it earlier than catalog construction does, but the
+    // index was equally read by then.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, true);
+
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .expect("a stale discovered index is ignored in favour of the walk");
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let metrics = exec.metrics_snapshot();
+    assert!(
+        metrics[GenotypeMetric::CompanionBytesRead as usize].1 > 0,
+        "the index was read before it was rejected: {metrics:?}"
+    );
+}
+
+#[tokio::test]
 async fn an_index_row_the_catalog_rejects_follows_the_stale_index_policy() {
     // Building the catalog from index rows validates them, and that validation
     // runs after the index has been opened — so a discovered index whose rows
