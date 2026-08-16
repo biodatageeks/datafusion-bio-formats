@@ -37,6 +37,25 @@ use crate::source::ObjectAccess;
 /// Schema metadata marking generated ordinal sample names.
 pub const BGEN_SAMPLE_NAMES_SYNTHETIC_KEY: &str = "bio.bgen.sample_names.synthetic";
 
+/// Coalesced payload ranges aimed at each partition.
+///
+/// Aiming for one range per partition cannot balance them, because a payload is
+/// indivisible: see [`plan_payload_partitions`]. Four bounds the error at about
+/// one range, a quarter of a partition's share, and costs at most four object
+/// reads per partition.
+const PAYLOAD_RANGES_PER_PARTITION: u64 = 4;
+
+/// Smallest range size the partition split will ask for.
+///
+/// Below this, splitting trades balance for object-store requests, which is a
+/// poor trade against remote storage: a small file scanned at a high partition
+/// count would otherwise be cut into ranges far under any sensible read size.
+/// Measured on a 4.9 MB slice at eight partitions, this floor keeps most of the
+/// available balance — 4.65x against 5.09x for a 128 KiB floor — at half the
+/// requests. An explicit `max_range_bytes` below this still wins, because the
+/// caller asked for it.
+const MIN_PAYLOAD_RANGE_BYTES: u64 = 256 * 1024;
+
 /// Genotype values emitted by the BGEN provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BgenOutputMode {
@@ -749,7 +768,15 @@ fn plan_payload_partitions(
         .collect::<Result<Vec<_>>>()?;
     // Bridging the metadata gaps between payloads would otherwise merge a whole
     // small file into one range and leave every partition but the first empty,
-    // so cap the coalesced size by an even split of the selected payload bytes.
+    // so cap the coalesced size by a split of the selected payload bytes.
+    //
+    // The cap aims for several ranges per partition rather than one. A payload
+    // is indivisible, so a cap of exactly one partition's share hands the scan
+    // `target_partitions + 1` chunks, and `target + 1` chunks never divide
+    // evenly into `target` partitions: one partition always takes two and
+    // becomes the bottleneck. Measured on a 4.9 MB slice, that capped the
+    // eight-partition speedup at 3.64x with the busiest partition holding 21.8%
+    // of the bytes against an ideal 12.5%.
     //
     // The split uses the requested partition count, while the plan ends up with
     // `min(target_partitions, coalesced.len())` partitions. Asking for many more
@@ -761,8 +788,23 @@ fn plan_payload_partitions(
         .iter()
         .map(|range| range.len())
         .fold(0, u64::saturating_add);
+    let partitions = target_partitions.max(1) as u64;
+    // A single-partition scan has no imbalance to correct, so splitting it finer
+    // would only add object-store round trips to a path that reads the whole
+    // selection sequentially anyway.
+    let chunks = if partitions > 1 {
+        partitions.saturating_mul(PAYLOAD_RANGES_PER_PARTITION)
+    } else {
+        1
+    };
+    // The floor must never cost a partition its work: a file smaller than the
+    // floor would otherwise coalesce into one range and leave every partition
+    // but the first empty, which is the collapse the cap exists to prevent. So
+    // the floor applies only up to one partition's share.
     let partition_cap = payload_bytes
-        .div_ceil(target_partitions.max(1) as u64)
+        .div_ceil(chunks)
+        .max(MIN_PAYLOAD_RANGE_BYTES)
+        .min(payload_bytes.div_ceil(partitions))
         .max(1);
     let coalesced = coalesce_byte_ranges(ranges, max_gap, max_range_bytes.min(partition_cap))?;
 
@@ -833,4 +875,162 @@ fn plan_metadata_partitions(selected: &[usize], target_partitions: usize) -> Vec
             ranges: Vec::new(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::BgenVariant;
+
+    /// A catalog of contiguous payloads whose sizes vary the way real ones do.
+    ///
+    /// Uniform sizes are degenerate here: they divide exactly into any partition
+    /// count, so every split looks perfect and the imbalance never appears.
+    fn contiguous_catalog(count: usize, payload_size: u64) -> BgenCatalog {
+        let mut offset = 0;
+        let variants = (0..count)
+            .map(|index| {
+                let payload_size = payload_size + (index as u64 * 37) % 100;
+                let payload_offset = offset;
+                offset += payload_size;
+                BgenVariant {
+                    index,
+                    id: None,
+                    rsid: None,
+                    chrom: "1".to_string(),
+                    start: index as u64,
+                    end: index as u64 + 1,
+                    position: index as u32 + 1,
+                    alleles: vec!["A".to_string(), "C".to_string()],
+                    record_offset: 0,
+                    record_size: 0,
+                    payload_offset,
+                    payload_size,
+                }
+            })
+            .collect::<Vec<_>>();
+        BgenCatalog {
+            variants: Arc::new(variants),
+            bytes_read: 0,
+        }
+    }
+
+    /// Share of the payload bytes held by the busiest partition.
+    fn heaviest_share(partitions: &[BgenPartition]) -> f64 {
+        let bytes: Vec<u64> = partitions
+            .iter()
+            .map(|partition| {
+                partition
+                    .ranges
+                    .iter()
+                    .map(|planned| planned.range.end - planned.range.start)
+                    .sum()
+            })
+            .collect();
+        let total: u64 = bytes.iter().sum();
+        bytes.iter().max().copied().unwrap_or(0) as f64 / total as f64
+    }
+
+    #[test]
+    fn payload_partitions_are_balanced() {
+        // A payload cannot be split across ranges, so capping a range at exactly
+        // one partition's byte share hands the scan `target + 1` indivisible
+        // chunks — and one partition always takes two of them. At two
+        // partitions that is an 87/13 split, which caps the speedup at 1.15x no
+        // matter how fast the decoder is.
+        // Aiming for `PAYLOAD_RANGES_PER_PARTITION` ranges per partition leaves
+        // the busiest one at most a single extra range, so its share stays near
+        // `(k + 1) / k` of a fair share. The bound below is that ratio with a
+        // little room; the failure it guards against is the old behaviour, where
+        // the busiest partition held 1.75x its share and up to 87% of the bytes.
+        let catalog = contiguous_catalog(1_000, 5_000);
+        let selected: Vec<usize> = (0..1_000).collect();
+        let tolerance =
+            (PAYLOAD_RANGES_PER_PARTITION as f64 + 1.0) / PAYLOAD_RANGES_PER_PARTITION as f64;
+        for target in [2_usize, 4, 8] {
+            let partitions =
+                plan_payload_partitions(&selected, &catalog, target, 64 * 1024, 16 * 1024 * 1024)
+                    .unwrap();
+            let share = heaviest_share(&partitions);
+            let fair = 1.0 / target as f64;
+            assert!(
+                share <= fair * tolerance + f64::EPSILON,
+                "target {target}: busiest partition holds {:.1}% of the payload bytes, \
+                 more than {:.1}% — {tolerance:.2}x its {:.1}% fair share",
+                share * 100.0,
+                fair * tolerance * 100.0,
+                fair * 100.0
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_below_the_range_floor_still_fills_its_partitions() {
+        // The floor stops the split asking for object reads far under a sensible
+        // size, but it must not do that by starving partitions: a file smaller
+        // than the floor would coalesce into a single range and leave every
+        // partition but the first empty, which is exactly the collapse the cap
+        // exists to prevent.
+        let payload_size = 200;
+        let count = 64;
+        let catalog = contiguous_catalog(count, payload_size);
+        assert!(
+            (count as u64) * payload_size < MIN_PAYLOAD_RANGE_BYTES,
+            "this fixture only tests the floor while it stays below it"
+        );
+        let selected: Vec<usize> = (0..count).collect();
+        for target in [2_usize, 4, 8] {
+            let partitions =
+                plan_payload_partitions(&selected, &catalog, target, 64 * 1024, 16 * 1024 * 1024)
+                    .unwrap();
+            assert_eq!(
+                partitions.len(),
+                target,
+                "a {} byte payload lost partitions to the floor at target {target}",
+                (count as u64) * payload_size
+            );
+        }
+    }
+
+    #[test]
+    fn the_range_floor_bounds_reads_once_partitions_are_fed() {
+        // Above the floor the split aims for PAYLOAD_RANGES_PER_PARTITION ranges
+        // per partition rather than splitting without bound, so a scan issues a
+        // handful of object reads per partition instead of one per payload.
+        let catalog = contiguous_catalog(25_000, 195);
+        let selected: Vec<usize> = (0..25_000).collect();
+        let partitions =
+            plan_payload_partitions(&selected, &catalog, 8, 64 * 1024, 16 * 1024 * 1024).unwrap();
+        let ranges: usize = partitions
+            .iter()
+            .map(|partition| partition.ranges.len())
+            .sum();
+        // 4.9 MB over eight partitions puts the 256 KiB floor in charge, so the
+        // plan lands near 19 ranges. The window allows for payload-size variance
+        // without being so wide that a regression could hide inside it.
+        assert!(
+            (10..=28).contains(&ranges),
+            "expected roughly 19 ranges for 8 partitions, got {ranges}"
+        );
+    }
+
+    #[test]
+    fn a_single_partition_scan_is_not_split_finer() {
+        // With one partition there is no imbalance to correct, so aiming for
+        // several ranges would only add object-store round trips to a path that
+        // reads its whole selection sequentially.
+        let catalog = contiguous_catalog(25_000, 195);
+        let selected: Vec<usize> = (0..25_000).collect();
+        let partitions =
+            plan_payload_partitions(&selected, &catalog, 1, 64 * 1024, 16 * 1024 * 1024).unwrap();
+        let ranges: usize = partitions
+            .iter()
+            .map(|partition| partition.ranges.len())
+            .sum();
+        assert_eq!(
+            ranges, 1,
+            "a 4.9 MB contiguous selection fits one coalesced range under the \
+             16 MiB limit, so a single-partition scan should issue one read"
+        );
+    }
 }
