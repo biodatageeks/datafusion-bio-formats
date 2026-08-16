@@ -518,6 +518,44 @@ fn decode_layout2_block(
             );
         }
     }
+    // Every sample can sit under `max_states_per_sample` while their sum still
+    // decodes to far more memory than the block itself occupies: one-bit
+    // precision expands each stored state into an f32, a 32-fold amplification,
+    // so a block inside `max_decompressed_block_bytes` can reconstruct into tens
+    // of gigabytes. The Arrow 32-bit offset check cannot stand in for this — it
+    // only fires after roughly eight gigabytes have already been written — and
+    // the batch byte limit is consulted between variants, not inside one. Bound
+    // the reconstruction here, before any of it is built.
+    if builds_states && options.output_mode == BgenOutputMode::Probability {
+        let total_states = match uniform_stride_bits {
+            Some(_) => (selected_samples.len() as u64)
+                .checked_mul(state_counts[min_ploidy as usize].1)
+                .ok_or_else(|| {
+                    execution_error(path, variant, "probability state count overflowed")
+                })?,
+            None => selected_samples.iter().try_fold(0_u64, |total, &sample| {
+                let ploidy = ploidy_bytes[sample] & 0x3f;
+                total
+                    .checked_add(state_counts[ploidy as usize].1)
+                    .ok_or_else(|| {
+                        execution_error(path, variant, "probability state count overflowed")
+                    })
+            })?,
+        };
+        let decoded_bytes = total_states.saturating_mul(size_of::<f32>() as u64);
+        if decoded_bytes > options.max_decompressed_block_bytes as u64 {
+            return Err(execution_error(
+                path,
+                variant,
+                &format!(
+                    "reconstructing {total_states} probability states for the selected samples \
+                     needs {decoded_bytes} bytes, exceeding max_decompressed_block_bytes {}",
+                    options.max_decompressed_block_bytes
+                ),
+            ));
+        }
+    }
+
     let total_bits = match uniform_stride_bits {
         Some(stride) => (sample_count as u64)
             .checked_mul(stride)

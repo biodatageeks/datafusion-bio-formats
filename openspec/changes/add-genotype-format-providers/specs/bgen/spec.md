@@ -349,6 +349,12 @@ compressed/decompressed work and coalesce only nearby bounded byte ranges.
   object read per variant
 - **AND** coalesced ranges stay small enough to fill the requested partitions.
 
+#### Scenario: Coalesced reads are attributed to the right counters
+- **WHEN** a coalesced range bridges the metadata between consecutive payloads
+- **THEN** every byte fetched is reported as primary bytes read
+- **AND** only the genotype payload bytes are reported as compressed bytes, so a
+  compression ratio derived from the counters is not skewed by bridged metadata.
+
 #### Scenario: Coalescing leaves partitions comparably loaded
 - **WHEN** payload ranges are coalesced for a scan with more than one partition
 - **THEN** a coalesced range covers at most a fraction of one partition's byte
@@ -388,6 +394,22 @@ BGEN readers within source quantization tolerance.
 #### Scenario: Decompression size limit
 - **WHEN** a block declares or expands beyond the configured hard limit
 - **THEN** decompression is aborted with a resource-limit error.
+
+#### Scenario: Reconstruction size limit
+- **WHEN** the probability states the selected samples of one variant would
+  reconstruct need more memory than the configured decompressed-block budget
+- **THEN** the variant is rejected before any of that reconstruction is built,
+  because low bit precision expands each stored state into a wider output value
+  and a block inside the limit can otherwise reconstruct into many times it
+- **AND** a per-sample state limit does not substitute for this, since every
+  sample may sit under it while their sum does not.
+
+#### Scenario: Metadata limit binds on parsed bytes
+- **WHEN** variant metadata exceeds the configured maximum but the read-ahead
+  buffer happens to hold it
+- **THEN** parsing is still rejected with a resource-limit error, because the
+  limit binds on the bytes handed to the parser rather than on the bytes
+  fetched.
 
 #### Scenario: Cross-tool probability fixture
 - **WHEN** a supported file is read by this provider and bgenix/qctool or an

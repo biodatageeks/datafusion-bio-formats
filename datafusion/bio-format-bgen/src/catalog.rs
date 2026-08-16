@@ -189,6 +189,12 @@ pub(crate) async fn build_transient_catalog(
             }
             let read_size = remaining.min(window_size as u64);
             let bytes = window.bytes_at(record_offset, window_size).await?;
+            // The window serves whatever its read-ahead buffer holds, which is
+            // up to METADATA_CHUNK_BYTES and unrelated to `window_size`. Parsing
+            // that whole buffer would let a record walk past
+            // `max_variant_metadata_bytes` without ever reporting `NeedMore`, so
+            // the doubling loop below — and with it the limit — would never run.
+            let bytes = &bytes[..bytes.len().min(window_size)];
             match parse_variant(path, index, record_offset, bytes, header, options) {
                 Ok(variant) => break variant,
                 Err(ParseVariantError::NeedMore) if read_size < remaining => {

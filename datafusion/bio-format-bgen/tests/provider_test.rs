@@ -1769,3 +1769,95 @@ fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, require
     );
     true
 }
+
+#[tokio::test]
+async fn the_metadata_limit_applies_inside_the_read_ahead_buffer() {
+    // The metadata window reads ahead a megabyte at a time and serves whatever
+    // it holds, so a record whose metadata exceeds max_variant_metadata_bytes
+    // but fits in that buffer would parse without the limit ever being
+    // consulted. The limit has to bind on the bytes handed to the parser, not
+    // on the bytes fetched.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            // Far below any real record, and far below the read-ahead buffer.
+            max_variant_metadata_bytes: 8,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a record larger than the metadata limit must be rejected")
+    .to_string();
+    assert!(error.contains("max_variant_metadata_bytes"), "{error}");
+}
+
+#[tokio::test]
+async fn compressed_bytes_counts_payloads_not_bridged_metadata() {
+    // A coalesced range bridges the metadata between consecutive payloads.
+    // Those bytes are downloaded, so they belong in PrimaryBytesRead, but they
+    // are not compressed genotype data and must not inflate CompressedBytes.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    let plan = provider
+        .scan(&context.state(), Some(&vec![8]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    // PrimaryBytesRead is already seeded with the header, catalog and probe
+    // reads at planning, so only its growth during execution is the coalesced
+    // range. Comparing against the total would pass even with the bug.
+    let planned = exec.metrics_snapshot()[GenotypeMetric::PrimaryBytesRead as usize].1;
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let snapshot = exec.metrics_snapshot();
+    let compressed = snapshot[GenotypeMetric::CompressedBytes as usize].1;
+    let range_bytes = snapshot[GenotypeMetric::PrimaryBytesRead as usize].1 - planned;
+    assert!(
+        range_bytes > 0,
+        "the scan should have read a coalesced range"
+    );
+    assert!(
+        compressed < range_bytes,
+        "compressed {compressed} must exclude the metadata bridged inside the \
+         {range_bytes}-byte coalesced range"
+    );
+}
+
+#[tokio::test]
+async fn a_variant_cannot_reconstruct_more_than_the_block_byte_budget() {
+    // Each sample can sit under max_states_per_sample while their sum decodes
+    // to far more memory than the block occupies, because low bit precision
+    // expands every stored state into an f32. The budget is checked before any
+    // of the reconstruction is built.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            // The fixture's largest decompressed block is 19 bytes, so this
+            // budget clears the existing block-size check; the reconstruction
+            // it implies — three samples of three to six states as f32 — does
+            // not fit, and only the new check can catch that.
+            max_decompressed_block_bytes: 24,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reconstructing") && error.contains("probability states"),
+        "the block-size check must not be what rejected this: {error}"
+    );
+}
