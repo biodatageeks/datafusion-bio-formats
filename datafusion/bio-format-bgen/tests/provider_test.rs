@@ -249,6 +249,16 @@ fn variants() -> Vec<Variant> {
     ]
 }
 
+/// A diploid biallelic sample whose stored probabilities vary with its index,
+/// so a wide cohort does not compress away to nothing.
+fn sample_probabilities(index: usize) -> SampleProbabilities {
+    SampleProbabilities {
+        ploidy: 2,
+        missing: false,
+        stored: vec![(index % 251) as u32, ((index * 7) % 251) as u32],
+    }
+}
+
 fn sample(ploidy: u8, missing: bool, stored: &[u32]) -> SampleProbabilities {
     SampleProbabilities {
         ploidy,
@@ -302,12 +312,20 @@ fn encode_layout2(
     embedded_samples: bool,
     variants: &[Variant],
 ) -> (Vec<u8>, Vec<IndexRow>) {
-    let names = ["s1", "s2", "s3"];
+    encode_layout2_with_samples(codec, embedded_samples, variants, &["s1", "s2", "s3"])
+}
+
+fn encode_layout2_with_samples(
+    codec: Codec,
+    embedded_samples: bool,
+    variants: &[Variant],
+    names: &[&str],
+) -> (Vec<u8>, Vec<IndexRow>) {
     let mut sample_block = Vec::new();
     if embedded_samples {
         sample_block.extend_from_slice(&0_u32.to_le_bytes());
         sample_block.extend_from_slice(&(names.len() as u32).to_le_bytes());
-        for name in names {
+        for name in names.iter() {
             put_string_u16(&mut sample_block, name);
         }
         let length = sample_block.len() as u32;
@@ -1086,6 +1104,92 @@ async fn verifying_index_records_catches_a_stale_row_that_pruning_would_hide() {
 }
 
 #[tokio::test]
+async fn resolving_metadata_does_not_bridge_genotype_payloads() {
+    // Resolving records reads a bounded prefix of each one. Coalescing those
+    // prefixes under the payload gap budget would merge them straight across the
+    // probability blocks in between, so a dense file would be downloaded almost
+    // whole to answer a metadata query — the very thing moving the index open
+    // ahead of the walk was meant to stop.
+    let samples: Vec<String> = (0..3_000).map(|index| format!("s{index}")).collect();
+    let names: Vec<&str> = samples.iter().map(String::as_str).collect();
+    let variants: Vec<Variant> = (0..8)
+        .map(|index| Variant {
+            id: Box::leak(format!("v{index}").into_boxed_str()),
+            rsid: Box::leak(format!("rs{index}").into_boxed_str()),
+            chrom: "1",
+            position: 10 + index as u32,
+            alleles: vec!["A", "C"],
+            phased: false,
+            bits: 8,
+            samples: (0..names.len()).map(sample_probabilities).collect(),
+        })
+        .collect();
+
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("cohort.bgen");
+    let bgi = dir.path().join("cohort.bgen.bgi");
+    let (bytes, rows) = encode_layout2_with_samples(Codec::None, true, &variants, &names);
+    fs::write(&bgen, bytes).unwrap();
+    let fixture = Fixture {
+        _dir: dir,
+        bgen,
+        bgi,
+        rows,
+    };
+    create_bgi(&fixture, false);
+    // Each record must be larger than the metadata probe, or there is no
+    // payload between the prefixes for coalescing to bridge.
+    assert!(
+        fixture.rows[0].size > 2 * METADATA_PROBE_BYTES,
+        "record size {} must exceed the probe",
+        fixture.rows[0].size
+    );
+
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let before = server.get_requests("cohort.bgen").len();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT chrom FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        variants.len()
+    );
+
+    let during = &server.get_requests("cohort.bgen")[before..];
+    for request in during {
+        let (start, end) = request.range.expect("metadata reads must be ranged");
+        let length = (end - start + 1) as u64;
+        assert!(
+            length <= 2 * METADATA_PROBE_BYTES,
+            "a metadata read of {length} bytes bridged a genotype payload: {during:?}"
+        );
+    }
+}
+
+/// Bytes of each record the metadata probe reads before widening.
+const METADATA_PROBE_BYTES: u64 = 4 * 1024;
+
+#[tokio::test]
 async fn planning_reads_each_record_once_when_a_query_filters_and_projects_it() {
     // A query that both filters on `id` and projects a variant column resolves
     // records twice over: once to filter the candidates exactly, once to supply
@@ -1140,17 +1244,9 @@ async fn metadata_longer_than_the_probe_still_resolves() {
     let fixture = fixture_with_variants(Codec::Zstd, true, &variants);
     create_bgi(&fixture, false);
 
-    // Without this the probe reads coalesce into one range that happens to
-    // cover the long record whole, and the widening loop is never entered.
-    let provider = BgenTableProvider::try_new(
-        path(&fixture.bgen),
-        BgenReadOptions {
-            max_range_gap: 0,
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
     let context = context(1024);
     context.register_table("b", Arc::new(provider)).unwrap();
     let batches = context

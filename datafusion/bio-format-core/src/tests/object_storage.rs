@@ -8,6 +8,39 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::NamedTempFile;
 
+/// Reads one complete HTTP request header from `stream`.
+///
+/// A TCP read is not an HTTP-message boundary, and a client can open a
+/// connection without completing a request on it. Returning `None` for anything
+/// incomplete lets a test server skip it; reading once and unwrapping instead
+/// fails under a loaded test run, taking the server thread and its `join` with
+/// it.
+fn read_http_request(stream: &mut std::net::TcpStream) -> Option<String> {
+    let mut buffer = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 1024];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return None,
+            Ok(size) if buffer.len() + size <= 8192 => {
+                buffer.extend_from_slice(&chunk[..size]);
+                if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                    return Some(String::from_utf8_lossy(&buffer).into_owned());
+                }
+            }
+            Ok(_) => return None,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return None;
+            }
+            Err(error) => panic!("HTTP test server failed to read request: {error}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_get_compression_type_gzip() {
     let mut file = NamedTempFile::new().unwrap();
@@ -72,9 +105,13 @@ async fn remote_http_object_supports_size_full_and_range_reads() {
                 Err(error) => panic!("HTTP test server failed: {error}"),
             };
 
-            let mut request = [0u8; 4096];
-            let size = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..size]);
+            // One read is not one HTTP request: see [`read_http_request`].
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let Some(request) = read_http_request(&mut stream) else {
+                continue;
+            };
             let is_head = request.starts_with("HEAD ");
             let range = request.lines().find_map(|line| {
                 line.strip_prefix("Range: bytes=")
@@ -155,9 +192,12 @@ async fn bounded_remote_range_stream_caps_each_request() {
                 Err(error) => panic!("HTTP test server failed: {error}"),
             };
 
-            let mut request = [0u8; 4096];
-            let size = stream.read(&mut request).unwrap();
-            let request = String::from_utf8_lossy(&request[..size]);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let Some(request) = read_http_request(&mut stream) else {
+                continue;
+            };
             assert!(request.starts_with("GET "));
             let (start, end) = request
                 .lines()

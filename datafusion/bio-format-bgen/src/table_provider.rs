@@ -1039,7 +1039,16 @@ async fn resolve_variant_metadata(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let coalesced = coalesce_byte_ranges(ranges, options.max_range_gap, options.max_range_bytes)?;
+    // Only touching prefixes are merged, never ones with a gap between them.
+    //
+    // `max_range_gap` is a budget for bridging the metadata that separates two
+    // genotype payloads, which is a few dozen bytes. Here the gaps are the
+    // payloads themselves, so spending that budget would merge straight across
+    // them and pull a dense file down almost whole to answer a metadata query —
+    // the same thing that made opening a table read the object. Records packed
+    // closer than the probe still coalesce, because then the bytes in between
+    // are ones the probe would have read anyway.
+    let coalesced = coalesce_byte_ranges(ranges, 0, options.max_range_bytes)?;
 
     // Both the coalesced ranges and the pending variants are in offset order, so
     // one cursor walks them together instead of rescanning the variants for

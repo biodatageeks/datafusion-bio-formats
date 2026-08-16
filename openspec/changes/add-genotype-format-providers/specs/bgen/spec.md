@@ -276,6 +276,19 @@ because standard BGI does not store the BGEN variant identifier.
 - **AND** a scan that reads payloads takes them from the records it already
   fetched, without an additional request.
 
+#### Scenario: Metadata reads do not bridge payloads
+- **WHEN** variant metadata is read for records separated by probability
+  payloads
+- **THEN** only touching metadata reads are coalesced, never ones with a payload
+  between them
+- **AND** the gap budget that bridges metadata between two payloads is not
+  applied, since here the gaps are the payloads themselves.
+
+#### Scenario: Records resolved once per query
+- **WHEN** a query both filters on and projects a field the index does not
+  record
+- **THEN** the records read to apply the filter supply the projection as well.
+
 #### Scenario: BGI filtered limit
 - **WHEN** an exact BGI predicate and safe limit are supplied
 - **THEN** block planning may stop after the required matching index rows.
