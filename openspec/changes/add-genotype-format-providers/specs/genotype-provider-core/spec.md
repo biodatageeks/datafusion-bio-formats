@@ -310,6 +310,11 @@ I/O, decompression, genotype decoding, and emitted rows.
 - **WHEN** a format partition reads internal dependency records
 - **THEN** metrics distinguish dependency reads from emitted variant rows.
 
+#### Scenario: Compressed companion input
+- **WHEN** a compressed companion object is fetched and decoded
+- **THEN** physical I/O metrics report the fetched compressed byte count
+- **AND** do not substitute the decoded in-memory size.
+
 ### Requirement: Contextual And Non-Lossy Errors
 
 The system SHALL distinguish malformed input, unsupported valid features,

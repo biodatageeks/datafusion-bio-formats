@@ -443,6 +443,11 @@ PLINK 2 for supported features.
 - **WHEN** a record ends during a varint, difflist, patch, or dosage track
 - **THEN** the stream fails with variant and byte-offset context.
 
+#### Scenario: Empty embedded extension-mode fileset
+- **WHEN** an embedded extension-mode PGEN declares zero variants
+- **THEN** the provider parses the header and footer extension-flag varints
+- **AND** validates that the declared data boundary follows those varints.
+
 #### Scenario: Differential fixture
 - **WHEN** a supported synthetic fileset is read by this provider and PLINK 2
   or external `pgenlib`

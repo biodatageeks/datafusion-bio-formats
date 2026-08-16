@@ -355,6 +355,25 @@ fn plink1_mode_fixture() -> Fixture {
     }
 }
 
+fn empty_extension_fixture() -> Fixture {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let pgen = root.join("cohort.pgen");
+    let (pvar, psam) = write_metadata(root, &[], 1);
+    let mut bytes = vec![0x6c, 0x1b, 0x11];
+    bytes.extend(0_u32.to_le_bytes());
+    bytes.extend(1_u32.to_le_bytes());
+    bytes.push(0x40);
+    bytes.extend([0, 0]);
+    fs::write(&pgen, bytes).unwrap();
+    Fixture {
+        _temp: temp,
+        pgen,
+        pvar,
+        psam,
+    }
+}
+
 fn variable_records() -> (Vec<u8>, Vec<Vec<u8>>, Vec<usize>) {
     let mut types = Vec::new();
     let mut records = Vec::new();
@@ -838,9 +857,11 @@ async fn reads_zstd_pvar_and_rejects_hybrid_or_inconsistent_filesets() {
     let fixture = fixed_fixture(2);
     let compressed =
         zstd::stream::encode_all(fs::read(&fixture.psam).unwrap().as_slice(), 1).unwrap();
+    let expected_companion_bytes =
+        fs::metadata(&fixture.pvar).unwrap().len() + compressed.len() as u64;
     let psam_zst = fixture.psam.with_extension("psam.zst");
-    fs::write(&psam_zst, compressed).unwrap();
-    PgenTableProvider::try_new(
+    fs::write(&psam_zst, &compressed).unwrap();
+    let provider = PgenTableProvider::try_new(
         path(&fixture.pgen),
         PgenReadOptions {
             psam_path: Some(path(&psam_zst)),
@@ -849,6 +870,21 @@ async fn reads_zstd_pvar_and_rejects_hybrid_or_inconsistent_filesets() {
     )
     .await
     .unwrap();
+    let metric_context = context(1);
+    let plan = provider
+        .scan(&metric_context.state(), None, &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    assert_eq!(
+        exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1,
+        expected_companion_bytes
+    );
+
+    let fixture = empty_extension_fixture();
+    PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap();
 
     let fixture = fixed_fixture(2);
     fs::write(&fixture.psam, "#IID\ns1\n").unwrap();
