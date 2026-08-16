@@ -196,7 +196,8 @@ pub(crate) async fn build_transient_catalog(
                 ));
             }
             let read_size = remaining.min(window_size as u64);
-            let bytes = window.bytes_at(record_offset, window_size).await?;
+            let visible = window_size.saturating_add(PAYLOAD_FRAMING_BYTES);
+            let bytes = window.bytes_at(record_offset, visible).await?;
             // The window serves whatever its read-ahead buffer holds, which is
             // up to METADATA_CHUNK_BYTES and unrelated to `window_size`. Parsing
             // that whole buffer would let a record walk past
@@ -207,7 +208,6 @@ pub(crate) async fn build_transient_catalog(
             // payload, not to it, so it stays available: truncating to exactly
             // the metadata allowance would reject a record whose metadata ends
             // within four bytes of the limit without having exceeded it.
-            let visible = window_size.saturating_add(PAYLOAD_FRAMING_BYTES);
             let bytes = &bytes[..bytes.len().min(visible)];
             match parse_variant(path, index, record_offset, bytes, header, options) {
                 Ok(variant) => {
