@@ -789,7 +789,14 @@ fn plan_payload_partitions(
         .map(|range| range.len())
         .fold(0, u64::saturating_add);
     let partitions = target_partitions.max(1) as u64;
-    let chunks = partitions.saturating_mul(PAYLOAD_RANGES_PER_PARTITION);
+    // A single-partition scan has no imbalance to correct, so splitting it finer
+    // would only add object-store round trips to a path that reads the whole
+    // selection sequentially anyway.
+    let chunks = if partitions > 1 {
+        partitions.saturating_mul(PAYLOAD_RANGES_PER_PARTITION)
+    } else {
+        1
+    };
     // The floor must never cost a partition its work: a file smaller than the
     // floor would otherwise coalesce into one range and leave every partition
     // but the first empty, which is the collapse the cap exists to prevent. So
@@ -998,10 +1005,32 @@ mod tests {
             .iter()
             .map(|partition| partition.ranges.len())
             .sum();
+        // 4.9 MB over eight partitions puts the 256 KiB floor in charge, so the
+        // plan lands near 19 ranges. The window allows for payload-size variance
+        // without being so wide that a regression could hide inside it.
         assert!(
-            (8..=8 * PAYLOAD_RANGES_PER_PARTITION as usize + 8).contains(&ranges),
-            "expected roughly {} ranges for 8 partitions, got {ranges}",
-            8 * PAYLOAD_RANGES_PER_PARTITION
+            (10..=28).contains(&ranges),
+            "expected roughly 19 ranges for 8 partitions, got {ranges}"
+        );
+    }
+
+    #[test]
+    fn a_single_partition_scan_is_not_split_finer() {
+        // With one partition there is no imbalance to correct, so aiming for
+        // several ranges would only add object-store round trips to a path that
+        // reads its whole selection sequentially.
+        let catalog = contiguous_catalog(25_000, 195);
+        let selected: Vec<usize> = (0..25_000).collect();
+        let partitions =
+            plan_payload_partitions(&selected, &catalog, 1, 64 * 1024, 16 * 1024 * 1024).unwrap();
+        let ranges: usize = partitions
+            .iter()
+            .map(|partition| partition.ranges.len())
+            .sum();
+        assert_eq!(
+            ranges, 1,
+            "a 4.9 MB contiguous selection fits one coalesced range under the \
+             16 MiB limit, so a single-partition scan should issue one read"
         );
     }
 }

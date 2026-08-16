@@ -27,6 +27,10 @@ Aim for `PAYLOAD_RANGES_PER_PARTITION = 4` ranges per partition instead of one,
 so the busiest partition carries at most one extra range — `(k + 1) / k`, a 1.25x
 share rather than 1.74x.
 
+The multi-range target applies only above one partition. A single-partition scan
+has no imbalance to correct, so splitting it would only add object-store round
+trips to a path that reads its selection sequentially.
+
 `MIN_PAYLOAD_RANGE_BYTES = 256 KiB` stops the split asking for object reads far
 under a useful size. It is capped at one partition's share so it can never
 starve a partition: a file smaller than the floor is still divided across the
@@ -58,7 +62,7 @@ Rust scan, `chr22.first-25000.unphased.bgen`, probability output, fixed layout:
 
 | Partitions | Before | After | Speedup before | Speedup after |
 | --- | --- | --- | --- | --- |
-| 1 | 743.97 ms | 755.58 ms | 1.00x | 1.00x |
+| 1 | 743.97 ms | 759.53 ms | 1.00x | 1.00x |
 | 2 | 641.80 ms | **437.36 ms** | 1.16x | **1.73x** |
 | 4 | 354.23 ms | **235.96 ms** | 2.10x | **3.20x** |
 | 8 | 204.37 ms | **163.09 ms** | 3.64x | **4.63x** |
@@ -67,7 +71,12 @@ Dosage on the same file improves in step: 157.76 ms to 132.82 ms at eight
 partitions, a 4.54x speedup against 3.75x. The phased fixture's fixed-layout
 probability read goes from 222.67 ms to 167.94 ms.
 
-One partition is unchanged, which is the point: this is balance, not throughput.
+One partition plans identically before and after — a single partition has no
+imbalance to correct, so it keeps one coalesced range, and
+`a_single_partition_scan_is_not_split_finer` asserts it. The couple of percent
+between the two one-partition figures is cross-session drift, not the split.
+That the gains are confined to multi-partition scans is the point: this is
+balance, not throughput.
 
 ## Cost
 
