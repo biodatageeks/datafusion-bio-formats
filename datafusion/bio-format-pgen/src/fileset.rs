@@ -170,10 +170,15 @@ impl PgenFileset {
             )));
         }
 
-        let psam_bytes = ObjectAccess::open(&psam_path, &storage_options)
+        let psam_raw = ObjectAccess::open(&psam_path, &storage_options)
             .await?
             .read_all_bounded(&psam_path, options.max_companion_bytes)
             .await?;
+        let psam_bytes = decode_text_companion(
+            &psam_path,
+            &psam_raw,
+            options.max_decompressed_companion_bytes,
+        )?;
         let identities = parse_psam(&psam_path, &psam_bytes, options.max_samples)?;
         let source_names = sample_names(&identities, options.psam_id_mode);
         let selected_samples = resolve_samples(
@@ -363,7 +368,7 @@ fn decode_text_companion(path: &str, bytes: &[u8], max_decoded: usize) -> Result
     if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         let decoder = zstd::stream::read::Decoder::new(bytes).map_err(|error| {
             DataFusionError::Plan(format!(
-                "failed to decompress PVAR {} as zstd: {error}",
+                "failed to decompress text companion {} as zstd: {error}",
                 sanitize_location(path)
             ))
         })?;
@@ -372,7 +377,7 @@ fn decode_text_companion(path: &str, bytes: &[u8], max_decoded: usize) -> Result
             .read_to_end(&mut decoded)
             .map_err(|error| {
                 DataFusionError::Plan(format!(
-                    "failed to decompress PVAR {} as zstd: {error}",
+                    "failed to decompress text companion {} as zstd: {error}",
                     sanitize_location(path)
                 ))
             })?;
@@ -382,7 +387,7 @@ fn decode_text_companion(path: &str, bytes: &[u8], max_decoded: usize) -> Result
             .read_to_end(&mut decoded)
             .map_err(|error| {
                 DataFusionError::Plan(format!(
-                    "failed to decompress PVAR {} as gzip: {error}",
+                    "failed to decompress text companion {} as gzip: {error}",
                     sanitize_location(path)
                 ))
             })?;
@@ -391,7 +396,7 @@ fn decode_text_companion(path: &str, bytes: &[u8], max_decoded: usize) -> Result
     }
     if decoded.len() > max_decoded {
         return Err(DataFusionError::Plan(format!(
-            "decompressed PVAR {} exceeds configured limit {max_decoded}",
+            "decompressed text companion {} exceeds configured limit {max_decoded}",
             sanitize_location(path)
         )));
     }
@@ -525,6 +530,12 @@ fn parse_pvar(
                 "has malformed ALT allele list".to_string(),
             ));
         }
+        if variants.len() >= max_variants {
+            return Err(DataFusionError::Plan(format!(
+                "PVAR {} exceeds configured max_variants {max_variants}",
+                sanitize_location(path)
+            )));
+        }
         variants.push(PvarVariant {
             chrom: fields[chrom_col].to_string(),
             start: site.start,
@@ -533,12 +544,6 @@ fn parse_pvar(
             reference: reference.to_string(),
             alternate,
         });
-        if variants.len() > max_variants {
-            return Err(DataFusionError::Plan(format!(
-                "PVAR {} exceeds configured max_variants {max_variants}",
-                sanitize_location(path)
-            )));
-        }
     }
     Ok(variants)
 }

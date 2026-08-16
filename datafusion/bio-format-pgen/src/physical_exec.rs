@@ -1,8 +1,7 @@
 use std::any::Any;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -23,8 +22,9 @@ use datafusion_bio_format_core::genotype::{
 use datafusion_bio_format_core::range_planning::ByteRange;
 
 use crate::decode::{
-    DecodedRecord, GtDecodeWorkspace, decode_biallelic_gt_into, decode_dense_biallelic_gt,
-    decode_main_track, decode_record_and_main, supports_biallelic_gt_fast_path,
+    DecodedRecord, GenotypeProjection, GtDecodeWorkspace, decode_biallelic_gt_into,
+    decode_dense_biallelic_gt, decode_main_track, decode_record_and_main,
+    supports_biallelic_gt_fast_path,
 };
 use crate::fileset::{PgenFileset, PgenMode};
 
@@ -132,6 +132,7 @@ impl ExecutionPlan for PgenExec {
         let max_rows = context.session_config().batch_size();
         let soft_bytes = self.batch_soft_byte_limit;
         let genotype_fields = self.genotype_fields.clone();
+        let genotype_projection = GenotypeProjection::from_fields(&genotype_fields);
         let genotypes_projected = schema.index_of("genotypes").is_ok();
 
         if genotypes_projected
@@ -181,8 +182,12 @@ impl ExecutionPlan for PgenExec {
                     .iter()
                     .filter_map(|&index| fileset.records[index].ld_base)
                     .collect::<HashSet<_>>();
-                let mut main_tracks: HashMap<usize, Vec<u8>> =
-                    HashMap::with_capacity(retained_bases.len());
+                // The index assigns every LD record to the most recent eligible
+                // non-LD record. Required records are processed in source order,
+                // so one current base is sufficient and older bases can be
+                // dropped as soon as a newer retained base is decoded.
+                let mut ld_base_index = None;
+                let mut ld_base = Vec::with_capacity(fileset.sample_count);
                 let mut required_position = 0;
                 for range in assignment.ranges {
                     let bytes = fileset
@@ -190,7 +195,6 @@ impl ExecutionPlan for PgenExec {
                         .read_range(&fileset.pgen_path, range.start..range.end)
                         .await?;
                     metrics.add(GenotypeMetric::RangeRequests, 1);
-                    metrics.add(GenotypeMetric::CoalescedRanges, 1);
                     metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
                     while let Some(&variant_index) = assignment.required.get(required_position) {
@@ -209,17 +213,17 @@ impl ExecutionPlan for PgenExec {
                         }
                         let payload =
                             record_payload(range, &bytes, record.offset, record.end(), variant_index)?;
-                    let base_track = record
+                    let base = record
                         .ld_base
-                        .map(|base| {
-                            main_tracks.get(&base).cloned().ok_or_else(|| {
-                                DataFusionError::Execution(format!(
-                                    "PGEN variant {variant_index} dependency base {base} was not decoded first"
-                                ))
-                            })
+                        .map(|base_index| {
+                            if ld_base_index != Some(base_index) {
+                                return Err(DataFusionError::Execution(format!(
+                                    "PGEN variant {variant_index} dependency base {base_index} was not decoded first"
+                                )));
+                            }
+                            Ok(ld_base.as_slice())
                         })
                         .transpose()?;
-                    let base = base_track.as_deref();
                     if !owned.contains(&variant_index) {
                         let main = decode_main_track(
                             payload,
@@ -229,7 +233,10 @@ impl ExecutionPlan for PgenExec {
                             fileset.sample_count,
                             base,
                         )?;
-                        main_tracks.insert(variant_index, main);
+                        if retained_bases.contains(&variant_index) {
+                            ld_base = main;
+                            ld_base_index = Some(variant_index);
+                        }
                         metrics.add(GenotypeMetric::DependencyRecords, 1);
                         required_position += 1;
                         continue;
@@ -250,11 +257,13 @@ impl ExecutionPlan for PgenExec {
                         variant_index,
                         fileset.sample_count,
                         fileset.variants[variant_index].allele_count(),
+                        genotype_projection,
                         fileset.selected_samples.source_indices(),
                         base,
                     )?;
                     if retained_bases.contains(&variant_index) {
-                        main_tracks.insert(variant_index, main);
+                        ld_base = main;
+                        ld_base_index = Some(variant_index);
                     }
                     metrics.add(
                         GenotypeMetric::SamplesDecoded,
@@ -521,15 +530,6 @@ fn execute_gt_only(
 ) -> Result<SendableRecordBatchStream> {
     let stream_schema = schema.clone();
     let stream = try_stream! {
-        let profile_enabled = std::env::var_os("PGEN_PROFILE").is_some();
-        let profile_started = Instant::now();
-        let mut read_elapsed = Duration::ZERO;
-        let mut decode_elapsed = Duration::ZERO;
-        let mut append_elapsed = Duration::ZERO;
-        let mut finish_elapsed = Duration::ZERO;
-        let mut representation_counts = [0_u64; 8];
-        let mut fast_records = 0_u64;
-        let mut fallback_records = 0_u64;
         let selected_samples = fileset.selected_samples.source_indices();
         let selected_sample_count = selected_samples.len();
         let estimated_row_bytes = estimate_genotype_bytes(selected_sample_count, &["GT".to_string()]);
@@ -548,18 +548,14 @@ fn execute_gt_only(
         let mut ld_base_index = None;
         let mut ld_base = Vec::with_capacity(fileset.sample_count);
         let mut required_position = 0;
+        let genotype_projection = GenotypeProjection::gt_only();
 
         for range in assignment.ranges {
-            let read_started = profile_enabled.then(Instant::now);
             let bytes = fileset
                 .source
                 .read_range(&fileset.pgen_path, range.start..range.end)
                 .await?;
-            if let Some(started) = read_started {
-                read_elapsed += started.elapsed();
-            }
             metrics.add(GenotypeMetric::RangeRequests, 1);
-            metrics.add(GenotypeMetric::CoalescedRanges, 1);
             metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
             while let Some(&variant_index) = assignment.required.get(required_position) {
@@ -610,26 +606,19 @@ fn execute_gt_only(
 
                 if sizer.should_flush_before(estimated_row_bytes) {
                     let row_count = batch.len();
-                    let finish_started = profile_enabled.then(Instant::now);
                     let finished = batch.finish(&fileset, schema.clone())?;
-                    if let Some(started) = finish_started {
-                        finish_elapsed += started.elapsed();
-                    }
                     record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
                     yield finished;
                     sizer.reset();
                 }
 
                 let allele_count = fileset.variants[variant_index].allele_count();
-                representation_counts[usize::from(record.record_type & 7)] += 1;
                 let retain_main = retained_bases.contains(&variant_index);
                 let direct_dense = workspace.has_identity_selection()
                     && !retain_main
                     && supports_biallelic_gt_fast_path(record.record_type, allele_count)
                     && (fileset.mode == PgenMode::Plink1 || record.record_type & 7 == 0);
                 if direct_dense {
-                    fast_records += 1;
-                    let decode_started = profile_enabled.then(Instant::now);
                     decode_dense_biallelic_gt(
                         payload,
                         fileset.mode,
@@ -641,12 +630,7 @@ fn execute_gt_only(
                         },
                     )?;
                     batch.finish_variant(variant_index);
-                    if let Some(started) = decode_started {
-                        decode_elapsed += started.elapsed();
-                    }
                 } else if supports_biallelic_gt_fast_path(record.record_type, allele_count) {
-                    fast_records += 1;
-                    let decode_started = profile_enabled.then(Instant::now);
                     decode_biallelic_gt_into(
                         &mut workspace,
                         payload,
@@ -658,21 +642,12 @@ fn execute_gt_only(
                         base,
                         retain_main,
                     )?;
-                    if let Some(started) = decode_started {
-                        decode_elapsed += started.elapsed();
-                    }
-                    let append_started = profile_enabled.then(Instant::now);
                     batch.append_codes(variant_index, workspace.selected_codes())?;
-                    if let Some(started) = append_started {
-                        append_elapsed += started.elapsed();
-                    }
                     if retained_bases.contains(&variant_index) {
                         workspace.swap_main_track(&mut ld_base);
                         ld_base_index = Some(variant_index);
                     }
                 } else {
-                    fallback_records += 1;
-                    let decode_started = profile_enabled.then(Instant::now);
                     let (decoded, main) = decode_record_and_main(
                         payload,
                         fileset.mode,
@@ -680,17 +655,11 @@ fn execute_gt_only(
                         variant_index,
                         fileset.sample_count,
                         allele_count,
+                        genotype_projection,
                         selected_samples,
                         base,
                     )?;
-                    if let Some(started) = decode_started {
-                        decode_elapsed += started.elapsed();
-                    }
-                    let append_started = profile_enabled.then(Instant::now);
                     batch.append(variant_index, &decoded.gt);
-                    if let Some(started) = append_started {
-                        append_elapsed += started.elapsed();
-                    }
                     if retained_bases.contains(&variant_index) {
                         ld_base = main;
                         ld_base_index = Some(variant_index);
@@ -714,25 +683,9 @@ fn execute_gt_only(
         }
         if !batch.is_empty() {
             let row_count = batch.len();
-            let finish_started = profile_enabled.then(Instant::now);
             let finished = batch.finish(&fileset, schema.clone())?;
-            if let Some(started) = finish_started {
-                finish_elapsed += started.elapsed();
-            }
             record_batch_metrics(&metrics, row_count, sizer.estimated_bytes());
             yield finished;
-        }
-        if profile_enabled {
-            eprintln!(
-                "PGEN_PROFILE total_ns={} read_ns={} decode_ns={} append_ns={} finish_ns={} fast_records={} fallback_records={} representations={representation_counts:?}",
-                profile_started.elapsed().as_nanos(),
-                read_elapsed.as_nanos(),
-                decode_elapsed.as_nanos(),
-                append_elapsed.as_nanos(),
-                finish_elapsed.as_nanos(),
-                fast_records,
-                fallback_records,
-            );
         }
     };
 
@@ -763,6 +716,8 @@ fn record_payload(
 }
 
 fn estimate_genotype_bytes(samples: usize, fields: &[String]) -> usize {
+    // Conservative soft-budget estimates include values, validity, list offsets,
+    // and alignment overhead. They deliberately exceed the dense Arrow payload.
     fields.iter().fold(0_usize, |bytes, field| {
         bytes.saturating_add(match field.as_str() {
             "GT" => samples.saturating_mul(5),
@@ -1046,12 +1001,13 @@ fn build_hds_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef
             "PGEN HDS field is not a list".to_string(),
         ));
     };
-    let DataType::List(haplotype_field) = sample_field.data_type() else {
+    let DataType::FixedSizeList(haplotype_field, 2) = sample_field.data_type() else {
         return Err(DataFusionError::Execution(
-            "PGEN HDS sample field is not a list".to_string(),
+            "PGEN HDS sample field is not a fixed-size haplotype pair".to_string(),
         ));
     };
-    let samples = ListBuilder::new(Float32Builder::new()).with_field(haplotype_field.clone());
+    let samples =
+        FixedSizeListBuilder::new(Float32Builder::new(), 2).with_field(haplotype_field.clone());
     let mut builder = ListBuilder::new(samples).with_field(sample_field.clone());
     for row in rows {
         let decoded = row.genotypes.as_ref().ok_or_else(|| {
@@ -1062,6 +1018,7 @@ fn build_hds_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef
                 builder.values().values().append_slice(value);
                 builder.values().append(true);
             } else {
+                builder.values().values().append_slice(&[0.0, 0.0]);
                 builder.values().append(false);
             }
         }

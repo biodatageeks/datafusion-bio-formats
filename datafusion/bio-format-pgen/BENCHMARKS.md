@@ -83,10 +83,5 @@ cargo run --release -p datafusion-bio-format-pgen \
   --example pgen_parity -- /tmp/pgen-parity/fixture.pgen 10 1
 ```
 
-Set `PGEN_PROFILE=1` on the Rust command to print per-partition read, decode,
-append, and Arrow-finalization timing together with record-representation
-counts. Profiling is disabled by default and does not create another thread
-pool.
-
 The Python dependencies are external benchmark/oracle tools. They are not
 linked, imported, or vendored by the Rust crate.

@@ -62,7 +62,7 @@ pub struct PgenReadOptions {
     pub object_storage_options: Option<ObjectStorageOptions>,
     /// Maximum compressed bytes accepted for either text companion.
     pub max_companion_bytes: usize,
-    /// Maximum decoded bytes accepted for PVAR.
+    /// Maximum decoded bytes accepted for either text companion.
     pub max_decompressed_companion_bytes: usize,
     /// Maximum bytes accepted for a PGEN or PGI header.
     pub max_header_bytes: usize,
@@ -244,6 +244,15 @@ impl TableProvider for PgenTableProvider {
             plan_metadata_partitions(&selected, state.config().target_partitions())
         };
         let metrics = Arc::new(GenotypeScanMetrics::default());
+        // CoalescedRanges describes the planned post-coalescing ranges;
+        // RangeRequests is incremented only when execution issues each read.
+        metrics.add(
+            GenotypeMetric::CoalescedRanges,
+            partitions
+                .iter()
+                .map(|partition| partition.ranges.len() as u64)
+                .sum(),
+        );
         metrics.add(GenotypeMetric::PrimaryBytesRead, self.fileset.header_bytes);
         metrics.add(
             GenotypeMetric::CompanionBytesRead,
@@ -349,7 +358,11 @@ fn build_schema(
                 "PHASED",
                 DataType::List(Arc::new(Field::new("sample", DataType::Boolean, true))),
                 false,
-            ),
+            )
+            .with_metadata(HashMap::from([(
+                "bio.pgen.phase_semantics".to_string(),
+                "null=missing call, false=unphased, true=phased".to_string(),
+            )])),
             "DS" => Field::new(
                 "DS",
                 DataType::List(Arc::new(Field::new("sample", DataType::Float32, true))),
@@ -389,7 +402,10 @@ fn build_schema(
                 "HDS",
                 DataType::List(Arc::new(Field::new(
                     "sample",
-                    DataType::List(Arc::new(Field::new("haplotype", DataType::Float32, false))),
+                    DataType::FixedSizeList(
+                        Arc::new(Field::new("haplotype", DataType::Float32, false)),
+                        2,
+                    ),
                     true,
                 ))),
                 false,

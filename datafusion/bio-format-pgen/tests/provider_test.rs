@@ -473,7 +473,10 @@ fn hds_values(
         .downcast_ref::<ListArray>()
         .unwrap()
         .value(row);
-    let values = values.as_any().downcast_ref::<ListArray>().unwrap();
+    let values = values
+        .as_any()
+        .downcast_ref::<FixedSizeListArray>()
+        .unwrap();
     (0..values.len())
         .map(|index| {
             if values.is_null(index) {
@@ -660,6 +663,32 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
             gt_values(&gt_batches[0], 0, 8),
             vec![Some(vec![1, 0]), Some(vec![0, 1]), Some(vec![0, 0]), None]
         );
+
+        let subset_provider = PgenTableProvider::try_new(
+            path(&fixture.pgen),
+            PgenReadOptions {
+                samples: Some(vec!["s3".to_string(), "s1".to_string()]),
+                genotype_fields: Some(vec!["GT".to_string(), "PHASED".to_string()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let subset_context = context(1);
+        subset_context
+            .register_table("subset", Arc::new(subset_provider))
+            .unwrap();
+        let subset_batches = subset_context
+            .sql("SELECT genotypes FROM subset ORDER BY start")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            gt_values(&subset_batches[0], 0, 3),
+            vec![Some(vec![1, 1]), Some(vec![0, 0])]
+        );
     }
 }
 
@@ -771,6 +800,21 @@ async fn reads_zstd_pvar_and_rejects_hybrid_or_inconsistent_filesets() {
     PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
         .await
         .unwrap();
+
+    let fixture = fixed_fixture(2);
+    let compressed =
+        zstd::stream::encode_all(fs::read(&fixture.psam).unwrap().as_slice(), 1).unwrap();
+    let psam_zst = fixture.psam.with_extension("psam.zst");
+    fs::write(&psam_zst, compressed).unwrap();
+    PgenTableProvider::try_new(
+        path(&fixture.pgen),
+        PgenReadOptions {
+            psam_path: Some(path(&psam_zst)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
 
     let fixture = fixed_fixture(2);
     fs::write(&fixture.psam, "#IID\ns1\n").unwrap();
@@ -951,10 +995,13 @@ async fn remote_sparse_scan_uses_bounded_pgen_ranges() {
         })
         .sum::<u64>();
     let exec = plan.as_any().downcast_ref::<PgenExec>().unwrap();
+    let snapshot = exec.metrics_snapshot();
     assert_eq!(
-        exec.metrics_snapshot()[GenotypeMetric::PrimaryBytesRead as usize].1,
+        snapshot[GenotypeMetric::PrimaryBytesRead as usize].1,
         requested_bytes
     );
+    assert_eq!(snapshot[GenotypeMetric::RangeRequests as usize].1, 1);
+    assert_eq!(snapshot[GenotypeMetric::CoalescedRanges as usize].1, 1);
 }
 
 #[tokio::test]

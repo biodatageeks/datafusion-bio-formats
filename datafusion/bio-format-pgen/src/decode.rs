@@ -13,6 +13,93 @@ pub(crate) struct DecodedRecord {
     pub(crate) hds: Vec<Option<[f32; 2]>>,
 }
 
+/// Logical genotype children that a scan will retain in its output rows.
+///
+/// Physical tracks are still parsed and validated when their child is absent,
+/// but the decoder does not allocate or retain unprojected logical vectors.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct GenotypeProjection {
+    gt: bool,
+    phased: bool,
+    ds: bool,
+    ds_stored: bool,
+    hds: bool,
+}
+
+impl GenotypeProjection {
+    pub(crate) fn gt_only() -> Self {
+        Self {
+            gt: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn from_fields(fields: &[String]) -> Self {
+        let mut projection = Self::default();
+        for field in fields {
+            match field.as_str() {
+                "GT" => projection.gt = true,
+                "PHASED" => projection.phased = true,
+                "DS" => projection.ds = true,
+                "DS_STORED" => projection.ds_stored = true,
+                "HDS" => projection.hds = true,
+                _ => {}
+            }
+        }
+        projection
+    }
+
+    #[cfg(test)]
+    fn all() -> Self {
+        Self {
+            gt: true,
+            phased: true,
+            ds: true,
+            ds_stored: true,
+            hds: true,
+        }
+    }
+}
+
+struct DosageTrack<'a> {
+    encoding: u8,
+    sample_count: usize,
+    sample_ids: Vec<usize>,
+    value_bytes: &'a [u8],
+    values: Option<Vec<Option<f32>>>,
+}
+
+impl DosageTrack<'_> {
+    fn entry_count(&self) -> usize {
+        if self.encoding == 2 {
+            self.sample_count
+        } else {
+            self.sample_ids.len()
+        }
+    }
+
+    fn sample_at(&self, entry: usize) -> usize {
+        if self.encoding == 2 {
+            entry
+        } else {
+            self.sample_ids[entry]
+        }
+    }
+
+    fn stored_at(&self, entry: usize) -> Option<f32> {
+        let offset = entry * 2;
+        let value = u16::from_le_bytes([self.value_bytes[offset], self.value_bytes[offset + 1]]);
+        (value != u16::MAX).then(|| f32::from(value) / DOSAGE_SCALE)
+    }
+
+    fn effective_at(&self, entry: usize, calls: &[Option<[u16; 2]>]) -> Option<f32> {
+        self.stored_at(entry).or_else(|| {
+            calls[self.sample_at(entry)]
+                .map(|call| (u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32)
+        })
+    }
+}
+
 /// Reusable state for the projection-specialized biallelic `GT` decoder.
 ///
 /// The source-to-output map is built once per physical partition. Record
@@ -397,6 +484,7 @@ pub(crate) fn decode_record(
         variant_index,
         sample_count,
         allele_count,
+        GenotypeProjection::all(),
         selected_samples,
         ld_base,
     )
@@ -411,10 +499,18 @@ pub(crate) fn decode_record_and_main(
     variant_index: usize,
     sample_count: usize,
     allele_count: usize,
+    projection: GenotypeProjection,
     selected_samples: &[usize],
     ld_base: Option<&[u8]>,
 ) -> Result<(DecodedRecord, Vec<u8>)> {
     let mut cursor = Cursor::new(bytes, variant_index);
+    for &sample in selected_samples {
+        if sample >= sample_count {
+            return Err(cursor.error(format!(
+                "selected sample index {sample} is out of bounds for {sample_count} samples"
+            )));
+        }
+    }
     let categories = decode_main(&mut cursor, mode, record_type, sample_count, ld_base)?;
     let mut calls = categories
         .iter()
@@ -435,11 +531,16 @@ pub(crate) fn decode_record_and_main(
         )));
     }
 
-    let mut phased = vec![None; sample_count];
+    let mut phased = (projection.phased || projection.hds).then(|| vec![None; sample_count]);
     if record_type != 0xff && record_type & 0x10 != 0 {
-        decode_phase(&mut cursor, &mut calls, &mut phased)?;
-    } else {
-        for (call, output) in calls.iter().zip(&mut phased) {
+        decode_phase(
+            &mut cursor,
+            &mut calls,
+            phased.as_deref_mut(),
+            projection.gt || projection.hds,
+        )?;
+    } else if let Some(phased) = &mut phased {
+        for (call, output) in calls.iter().zip(phased) {
             if call.is_some() {
                 *output = Some(false);
             }
@@ -456,31 +557,60 @@ pub(crate) fn decode_record_and_main(
             "unsupported multiallelic PGEN dosage track; hardcalls remain supported".to_string(),
         ));
     }
-    let (stored_dosages, dosage_sample_ids) =
-        decode_dosage(&mut cursor, dosage_encoding, sample_count)?;
-    if dosage_encoding == 2 {
-        validate_fixed_dosage_missingness(&calls, &stored_dosages, &cursor)?;
-    }
-    validate_dosage_hardcall_consistency(&calls, &stored_dosages, &cursor)?;
-    let mut dosages = stored_dosages.clone();
-    for (dosage, call) in dosages.iter_mut().zip(&calls) {
-        if dosage.is_none()
-            && let Some(call) = call
-        {
-            *dosage = Some((u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32);
+    let has_hds_track = record_type != 0xff && record_type & 0x80 != 0;
+    let materialize_stored = projection.ds || projection.ds_stored || projection.hds;
+    let mut dosage_track = decode_dosage(
+        &mut cursor,
+        dosage_encoding,
+        sample_count,
+        &calls,
+        materialize_stored,
+    )?;
+    let mut dosages = if projection.ds || projection.hds {
+        Some(if projection.ds_stored {
+            dosage_track
+                .values
+                .clone()
+                .unwrap_or_else(|| vec![None; sample_count])
+        } else {
+            dosage_track
+                .values
+                .take()
+                .unwrap_or_else(|| vec![None; sample_count])
+        })
+    } else {
+        None
+    };
+    if let Some(dosages) = &mut dosages {
+        for (dosage, call) in dosages.iter_mut().zip(&calls) {
+            if dosage.is_none()
+                && let Some(call) = call
+            {
+                *dosage = Some((u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32);
+            }
         }
     }
-    let hds = if record_type != 0xff && record_type & 0x80 != 0 {
+    let hds = if has_hds_track {
         decode_phased_dosage(
             &mut cursor,
-            dosage_encoding,
-            &dosage_sample_ids,
-            &dosages,
+            &dosage_track,
+            dosages.as_deref(),
             &calls,
-            &phased,
+            phased.as_deref(),
+            projection.hds,
         )?
+    } else if projection.hds {
+        Some(implicit_haplotype_dosages(
+            dosages.as_deref().ok_or_else(|| {
+                cursor.error("HDS projection has no effective dosage values".to_string())
+            })?,
+            &calls,
+            phased.as_deref().ok_or_else(|| {
+                cursor.error("HDS projection has no hardcall phase values".to_string())
+            })?,
+        ))
     } else {
-        implicit_haplotype_dosages(&dosages, &calls, &phased)
+        None
     };
 
     if !cursor.is_finished() {
@@ -493,23 +623,67 @@ pub(crate) fn decode_record_and_main(
         return Err(cursor.error("decoded hardcall count is inconsistent".to_string()));
     }
 
-    let mut selected_gt = Vec::with_capacity(selected_samples.len());
-    let mut selected_phased = Vec::with_capacity(selected_samples.len());
-    let mut selected_ds = Vec::with_capacity(selected_samples.len());
-    let mut selected_ds_stored = Vec::with_capacity(selected_samples.len());
-    let mut selected_hds = Vec::with_capacity(selected_samples.len());
-    for &sample in selected_samples {
-        if sample >= sample_count {
-            return Err(cursor.error(format!(
-                "selected sample index {sample} is out of bounds for {sample_count} samples"
-            )));
-        }
-        selected_gt.push(calls[sample]);
-        selected_phased.push(phased[sample]);
-        selected_ds.push(dosages[sample]);
-        selected_ds_stored.push(stored_dosages[sample]);
-        selected_hds.push(hds[sample]);
-    }
+    let selected_gt = if projection.gt {
+        selected_samples
+            .iter()
+            .map(|&sample| calls[sample])
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let selected_phased = projection
+        .phased
+        .then(|| {
+            let phased = phased
+                .as_deref()
+                .ok_or_else(|| cursor.error("PHASED projection has no phase values".to_string()))?;
+            Ok::<_, DataFusionError>(
+                selected_samples
+                    .iter()
+                    .map(|&sample| phased[sample])
+                    .collect(),
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let selected_ds = projection
+        .ds
+        .then(|| {
+            let dosages = dosages.as_deref().ok_or_else(|| {
+                cursor.error("DS projection has no effective dosage values".to_string())
+            })?;
+            Ok::<_, DataFusionError>(
+                selected_samples
+                    .iter()
+                    .map(|&sample| dosages[sample])
+                    .collect(),
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let selected_ds_stored = if projection.ds_stored {
+        selected_samples
+            .iter()
+            .map(|&sample| {
+                dosage_track
+                    .values
+                    .as_deref()
+                    .and_then(|dosages| dosages[sample])
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let selected_hds = projection
+        .hds
+        .then(|| {
+            let hds = hds.as_deref().ok_or_else(|| {
+                cursor.error("HDS projection has no phased dosage values".to_string())
+            })?;
+            Ok::<_, DataFusionError>(selected_samples.iter().map(|&sample| hds[sample]).collect())
+        })
+        .transpose()?
+        .unwrap_or_default();
     Ok((
         DecodedRecord {
             gt: selected_gt,
@@ -910,7 +1084,8 @@ fn decode_packed_values(
 fn decode_phase(
     cursor: &mut Cursor<'_>,
     calls: &mut [Option<[u16; 2]>],
-    phased: &mut [Option<bool>],
+    mut phased: Option<&mut [Option<bool>]>,
+    orient_calls: bool,
 ) -> Result<()> {
     let heterozygous = calls
         .iter()
@@ -925,17 +1100,18 @@ fn decode_phase(
             cursor.error("hardcall-phase track is present without heterozygous calls".to_string())
         );
     }
+    let phase_bit_count = heterozygous
+        .len()
+        .checked_add(1)
+        .ok_or_else(|| cursor.error("hardcall-phase bit count overflowed".to_string()))?;
     let first = *cursor
         .bytes
         .get(cursor.position)
         .ok_or_else(|| cursor.error("truncated hardcall-phase track".to_string()))?;
     let explicit_present = first & 1 != 0;
     let present = if explicit_present {
-        let bytes = cursor.take(
-            (heterozygous.len() + 1).div_ceil(8),
-            "phase-present bitarray",
-        )?;
-        validate_phase_padding(bytes, heterozygous.len() + 1, cursor)?;
+        let bytes = cursor.take(phase_bit_count.div_ceil(8), "phase-present bitarray")?;
+        validate_phase_padding(bytes, phase_bit_count, cursor)?;
         (0..heterozygous.len())
             .map(|index| bit(bytes, index + 1))
             .collect::<Vec<_>>()
@@ -950,16 +1126,13 @@ fn decode_phase(
             .map(|index| bit(bytes, index))
             .collect::<Vec<_>>()
     } else {
-        let bytes = cursor.take(
-            (heterozygous.len() + 1).div_ceil(8),
-            "implicit phase-info bitarray",
-        )?;
+        let bytes = cursor.take(phase_bit_count.div_ceil(8), "implicit phase-info bitarray")?;
         if bytes.first().is_some_and(|byte| byte & 1 != 0) {
             return Err(
                 cursor.error("implicit phase track has phase-present marker set".to_string())
             );
         }
-        validate_phase_padding(bytes, heterozygous.len() + 1, cursor)?;
+        validate_phase_padding(bytes, phase_bit_count, cursor)?;
         (0..heterozygous.len())
             .map(|index| bit(bytes, index + 1))
             .collect::<Vec<_>>()
@@ -967,7 +1140,7 @@ fn decode_phase(
     let mut info_index = 0;
     for (heterozygous_index, &sample) in heterozygous.iter().enumerate() {
         if present[heterozygous_index] {
-            if info[info_index] {
+            if info[info_index] && orient_calls {
                 let call = calls[sample].as_mut().ok_or_else(|| {
                     cursor.error(format!(
                         "phase information addresses a missing hardcall for sample {sample}"
@@ -975,15 +1148,19 @@ fn decode_phase(
                 })?;
                 call.swap(0, 1);
             }
-            phased[sample] = Some(true);
+            if let Some(output) = phased.as_deref_mut() {
+                output[sample] = Some(true);
+            }
             info_index += 1;
-        } else {
-            phased[sample] = Some(false);
+        } else if let Some(output) = phased.as_deref_mut() {
+            output[sample] = Some(false);
         }
     }
-    for (sample, call) in calls.iter().enumerate() {
-        if call.is_some() && phased[sample].is_none() {
-            phased[sample] = Some(false);
+    if let Some(phased) = phased {
+        for (sample, call) in calls.iter().enumerate() {
+            if call.is_some() && phased[sample].is_none() {
+                phased[sample] = Some(false);
+            }
         }
     }
     Ok(())
@@ -996,6 +1173,9 @@ fn decode_phase_for_selected_gt(
     selected_codes: &mut [u8],
     identity_selection: bool,
 ) -> Result<()> {
+    // With a subset selection, phase orientation belongs only in selected_codes:
+    // categories must remain the raw main track so it can become a later LD base.
+    // For an identity selection, retain_main snapshots categories before this call.
     let heterozygous_count = categories.iter().filter(|&&category| category == 1).count();
     if heterozygous_count == 0 {
         return Err(
@@ -1100,18 +1280,20 @@ fn orient_selected_call(
     Ok(())
 }
 
-fn decode_dosage(
-    cursor: &mut Cursor<'_>,
+fn decode_dosage<'a>(
+    cursor: &mut Cursor<'a>,
     encoding: u8,
     sample_count: usize,
-) -> Result<(Vec<Option<f32>>, Vec<usize>)> {
+    calls: &[Option<[u16; 2]>],
+    materialize: bool,
+) -> Result<DosageTrack<'a>> {
     let sample_ids = match encoding {
         0 => Vec::new(),
         1 => decode_difflist(cursor, sample_count, false)?
             .into_iter()
             .map(|(sample, _)| sample)
             .collect(),
-        2 => (0..sample_count).collect(),
+        2 => Vec::new(),
         3 => {
             let bits = cursor.take(sample_count.div_ceil(8), "dosage-presence bitarray")?;
             validate_packed_padding(bits, sample_count, 1, cursor)?;
@@ -1121,17 +1303,40 @@ fn decode_dosage(
         }
         _ => unreachable!(),
     };
+    if encoding == 0 {
+        return Ok(DosageTrack {
+            encoding,
+            sample_count,
+            sample_ids,
+            value_bytes: &[],
+            values: None,
+        });
+    }
+    let entry_count = if encoding == 2 {
+        sample_count
+    } else {
+        sample_ids.len()
+    };
     let value_bytes = cursor.take(
-        sample_ids
-            .len()
+        entry_count
             .checked_mul(2)
             .ok_or_else(|| cursor.error("dosage byte count overflowed".to_string()))?,
         "dosage values",
     )?;
-    let mut output = vec![None; sample_count];
-    for (index, &sample) in sample_ids.iter().enumerate() {
+    let mut output = materialize.then(|| vec![None; sample_count]);
+    for index in 0..entry_count {
+        let sample = if encoding == 2 {
+            index
+        } else {
+            sample_ids[index]
+        };
         let value = u16::from_le_bytes([value_bytes[index * 2], value_bytes[index * 2 + 1]]);
         if encoding == 2 && value == u16::MAX {
+            if calls[sample].is_some() {
+                return Err(cursor.error(format!(
+                    "fixed-width dosage is missing while the hardcall is present for sample {sample}"
+                )));
+            }
             continue;
         }
         if value > 32_768 {
@@ -1139,83 +1344,80 @@ fn decode_dosage(
                 "dosage integer {value} exceeds 32768 for sample {sample}"
             )));
         }
-        output[sample] = Some(f32::from(value) / DOSAGE_SCALE);
-    }
-    Ok((output, sample_ids))
-}
-
-fn validate_dosage_hardcall_consistency(
-    calls: &[Option<[u16; 2]>],
-    dosages: &[Option<f32>],
-    cursor: &Cursor<'_>,
-) -> Result<()> {
-    for (sample, (call, dosage)) in calls.iter().zip(dosages).enumerate() {
-        let (Some(call), Some(dosage)) = (call, dosage) else {
-            continue;
-        };
-        let hardcall = (u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32;
-        if (hardcall - dosage).abs() > 0.5001 {
-            return Err(cursor.error(format!(
-                "dosage {dosage} is inconsistent with hardcall ALT count {hardcall} for sample {sample}"
-            )));
+        let dosage = f32::from(value) / DOSAGE_SCALE;
+        if let Some(call) = calls[sample] {
+            let hardcall = (u16::from(call[0] > 0) + u16::from(call[1] > 0)) as f32;
+            if (hardcall - dosage).abs() > 0.5001 {
+                return Err(cursor.error(format!(
+                    "dosage {dosage} is inconsistent with hardcall ALT count {hardcall} for sample {sample}"
+                )));
+            }
+        }
+        if let Some(output) = &mut output {
+            output[sample] = Some(dosage);
         }
     }
-    Ok(())
-}
-
-fn validate_fixed_dosage_missingness(
-    calls: &[Option<[u16; 2]>],
-    stored_dosages: &[Option<f32>],
-    cursor: &Cursor<'_>,
-) -> Result<()> {
-    for (sample, (call, dosage)) in calls.iter().zip(stored_dosages).enumerate() {
-        if dosage.is_none() && call.is_some() {
-            return Err(cursor.error(format!(
-                "fixed-width dosage is missing while the hardcall is present for sample {sample}"
-            )));
-        }
-    }
-    Ok(())
+    Ok(DosageTrack {
+        encoding,
+        sample_count,
+        sample_ids,
+        value_bytes,
+        values: output,
+    })
 }
 
 fn decode_phased_dosage(
     cursor: &mut Cursor<'_>,
-    dosage_encoding: u8,
-    dosage_sample_ids: &[usize],
-    dosages: &[Option<f32>],
+    dosage: &DosageTrack<'_>,
+    dosages: Option<&[Option<f32>]>,
     calls: &[Option<[u16; 2]>],
-    phased: &[Option<bool>],
-) -> Result<Vec<Option<[f32; 2]>>> {
-    if dosage_encoding == 0 {
+    phased: Option<&[Option<bool>]>,
+    materialize: bool,
+) -> Result<Option<Vec<Option<[f32; 2]>>>> {
+    if dosage.encoding == 0 {
         return Err(
             cursor.error("phased-dosage track is present without a dosage track".to_string())
         );
     }
-    let explicit_samples = if dosage_encoding == 2 {
-        dosage_sample_ids.to_vec()
+    let entry_count = dosage.entry_count();
+    let presence = if dosage.encoding == 2 {
+        None
     } else {
-        let bits = cursor.take(
-            dosage_sample_ids.len().div_ceil(8),
-            "phased-dosage-presence bitarray",
-        )?;
-        validate_packed_padding(bits, dosage_sample_ids.len(), 1, cursor)?;
-        dosage_sample_ids
-            .iter()
-            .enumerate()
-            .filter_map(|(index, &sample)| bit(bits, index).then_some(sample))
-            .collect()
+        let bits = cursor.take(entry_count.div_ceil(8), "phased-dosage-presence bitarray")?;
+        validate_packed_padding(bits, entry_count, 1, cursor)?;
+        Some(bits)
     };
+    let explicit_count = presence.map_or(entry_count, |bits| {
+        (0..entry_count).filter(|&index| bit(bits, index)).count()
+    });
     let values = cursor.take(
-        explicit_samples
-            .len()
+        explicit_count
             .checked_mul(2)
             .ok_or_else(|| cursor.error("phased dosage byte count overflowed".to_string()))?,
         "phased-dosage values",
     )?;
-    let mut output = implicit_haplotype_dosages(dosages, calls, phased);
-    for (index, &sample) in explicit_samples.iter().enumerate() {
-        let value = i16::from_le_bytes([values[index * 2], values[index * 2 + 1]]);
-        if dosage_encoding == 2 && value == i16::MIN {
+    let mut output = if materialize {
+        Some(implicit_haplotype_dosages(
+            dosages.ok_or_else(|| {
+                cursor.error("phased dosage output has no total dosage values".to_string())
+            })?,
+            calls,
+            phased.ok_or_else(|| {
+                cursor.error("phased dosage output has no hardcall phase values".to_string())
+            })?,
+        ))
+    } else {
+        None
+    };
+    let mut value_index = 0;
+    for entry in 0..entry_count {
+        if presence.is_some_and(|bits| !bit(bits, entry)) {
+            continue;
+        }
+        let sample = dosage.sample_at(entry);
+        let value = i16::from_le_bytes([values[value_index * 2], values[value_index * 2 + 1]]);
+        value_index += 1;
+        if dosage.encoding == 2 && value == i16::MIN {
             continue;
         }
         if !(-16_384..=16_384).contains(&value) {
@@ -1223,7 +1425,10 @@ fn decode_phased_dosage(
                 "phased-dosage difference {value} is outside [-16384, 16384] for sample {sample}"
             )));
         }
-        let Some(total) = dosages[sample] else {
+        let Some(total) = dosages
+            .and_then(|values| values[sample])
+            .or_else(|| dosage.effective_at(entry, calls))
+        else {
             return Err(cursor.error(format!(
                 "phased dosage exists without total dosage for sample {sample}"
             )));
@@ -1236,8 +1441,11 @@ fn decode_phased_dosage(
                 "phased dosage [{left}, {right}] is outside haplotype bounds for sample {sample}"
             )));
         }
-        output[sample] = Some([left.clamp(0.0, 1.0), right.clamp(0.0, 1.0)]);
+        if let Some(output) = &mut output {
+            output[sample] = Some([left.clamp(0.0, 1.0), right.clamp(0.0, 1.0)]);
+        }
     }
+    debug_assert_eq!(value_index, explicit_count);
     Ok(output)
 }
 
@@ -1432,6 +1640,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(record.gt, vec![None, Some([0, 1]), Some([0, 0])]);
+    }
+
+    #[test]
+    fn retains_only_projected_genotype_children() {
+        let fields = vec!["PHASED".to_string()];
+        let (record, _) = decode_record_and_main(
+            &[0b11_10_01_00],
+            PgenMode::Variable,
+            0,
+            0,
+            4,
+            2,
+            GenotypeProjection::from_fields(&fields),
+            &[0, 1, 2, 3],
+            None,
+        )
+        .unwrap();
+        assert!(record.gt.is_empty());
+        assert_eq!(
+            record.phased,
+            vec![Some(false), Some(false), Some(false), None]
+        );
+        assert!(record.ds.is_empty());
+        assert!(record.ds_stored.is_empty());
+        assert!(record.hds.is_empty());
+
+        let mut physical_hds = vec![0b11_10_01_00];
+        for dosage in [0_u16, 16_384, 32_768, u16::MAX] {
+            physical_hds.extend_from_slice(&dosage.to_le_bytes());
+        }
+        for difference in [0_i16, 0, 0, i16::MIN] {
+            physical_hds.extend_from_slice(&difference.to_le_bytes());
+        }
+        let (record, _) = decode_record_and_main(
+            &physical_hds,
+            PgenMode::Variable,
+            0xc0,
+            0,
+            4,
+            2,
+            GenotypeProjection::from_fields(&fields),
+            &[0, 1, 2, 3],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            record.phased,
+            vec![Some(false), Some(false), Some(false), None]
+        );
+        assert!(record.ds.is_empty());
+        assert!(record.ds_stored.is_empty());
+        assert!(record.hds.is_empty());
     }
 
     #[test]

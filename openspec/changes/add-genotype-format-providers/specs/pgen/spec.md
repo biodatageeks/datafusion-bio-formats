@@ -196,8 +196,8 @@ counting PVAR alternate allele index one.
 ### Requirement: PGEN Phased Dosage Output
 
 The system SHALL decode valid phased dosage tracks into
-`HDS: List<List<Float32>>` in stored haplotype order and preserve their
-relationship to total dosage.
+`HDS: List<FixedSizeList<Float32, 2>>` in stored haplotype order and preserve
+their relationship to total dosage.
 
 #### Scenario: Complete phased dosage
 - **WHEN** both haplotype dosages are stored for a selected sample

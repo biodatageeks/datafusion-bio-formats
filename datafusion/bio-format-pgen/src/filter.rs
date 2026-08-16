@@ -24,6 +24,7 @@ pub(crate) fn supports_exact_filter(expr: &Expr) -> bool {
 }
 
 pub(crate) fn evaluate_exact_filter(variant: &PvarVariant, expr: &Expr) -> bool {
+    debug_assert!(supports_exact_filter(expr));
     match expr {
         Expr::BinaryExpr(binary) if binary.op == Operator::And => {
             evaluate_exact_filter(variant, &binary.left)

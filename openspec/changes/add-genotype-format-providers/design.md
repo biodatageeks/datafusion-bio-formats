@@ -168,7 +168,7 @@ The format-specific child fields are:
 | BGEN probability | `GP: List<List<Float32>>`, `PLOIDY: List<UInt8>`, and variant `phased` |
 | BGEN dosage | `DS: List<Float32>` and `PLOIDY: List<UInt8>` |
 | PGEN allele | `GT: List<FixedSizeList<UInt16, 2>>`, `PHASED: List<Boolean>` |
-| PGEN dosage | effective `DS`, optional source-only `DS_STORED`, `HDS`, and requested hardcall fields |
+| PGEN dosage | effective `DS`, optional source-only `DS_STORED`, `HDS: List<FixedSizeList<Float32, 2>>`, and requested hardcall fields |
 | GRG haplotype | `GT: List<UInt8>` with mutation presence 0/1 or null |
 | GRG individual | `GT: List<UInt8>` with alternate count 0..ploidy or null |
 

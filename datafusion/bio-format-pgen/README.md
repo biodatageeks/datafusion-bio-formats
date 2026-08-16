@@ -50,8 +50,9 @@ let batches = context
 ```
 
 The provider resolves `.pvar` (then `.pvar.zst`) and `.psam` beside the PGEN
-file unless explicit locations are supplied. Modes `0x01`, `0x02`, `0x03`,
-`0x04`, `0x10`, `0x11`, `0x20`, and `0x21` are supported, including
+file unless explicit locations are supplied. Explicit gzip/zstd PVAR and PSAM
+companions are decompressed within the configured bound. Modes `0x01`, `0x02`,
+`0x03`, `0x04`, `0x10`, `0x11`, `0x20`, and `0x21` are supported, including
 standard `.pgen.pgi` external indexes. BED/BIM/FAM hybrid companions are
 rejected.
 
