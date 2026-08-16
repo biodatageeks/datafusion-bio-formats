@@ -1225,6 +1225,25 @@ async fn an_index_row_the_catalog_rejects_follows_the_stale_index_policy() {
         "the walked catalog still sees every variant"
     );
 
+    // Dropping the index does not unspend what reading it cost. Those bytes were
+    // fetched before it was found unusable, and a scan that does not report them
+    // understates what the query actually did.
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let metrics = exec.metrics_snapshot();
+    assert!(
+        metrics[GenotypeMetric::CompanionBytesRead as usize].1 > 0,
+        "the discarded index was still read: {metrics:?}"
+    );
+
     // Named explicitly, the caller asked for that index: say why it is unusable.
     let error = BgenTableProvider::try_new(
         path(&fixture.bgen),
