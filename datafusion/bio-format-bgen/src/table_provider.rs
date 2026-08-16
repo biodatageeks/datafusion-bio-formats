@@ -379,6 +379,7 @@ impl TableProvider for BgenTableProvider {
                 &self.fileset.options,
                 &self.fileset.catalog,
                 &candidates,
+                &HashMap::new(),
             )
             .await?;
             metadata_cost = cost;
@@ -438,6 +439,7 @@ impl TableProvider for BgenTableProvider {
                 &self.fileset.options,
                 &self.fileset.catalog,
                 &selected,
+                &resolved,
             )
             .await?;
             resolved.extend(records);
@@ -981,9 +983,10 @@ async fn widen_metadata_probe(
 /// are coalesced under the configured gap budget, so this costs the metadata
 /// rather than the payloads sitting behind it.
 ///
-/// Returns the resolved variants by catalog index, and what reading them cost,
-/// so the scan's counters include the object reads planning made. Variants the
-/// catalog already knows in full are absent, because the caller already has them.
+/// Returns the variants this call resolved, by catalog index, and what reading
+/// them cost, so the scan's counters include the object reads planning made.
+/// Variants the catalog already knows in full, and those already in `known`,
+/// are absent: the caller has them either way.
 ///
 /// # Precondition
 ///
@@ -1000,13 +1003,17 @@ async fn resolve_variant_metadata(
     options: &BgenReadOptions,
     catalog: &BgenCatalog,
     indices: &[usize],
+    known: &HashMap<usize, Arc<BgenVariant>>,
 ) -> Result<(HashMap<usize, Arc<BgenVariant>>, MetadataReadCost)> {
     let mut resolved = HashMap::new();
     let mut cost = MetadataReadCost::default();
+    // Records another pass already read are not read again: a query that both
+    // filters on a field the index lacks and projects one resolves the same
+    // candidates twice, and the second pass should cost nothing.
     let pending: Vec<usize> = indices
         .iter()
         .copied()
-        .filter(|&index| !catalog.variants[index].is_resolved())
+        .filter(|&index| !catalog.variants[index].is_resolved() && !known.contains_key(&index))
         .collect();
     if pending.is_empty() {
         return Ok((resolved, cost));

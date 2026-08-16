@@ -1086,6 +1086,50 @@ async fn verifying_index_records_catches_a_stale_row_that_pruning_would_hide() {
 }
 
 #[tokio::test]
+async fn planning_reads_each_record_once_when_a_query_filters_and_projects_it() {
+    // A query that both filters on `id` and projects a variant column resolves
+    // records twice over: once to filter the candidates exactly, once to supply
+    // the projection. The second pass must reuse the first pass's records
+    // rather than fetching them again.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let before = server.get_requests("cohort.bgen").len();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT id FROM b WHERE id != 'missing'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3
+    );
+    let during = server.get_requests("cohort.bgen").len() - before;
+    assert_eq!(
+        during, 1,
+        "the records resolved for the filter must serve the projection too"
+    );
+}
+
+#[tokio::test]
 async fn metadata_longer_than_the_probe_still_resolves() {
     // Resolving an indexed record reads a bounded prefix rather than the whole
     // record, so a variant whose identifier runs past that prefix exercises the
