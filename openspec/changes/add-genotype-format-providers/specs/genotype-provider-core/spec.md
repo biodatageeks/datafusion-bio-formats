@@ -26,7 +26,8 @@ partitions.
 #### Scenario: Reordered sample request
 - **WHEN** a caller requests samples in an order different from source order
 - **THEN** every genotype child uses the request order
-- **AND** field metadata records that same order.
+- **AND** field metadata records that same order under the shared genotype
+  sample-names key.
 
 #### Scenario: Duplicate requested names
 - **WHEN** the requested sample list repeats a sample name

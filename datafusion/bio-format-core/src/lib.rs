@@ -55,6 +55,8 @@ pub use metadata::{
     BAM_BINARY_CIGAR_KEY, BAM_COMMENTS_KEY, BAM_FILE_FORMAT_VERSION_KEY, BAM_GROUP_ORDER_KEY,
     BAM_PROGRAM_INFO_KEY, BAM_READ_GROUPS_KEY, BAM_REFERENCE_SEQUENCES_KEY, BAM_SORT_ORDER_KEY,
     BAM_SUBSORT_ORDER_KEY, BAM_TAG_DESCRIPTION_KEY, BAM_TAG_TAG_KEY, BAM_TAG_TYPE_KEY,
+    GENOTYPE_ALLELE_ORDER_KEY, GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY,
+    GENOTYPE_SAMPLE_NAMES_KEY, GENOTYPE_SOURCE_BIT_PRECISION_KEY, GENOTYPE_STATE_ORDER_KEY,
     ProgramMetadata, ReadGroupMetadata, ReferenceSequenceMetadata, extract_header_metadata,
     from_json_string, to_json_string,
 };
@@ -62,14 +64,20 @@ pub use metadata::{
 pub mod alignment_utils;
 /// Calculated tags (MD, NM) for alignment records
 pub mod calculated_tags;
+/// Companion object naming and discovery
+pub mod companion;
 /// Genomic filter extraction from SQL expressions for index-based queries
 pub mod genomic_filter;
+/// Shared genotype provider contracts
+pub mod genotype;
 /// Index file discovery utilities for BAI/CSI/CRAI/TBI
 pub mod index_utils;
 /// Object storage integration for cloud and local file access
 pub mod object_storage;
 /// Balanced partition assignment for indexed genomic reads
 pub mod partition_balancer;
+/// Byte-range coalescing and partition assignment
+pub mod range_planning;
 /// Shared record-level filter evaluation for all formats
 pub mod record_filter;
 /// Shared serializer helpers for alignment records written to BAM/CRAM

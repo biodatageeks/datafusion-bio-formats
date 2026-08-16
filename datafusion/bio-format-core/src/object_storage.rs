@@ -5,10 +5,11 @@ use log::debug;
 use noodles_bgzf as bgzf;
 use noodles_bgzf::r#async::io::Reader as AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
-use opendal::services::{Azblob, Gcs, S3};
+use opendal::services::{Azblob, Gcs, Http, S3};
 use opendal::{FuturesBytesStream, Operator};
 use std::env;
 use std::fmt::Display;
+use std::ops::Range;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -87,10 +88,10 @@ impl Default for ObjectStorageOptions {
         ObjectStorageOptions {
             chunk_size: Some(8),                           // Default chunk size in MB
             concurrent_fetches: Some(1),                   // Default concurrent fetches
-            allow_anonymous: true, // Default to not allowing anonymous access
-            enable_request_payer: false, // Default to not enabling request payer
-            max_retries: Some(5),  // Default max retries
-            timeout: Some(300),    // Default timeout in seconds
+            allow_anonymous: true,                         // Default to allowing anonymous access
+            enable_request_payer: false,                   // Default to not enabling request payer
+            max_retries: Some(5),                          // Default max retries
+            timeout: Some(300),                            // Default timeout in seconds
             compression_type: Some(CompressionType::AUTO), // Default compression type
         }
     }
@@ -435,14 +436,11 @@ fn is_azure_blob_url(url_str: &str) -> bool {
                 let segments: Vec<_> = segments.collect();
                 return segments.len() >= 2;
             }
-        } else if !&env::var("AZURE_ENDPOINT_URL")
-            .unwrap_or("".parse().unwrap())
-            .is_empty()
-            && url
-                .to_string()
-                .starts_with(&env::var("AZURE_ENDPOINT_URL").unwrap())
-        //FIXME: this is a workaround for Azure Blob Storage emulator
+        } else if let Ok(endpoint) = env::var("AZURE_ENDPOINT_URL")
+            && !endpoint.is_empty()
+            && url.as_str().starts_with(&endpoint)
         {
+            // FIXME: This is a workaround for the Azure Blob Storage emulator.
             return true;
         }
     }
@@ -468,85 +466,84 @@ pub async fn get_remote_stream(
     object_storage_options: ObjectStorageOptions,
     byte_limit: Option<usize>,
 ) -> Result<FuturesBytesStream, opendal::Error> {
-    let storage_type = get_storage_type(file_path.clone());
-    let bucket_name = get_bucket_name(file_path.clone());
-    let relative_file_path = get_file_path(file_path.clone());
-    let chunk_size = object_storage_options.clone().chunk_size.unwrap_or(64);
-    let concurrent_fetches = object_storage_options
-        .clone()
-        .concurrent_fetches
-        .unwrap_or(8);
-    let allow_anonymous = object_storage_options.allow_anonymous;
-    let enable_request_payer = object_storage_options.enable_request_payer;
-    let max_retries = object_storage_options.max_retries.unwrap_or(5);
-    let timeout = object_storage_options.timeout.unwrap_or(300);
+    let object = RemoteObject::open(file_path, object_storage_options).await?;
+    match byte_limit {
+        Some(limit) => object.stream_range(0..limit as u64).await,
+        None => object.stream().await,
+    }
+}
 
-    match storage_type {
-        StorageType::S3 => {
-            log::info!(
-                "Using S3 storage type with parameters: \
+/// A remotely stored immutable object with bounded read primitives.
+#[derive(Clone, Debug)]
+pub struct RemoteObject {
+    operator: Operator,
+    path: String,
+    chunk_size: Option<usize>,
+    concurrent_fetches: usize,
+}
+
+impl RemoteObject {
+    /// Opens an object using the configured OpenDAL storage backend.
+    pub async fn open(
+        file_path: String,
+        object_storage_options: ObjectStorageOptions,
+    ) -> Result<Self, opendal::Error> {
+        let storage_type = get_storage_type(file_path.clone());
+        let bucket_name = get_bucket_name(file_path.clone());
+        let relative_file_path = get_file_path(file_path.clone());
+        let chunk_size = object_storage_options.clone().chunk_size.unwrap_or(64);
+        let concurrent_fetches = object_storage_options
+            .clone()
+            .concurrent_fetches
+            .unwrap_or(8);
+        let allow_anonymous = object_storage_options.allow_anonymous;
+        let enable_request_payer = object_storage_options.enable_request_payer;
+        let max_retries = object_storage_options.max_retries.unwrap_or(5);
+        let timeout = object_storage_options.timeout.unwrap_or(300);
+
+        let (operator, path, reader_chunk_size, reader_concurrency) = match storage_type {
+            StorageType::S3 => {
+                log::info!(
+                    "Using S3 storage type with parameters: \
                 bucket_name: {bucket_name}, \
                 allow_anonymous: {allow_anonymous}, \
                 enable_request_payer: {enable_request_payer}, \
                 max_retries: {max_retries}, \
                 timeout: {timeout}"
-            );
-            let mut builder = S3::default()
-                .region(
-                    &env::var("AWS_REGION").unwrap_or(
-                        env::var("AWS_DEFAULT_REGION").unwrap_or(
-                            S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
-                                .await
-                                .unwrap_or("us-east-1".to_string()),
+                );
+                let mut builder = S3::default()
+                    .region(
+                        &env::var("AWS_REGION").unwrap_or(
+                            env::var("AWS_DEFAULT_REGION").unwrap_or(
+                                S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
+                                    .await
+                                    .unwrap_or("us-east-1".to_string()),
+                            ),
                         ),
-                    ),
-                )
-                .bucket(bucket_name.as_str())
-                .endpoint(&env::var("AWS_ENDPOINT_URL").unwrap_or_default());
-            if allow_anonymous {
-                builder = builder.disable_ec2_metadata().allow_anonymous();
-            };
-            if enable_request_payer {
-                builder = builder.enable_request_payer();
-            }
-            let operator = Operator::new(builder)?
-                .layer(
-                    TimeoutLayer::new()
-                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
-                ) // 5 minutes
-                .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
-                .layer(LoggingLayer::default())
-                .finish();
-
-            //FIXME: disable because of AWS S3 bug
-            // Reduce chunk size and increase concurrency for better reliability
-            // let adjusted_chunk_size = chunk_size.min(8 * 1024 * 1024); // Max 8MB chunks
-            // let adjusted_concurrency = concurrent_fetches.max(4); // Min 4 concurrent fetches
-
-            match byte_limit {
-                Some(limit) => {
-                    operator
-                        .reader_with(relative_file_path.as_str())
-                        .concurrent(1)
-                        .await?
-                        .into_bytes_stream(0u64..limit as u64)
-                        .await
+                    )
+                    .bucket(bucket_name.as_str())
+                    .endpoint(&env::var("AWS_ENDPOINT_URL").unwrap_or_default());
+                if allow_anonymous {
+                    builder = builder.disable_ec2_metadata().allow_anonymous();
+                };
+                if enable_request_payer {
+                    builder = builder.enable_request_payer();
                 }
-                None => {
-                    operator
-                        .reader_with(relative_file_path.as_str())
-                        .concurrent(1)
-                        .await?
-                        .into_bytes_stream(..)
-                        .await
-                }
+                let operator = Operator::new(builder)?
+                    .layer(
+                        TimeoutLayer::new()
+                            .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                    ) // 5 minutes
+                    .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
+                    .layer(LoggingLayer::default())
+                    .finish();
+                (operator, relative_file_path, None, 1)
             }
-        }
-        //FIXME: Currently, Azure Blob Storage does not support anonymous access
-        StorageType::AZBLOB => {
-            let blob_info = extract_account_and_container(&file_path);
-            log::info!(
-                "Using Azure Blob Storage type with parameters: \
+            //FIXME: Currently, Azure Blob Storage does not support anonymous access
+            StorageType::AZBLOB => {
+                let blob_info = extract_account_and_container(&file_path);
+                log::info!(
+                    "Using Azure Blob Storage type with parameters: \
                 account_name: {}, \
                 container_name: {}, \
                 endpoint: {}, \
@@ -555,103 +552,239 @@ pub async fn get_remote_stream(
                 allow_anonymous: {}, \
                 max_retries: {}, \
                 timeout: {}",
-                blob_info.account,
-                blob_info.container.clone(),
-                blob_info.endpoint,
-                chunk_size,
-                concurrent_fetches,
-                allow_anonymous,
-                max_retries,
-                timeout,
-            );
+                    blob_info.account,
+                    blob_info.container.clone(),
+                    blob_info.endpoint,
+                    chunk_size,
+                    concurrent_fetches,
+                    allow_anonymous,
+                    max_retries,
+                    timeout,
+                );
 
-            let builder = Azblob::default()
-                .root("/")
-                .container(&blob_info.container)
-                .endpoint(&blob_info.endpoint)
-                .account_name(&env::var("AZURE_STORAGE_ACCOUNT").unwrap_or_default())
-                .account_key(&env::var("AZURE_STORAGE_KEY").unwrap_or_default());
-            let operator = Operator::new(builder)?
-                .layer(
-                    TimeoutLayer::new()
-                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
-                ) // 5 minutes
-                .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
-                .layer(LoggingLayer::default())
-                .finish();
-            match byte_limit {
-                Some(limit) => {
-                    operator
-                        .reader_with(blob_info.relative_path.as_str())
-                        .chunk(chunk_size * 1024 * 1024)
-                        .concurrent(1)
-                        .await?
-                        .into_bytes_stream(0u64..limit as u64)
-                        .await
-                }
-                None => {
-                    operator
-                        .reader_with(blob_info.relative_path.as_str())
-                        .chunk(chunk_size * 1024 * 1024)
-                        .concurrent(1)
-                        .await?
-                        .into_bytes_stream(..)
-                        .await
-                }
+                let builder = Azblob::default()
+                    .root("/")
+                    .container(&blob_info.container)
+                    .endpoint(&blob_info.endpoint)
+                    .account_name(&env::var("AZURE_STORAGE_ACCOUNT").unwrap_or_default())
+                    .account_key(&env::var("AZURE_STORAGE_KEY").unwrap_or_default());
+                let operator = Operator::new(builder)?
+                    .layer(
+                        TimeoutLayer::new()
+                            .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                    ) // 5 minutes
+                    .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
+                    .layer(LoggingLayer::default())
+                    .finish();
+                (
+                    operator,
+                    blob_info.relative_path,
+                    Some(chunk_size * 1024 * 1024),
+                    1,
+                )
             }
-        }
-        StorageType::HTTP => unimplemented!("HTTP storage type is not implemented yet"),
+            StorageType::HTTP => {
+                let url = Url::parse(&file_path).map_err(|error| {
+                    opendal::Error::new(
+                        opendal::ErrorKind::ConfigInvalid,
+                        "invalid HTTP object URL",
+                    )
+                    .set_source(error)
+                })?;
+                let host = url.host_str().ok_or_else(|| {
+                    opendal::Error::new(
+                        opendal::ErrorKind::ConfigInvalid,
+                        "HTTP object URL has no host",
+                    )
+                })?;
+                let endpoint = match url.port() {
+                    Some(port) => format!("{}://{host}:{port}", url.scheme()),
+                    None => format!("{}://{host}", url.scheme()),
+                };
+                let mut path = url.path().trim_start_matches('/').to_string();
+                if let Some(query) = url.query() {
+                    path.push('?');
+                    path.push_str(query);
+                }
+                let builder = Http::default().endpoint(&endpoint);
+                let operator = Operator::new(builder)?
+                    .layer(
+                        TimeoutLayer::new()
+                            .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                    )
+                    .layer(RetryLayer::new().with_max_times(max_retries))
+                    .layer(LoggingLayer::default())
+                    .finish();
+                (
+                    operator,
+                    path,
+                    Some(chunk_size * 1024 * 1024),
+                    concurrent_fetches,
+                )
+            }
 
-        StorageType::GCS => {
-            log::info!(
-                "Using GCS storage type with parameters: \
+            StorageType::GCS => {
+                log::info!(
+                    "Using GCS storage type with parameters: \
                 bucket_name: {bucket_name}, \
                 chunk_size: {chunk_size}, \
                 concurrent_fetches: {concurrent_fetches}, \
                 allow_anonymous: {allow_anonymous}, \
                 max_retries: {max_retries}, \
                 timeout: {timeout}",
-            );
-            let mut builder = Gcs::default().bucket(bucket_name.as_str());
-            if allow_anonymous {
-                builder = builder.disable_vm_metadata().allow_anonymous();
-            } else if let Ok(service_account_key) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-                builder = builder.credential_path(service_account_key.as_str());
-            } else {
-                log::warn!(
-                    "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set. Using default credentials."
                 );
-            };
-            let operator = Operator::new(builder)?
-                .layer(
-                    TimeoutLayer::new()
-                        .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
-                ) // 5 minutes
-                .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
-                .layer(LoggingLayer::default())
-                .finish();
-            match byte_limit {
-                Some(limit) => {
-                    operator
-                        .reader_with(relative_file_path.as_str())
-                        .chunk(chunk_size * 1024 * 1024)
-                        .concurrent(concurrent_fetches)
-                        .await?
-                        .into_bytes_stream(0u64..limit as u64)
-                        .await
-                }
-                None => {
-                    operator
-                        .reader_with(relative_file_path.as_str())
-                        .chunk(chunk_size * 1024 * 1024)
-                        .concurrent(concurrent_fetches)
-                        .await?
-                        .into_bytes_stream(..)
-                        .await
-                }
+                let mut builder = Gcs::default().bucket(bucket_name.as_str());
+                if allow_anonymous {
+                    builder = builder.disable_vm_metadata().allow_anonymous();
+                } else if let Ok(service_account_key) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+                    builder = builder.credential_path(service_account_key.as_str());
+                } else {
+                    log::warn!(
+                        "GOOGLE_APPLICATION_CREDENTIALS environment variable is not set. Using default credentials."
+                    );
+                };
+                let operator = Operator::new(builder)?
+                    .layer(
+                        TimeoutLayer::new()
+                            .with_io_timeout(std::time::Duration::from_secs(timeout as u64)),
+                    ) // 5 minutes
+                    .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
+                    .layer(LoggingLayer::default())
+                    .finish();
+                (
+                    operator,
+                    relative_file_path,
+                    Some(chunk_size * 1024 * 1024),
+                    concurrent_fetches,
+                )
             }
+            StorageType::LOCAL => {
+                return Err(opendal::Error::new(
+                    opendal::ErrorKind::Unsupported,
+                    "RemoteObject requires a non-local path",
+                ));
+            }
+        };
+
+        Ok(Self {
+            operator,
+            path,
+            chunk_size: reader_chunk_size,
+            concurrent_fetches: reader_concurrency,
+        })
+    }
+
+    /// Returns the object size in bytes.
+    pub async fn size(&self) -> Result<u64, opendal::Error> {
+        self.operator
+            .stat(&self.path)
+            .await
+            .map(|metadata| metadata.content_length())
+    }
+
+    /// Reads the entire object into memory.
+    ///
+    /// This is intended for bounded companion metadata such as CSI indexes.
+    pub async fn read_all(&self) -> Result<bytes::Bytes, opendal::Error> {
+        self.operator
+            .read(&self.path)
+            .await
+            .map(|buffer| buffer.to_bytes())
+    }
+
+    /// Reads a half-open byte range into memory.
+    pub async fn read_range(&self, range: Range<u64>) -> Result<bytes::Bytes, opendal::Error> {
+        self.operator
+            .read_with(&self.path)
+            .range(range)
+            .await
+            .map(|buffer| buffer.to_bytes())
+    }
+
+    /// Streams the complete object.
+    pub async fn stream(&self) -> Result<FuturesBytesStream, opendal::Error> {
+        let reader = match self.chunk_size {
+            Some(chunk_size) => {
+                self.operator
+                    .reader_with(&self.path)
+                    .chunk(chunk_size)
+                    .concurrent(self.concurrent_fetches)
+                    .await?
+            }
+            None => {
+                self.operator
+                    .reader_with(&self.path)
+                    .concurrent(self.concurrent_fetches)
+                    .await?
+            }
+        };
+        reader.into_bytes_stream(..).await
+    }
+
+    /// Streams the complete object through one sequential backend request.
+    ///
+    /// Unlike [`Self::stream`], this does not apply the configured reader chunk
+    /// size. It therefore avoids a size/HEAD preflight on backends that need the
+    /// object length to split a complete-object read into ranges. This is useful
+    /// for bounded companion metadata when the caller enforces its own byte
+    /// ceiling while consuming the stream.
+    pub async fn stream_single_request(&self) -> Result<FuturesBytesStream, opendal::Error> {
+        let reader = self.operator.reader_with(&self.path).concurrent(1).await?;
+        reader.into_bytes_stream(..).await
+    }
+
+    /// Streams a half-open byte range.
+    pub async fn stream_range(
+        &self,
+        range: Range<u64>,
+    ) -> Result<FuturesBytesStream, opendal::Error> {
+        let reader = match self.chunk_size {
+            Some(chunk_size) => {
+                self.operator
+                    .reader_with(&self.path)
+                    .chunk(chunk_size)
+                    .concurrent(self.concurrent_fetches)
+                    .await?
+            }
+            None => {
+                self.operator
+                    .reader_with(&self.path)
+                    .concurrent(self.concurrent_fetches)
+                    .await?
+            }
+        };
+        reader.into_bytes_stream(range).await
+    }
+
+    /// Streams a range with a hard ceiling on each sequential backend read.
+    ///
+    /// The configured chunk size is honored when it is smaller than
+    /// `max_chunk_size`; otherwise it is capped. Only one chunk is fetched at a
+    /// time, so callers can stream an arbitrarily large logical range without
+    /// materializing it or multiplying the byte ceiling by reader concurrency.
+    pub async fn stream_range_bounded(
+        &self,
+        range: Range<u64>,
+        max_chunk_size: usize,
+    ) -> Result<FuturesBytesStream, opendal::Error> {
+        if max_chunk_size == 0 {
+            return Err(opendal::Error::new(
+                opendal::ErrorKind::ConfigInvalid,
+                "bounded range stream chunk size must be greater than zero",
+            ));
         }
-        _ => panic!("Invalid object storage type"),
+
+        let chunk_size = self
+            .chunk_size
+            .unwrap_or(max_chunk_size)
+            .min(max_chunk_size);
+        let reader = self
+            .operator
+            .reader_with(&self.path)
+            .chunk(chunk_size)
+            .concurrent(1)
+            .await?;
+        reader.into_bytes_stream(range).await
     }
 }
 
