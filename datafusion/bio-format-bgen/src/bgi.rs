@@ -11,7 +11,7 @@ use rusqlite::{Connection, OpenFlags};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use crate::catalog::BgenCatalog;
+use crate::catalog::IndexedVariant;
 use crate::header::BgenHeader;
 use crate::source::ObjectAccess;
 use crate::table_provider::{BgenReadOptions, StaleBgiPolicy};
@@ -25,9 +25,14 @@ static CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 /// provides.
 const MAX_SQLITE_PARAMETERS: usize = 900;
 
+/// Bytes of the BGEN object a BGI stores to identify the file it describes.
+const IDENTITY_PREFIX_BYTES: u64 = 1000;
+
 #[derive(Clone)]
 pub(crate) struct BgiIndex {
     pub(crate) row_indices: Arc<Vec<usize>>,
+    /// The index's own record of every variant, which becomes the catalog.
+    pub(crate) variants: Arc<Vec<IndexedVariant>>,
     pub(crate) bytes_read: u64,
     pub(crate) primary_bytes_read: u64,
     /// Connection held open for the provider's lifetime.
@@ -127,7 +132,6 @@ pub(crate) async fn open_optional_bgi(
     primary_path: &str,
     primary_source: &ObjectAccess,
     header: &BgenHeader,
-    catalog: &BgenCatalog,
     options: &BgenReadOptions,
 ) -> Result<Option<BgiIndex>> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
@@ -148,15 +152,7 @@ pub(crate) async fn open_optional_bgi(
     };
 
     let explicit = options.bgi_path.is_some();
-    let result = open_and_validate(
-        primary_path,
-        primary_source,
-        &bgi_path,
-        header,
-        catalog,
-        options,
-    )
-    .await;
+    let result = open_and_validate(primary_path, primary_source, &bgi_path, header, options).await;
     match result {
         Ok(index) => Ok(Some(index)),
         Err(_) if !explicit && options.stale_bgi_policy == StaleBgiPolicy::Ignore => Ok(None),
@@ -169,7 +165,6 @@ async fn open_and_validate(
     primary_source: &ObjectAccess,
     bgi_path: &str,
     header: &BgenHeader,
-    catalog: &BgenCatalog,
     options: &BgenReadOptions,
 ) -> Result<BgiIndex> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
@@ -231,7 +226,6 @@ async fn open_and_validate(
         primary_path,
         primary_source,
         header,
-        catalog,
         &metadata,
         &rows,
         bgi_path,
@@ -243,10 +237,32 @@ async fn open_and_validate(
         .enumerate()
         .map(|(index, row)| (row.offset, index))
         .collect();
+    let variants = rows
+        .into_iter()
+        .map(|row| IndexedVariant {
+            chrom: row.chrom,
+            position: row.position,
+            // A parsed record reports an empty RS identifier as absent, so an
+            // index that spells the same thing as an empty string has to agree.
+            rsid: row.rsid.filter(|value| !value.is_empty()),
+            allele_count: row.allele_count,
+            // Only a leading run is usable: these are compared against the
+            // record's alleles by position, so a null `allele1` beside a
+            // present `allele2` would line the second allele up with the first.
+            alleles: [row.allele1, row.allele2]
+                .into_iter()
+                .take_while(Option::is_some)
+                .flatten()
+                .collect(),
+            record_offset: row.offset,
+            record_size: row.size,
+        })
+        .collect::<Vec<_>>();
     Ok(BgiIndex {
-        row_indices: Arc::new((0..rows.len()).collect()),
+        row_indices: Arc::new((0..variants.len()).collect()),
+        variants: Arc::new(variants),
         bytes_read: bgi_size,
-        primary_bytes_read: header.object_size.min(1000),
+        primary_bytes_read: header.object_size.min(IDENTITY_PREFIX_BYTES),
         connection,
         sqlite_path: Arc::new(sqlite_path),
         offset_to_index: Arc::new(offset_to_index),
@@ -525,11 +541,23 @@ fn read_sqlite(connection: &Connection, display_path: &str) -> Result<(BgiMetada
     ))
 }
 
+/// Checks that an index describes this object and covers it consistently.
+///
+/// This is the part of validation that can be done without reading the
+/// variants: the object's size and its first bytes identify the file, the
+/// declared variant count fixes how many records the index must describe, and
+/// the row ranges must tile the variant region in order without gaps, overlaps,
+/// or reads that fall outside the object.
+///
+/// Each row's contents are checked against the record it points at when a scan
+/// reads that record — see `resolve_variant`. Rebuilding every record's
+/// metadata here to compare it would mean walking the whole object, which is
+/// exactly the work the index exists to avoid, and it would happen on every
+/// open whether or not the query touches those variants.
 async fn validate_identity(
     primary_path: &str,
     primary_source: &ObjectAccess,
     header: &BgenHeader,
-    catalog: &BgenCatalog,
     metadata: &BgiMetadata,
     rows: &[BgiRow],
     bgi_path: &str,
@@ -543,7 +571,7 @@ async fn validate_identity(
             ),
         ));
     }
-    let identity_length = header.object_size.min(1000);
+    let identity_length = header.object_size.min(IDENTITY_PREFIX_BYTES);
     let primary_prefix = primary_source
         .read_range(primary_path, 0..identity_length)
         .await?;
@@ -553,22 +581,27 @@ async fn validate_identity(
             "Metadata.first_1000_bytes does not match the BGEN object",
         ));
     }
-    if rows.len() != catalog.variants.len() {
+    if rows.len() != header.variant_count as usize {
         return Err(index_error(
             bgi_path,
             &format!(
-                "Variant row count {} differs from BGEN count {}",
+                "Variant row count {} differs from the BGEN header's variant count {}",
                 rows.len(),
-                catalog.variants.len()
+                header.variant_count
             ),
         ));
     }
 
-    for (index, (row, variant)) in rows.iter().zip(catalog.variants.iter()).enumerate() {
+    // Records are laid out end to end from the first variant offset to the end
+    // of the object, so a set of rows that describes this object has to do the
+    // same. Anything else means the index is describing different records, and
+    // catching it here keeps a scan from reading a range that begins mid-record.
+    let mut expected_offset = header.first_variant_offset;
+    for (index, row) in rows.iter().enumerate() {
         let end = row.offset.checked_add(row.size).ok_or_else(|| {
             index_error(bgi_path, &format!("Variant row {index} range overflowed"))
         })?;
-        if row.size == 0 || row.offset < header.first_variant_offset || end > header.object_size {
+        if row.size == 0 || end > header.object_size {
             return Err(index_error(
                 bgi_path,
                 &format!(
@@ -577,20 +610,26 @@ async fn validate_identity(
                 ),
             ));
         }
-        if row.offset != variant.record_offset
-            || row.size != variant.record_size
-            || row.chrom != variant.chrom
-            || row.position != variant.position
-            || row.rsid.as_deref() != variant.rsid.as_deref()
-            || row.allele_count != variant.alleles.len()
-            || row.allele1.as_deref() != variant.alleles.first().map(String::as_str)
-            || row.allele2.as_deref() != variant.alleles.get(1).map(String::as_str)
-        {
+        if row.offset != expected_offset {
             return Err(index_error(
                 bgi_path,
-                &format!("Variant row {index} does not match BGEN metadata"),
+                &format!(
+                    "Variant row {index} starts at {} but the preceding rows end at \
+                     {expected_offset}",
+                    row.offset
+                ),
             ));
         }
+        expected_offset = end;
+    }
+    if expected_offset != header.object_size {
+        return Err(index_error(
+            bgi_path,
+            &format!(
+                "Variant rows end at {expected_offset}, but the object is {} bytes",
+                header.object_size
+            ),
+        ));
     }
     Ok(())
 }

@@ -27,9 +27,12 @@ use datafusion_bio_format_core::companion::sanitize_location;
 
 use crate::bgi::{BgiIndex, open_optional_bgi};
 use crate::buffers::{BufferLayout, GenotypeBuffers};
-use crate::catalog::{BgenCatalog, build_transient_catalog};
+use crate::catalog::{
+    BgenCatalog, BgenVariant, ResolveOutcome, build_transient_catalog, catalog_from_index,
+    resolve_variant, try_resolve_variant,
+};
 use crate::decode::{DecodeScratch, complete_probability_count, decode_variant};
-use crate::filter::{evaluate_exact_filter, supports_exact_filter};
+use crate::filter::{evaluate_exact_filter, references_id, supports_exact_filter};
 use crate::header::{BgenHeader, BgenLayout};
 use crate::physical_exec::{BgenExec, BgenPartition, BgenReadRange};
 use crate::source::ObjectAccess;
@@ -224,8 +227,19 @@ impl BgenTableProvider {
             options.samples.as_deref(),
             options.missing_sample_policy,
         )?;
-        let catalog = build_transient_catalog(&path, &source, &header, &options).await?;
-        let bgi = open_optional_bgi(&path, &source, &header, &catalog, &options).await?;
+        // The index is opened first because it already holds every variant's
+        // location and metadata. Walking the object to rebuild that would
+        // duplicate the index, and since metadata and genotype payloads are
+        // interleaved, the walk pulls the payloads with it — so opening a table
+        // could download the whole file before a single query ran.
+        let bgi = open_optional_bgi(&path, &source, &header, &options).await?;
+        let catalog = match &bgi {
+            // No bytes of the object go into building this catalog: the index
+            // supplied it, and the prefix its identity check read is already
+            // reported against the index itself.
+            Some(index) => catalog_from_index(&path, &index.variants, &header, &options, 0)?,
+            None => build_transient_catalog(&path, &source, &header, &options).await?,
+        };
         // The fixed layout puts the state count in the schema, so it has to be
         // known before any batch is produced. One variant's block header carries
         // it; every other variant is checked against it while scanning.
@@ -327,10 +341,28 @@ impl TableProvider for BgenTableProvider {
             .transpose()?
             .unwrap_or_else(|| (0..self.fileset.catalog.variants.len()).collect());
         let candidate_count = candidates.len();
+        // A variant identifier lives only in the record, never in the index, so
+        // a predicate naming it needs those records parsed before the filter can
+        // be applied exactly. Only their metadata is read, not their payloads.
+        let mut resolved = if exact_filters.iter().any(|filter| references_id(filter)) {
+            resolve_variant_metadata(
+                &self.fileset.path,
+                &self.fileset.source,
+                &self.fileset.header,
+                &self.fileset.options,
+                &self.fileset.catalog,
+                &candidates,
+            )
+            .await?
+        } else {
+            HashMap::new()
+        };
         let mut selected: Vec<usize> = candidates
             .into_iter()
             .filter(|&index| {
-                let variant = &self.fileset.catalog.variants[index];
+                let variant = resolved
+                    .get(&index)
+                    .unwrap_or(&self.fileset.catalog.variants[index]);
                 exact_filters
                     .iter()
                     .all(|filter| evaluate_exact_filter(variant, filter))
@@ -356,6 +388,25 @@ impl TableProvider for BgenTableProvider {
         let needs_payload = projected_names.contains("phased")
             || projected_names.contains("bits")
             || (genotype_projected && !self.fileset.selected_samples.is_empty());
+        // `id` and a multiallelic variant's full allele list are in the record,
+        // not the index. A scan that reads payloads picks them up on the way; one
+        // that does not has to read the records' metadata for them.
+        let needs_record_metadata = !needs_payload
+            && (projected_names.contains("id") || projected_names.contains("alleles"));
+        if needs_record_metadata {
+            resolved.extend(
+                resolve_variant_metadata(
+                    &self.fileset.path,
+                    &self.fileset.source,
+                    &self.fileset.header,
+                    &self.fileset.options,
+                    &self.fileset.catalog,
+                    &selected,
+                )
+                .await?,
+            );
+        }
+
         let partitions = if needs_payload {
             plan_payload_partitions(
                 &selected,
@@ -436,6 +487,7 @@ impl TableProvider for BgenTableProvider {
             fileset: self.fileset.clone(),
             schema: schema.clone(),
             partitions: Arc::new(partitions),
+            resolved: Arc::new(resolved),
             metrics,
             batch_soft_byte_limit: self.fileset.options.batch_soft_byte_limit,
             cache: Arc::new(PlanProperties::new(
@@ -535,7 +587,7 @@ fn derive_fixed_width(
     for variant in catalog.variants.iter() {
         width = width.max(complete_probability_count(
             shape.ploidy,
-            variant.alleles.len(),
+            variant.allele_count,
             shape.phased,
         )?);
     }
@@ -564,11 +616,34 @@ async fn probe_probability_width(
                 .to_string(),
         )
     })?;
-    let end = variant
-        .payload_offset
-        .checked_add(variant.payload_size)
-        .ok_or_else(|| DataFusionError::Plan("BGEN payload range overflowed".to_string()))?;
-    let payload = source.read_range(path, variant.payload_offset..end).await?;
+    // An indexed variant knows where its record starts but not where the
+    // payload does, so the record is read and parsed first. It is one record.
+    let (variant, payload, bytes_fetched) = match variant.payload_span() {
+        Some(payload) => {
+            let payload = source.read_range(path, payload).await?;
+            let fetched = payload.len() as u64;
+            (variant.as_ref().clone(), payload, fetched)
+        }
+        None => {
+            let record = source.read_range(path, variant.record_span()).await?;
+            let resolved = resolve_variant(path, variant, &record, header, options)?;
+            let payload = resolved.payload_span().ok_or_else(|| {
+                DataFusionError::Internal(
+                    "BGEN variant stayed unresolved after being parsed".to_string(),
+                )
+            })?;
+            let start = usize::try_from(payload.start.saturating_sub(resolved.record_offset))
+                .map_err(|_| {
+                    DataFusionError::Internal("BGEN payload offset does not fit usize".to_string())
+                })?;
+            let end = usize::try_from(payload.end.saturating_sub(resolved.record_offset)).map_err(
+                |_| DataFusionError::Internal("BGEN payload end does not fit usize".to_string()),
+            )?;
+            let fetched = record.len() as u64;
+            (resolved, record.slice(start..end), fetched)
+        }
+    };
+    let variant = &variant;
     let mut scratch = DecodeScratch::new();
     // The probe selects no sample, so nothing is written into these.
     let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability);
@@ -604,11 +679,7 @@ async fn probe_probability_width(
         ploidy: decoded.declared_ploidy.ok_or_else(variable_ploidy)?,
         phased: decoded.phased,
     };
-    Ok((
-        shape,
-        payload.len() as u64,
-        decoded.decompressed_bytes as u64,
-    ))
+    Ok((shape, bytes_fetched, decoded.decompressed_bytes as u64))
 }
 
 /// Converts a state count to Arrow's fixed-size list width.
@@ -754,6 +825,99 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Result
     }
 }
 
+/// Bytes read per record when only its metadata is wanted.
+///
+/// Variant metadata is a few dozen bytes for a typical biallelic record, so this
+/// covers it many times over while staying far below any real genotype payload.
+/// A record whose metadata runs past it is re-read in full.
+const METADATA_PROBE_BYTES: u64 = 4 * 1024;
+
+/// Parses the metadata of indexed variants without reading their payloads.
+///
+/// A BGI records neither the variant identifier nor the alleles past the
+/// second, so a query that filters or projects those has to read the records
+/// themselves. Only the front of each record is fetched, and neighbouring reads
+/// are coalesced under the configured gap budget, so this costs the metadata
+/// rather than the payloads sitting behind it.
+///
+/// Returns the resolved variants by catalog index; variants the catalog already
+/// knows in full are absent, because the caller already has them.
+async fn resolve_variant_metadata(
+    path: &str,
+    source: &ObjectAccess,
+    header: &BgenHeader,
+    options: &BgenReadOptions,
+    catalog: &BgenCatalog,
+    indices: &[usize],
+) -> Result<HashMap<usize, Arc<BgenVariant>>> {
+    let mut resolved = HashMap::new();
+    let pending: Vec<usize> = indices
+        .iter()
+        .copied()
+        .filter(|&index| !catalog.variants[index].is_resolved())
+        .collect();
+    if pending.is_empty() {
+        return Ok(resolved);
+    }
+
+    let probe = METADATA_PROBE_BYTES
+        .min(options.max_variant_metadata_bytes as u64)
+        .max(1);
+    let ranges = pending
+        .iter()
+        .map(|&index| {
+            let record = catalog.variants[index].record_span();
+            ByteRange::new(
+                record.start,
+                record.start.saturating_add(probe).min(record.end),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let coalesced = coalesce_byte_ranges(ranges, options.max_range_gap, options.max_range_bytes)?;
+
+    // Both the coalesced ranges and the pending variants are in offset order, so
+    // one cursor walks them together instead of rescanning the variants for
+    // every range.
+    let mut next = 0;
+    for range in coalesced {
+        let bytes = source.read_range(path, range.start..range.end).await?;
+        while let Some(&index) = pending.get(next) {
+            let variant = &catalog.variants[index];
+            let start = variant.record_offset;
+            if start >= range.end {
+                break;
+            }
+            let offset = usize::try_from(start.saturating_sub(range.start)).map_err(|_| {
+                DataFusionError::Internal("BGEN record offset does not fit usize".to_string())
+            })?;
+            let slice = bytes.get(offset..).ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "BGEN variant {index} is outside the range read for its metadata"
+                ))
+            })?;
+            let variant = match try_resolve_variant(path, variant, slice, header, options)? {
+                ResolveOutcome::Resolved(variant) => variant,
+                // Longer metadata than the probe covers, which is rare enough to
+                // be worth a second read rather than a larger read for every
+                // record.
+                ResolveOutcome::NeedMore => {
+                    let record = source.read_range(path, variant.record_span()).await?;
+                    resolve_variant(path, variant, &record, header, options)?
+                }
+            };
+            resolved.insert(index, Arc::new(variant));
+            next += 1;
+        }
+    }
+    if next != pending.len() {
+        return Err(DataFusionError::Internal(format!(
+            "BGEN resolved {next} of {} variant records",
+            pending.len()
+        )));
+    }
+    Ok(resolved)
+}
+
 fn plan_payload_partitions(
     selected: &[usize],
     catalog: &BgenCatalog,
@@ -761,19 +925,15 @@ fn plan_payload_partitions(
     max_gap: u64,
     max_range_bytes: u64,
 ) -> Result<Vec<BgenPartition>> {
+    // A variant parsed from the object contributes just its payload. One known
+    // only from the index contributes its whole record, because the metadata in
+    // front of the payload is what says where the payload starts — a few dozen
+    // bytes immediately before bytes the scan is fetching anyway.
     let ranges = selected
         .iter()
         .map(|&index| {
-            let variant = &catalog.variants[index];
-            ByteRange::new(
-                variant.payload_offset,
-                variant
-                    .payload_offset
-                    .checked_add(variant.payload_size)
-                    .ok_or_else(|| {
-                        DataFusionError::Plan("BGEN payload range overflowed".to_string())
-                    })?,
-            )
+            let span = catalog.variants[index].scan_span();
+            ByteRange::new(span.start, span.end)
         })
         .collect::<Result<Vec<_>>>()?;
     // Bridging the metadata gaps between payloads would otherwise merge a whole
@@ -824,23 +984,18 @@ fn plan_payload_partitions(
     // range is quadratic and dominates planning on whole-chromosome files.
     let mut range_variants: Vec<Vec<usize>> = vec![Vec::new(); coalesced.len()];
     for &index in selected {
-        let variant = &catalog.variants[index];
-        let end = variant
-            .payload_offset
-            .checked_add(variant.payload_size)
-            .ok_or_else(|| DataFusionError::Plan("BGEN payload range overflowed".to_string()))?;
-        // Coalescing only merges ranges built from these same payload bounds, so
-        // every payload is contained in exactly one coalesced range. Failing
-        // loudly keeps a future coalescing bug from silently dropping variants
-        // from the scan.
+        let span = catalog.variants[index].scan_span();
+        // Coalescing only merges ranges built from these same bounds, so every
+        // span is contained in exactly one coalesced range. Failing loudly keeps
+        // a future coalescing bug from silently dropping variants from the scan.
         let position = coalesced
-            .partition_point(|range| range.start <= variant.payload_offset)
+            .partition_point(|range| range.start <= span.start)
             .checked_sub(1)
-            .filter(|&position| end <= coalesced[position].end)
+            .filter(|&position| span.end <= coalesced[position].end)
             .ok_or_else(|| {
                 DataFusionError::Internal(format!(
-                    "BGEN variant {index} payload {}..{end} is not inside any coalesced range",
-                    variant.payload_offset
+                    "BGEN variant {index} span {}..{} is not inside any coalesced range",
+                    span.start, span.end
                 ))
             })?;
         range_variants[position].push(index);
@@ -890,7 +1045,7 @@ fn plan_metadata_partitions(selected: &[usize], target_partitions: usize) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::BgenVariant;
+    use crate::catalog::{BgenVariant, VariantDetail};
 
     /// A catalog of contiguous payloads whose sizes vary the way real ones do.
     ///
@@ -903,20 +1058,23 @@ mod tests {
                 let payload_size = payload_size + (index as u64 * 37) % 100;
                 let payload_offset = offset;
                 offset += payload_size;
-                BgenVariant {
+                Arc::new(BgenVariant {
                     index,
-                    id: None,
                     rsid: None,
                     chrom: "1".to_string(),
                     start: index as u64,
                     end: index as u64 + 1,
                     position: index as u32 + 1,
                     alleles: vec!["A".to_string(), "C".to_string()],
-                    record_offset: 0,
-                    record_size: 0,
-                    payload_offset,
-                    payload_size,
-                }
+                    allele_count: 2,
+                    record_offset: payload_offset,
+                    record_size: payload_size,
+                    detail: VariantDetail::Parsed {
+                        id: None,
+                        payload_offset,
+                        payload_size,
+                    },
+                })
             })
             .collect::<Vec<_>>();
         BgenCatalog {

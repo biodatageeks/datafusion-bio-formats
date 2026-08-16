@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -45,22 +46,93 @@ const COMPRESSION_EXPANSION_BYTES: u64 = 1024;
 #[derive(Clone, Debug)]
 pub(crate) struct BgenVariant {
     pub(crate) index: usize,
-    pub(crate) id: Option<String>,
     pub(crate) rsid: Option<String>,
     pub(crate) chrom: String,
     pub(crate) start: u64,
     pub(crate) end: u64,
     pub(crate) position: u32,
+    /// The alleles this variant's source knows about.
+    ///
+    /// A parsed record carries all of them; a BGI row carries only the first
+    /// two, so this can be shorter than [`Self::allele_count`]. Use
+    /// [`Self::complete_alleles`] wherever the whole list is required.
     pub(crate) alleles: Vec<String>,
+    /// How many alleles the variant declares, whatever the source knows.
+    pub(crate) allele_count: usize,
     pub(crate) record_offset: u64,
     pub(crate) record_size: u64,
-    pub(crate) payload_offset: u64,
-    pub(crate) payload_size: u64,
+    pub(crate) detail: VariantDetail,
+}
+
+/// The parts of a variant record a BGI does not record.
+///
+/// The index stores where each record starts and how long it is, but not the
+/// variant identifier and not where the genotype payload begins inside the
+/// record. Keeping those behind this enum rather than filling them with
+/// placeholders means a path that forgets to resolve a record fails to compile
+/// instead of silently reading the wrong bytes.
+#[derive(Clone, Debug)]
+pub(crate) enum VariantDetail {
+    /// Parsed from the BGEN object.
+    Parsed {
+        id: Option<String>,
+        payload_offset: u64,
+        payload_size: u64,
+    },
+    /// Known only from the index, pending a read of the record itself.
+    Indexed,
+}
+
+impl BgenVariant {
+    /// The complete allele list, or `None` when the source knows only a prefix.
+    pub(crate) fn complete_alleles(&self) -> Option<&[String]> {
+        (self.alleles.len() == self.allele_count).then_some(self.alleles.as_slice())
+    }
+
+    /// Where the genotype payload sits, once the record has been parsed.
+    pub(crate) fn payload_span(&self) -> Option<Range<u64>> {
+        match &self.detail {
+            VariantDetail::Parsed {
+                payload_offset,
+                payload_size,
+                ..
+            } => Some(*payload_offset..payload_offset.saturating_add(*payload_size)),
+            VariantDetail::Indexed => None,
+        }
+    }
+
+    /// The record's byte range, which every source knows.
+    pub(crate) fn record_span(&self) -> Range<u64> {
+        self.record_offset..self.record_offset.saturating_add(self.record_size)
+    }
+
+    /// The bytes a scan must fetch to emit this variant.
+    ///
+    /// A parsed record needs only its payload. An indexed one needs the whole
+    /// record, because its metadata is what says where the payload starts — and
+    /// that metadata is a few dozen bytes sitting immediately before payload
+    /// the scan is fetching anyway.
+    pub(crate) fn scan_span(&self) -> Range<u64> {
+        self.payload_span().unwrap_or_else(|| self.record_span())
+    }
+
+    /// The variant identifier, once the record has been parsed.
+    pub(crate) fn id(&self) -> Option<Option<&str>> {
+        match &self.detail {
+            VariantDetail::Parsed { id, .. } => Some(id.as_deref()),
+            VariantDetail::Indexed => None,
+        }
+    }
+
+    /// Whether every field is known, so no read is needed to emit this variant.
+    pub(crate) fn is_resolved(&self) -> bool {
+        matches!(self.detail, VariantDetail::Parsed { .. })
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenCatalog {
-    pub(crate) variants: Arc<Vec<BgenVariant>>,
+    pub(crate) variants: Arc<Vec<Arc<BgenVariant>>>,
     pub(crate) bytes_read: u64,
 }
 
@@ -214,7 +286,9 @@ pub(crate) async fn build_transient_catalog(
                     // Those extra framing bytes must not become extra allowance,
                     // so the metadata a successful parse actually consumed is
                     // measured against the limit.
-                    let metadata_size = variant.payload_offset.saturating_sub(record_offset);
+                    let metadata_size = variant
+                        .payload_span()
+                        .map_or(0, |payload| payload.start.saturating_sub(record_offset));
                     if metadata_size > options.max_variant_metadata_bytes as u64 {
                         return Err(catalog_error(
                             path,
@@ -275,7 +349,7 @@ pub(crate) async fn build_transient_catalog(
                     "record end arithmetic overflowed",
                 )
             })?;
-        variants.push(variant);
+        variants.push(Arc::new(variant));
     }
 
     if record_offset != header.object_size {
@@ -290,6 +364,174 @@ pub(crate) async fn build_transient_catalog(
         variants: Arc::new(variants),
         bytes_read: window.bytes_read,
     })
+}
+
+/// One variant's location and metadata as the BGI records it.
+#[derive(Clone, Debug)]
+pub(crate) struct IndexedVariant {
+    pub(crate) chrom: String,
+    pub(crate) position: u32,
+    pub(crate) rsid: Option<String>,
+    pub(crate) allele_count: usize,
+    /// The first one or two alleles, which is all the standard BGI schema holds.
+    pub(crate) alleles: Vec<String>,
+    pub(crate) record_offset: u64,
+    pub(crate) record_size: u64,
+}
+
+/// Builds a catalog from index rows, without reading the object's variants.
+///
+/// The index already holds what planning needs: which variants exist, where
+/// their records are, and the chromosome, position, RS identifier and allele
+/// count to filter them on. What it does not hold — the variant identifier, the
+/// alleles past the second, and where the payload starts inside each record —
+/// is resolved by [`resolve_variant`] when a scan reads the record, which is
+/// also where each row is checked against the object it claims to describe.
+pub(crate) fn catalog_from_index(
+    path: &str,
+    rows: &[IndexedVariant],
+    header: &BgenHeader,
+    options: &BgenReadOptions,
+    bytes_read: u64,
+) -> Result<BgenCatalog> {
+    let mut variants = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let coordinates = options
+            .coordinate_system
+            .site(row.position.into())
+            .map_err(|error| {
+                catalog_error(
+                    path,
+                    index,
+                    row.record_offset,
+                    &format!("invalid one-based position {}: {error}", row.position),
+                )
+            })?;
+        if row.allele_count == 0 || row.allele_count > options.max_alleles {
+            return Err(catalog_error(
+                path,
+                index,
+                row.record_offset,
+                &format!(
+                    "allele count {} is outside supported range 1..={}",
+                    row.allele_count, options.max_alleles
+                ),
+            ));
+        }
+        // The record range is trusted for reads, so it is bounded here rather
+        // than where it is turned into an object request.
+        let record_end = row
+            .record_offset
+            .checked_add(row.record_size)
+            .ok_or_else(|| {
+                catalog_error(path, index, row.record_offset, "record range overflowed")
+            })?;
+        if row.record_size == 0
+            || row.record_offset < header.first_variant_offset
+            || record_end > header.object_size
+        {
+            return Err(catalog_error(
+                path,
+                index,
+                row.record_offset,
+                &format!("record range ..{record_end} is outside the object"),
+            ));
+        }
+        variants.push(Arc::new(BgenVariant {
+            index,
+            rsid: row.rsid.clone(),
+            chrom: row.chrom.clone(),
+            start: coordinates.start,
+            end: coordinates.end,
+            position: row.position,
+            alleles: row.alleles.clone(),
+            allele_count: row.allele_count,
+            record_offset: row.record_offset,
+            record_size: row.record_size,
+            detail: VariantDetail::Indexed,
+        }));
+    }
+    Ok(BgenCatalog {
+        variants: Arc::new(variants),
+        bytes_read,
+    })
+}
+
+/// Parses an indexed variant's record and checks it against what the index said.
+///
+/// `bytes` must start at the variant's record offset. This is where a BGI is
+/// validated against the object: every field the index records is compared with
+/// the record itself, so a stale or mismatched index fails the scan rather than
+/// producing rows that describe the wrong variants.
+pub(crate) fn resolve_variant(
+    path: &str,
+    variant: &BgenVariant,
+    bytes: &[u8],
+    header: &BgenHeader,
+    options: &BgenReadOptions,
+) -> Result<BgenVariant> {
+    match try_resolve_variant(path, variant, bytes, header, options)? {
+        ResolveOutcome::Resolved(resolved) => Ok(resolved),
+        ResolveOutcome::NeedMore => Err(catalog_error(
+            path,
+            variant.index,
+            variant.record_offset,
+            "variant metadata is truncated",
+        )),
+    }
+}
+
+/// What resolving a variant from a bounded slice of its record produced.
+pub(crate) enum ResolveOutcome {
+    Resolved(BgenVariant),
+    /// The slice ended inside the variant's metadata; re-read it longer.
+    NeedMore,
+}
+
+/// [`resolve_variant`], but reporting a slice that was too short rather than
+/// failing, so a caller reading a bounded prefix of the record can widen it.
+pub(crate) fn try_resolve_variant(
+    path: &str,
+    variant: &BgenVariant,
+    bytes: &[u8],
+    header: &BgenHeader,
+    options: &BgenReadOptions,
+) -> Result<ResolveOutcome> {
+    let index = variant.index;
+    let parsed = match parse_variant(path, index, variant.record_offset, bytes, header, options) {
+        Ok(parsed) => parsed,
+        Err(ParseVariantError::Invalid(error)) => return Err(error),
+        Err(ParseVariantError::NeedMore) => return Ok(ResolveOutcome::NeedMore),
+    };
+    let mismatch = |field: &str| Err(index_mismatch(path, index, variant.record_offset, field));
+    if parsed.record_size != variant.record_size {
+        return mismatch("record size");
+    }
+    if parsed.chrom != variant.chrom {
+        return mismatch("chromosome");
+    }
+    if parsed.position != variant.position {
+        return mismatch("position");
+    }
+    if parsed.rsid != variant.rsid {
+        return mismatch("RS identifier");
+    }
+    if parsed.allele_count != variant.allele_count {
+        return mismatch("allele count");
+    }
+    // The index holds a prefix of the alleles, so only that prefix is compared.
+    if parsed.alleles[..variant.alleles.len()] != variant.alleles[..] {
+        return mismatch("alleles");
+    }
+    Ok(ResolveOutcome::Resolved(parsed))
+}
+
+fn index_mismatch(path: &str, index: usize, offset: u64, field: &str) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "BGEN {} variant {index} at byte {offset}: the index's {field} does not match the record; \
+         the index does not describe this object",
+        sanitize_location(path)
+    ))
 }
 
 enum ParseVariantError {
@@ -479,17 +721,20 @@ fn parse_variant(
 
     Ok(BgenVariant {
         index,
-        id: (!id.is_empty()).then_some(id),
         rsid: (!rsid.is_empty()).then_some(rsid),
         chrom,
         start: coordinates.start,
         end: coordinates.end,
         position,
+        allele_count: alleles.len(),
         alleles,
         record_offset,
         record_size,
-        payload_offset,
-        payload_size,
+        detail: VariantDetail::Parsed {
+            id: (!id.is_empty()).then_some(id),
+            payload_offset,
+            payload_size,
+        },
     })
 }
 

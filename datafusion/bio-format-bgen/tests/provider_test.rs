@@ -258,10 +258,14 @@ fn sample(ploidy: u8, missing: bool, stored: &[u32]) -> SampleProbabilities {
 }
 
 fn fixture(codec: Codec, embedded_samples: bool) -> Fixture {
+    fixture_with_variants(codec, embedded_samples, &variants())
+}
+
+fn fixture_with_variants(codec: Codec, embedded_samples: bool, variants: &[Variant]) -> Fixture {
     let dir = TempDir::new().unwrap();
     let bgen = dir.path().join("cohort.bgen");
     let bgi = dir.path().join("cohort.bgen.bgi");
-    let (bytes, rows) = encode_layout2(codec, embedded_samples, &variants());
+    let (bytes, rows) = encode_layout2(codec, embedded_samples, variants);
     fs::write(&bgen, bytes).unwrap();
     Fixture {
         _dir: dir,
@@ -269,6 +273,28 @@ fn fixture(codec: Codec, embedded_samples: bool) -> Fixture {
         bgi,
         rows,
     }
+}
+
+/// Enough biallelic variants that the object is several times the 1000-byte
+/// identity prefix, so a read of the variant region is unmistakable in the
+/// server's request log.
+fn many_variants(count: usize) -> Vec<Variant> {
+    (0..count)
+        .map(|index| Variant {
+            id: Box::leak(format!("v{index}").into_boxed_str()),
+            rsid: Box::leak(format!("rs{index}").into_boxed_str()),
+            chrom: "1",
+            position: 10 + index as u32,
+            alleles: vec!["A", "C"],
+            phased: false,
+            bits: 8,
+            samples: vec![
+                sample(2, false, &[255, 0]),
+                sample(2, false, &[0, 255]),
+                sample(2, true, &[0, 0]),
+            ],
+        })
+        .collect()
 }
 
 fn encode_layout2(
@@ -952,6 +978,141 @@ async fn applies_stale_bgi_policy_and_never_ignores_an_explicit_index() {
     .unwrap_err()
     .to_string();
     assert!(error.contains("first_1000_bytes"), "{error}");
+}
+
+#[tokio::test]
+async fn opening_an_indexed_bgen_does_not_read_the_variant_region() {
+    // The BGI already records every variant's chromosome, position, RS
+    // identifier, allele count and record range. Walking the object to rebuild
+    // that at construction duplicates the index, and because variant metadata
+    // and genotype payloads are interleaved, the walk's read-ahead drags the
+    // payloads along with it — so opening a table can download the whole file.
+    let variants = many_variants(200);
+    let fixture = fixture_with_variants(Codec::Zstd, true, &variants);
+    create_bgi(&fixture, false);
+    let object_size = fs::metadata(&fixture.bgen).unwrap().len();
+    assert!(
+        object_size > 4 * IDENTITY_PREFIX_BYTES,
+        "fixture must be several times the identity prefix: {object_size}"
+    );
+
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Opening the table needs the header and the bytes the BGI's own identity
+    // check covers. Nothing beyond that.
+    let allowed_end = IDENTITY_PREFIX_BYTES.max(fixture.rows[0].offset);
+    let reads = server.get_requests("cohort.bgen");
+    for request in &reads {
+        let end = request
+            .range
+            .map_or(object_size, |(_, end)| end as u64 + 1)
+            .min(object_size);
+        assert!(
+            end <= allowed_end,
+            "opening an indexed BGEN read to byte {end}, past the header and identity prefix \
+             at {allowed_end}: {reads:?}"
+        );
+    }
+}
+
+/// Bytes of the BGEN object the BGI stores for its own identity check.
+const IDENTITY_PREFIX_BYTES: u64 = 1000;
+
+#[tokio::test]
+async fn an_indexed_scan_matches_an_unindexed_one_column_for_column() {
+    // With an index the catalog comes from the BGI, and the variant identifier,
+    // the alleles past the second and the payload position are parsed from each
+    // record as the scan reads it. Without one every field is parsed up front.
+    // The two must be indistinguishable in the output, including for `v3`,
+    // which has three alleles where the index records only two.
+    let indexed = fixture(Codec::Zstd, true);
+    create_bgi(&indexed, false);
+    let unindexed = fixture(Codec::Zstd, true);
+    assert!(!unindexed.bgi.exists(), "the second fixture has no index");
+
+    for sql in [
+        "SELECT chrom, start, \"end\", id, rsid, alleles FROM b ORDER BY start",
+        "SELECT id FROM b WHERE id = 'v2'",
+        "SELECT id, alleles FROM b WHERE rsid = 'rs3'",
+        "SELECT chrom, start FROM b ORDER BY start",
+        "SELECT rsid, phased, bits FROM b ORDER BY start",
+        "SELECT genotypes FROM b WHERE rsid = 'rs2'",
+        "SELECT id FROM b WHERE id IN ('v1', 'v3') ORDER BY start",
+        "SELECT alleles FROM b WHERE start >= 0 ORDER BY start",
+    ] {
+        let mut rendered = Vec::new();
+        for fixture in [&indexed, &unindexed] {
+            let provider =
+                BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+                    .await
+                    .unwrap();
+            let context = context(1024);
+            context.register_table("b", Arc::new(provider)).unwrap();
+            let batches = context.sql(sql).await.unwrap().collect().await.unwrap();
+            rendered.push(
+                datafusion::arrow::util::pretty::pretty_format_batches(&batches)
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_eq!(rendered[0], rendered[1], "indexed vs unindexed for: {sql}");
+    }
+}
+
+#[tokio::test]
+async fn a_scan_rejects_an_index_that_describes_different_variants() {
+    // Validating every index row against the object at open time is what made
+    // opening a table read the whole file. The check now happens where each
+    // record is read, so an index that identifies the right file but describes
+    // the wrong variants has to fail the scan rather than emit its own values.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let connection = Connection::open(&fixture.bgi).unwrap();
+    connection
+        .execute(
+            "UPDATE Variant SET rsid = 'rs-wrong' WHERE rsid = 'rs2'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    // Opening still succeeds: the file's size and first bytes are untouched, and
+    // the row ranges still tile the object.
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .expect("the index still identifies this object");
+
+    for sql in ["SELECT id FROM b", "SELECT genotypes FROM b"] {
+        let context = context(1024);
+        context
+            .register_table("b", Arc::new(provider.clone()))
+            .unwrap();
+        let error = context
+            .sql(sql)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err("a mismatched index must fail the scan")
+            .to_string();
+        assert!(
+            error.contains("does not match the record"),
+            "unexpected error for {sql}: {error}"
+        );
+    }
 }
 
 #[tokio::test]
