@@ -462,11 +462,13 @@ needed by the projection/sample plan. The decoder does not keep a map of every
 base variant and does not clone a full cohort vector for each LD record.
 
 Local scans open one read handle per partition and reuse buffers with positional
-reads. Object-store scans retain bounded coalesced range reads. The header index
-is decoded by `2^16`-variant blocks on demand instead of requiring an owned
-record descriptor for every variant. PVAR/PSAM parsing is streaming or compactly
-interned so metadata memory does not multiply the source text with per-cell
-`String` allocations.
+reads. Object-store scans retain bounded coalesced range reads. Variable-width
+header indexes retain their encoded `2^16`-variant blocks, packed block-relative
+offsets, and 16-bit within-block LD deltas; fixed-width modes retain only their
+offset formula. Record descriptors are reconstructed on demand instead of being
+allocated per variant. PVAR/PSAM parsing is streaming or compactly interned so
+metadata memory does not multiply the source text with per-cell `String`
+allocations.
 
 Partitions remain contiguous for locality and are balanced with a cost model
 combining encoded bytes, projected decoded values, record representation, and

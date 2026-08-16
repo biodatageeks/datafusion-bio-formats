@@ -180,7 +180,10 @@ impl ExecutionPlan for PgenExec {
                 let retained_bases = assignment
                     .required
                     .iter()
-                    .filter_map(|&index| fileset.records[index].ld_base)
+                    .map(|&index| fileset.records.record(index).map(|record| record.ld_base))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
                     .collect::<HashSet<_>>();
                 // The index assigns every LD record to the most recent eligible
                 // non-LD record. Required records are processed in source order,
@@ -198,7 +201,7 @@ impl ExecutionPlan for PgenExec {
                     metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
                     while let Some(&variant_index) = assignment.required.get(required_position) {
-                        let record = &fileset.records[variant_index];
+                        let record = fileset.records.record(variant_index)?;
                         if record.offset >= range.end {
                             break;
                         }
@@ -543,7 +546,10 @@ fn execute_gt_only(
         let retained_bases = assignment
             .required
             .iter()
-            .filter_map(|&index| fileset.records[index].ld_base)
+            .map(|&index| fileset.records.record(index).map(|record| record.ld_base))
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
             .collect::<HashSet<_>>();
         let mut ld_base_index = None;
         let mut ld_base = Vec::with_capacity(fileset.sample_count);
@@ -559,7 +565,7 @@ fn execute_gt_only(
             metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
             while let Some(&variant_index) = assignment.required.get(required_position) {
-                let record = &fileset.records[variant_index];
+                let record = fileset.records.record(variant_index)?;
                 if record.offset >= range.end {
                     break;
                 }

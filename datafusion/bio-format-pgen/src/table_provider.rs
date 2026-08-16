@@ -499,7 +499,7 @@ fn plan_payload_partitions(
     let selected_ranges = selected
         .iter()
         .map(|&index| {
-            let record = &fileset.records[index];
+            let record = fileset.records.record(index)?;
             ByteRange::new(record.offset, record.end()).map(|range| (index, range))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -513,23 +513,24 @@ fn plan_payload_partitions(
                 .collect::<Vec<_>>();
             let mut required = owned.iter().copied().collect::<HashSet<_>>();
             for &index in &owned {
-                if let Some(base) = fileset.records[index].ld_base {
+                if let Some(base) = fileset.records.record(index)?.ld_base {
                     required.insert(base);
                 }
             }
             let mut required = required.into_iter().collect::<Vec<_>>();
             required.sort_unstable();
-            let ranges = coalesce_byte_ranges(
-                required.iter().map(|&index| {
-                    let record = &fileset.records[index];
-                    ByteRange {
+            let required_ranges = required
+                .iter()
+                .map(|&index| {
+                    let record = fileset.records.record(index)?;
+                    Ok(ByteRange {
                         start: record.offset,
                         end: record.end(),
-                    }
-                }),
-                max_gap,
-                max_range_bytes,
-            )?;
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let ranges =
+                coalesce_byte_ranges(required_ranges.into_iter(), max_gap, max_range_bytes)?;
             Ok(PgenPartition {
                 owned,
                 required,
@@ -611,7 +612,7 @@ mod tests {
             .unwrap(),
             selected_identities: Arc::new(Vec::new()),
             sample_count: 0,
-            records: Arc::new(vec![
+            records: Arc::new(crate::fileset::RecordIndex::explicit(vec![
                 RecordInfo {
                     offset: 100,
                     length: 10,
@@ -624,7 +625,7 @@ mod tests {
                     record_type: 2,
                     ld_base: Some(0),
                 },
-            ]),
+            ])),
             mode: crate::fileset::PgenMode::Variable,
             companion_bytes: 0,
             header_bytes: 0,
