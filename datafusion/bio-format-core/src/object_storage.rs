@@ -513,6 +513,28 @@ pub async fn get_remote_stream(
     }
 }
 
+/// Rebuilds the scheme/host/port prefix of an HTTP object URL.
+///
+/// `Url::host_str` returns an IPv6 literal without its brackets, so
+/// reassembling from it would turn `http://[::1]:8080` into `http://::1:8080`,
+/// where the final colon no longer separates a port. `Host`'s Display keeps
+/// them.
+fn http_endpoint(url: &Url) -> Result<String, opendal::Error> {
+    let host = match url.host().ok_or_else(|| {
+        opendal::Error::new(
+            opendal::ErrorKind::ConfigInvalid,
+            "HTTP object URL has no host",
+        )
+    })? {
+        url::Host::Ipv6(address) => format!("[{address}]"),
+        other => other.to_string(),
+    };
+    Ok(match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    })
+}
+
 /// A remotely stored immutable object with bounded read primitives.
 #[derive(Clone, Debug)]
 pub struct RemoteObject {
@@ -631,16 +653,7 @@ impl RemoteObject {
                     )
                     .set_source(error)
                 })?;
-                let host = url.host_str().ok_or_else(|| {
-                    opendal::Error::new(
-                        opendal::ErrorKind::ConfigInvalid,
-                        "HTTP object URL has no host",
-                    )
-                })?;
-                let endpoint = match url.port() {
-                    Some(port) => format!("{}://{host}:{port}", url.scheme()),
-                    None => format!("{}://{host}", url.scheme()),
-                };
+                let endpoint = http_endpoint(&url)?;
                 let mut path = url.path().trim_start_matches('/').to_string();
                 if let Some(query) = url.query() {
                     path.push('?');
@@ -851,5 +864,31 @@ mod multimember_tests {
         let mut out = String::new();
         decoder.read_to_string(&mut out).await.unwrap();
         assert_eq!(out, "helloworld");
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn an_ipv6_endpoint_keeps_its_brackets() {
+        // Without them the endpoint reads as `http://::1:8081`, whose final
+        // colon no longer separates a port.
+        let url = Url::parse("http://[::1]:8081/example.bcf").unwrap();
+        assert_eq!(http_endpoint(&url).unwrap(), "http://[::1]:8081");
+    }
+
+    #[test]
+    fn named_and_ipv4_endpoints_are_unchanged() {
+        for (input, expected) in [
+            ("https://example.test/file.bcf", "https://example.test"),
+            ("http://127.0.0.1:8080/file.bcf", "http://127.0.0.1:8080"),
+            // A scheme's default port normalizes away, which is correct.
+            ("https://example.test:443/f.bcf", "https://example.test"),
+        ] {
+            let url = Url::parse(input).unwrap();
+            assert_eq!(http_endpoint(&url).unwrap(), expected, "{input}");
+        }
     }
 }
