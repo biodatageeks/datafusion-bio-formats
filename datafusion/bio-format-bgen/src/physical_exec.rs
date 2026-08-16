@@ -190,7 +190,17 @@ impl ExecutionPlan for BgenExec {
                     metrics.add(GenotypeMetric::RangeRequests, 1);
                     metrics.add(GenotypeMetric::CoalescedRanges, 1);
                     metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
-                    metrics.add(GenotypeMetric::CompressedBytes, bytes.len() as u64);
+                    // A coalesced range bridges the metadata between consecutive
+                    // payloads, so its length is what was downloaded, not what
+                    // was compressed genotype data. Counting the range would
+                    // report the bridged metadata as compressed bytes and skew
+                    // any compression ratio derived from these counters.
+                    let compressed_bytes: u64 = planned
+                        .variants
+                        .iter()
+                        .map(|&index| fileset.catalog.variants[index].payload_size)
+                        .sum();
+                    metrics.add(GenotypeMetric::CompressedBytes, compressed_bytes);
 
                     for variant_index in planned.variants {
                         let variant = &fileset.catalog.variants[variant_index];

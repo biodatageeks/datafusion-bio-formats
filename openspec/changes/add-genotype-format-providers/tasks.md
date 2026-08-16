@@ -148,6 +148,9 @@
 - [x] 5.23 Size coalesced payload ranges for several per partition, with a floor
   that never starves a partition, so partition scaling is not capped by an
   unbalanced split.
+- [x] 5.24 Bound a variant's probability reconstruction by the decompressed
+  block budget, bind the metadata limit on parsed rather than fetched bytes, and
+  attribute only payload bytes to the compressed-bytes counter.
 
 ## 6. PGEN Provider
 

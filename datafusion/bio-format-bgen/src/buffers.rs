@@ -79,6 +79,15 @@ impl GenotypeBuffers {
         }
     }
 
+    /// How this batch lays its values out.
+    ///
+    /// The decoder needs it to size a variant's reconstruction before building
+    /// it: a fixed layout pads every sample to its width, so the emitted states
+    /// are the width rather than what the variant itself stores.
+    pub(crate) fn layout(&self) -> BufferLayout {
+        self.layout
+    }
+
     /// The values buffer, for a decoder that appends a whole sample at once.
     #[inline]
     pub(crate) fn values_mut(&mut self) -> &mut Vec<f32> {

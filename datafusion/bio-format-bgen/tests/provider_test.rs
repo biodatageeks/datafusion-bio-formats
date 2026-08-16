@@ -1769,3 +1769,243 @@ fn run_python_oracle(python: &str, name: &str, script: &str, bgen: &str, require
     );
     true
 }
+
+#[tokio::test]
+async fn the_metadata_limit_applies_inside_the_read_ahead_buffer() {
+    // The metadata window reads ahead a megabyte at a time and serves whatever
+    // it holds, so a record whose metadata exceeds max_variant_metadata_bytes
+    // but fits in that buffer would parse without the limit ever being
+    // consulted. The limit has to bind on the bytes handed to the parser, not
+    // on the bytes fetched.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            // Far below any real record, and far below the read-ahead buffer.
+            max_variant_metadata_bytes: 8,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a record larger than the metadata limit must be rejected")
+    .to_string();
+    assert!(error.contains("max_variant_metadata_bytes"), "{error}");
+}
+
+#[tokio::test]
+async fn compressed_bytes_counts_payloads_not_bridged_metadata() {
+    // A coalesced range bridges the metadata between consecutive payloads.
+    // Those bytes are downloaded, so they belong in PrimaryBytesRead, but they
+    // are not compressed genotype data and must not inflate CompressedBytes.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    let plan = provider
+        .scan(&context.state(), Some(&vec![8]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    // PrimaryBytesRead is already seeded with the header, catalog and probe
+    // reads at planning, so only its growth during execution is the coalesced
+    // range. Comparing against the total would pass even with the bug.
+    let planned = exec.metrics_snapshot()[GenotypeMetric::PrimaryBytesRead as usize].1;
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let snapshot = exec.metrics_snapshot();
+    let compressed = snapshot[GenotypeMetric::CompressedBytes as usize].1;
+    let range_bytes = snapshot[GenotypeMetric::PrimaryBytesRead as usize].1 - planned;
+    assert!(
+        range_bytes > 0,
+        "the scan should have read a coalesced range"
+    );
+    assert!(
+        compressed < range_bytes,
+        "compressed {compressed} must exclude the metadata bridged inside the \
+         {range_bytes}-byte coalesced range"
+    );
+}
+
+#[tokio::test]
+async fn a_variant_cannot_reconstruct_more_than_the_block_byte_budget() {
+    // Each sample can sit under max_states_per_sample while their sum decodes
+    // to far more memory than the block occupies, because low bit precision
+    // expands every stored state into an f32. The budget is checked before any
+    // of the reconstruction is built.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            // The fixture's largest decompressed block is 19 bytes, so this
+            // budget clears the existing block-size check; the reconstruction
+            // it implies — three samples of three to six states as f32 — does
+            // not fit, and only the new check can catch that.
+            max_decompressed_block_bytes: 24,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reconstructing") && error.contains("probability states"),
+        "the block-size check must not be what rejected this: {error}"
+    );
+}
+
+#[tokio::test]
+async fn the_reconstruction_budget_counts_fixed_layout_padding() {
+    // A fixed layout pads every sample to the catalog-derived width, so what a
+    // variant emits is that width rather than what it stores. Sizing the budget
+    // from the variant's own states would let a scan filtered to a narrow
+    // variant allocate the full padded width unchecked.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            // rs1 stores three states per sample: 3 x 3 x 4 = 36 bytes, inside
+            // this budget. Padded to the schema's six-state width it needs
+            // 3 x 6 x 4 = 72, which is not.
+            max_decompressed_block_bytes: 50,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("f", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM f WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reconstructing") && error.contains("probability states"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn the_reconstruction_budget_applies_to_layout1() {
+    // Layout 1 stores six bytes per sample and emits three f32 values, so its
+    // block passes a budget its reconstruction does not. The bound is promised
+    // for both layouts.
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("budget.bgen");
+    fs::write(
+        &bgen,
+        encode_layout1_with(
+            Codec::None,
+            [[32_768, 0, 0], [0, 32_768, 0], [0, 0, 32_768]],
+        ),
+    )
+    .unwrap();
+    let provider = BgenTableProvider::try_new(
+        path(&bgen),
+        BgenReadOptions {
+            // The block is three samples x six bytes = 18, inside this budget;
+            // the reconstruction is three samples x three states x four = 36.
+            max_decompressed_block_bytes: 24,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("reconstructing") && error.contains("probability states"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn the_reconstruction_budget_ignores_states_it_never_builds() {
+    // The nested layout appends nothing for a sample with no called genotype,
+    // so charging one its nominal width would reject a scan whose actual
+    // reconstruction fits. rs1 has three samples, one of them missing: two
+    // called samples of three states are 24 bytes, inside this budget, while
+    // counting the missing one would make it 36 and fail.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            max_decompressed_block_bytes: 30,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM b WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a missing sample builds no states and must not be charged for them");
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn the_layout1_budget_ignores_missing_samples() {
+    // A Layout 1 sample whose three values are all zero is the missing
+    // sentinel; the nested layout builds nothing for it, so charging it would
+    // reject a scan whose reconstruction fits. Two called samples of three
+    // states are 24 bytes, inside this budget; counting the third would make it
+    // 36 and fail.
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("missing.bgen");
+    fs::write(
+        &bgen,
+        encode_layout1_with(Codec::None, [[32_768, 0, 0], [0, 32_768, 0], [0, 0, 0]]),
+    )
+    .unwrap();
+    let provider = BgenTableProvider::try_new(
+        path(&bgen),
+        BgenReadOptions {
+            max_decompressed_block_bytes: 30,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a missing Layout 1 sample builds no states and must not be charged");
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+}
