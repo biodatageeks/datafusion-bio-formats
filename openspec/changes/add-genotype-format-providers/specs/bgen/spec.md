@@ -349,6 +349,25 @@ compressed/decompressed work and coalesce only nearby bounded byte ranges.
   object read per variant
 - **AND** coalesced ranges stay small enough to fill the requested partitions.
 
+#### Scenario: Coalescing leaves partitions comparably loaded
+- **WHEN** payload ranges are coalesced for a scan with more than one partition
+- **THEN** a coalesced range covers at most a fraction of one partition's byte
+  share, so several ranges are available to each partition
+- **AND** no partition is assigned materially more than its share of the
+  selected payload bytes.
+
+Sizing a coalesced range at exactly one partition's share cannot balance the
+scan: a variant's payload is indivisible, so the plan is handed one more chunk
+than there are partitions, and one partition always takes two of them.
+
+#### Scenario: Range sizing has a floor that never starves a partition
+- **WHEN** the byte share implied by the partition count falls below the minimum
+  useful object read
+- **THEN** ranges are not split further, so a scan does not issue many reads far
+  below a useful size
+- **AND** a payload smaller than that minimum is still divided across the
+  requested partitions rather than collapsing into one range.
+
 #### Scenario: Decompression isolation
 - **WHEN** one selected BGEN block is malformed
 - **THEN** its partition fails with variant context
