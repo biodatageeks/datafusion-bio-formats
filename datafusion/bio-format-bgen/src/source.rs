@@ -104,19 +104,23 @@ impl ObjectAccess {
 
     /// Returns the object's length and a validator identifying this version of
     /// it, without reading its contents. See [`RemoteObject::identity`].
-    pub(crate) async fn identity(&self, display_path: &str) -> Result<(u64, String)> {
+    pub(crate) async fn identity(&self, display_path: &str) -> Result<(u64, Option<String>)> {
         self.count_request();
         match &self.backing {
             Backing::Local(path) => {
                 let metadata = std::fs::metadata(path)
                     .map_err(|error| io_error("stat", display_path, error))?;
-                let mut validator = format!("len={}", metadata.len());
-                if let Ok(modified) = metadata.modified()
-                    && let Ok(since_epoch) =
-                        modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
-                {
-                    validator.push_str(&format!(";modified={}", since_epoch.as_nanos()));
-                }
+                let validator = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| {
+                        modified
+                            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                            .ok()
+                    })
+                    .map(|since_epoch| {
+                        format!("len={};modified={}", metadata.len(), since_epoch.as_nanos())
+                    });
                 Ok((metadata.len(), validator))
             }
             Backing::Remote(object) => object

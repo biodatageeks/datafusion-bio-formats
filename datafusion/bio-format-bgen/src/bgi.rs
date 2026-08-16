@@ -141,6 +141,12 @@ pub(crate) async fn open_optional_bgi(
     options: &BgenReadOptions,
 ) -> Result<(Option<BgiIndex>, IndexReadCost)> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
+    let mut cost = IndexReadCost::default();
+    // Probing for a companion stats each candidate, which is a physical request
+    // against remote storage and belongs in the index's cost like any other.
+    // `exists` opens its own handle, so it is counted here rather than by one.
+    let probes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let probe_counter = Arc::clone(&probes);
     let bgi_path = resolve_companion(
         primary_path,
         "BGI",
@@ -149,16 +155,20 @@ pub(crate) async fn open_optional_bgi(
         false,
         |candidate| {
             let storage_options = storage_options.clone();
-            async move { ObjectAccess::exists(&candidate, &storage_options).await }
+            let probe_counter = Arc::clone(&probe_counter);
+            async move {
+                probe_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ObjectAccess::exists(&candidate, &storage_options).await
+            }
         },
     )
     .await?;
+    cost.requests = probes.load(std::sync::atomic::Ordering::Relaxed);
     let Some(bgi_path) = bgi_path else {
-        return Ok((None, IndexReadCost::default()));
+        return Ok((None, cost));
     };
 
     let explicit = options.bgi_path.is_some();
-    let mut cost = IndexReadCost::default();
     let result = open_and_validate(
         primary_path,
         primary_source,
@@ -249,7 +259,7 @@ async fn open_validated_index(
         }
         cache_remote_index(
             bgi_path,
-            &bgi_validator,
+            bgi_validator.as_deref(),
             bgi_size,
             options.max_bgi_cache_bytes,
             options.bgi_cache_directory.as_deref(),
@@ -699,7 +709,7 @@ async fn validate_identity(
 /// wait for the first rather than each fetching their own copy.
 async fn cache_remote_index<F, Fut>(
     path: &str,
-    validator: &str,
+    validator: Option<&str>,
     expected_size: u64,
     max_cache_bytes: usize,
     configured_directory: Option<&str>,
@@ -731,12 +741,36 @@ where
         .await
         .map_err(|error| index_error(path, &format!("create BGI cache: {error}")))?;
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(path.as_bytes());
-    hasher.update(validator.as_bytes());
-    let key = hasher.finalize().to_hex();
-    let destination = cache_root.join(format!("{key}.bgi"));
     let lock = CACHE_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    // A validator identifies *this version* of the object, so an entry keyed on
+    // one can be reused without reading anything. Length alone is not a
+    // validator: a replacement of the same length would be served from the cache
+    // for ever, and open-time validation cannot catch it — that compares the
+    // index against the BGEN object, which has not changed, and the rows' own
+    // chromosomes, positions and identifiers are only checked against records a
+    // scan actually reads. A stale row would prune matching variants first.
+    //
+    // So without one, the object's bytes are its only identity, and they have to
+    // be fetched before the cache can be consulted. That is slower and always
+    // correct.
+    let mut download = Some(download);
+    let (key, downloaded) = match validator {
+        Some(validator) => {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(path.as_bytes());
+            hasher.update(validator.as_bytes());
+            (hasher.finalize().to_hex(), None)
+        }
+        None => {
+            let fetch = download.take().expect("the index is downloaded once");
+            let bytes = fetch().await?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(path.as_bytes());
+            hasher.update(&bytes);
+            (hasher.finalize().to_hex(), Some(bytes))
+        }
+    };
+    let destination = cache_root.join(format!("{key}.bgi"));
     if tokio::fs::metadata(&destination)
         .await
         .is_ok_and(|metadata| metadata.len() == expected_size)
@@ -756,7 +790,13 @@ where
     evict_cache_entries(&cache_root, incoming, max_cache_bytes, &destination).await?;
     // Fetched only now that the entry is known to be missing, and under the
     // lease, so concurrent opens of the same index do not each download it.
-    let bytes = download().await?;
+    let bytes = match downloaded {
+        Some(bytes) => bytes,
+        None => {
+            let fetch = download.take().expect("the index is downloaded once");
+            fetch().await?
+        }
+    };
     let temporary = cache_root.join(format!(".{key}.{}.tmp", std::process::id()));
     if tokio::fs::try_exists(&temporary).await.unwrap_or(false) {
         tokio::fs::remove_file(&temporary)

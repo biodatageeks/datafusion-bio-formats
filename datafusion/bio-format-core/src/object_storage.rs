@@ -866,22 +866,29 @@ impl RemoteObject {
     ///
     /// A cache keyed on an object's bytes cannot be consulted until those bytes
     /// have been fetched, which defeats the cache. This is what a caller keys on
-    /// instead: the length plus whichever validator the backend publishes — an
-    /// entity tag where there is one, otherwise a modification time. A backend
-    /// offering neither degrades to length alone, which is weaker but no worse
-    /// than having no cache at all.
-    pub async fn identity(&self) -> Result<(u64, String), opendal::Error> {
+    /// instead: whichever validator the backend publishes — an entity tag where
+    /// there is one, otherwise a modification time.
+    ///
+    /// The validator is `None` when the backend publishes neither. Length alone
+    /// is deliberately not offered as one: a replacement of the same length
+    /// would be indistinguishable, and a caller cannot tell a weak identity from
+    /// a strong one once it is handed a string.
+    pub async fn identity(&self) -> Result<(u64, Option<String>), opendal::Error> {
         let metadata = self.operator.stat(&self.path).await?;
         let length = metadata.content_length();
-        let mut validator = format!("len={length}");
+        let mut validator = String::new();
         if let Some(etag) = metadata.etag() {
-            validator.push_str(";etag=");
+            validator.push_str("etag=");
             validator.push_str(etag);
         }
         if let Some(modified) = metadata.last_modified() {
-            validator.push_str(";modified=");
+            if !validator.is_empty() {
+                validator.push(';');
+            }
+            validator.push_str("modified=");
             validator.push_str(&modified.to_string());
         }
+        let validator = (!validator.is_empty()).then(|| format!("len={length};{validator}"));
         Ok((length, validator))
     }
 

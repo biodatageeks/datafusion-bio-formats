@@ -78,6 +78,7 @@ struct HttpRequest {
 
 struct RangeServer {
     address: std::net::SocketAddr,
+    /// Entity tag published for the index object, when the server offers one.
     requests: Arc<Mutex<Vec<HttpRequest>>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -85,6 +86,15 @@ struct RangeServer {
 
 impl RangeServer {
     fn start(bgen: Vec<u8>, bgi: Vec<u8>) -> Self {
+        Self::start_inner(bgen, bgi, None)
+    }
+
+    /// Publishes an entity tag for the index, as real object stores do.
+    fn start_with_index_etag(bgen: Vec<u8>, bgi: Vec<u8>, etag: &str) -> Self {
+        Self::start_inner(bgen, bgi, Some(etag.to_string()))
+    }
+
+    fn start_inner(bgen: Vec<u8>, bgi: Vec<u8>, index_etag: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -131,6 +141,10 @@ impl RangeServer {
                     range,
                 });
 
+                let validator = match (path.as_str(), &index_etag) {
+                    ("/cohort.bgen.bgi", Some(etag)) => format!("ETag: \"{etag}\"\r\n"),
+                    _ => String::new(),
+                };
                 let body = match path.as_str() {
                     "/cohort.bgen" => &bgen,
                     "/cohort.bgen.bgi" => &bgi,
@@ -145,7 +159,7 @@ impl RangeServer {
                 if method == "HEAD" {
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n",
                         body.len()
                     );
                 } else if let Some((start, end)) = range {
@@ -163,7 +177,7 @@ impl RangeServer {
                 } else {
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(body);
@@ -1243,9 +1257,10 @@ async fn a_cached_remote_index_is_not_downloaded_again() {
     // avoid. For a multi-gigabyte BGI that is the whole point of caching it.
     let fixture = fixture(Codec::Zstd, true);
     create_bgi(&fixture, false);
-    let server = RangeServer::start(
+    let server = RangeServer::start_with_index_etag(
         fs::read(&fixture.bgen).unwrap(),
         fs::read(&fixture.bgi).unwrap(),
+        "index-v1",
     );
     let cache = fixture._dir.path().join("cache");
     let options = BgenReadOptions {
@@ -1267,6 +1282,42 @@ async fn a_cached_remote_index_is_not_downloaded_again() {
         during_second, 0,
         "the second open must read the cached index, not fetch it again"
     );
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn an_index_without_a_validator_is_refetched_rather_than_trusted() {
+    // Length alone cannot identify a version of an object: a replacement of the
+    // same length would be served from the cache for ever, and nothing later
+    // catches it — open-time validation compares the index against the BGEN
+    // object, which has not changed, and a row's own chromosome, position and
+    // identifier are only checked against records a scan actually reads. So a
+    // backend publishing neither an entity tag nor a modification time gives up
+    // the saved download rather than the guarantee.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let after_first = server.get_requests("cohort.bgen.bgi").len();
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    assert!(
+        server.get_requests("cohort.bgen.bgi").len() > after_first,
+        "without a validator the index must be re-read rather than reused"
+    );
+    // Still only one entry: the content-addressed key matches what is there.
     assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
 }
 
