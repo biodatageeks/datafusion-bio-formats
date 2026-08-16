@@ -236,6 +236,23 @@ async fn context(
     context
 }
 
+/// Coalesced payload range cap for the real-file benches.
+///
+/// Payload ranges are otherwise capped at one partition's byte share, so a scan
+/// gets `target_partitions + 1` indivisible chunks and cannot balance them.
+/// Setting `BGEN_BENCH_MAX_RANGE_BYTES` explores finer range sizing. A value
+/// that does not parse aborts rather than silently measuring the default, which
+/// would report numbers the operator did not ask for.
+fn max_range_bytes() -> u64 {
+    const DEFAULT: u64 = 16 * 1024 * 1024;
+    match std::env::var("BGEN_BENCH_MAX_RANGE_BYTES") {
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            panic!("BGEN_BENCH_MAX_RANGE_BYTES must be a byte count, got {value:?}")
+        }),
+        Err(_) => DEFAULT,
+    }
+}
+
 /// Builds a context and proves its scan works.
 ///
 /// Returns `None` for a combination the file does not support, so one
@@ -427,10 +444,7 @@ fn benchmarks(criterion: &mut Criterion) {
                             // share, so a scan gets `target_partitions + 1`
                             // indivisible chunks and cannot balance them. Set
                             // this to explore finer range sizing.
-                            max_range_bytes: std::env::var("BGEN_BENCH_MAX_RANGE_BYTES")
-                                .ok()
-                                .and_then(|value| value.parse().ok())
-                                .unwrap_or(16 * 1024 * 1024),
+                            max_range_bytes: max_range_bytes(),
                             ..Default::default()
                         },
                         partitions,
