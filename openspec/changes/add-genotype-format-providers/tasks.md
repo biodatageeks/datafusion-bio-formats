@@ -145,6 +145,9 @@
 - [x] 5.22 Derive the fixed probability width from the catalog, NaN-pad narrower
   and missing samples per sample, and bound the derived width by
   `max_states_per_sample`.
+- [x] 5.23 Size coalesced payload ranges for several per partition, with a floor
+  that never starves a partition, so partition scaling is not capped by an
+  unbalanced split.
 
 ## 6. PGEN Provider
 
