@@ -805,31 +805,66 @@ where
             fetch().await?
         }
     };
+    // The object can change between being stated and being read. Eviction has
+    // already made room for the size the stat reported, so writing a different
+    // body would leave the cache over its limit — and the key, derived from that
+    // stat, would name the wrong contents. Neither is worth repairing here:
+    // reject it, and the caller falls back to the object itself.
+    if bytes.len() as u64 != expected_size {
+        return Err(index_error(
+            path,
+            &format!(
+                "index changed while it was being read: {expected_size} bytes when stated, {} \
+                 when read",
+                bytes.len()
+            ),
+        ));
+    }
+
     let temporary = cache_root.join(format!(".{key}.{}.tmp", std::process::id()));
     if tokio::fs::try_exists(&temporary).await.unwrap_or(false) {
         tokio::fs::remove_file(&temporary)
             .await
             .map_err(|error| index_error(path, &format!("remove stale cached BGI: {error}")))?;
     }
+    // Once the temporary exists, every path out of here removes it. Its name
+    // carries this process's id, so nothing else will ever collect it: a failure
+    // that left it behind would consume disk that no limit accounts for, and
+    // repeated failures would do so without bound.
+    let published = publish_cached_index(path, &temporary, &destination, &bytes).await;
+    if published.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    published?;
+    let connection = open_retained_index(&destination)?;
+    drop(lock);
+    Ok((destination, connection))
+}
+
+/// Writes the index to `temporary` and renames it over `destination`.
+async fn publish_cached_index(
+    path: &str,
+    temporary: &Path,
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<()> {
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temporary)
+        .open(temporary)
         .await
         .map_err(|error| index_error(path, &format!("create cached BGI: {error}")))?;
-    file.write_all(&bytes)
+    file.write_all(bytes)
         .await
         .map_err(|error| index_error(path, &format!("write cached BGI: {error}")))?;
     file.sync_all()
         .await
         .map_err(|error| index_error(path, &format!("sync cached BGI: {error}")))?;
     drop(file);
-    tokio::fs::rename(&temporary, &destination)
+    tokio::fs::rename(temporary, destination)
         .await
         .map_err(|error| index_error(path, &format!("publish cached BGI: {error}")))?;
-    let connection = open_retained_index(&destination)?;
-    drop(lock);
-    Ok((destination, connection))
+    Ok(())
 }
 
 /// Opens the long-lived read-only connection kept by a [`BgiIndex`].

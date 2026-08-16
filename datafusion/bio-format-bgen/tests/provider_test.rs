@@ -94,6 +94,17 @@ impl RangeServer {
         Self::start_inner(bgen, bgi, Some(format!("ETag: \"{etag}\"\r\n")))
     }
 
+    /// Reports a different index length than it serves, as an object replaced
+    /// between the stat and the read would.
+    fn start_with_index_size_drift(bgen: Vec<u8>, bgi: Vec<u8>, stated: u64) -> Self {
+        Self::start_full(
+            bgen,
+            bgi,
+            Some("ETag: \"drift\"\r\n".to_string()),
+            Some(stated),
+        )
+    }
+
     /// Publishes only a modification time for the index, as a plain HTTP file
     /// server does. That is a weak validator: one-second granularity.
     fn start_with_index_last_modified(bgen: Vec<u8>, bgi: Vec<u8>) -> Self {
@@ -105,6 +116,15 @@ impl RangeServer {
     }
 
     fn start_inner(bgen: Vec<u8>, bgi: Vec<u8>, index_validator: Option<String>) -> Self {
+        Self::start_full(bgen, bgi, index_validator, None)
+    }
+
+    fn start_full(
+        bgen: Vec<u8>,
+        bgi: Vec<u8>,
+        index_validator: Option<String>,
+        stated_index_size: Option<u64>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -167,10 +187,15 @@ impl RangeServer {
                     }
                 };
                 if method == "HEAD" {
+                    // A stated length can differ from what is served, as it does
+                    // for an object replaced between the two.
+                    let stated = match (path.as_str(), stated_index_size) {
+                        ("/cohort.bgen.bgi", Some(stated)) => stated,
+                        _ => body.len() as u64,
+                    };
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n",
-                        body.len()
+                        "HTTP/1.1 200 OK\r\nContent-Length: {stated}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n"
                     );
                 } else if let Some((start, end)) = range {
                     let end = end.min(body.len() - 1);
@@ -1293,6 +1318,106 @@ async fn a_cached_remote_index_is_not_downloaded_again() {
         "the second open must read the cached index, not fetch it again"
     );
     assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn an_index_that_changes_between_stat_and_read_is_not_cached() {
+    // The stat decides the cache key and how much room eviction makes. If the
+    // object changes before it is read, the body written would neither match the
+    // key nor fit the space reserved for it.
+    //
+    // What this pins is the user-visible outcome: nothing cached, and the walk
+    // still answering. It does not exercise the length check in
+    // `cache_remote_index` — a server that shortens its body fails the read
+    // first — so that check remains for a backend returning a complete body of a
+    // different length, which this harness cannot produce.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let index = fs::read(&fixture.bgi).unwrap();
+    let server = RangeServer::start_with_index_size_drift(
+        fs::read(&fixture.bgen).unwrap(),
+        index.clone(),
+        // Stated longer than what is served.
+        index.len() as u64 + 4_096,
+    );
+    let cache = fixture._dir.path().join("cache");
+
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a discovered index that changed underneath is ignored");
+
+    let cached = fs::read_dir(&cache)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(cached, 0, "nothing may be published for a changed object");
+
+    // The walk still answers the query.
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT rsid FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn a_failed_cache_publication_leaves_no_temporary_behind() {
+    // A temporary that outlives its failure is disk no limit accounts for: its
+    // name carries this process's id, so nothing else ever collects it, and
+    // eviction only considers `.bgi` entries.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start_with_index_etag(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+        "index-v1",
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    // Replace the published entry with a directory of the same name, so the
+    // rename that publishes the next download fails after the temporary exists.
+    let entry = fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "bgi"))
+        .expect("the first open caches the index");
+    fs::remove_file(&entry).unwrap();
+    fs::create_dir(&entry).unwrap();
+    fs::write(entry.join("occupied"), b"x").unwrap();
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .expect("a discovered index that cannot be published is ignored");
+
+    let leftovers: Vec<_> = fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed publication left temporaries behind: {leftovers:?}"
+    );
 }
 
 #[tokio::test]
