@@ -311,6 +311,38 @@ pub async fn get_remote_stream_bgzf_single_request(
     Ok(bgzf::r#async::io::Reader::new(remote_stream))
 }
 
+/// Opens a BGZF reader over the whole object, retrying without the size
+/// preflight when the backend refuses it.
+///
+/// Unlike [`get_remote_stream_bgzf_single_request`], this keeps the chunked,
+/// concurrent reader on the common path — a full scan of a large object depends
+/// on it — and gives up that concurrency only for the URLs that cannot support
+/// it. See [`RemoteObject::stream_with_size_preflight_fallback`].
+pub async fn get_remote_stream_bgzf_head_tolerant(
+    file_path: String,
+    object_storage_options: ObjectStorageOptions,
+) -> Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
+    let object = RemoteObject::open(file_path, object_storage_options).await?;
+    let remote_stream = StreamReader::new(object.stream_with_size_preflight_fallback().await?);
+    Ok(bgzf::r#async::io::Reader::new(remote_stream))
+}
+
+/// Whether an error means the backend refused to report the object's size,
+/// rather than that the object cannot be read.
+///
+/// A pre-signed URL scoped to GET and range requests answers a HEAD with 403,
+/// and a backend with no size capability reports the request as unsupported.
+/// Both leave every actual read authorized, so the caller can retry without the
+/// preflight. Every other kind — a missing object, a bad config, a rate limit —
+/// would fail the retry too, and retrying would only hide the first error
+/// behind the second.
+fn is_refused_size_preflight(error: &opendal::Error) -> bool {
+    matches!(
+        error.kind(),
+        opendal::ErrorKind::PermissionDenied | opendal::ErrorKind::Unsupported
+    )
+}
+
 /// Builds a gzip decoder that decodes **all** members of a multi-member
 /// (concatenated / block) gzip stream, not just the first one.
 ///
@@ -839,6 +871,27 @@ impl RemoteObject {
         reader.into_bytes_stream(..).await
     }
 
+    /// Streams the complete object, falling back to a single sequential request
+    /// when the backend refuses the size preflight.
+    ///
+    /// [`Self::stream`] splits a complete-object read into concurrent ranges,
+    /// which needs the object length and so issues a HEAD. That concurrency is
+    /// what makes a full scan of a large object bearable, so it stays the
+    /// default; only a backend that refuses the preflight — a pre-signed URL
+    /// authorizing GET and range requests but not HEAD — drops to
+    /// [`Self::stream_single_request`], whose sequential read needs no length.
+    /// Nothing has been consumed when the preflight fails, so the retry starts
+    /// from the beginning of the object.
+    pub async fn stream_with_size_preflight_fallback(
+        &self,
+    ) -> Result<FuturesBytesStream, opendal::Error> {
+        match self.stream().await {
+            Ok(stream) => Ok(stream),
+            Err(error) if is_refused_size_preflight(&error) => self.stream_single_request().await,
+            Err(error) => Err(error),
+        }
+    }
+
     /// Streams a half-open byte range.
     pub async fn stream_range(
         &self,
@@ -972,6 +1025,45 @@ mod endpoint_tests {
         ] {
             let url = Url::parse(input).unwrap();
             assert_eq!(http_endpoint(&url).unwrap(), expected, "{input}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_size_preflight_is_recognized() {
+        // A signed URL that authorizes GET and range requests but not HEAD
+        // answers the preflight with 403, and a backend that cannot report a
+        // size at all reports it as unsupported. Neither says the object is
+        // unreadable, so both are worth retrying without the preflight.
+        for kind in [
+            opendal::ErrorKind::PermissionDenied,
+            opendal::ErrorKind::Unsupported,
+        ] {
+            assert!(
+                is_refused_size_preflight(&opendal::Error::new(kind, "denied")),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuine_read_failure_is_not_a_refused_preflight() {
+        // Retrying these without a preflight would only fail again, more
+        // slowly, and would mask the real error behind the second one.
+        for kind in [
+            opendal::ErrorKind::NotFound,
+            opendal::ErrorKind::ConfigInvalid,
+            opendal::ErrorKind::Unexpected,
+            opendal::ErrorKind::RateLimited,
+        ] {
+            assert!(
+                !is_refused_size_preflight(&opendal::Error::new(kind, "failed")),
+                "{kind:?}"
+            );
         }
     }
 }

@@ -15,7 +15,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{
-    ObjectStorageOptions, RemoteObject, StorageType, get_remote_stream_bgzf_async,
+    ObjectStorageOptions, RemoteObject, StorageType, get_remote_stream_bgzf_head_tolerant,
     get_remote_stream_bgzf_single_request, get_storage_type,
 };
 use datafusion_bio_format_core::partition_balancer::PartitionAssignment;
@@ -2959,8 +2959,12 @@ async fn full_remote_stream(
     limit: Option<usize>,
 ) -> Result<SendableRecordBatchStream> {
     let output_schema = schema.clone();
+    // The whole object is read here, so the chunked concurrent reader stays the
+    // default; it falls back to one sequential request only when the backend
+    // refuses the size preflight the chunking needs, as a pre-signed URL scoped
+    // to GET and range requests does.
     let mut inner =
-        get_remote_stream_bgzf_async(file_path, object_storage_options.unwrap_or_default())
+        get_remote_stream_bgzf_head_tolerant(file_path, object_storage_options.unwrap_or_default())
             .await
             .map_err(|e| execution_error("failed to open remote BCF", e))?;
     let header = read_bcf_header_bounded_async(&mut inner).await?;
