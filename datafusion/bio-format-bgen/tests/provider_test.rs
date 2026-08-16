@@ -1190,6 +1190,59 @@ async fn resolving_metadata_does_not_bridge_genotype_payloads() {
 const METADATA_PROBE_BYTES: u64 = 4 * 1024;
 
 #[tokio::test]
+async fn an_index_row_the_catalog_rejects_follows_the_stale_index_policy() {
+    // Building the catalog from index rows validates them, and that validation
+    // runs after the index has been opened — so a discovered index whose rows
+    // are individually unusable has to fall back to the walk like any other
+    // stale index, rather than failing the table outright.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let connection = Connection::open(&fixture.bgi).unwrap();
+    connection
+        .execute(
+            "UPDATE Variant SET number_of_alleles = 1 WHERE rsid = 'rs1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    // Discovered by convention under the default policy: ignore it and walk.
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .expect("a discovered index with an unusable row must fall back to the walk");
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT rsid FROM b ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3,
+        "the walked catalog still sees every variant"
+    );
+
+    // Named explicitly, the caller asked for that index: say why it is unusable.
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            bgi_path: Some(path(&fixture.bgi)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("an explicitly named index must not be silently ignored")
+    .to_string();
+    assert!(
+        error.contains("allele count 1 is outside supported range 2..="),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn a_layout2_variant_declaring_one_allele_is_rejected() {
     // Probability states are counts over a variant's alleles, so a single-allele
     // variant encodes one state per sample and carries no genotype. Layout 1

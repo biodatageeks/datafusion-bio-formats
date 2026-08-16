@@ -24,6 +24,7 @@ use datafusion_bio_format_core::range_planning::{
 };
 
 use datafusion_bio_format_core::companion::sanitize_location;
+use log::debug;
 
 use crate::bgi::{BgiIndex, open_optional_bgi};
 use crate::buffers::{BufferLayout, GenotypeBuffers};
@@ -248,12 +249,40 @@ impl BgenTableProvider {
         // duplicate the index, and since metadata and genotype payloads are
         // interleaved, the walk pulls the payloads with it — so opening a table
         // could download the whole file before a single query ran.
-        let bgi = open_optional_bgi(&path, &source, &header, &options).await?;
-        let catalog = match &bgi {
+        let mut bgi = open_optional_bgi(&path, &source, &header, &options).await?;
+        // Building the catalog validates the index's rows one by one — their
+        // coordinates, allele counts and record ranges — and that happens after
+        // the index has been opened. A discovered index whose rows turn out to
+        // be unusable is stale in exactly the sense the policy governs, so it
+        // follows the same rule rather than failing the table outright. An index
+        // the caller named explicitly always reports why it cannot be used.
+        //
+        // The index is dropped along with its catalog: its rows are positional,
+        // so pushing predicates through it against a walked catalog would
+        // resolve to the wrong variants.
+        let mut catalog = None;
+        if let Some(index) = &bgi {
             // No bytes of the object go into building this catalog: the index
             // supplied it, and the prefix its identity check read is already
             // reported against the index itself.
-            Some(index) => catalog_from_index(&path, &index.variants, &header, &options, 0)?,
+            match catalog_from_index(&path, &index.variants, &header, &options, 0) {
+                Ok(built) => catalog = Some(built),
+                Err(error)
+                    if options.bgi_path.is_none()
+                        && options.stale_bgi_policy == StaleBgiPolicy::Ignore =>
+                {
+                    debug!(
+                        "BGEN {}: ignoring the discovered index and walking the object: {error}",
+                        sanitize_location(&path)
+                    );
+                    bgi = None;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let bgi = bgi;
+        let catalog = match catalog {
+            Some(catalog) => catalog,
             None => build_transient_catalog(&path, &source, &header, &options).await?,
         };
         // Opting into full verification walks the object once and checks every
