@@ -80,6 +80,15 @@ reference allele, and all alternate alleles without reducing multiallelic rows.
 - **THEN** required column interpretation follows that header
 - **AND** unsupported optional annotations do not alter allele indices.
 
+#### Scenario: Headerless PVAR
+- **WHEN** PVAR has no header line
+- **THEN** columns follow BIM order `CHROM, ID, CM, POS, ALT, REF`
+- **AND** a five-column row is interpreted as the same order with `CM` omitted.
+
+#### Scenario: Biallelic-only PGEN mode
+- **WHEN** a PLINK1 or fixed-width PGEN mode is paired with a multiallelic PVAR
+- **THEN** provider construction fails before metadata or genotype rows are exposed.
+
 #### Scenario: Invalid PVAR position
 - **WHEN** a PVAR row has an invalid one-based position or malformed allele list
 - **THEN** planning fails with the PVAR line number.

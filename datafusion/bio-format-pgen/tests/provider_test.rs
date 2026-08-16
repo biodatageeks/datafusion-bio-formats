@@ -271,6 +271,36 @@ fn variable_fixture(
     }
 }
 
+fn variable_fixture_without_header_allele_counts(
+    record_type: u8,
+    record: &[u8],
+    allele_count: usize,
+) -> Fixture {
+    assert!(record.len() < 256);
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let pgen = root.join("cohort.pgen");
+    let (pvar, psam) = write_metadata(root, &[allele_count], 4);
+    let header_len = 12 + 8 + 1 + 1;
+    let mut bytes = vec![0x6c, 0x1b, 0x10];
+    bytes.extend(1_u32.to_le_bytes());
+    bytes.extend(4_u32.to_le_bytes());
+    // 8-bit record type, 1-byte record length, allele counts supplied by PVAR,
+    // and no provisional reference alleles.
+    bytes.push(0x44);
+    bytes.extend((header_len as u64).to_le_bytes());
+    bytes.push(record_type);
+    bytes.push(record.len() as u8);
+    bytes.extend(record);
+    fs::write(&pgen, bytes).unwrap();
+    Fixture {
+        _temp: temp,
+        pgen,
+        pvar,
+        psam,
+    }
+}
+
 fn fixed_fixture(mode: u8) -> Fixture {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -823,6 +853,39 @@ async fn reads_zstd_pvar_and_rejects_hybrid_or_inconsistent_filesets() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("sample count"), "{error}");
+
+    let fixture = variable_fixture_without_header_allele_counts(
+        0x08,
+        &[0b11_00_10_01, 0x00, 0x01, 0x01, 0x00],
+        3,
+    );
+    PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap();
+
+    for mode in [2, 3, 4] {
+        let fixture = fixed_fixture(mode);
+        let pvar = fs::read_to_string(&fixture.pvar)
+            .unwrap()
+            .replacen("\tA1\n", "\tA1,A2\n", 1);
+        fs::write(&fixture.pvar, pvar).unwrap();
+        let error = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("biallelic-only"), "{error}");
+    }
+
+    let fixture = plink1_mode_fixture();
+    let pvar = fs::read_to_string(&fixture.pvar)
+        .unwrap()
+        .replacen("\tA1\n", "\tA1,A2\n", 1);
+    fs::write(&fixture.pvar, pvar).unwrap();
+    let error = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("biallelic-only"), "{error}");
 
     let temp = tempfile::tempdir().unwrap();
     let pgen = temp.path().join("hybrid.pgen");

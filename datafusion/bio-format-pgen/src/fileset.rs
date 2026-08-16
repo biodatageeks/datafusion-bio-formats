@@ -66,6 +66,13 @@ impl PgenMode {
             Self::VariableExtensions | Self::ExternalIndexExtensions
         )
     }
+
+    fn is_biallelic_only(self) -> bool {
+        matches!(
+            self,
+            Self::Plink1 | Self::FixedHardcall | Self::FixedDosage | Self::FixedPhasedDosage
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -448,6 +455,8 @@ fn parse_pvar(
             .find(|line| !line.is_empty())
             .map(|line| line.split_whitespace().count())
             .unwrap_or(0);
+        // PLINK 2 specifies BIM order for a headerless PVAR. The five-column
+        // form omits CM: CHROM, ID, POS, ALT, REF.
         let columns = match first_width {
             5 => vec!["CHROM", "ID", "POS", "ALT", "REF"],
             6.. => vec!["CHROM", "ID", "CM", "POS", "ALT", "REF"],
@@ -695,6 +704,18 @@ async fn parse_index(
     pvar: &[PvarVariant],
     psam_sample_count: usize,
 ) -> Result<(Vec<RecordInfo>, u64, usize, usize)> {
+    if mode.is_biallelic_only()
+        && let Some((index, count)) = pvar
+            .iter()
+            .map(PvarVariant::allele_count)
+            .enumerate()
+            .find(|(_, count)| *count != 2)
+    {
+        return Err(DataFusionError::Plan(format!(
+            "PGEN storage mode 0x{:02x} is biallelic-only, but PVAR variant {index} has {count} alleles",
+            mode.byte()
+        )));
+    }
     if mode == PgenMode::Plink1 {
         let bytes_per_variant = psam_sample_count.checked_add(3).ok_or_else(|| {
             DataFusionError::Plan("PGEN sample count arithmetic overflowed".to_string())
@@ -981,6 +1002,8 @@ async fn parse_index(
                 block_offsets[block + 1]
             )));
         }
+        // In variable-width modes, zero means counts are supplied by the
+        // accompanying PVAR; it does not imply that every row is biallelic.
         if allele_width > 0 {
             let raw = take(&body, &mut cursor, count * allele_width, "allele counts")?;
             for index in 0..count {
@@ -1253,11 +1276,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_five_column_headerless_pvar_and_enforces_row_limit() {
+    fn parses_bim_order_headerless_pvar_and_enforces_row_limit() {
         let bytes = b"1 v1 10 C A\n2 v2 20 G T\n";
         let variants =
             parse_pvar("cohort.pvar", bytes, CoordinateSystem::ZeroBasedHalfOpen, 2).unwrap();
         assert_eq!(variants[0].start, 9);
+        assert_eq!(variants[0].id.as_deref(), Some("v1"));
         assert_eq!(variants[0].reference, "A");
         assert_eq!(variants[0].alternate, vec!["C"]);
         let error = parse_pvar("cohort.pvar", bytes, CoordinateSystem::ZeroBasedHalfOpen, 1)
