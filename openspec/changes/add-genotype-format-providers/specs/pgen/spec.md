@@ -339,7 +339,9 @@ representation.
 - **WHEN** projected PGEN values are decoded
 - **THEN** they are appended directly to reusable Arrow builders
 - **AND** the provider does not retain a full-cohort decoded-row copy until
-  batch flush.
+  batch flush
+- **AND** initial builder capacity is bounded by both the row limit and the
+  configured soft byte limit.
 
 ### Requirement: Explicit PGEN Ploidy Semantics
 

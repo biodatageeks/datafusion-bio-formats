@@ -591,7 +591,12 @@ fn execute_gt_only(
         let selected_sample_count = selected_samples.len();
         let estimated_row_bytes = estimate_genotype_bytes(selected_sample_count, &["GT".to_string()]);
         let mut sizer = GenotypeBatchSizer::new(max_rows, soft_bytes)?;
-        let partition_row_capacity = max_rows.min(assignment.owned().len()).max(1);
+        let partition_row_capacity = initial_batch_row_capacity(
+            max_rows,
+            assignment.owned().len(),
+            soft_bytes,
+            estimated_row_bytes,
+        );
         let mut batch =
             GtBatchBuilder::new(&schema, partition_row_capacity, selected_sample_count)?;
         let mut workspace = GtDecodeWorkspace::new(fileset.sample_count, selected_samples)?;
@@ -785,6 +790,20 @@ fn estimate_genotype_bytes(samples: usize, fields: &[String]) -> usize {
             _ => 0,
         })
     })
+}
+
+fn initial_batch_row_capacity(
+    max_rows: usize,
+    partition_rows: usize,
+    soft_bytes: usize,
+    estimated_row_bytes: usize,
+) -> usize {
+    let byte_limited_rows = if estimated_row_bytes == 0 {
+        max_rows
+    } else {
+        (soft_bytes / estimated_row_bytes).max(1)
+    };
+    max_rows.min(partition_rows).min(byte_limited_rows).max(1)
 }
 
 fn record_batch_metrics(metrics: &GenotypeScanMetrics, rows: usize, genotype_bytes: usize) {
@@ -1085,4 +1104,27 @@ fn build_hds_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef
         builder.append(true);
     }
     Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{estimate_genotype_bytes, initial_batch_row_capacity};
+
+    #[test]
+    fn bounds_gt_builder_capacity_by_the_soft_byte_budget() {
+        let estimated_row_bytes = estimate_genotype_bytes(100_000, &["GT".to_string()]);
+        assert_eq!(estimated_row_bytes, 500_000);
+        assert_eq!(
+            initial_batch_row_capacity(8192, 8192, 64 * 1024 * 1024, estimated_row_bytes),
+            134
+        );
+        assert_eq!(
+            initial_batch_row_capacity(8192, 8192, 1, estimated_row_bytes),
+            1
+        );
+        assert_eq!(
+            initial_batch_row_capacity(8192, 3, 64 * 1024 * 1024, estimated_row_bytes),
+            3
+        );
+    }
 }
