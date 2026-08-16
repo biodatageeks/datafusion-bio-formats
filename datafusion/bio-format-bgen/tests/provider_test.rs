@@ -1322,6 +1322,41 @@ async fn an_index_without_a_validator_is_refetched_rather_than_trusted() {
 }
 
 #[tokio::test]
+async fn an_index_rejected_by_a_size_limit_reports_no_bytes_read() {
+    // An index turned away by a size limit was stated, never read. Charging its
+    // advertised size would report I/O that did not happen — for a large index,
+    // gigabytes of it.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let index_size = fs::metadata(&fixture.bgi).unwrap().len();
+
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            // Smaller than the index, and discovered by convention, so the
+            // failure is ignored and the object is walked instead.
+            max_bgi_bytes: (index_size - 1) as usize,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an oversized discovered index is ignored");
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let companion = exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1;
+    assert_eq!(
+        companion, 0,
+        "an index that was never read must not be charged for"
+    );
+}
+
+#[tokio::test]
 async fn an_index_dropped_by_open_time_validation_still_reports_what_it_cost() {
     // The same accounting applies wherever the index is dropped. Identity
     // validation rejects it earlier than catalog construction does, but the

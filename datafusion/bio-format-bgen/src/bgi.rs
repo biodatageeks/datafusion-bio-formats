@@ -236,8 +236,6 @@ async fn open_validated_index(
     // One stat yields both the size the limits are checked against and the
     // validator the cache is keyed on, so a cached index costs no extra request.
     let (bgi_size, bgi_validator) = bgi_source.identity(bgi_path).await?;
-    // Spent from here on whether or not the index survives validation.
-    cost.companion_bytes = bgi_size;
     if bgi_size > options.max_bgi_bytes as u64 {
         return Err(index_error(
             bgi_path,
@@ -274,6 +272,11 @@ async fn open_validated_index(
         )
         .await?
     };
+    // Counted only now. An index rejected by a size limit above was never read —
+    // only stated — so charging its advertised size there would report gigabytes
+    // of I/O that never happened. From here it has been downloaded, or opened
+    // where it lies for SQLite to read, so it is read in full either way.
+    cost.companion_bytes = bgi_size;
 
     // Validation runs through the connection opened under the cache lease, so an
     // entry evicted by a concurrent provider cannot make it fail on a path that
