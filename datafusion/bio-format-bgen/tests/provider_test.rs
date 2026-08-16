@@ -1939,3 +1939,35 @@ async fn the_reconstruction_budget_applies_to_layout1() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn the_reconstruction_budget_ignores_states_it_never_builds() {
+    // The nested layout appends nothing for a sample with no called genotype,
+    // so charging one its nominal width would reject a scan whose actual
+    // reconstruction fits. rs1 has three samples, one of them missing: two
+    // called samples of three states are 24 bytes, inside this budget, while
+    // counting the missing one would make it 36 and fail.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            max_decompressed_block_bytes: 30,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM b WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a missing sample builds no states and must not be charged for them");
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        1
+    );
+}

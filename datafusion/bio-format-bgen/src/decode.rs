@@ -578,31 +578,44 @@ fn decode_layout2_block(
     // the batch byte limit is consulted between variants, not inside one. Bound
     // the reconstruction here, before any of it is built.
     if builds_states && options.output_mode == BgenOutputMode::Probability {
-        let total_states = match fixed_states_per_sample(buffers) {
-            // A fixed layout pads every sample to its width, so that width is
-            // what gets emitted regardless of what this variant stores. Sizing
-            // from the variant's own states would let a scan filtered to a
-            // narrow variant allocate the full padded width unchecked.
-            Some(width) => (selected_samples.len() as u64)
-                .checked_mul(width)
-                .ok_or_else(|| {
+        let fixed_width = fixed_states_per_sample(buffers);
+        // The widest any selected sample can charge, in O(1): state counts grow
+        // with ploidy, so the declared maximum bounds them all.
+        let widest = fixed_width
+            .unwrap_or(0)
+            .max(state_counts[max_ploidy as usize].1);
+        let upper_bound = (selected_samples.len() as u64)
+            .checked_mul(widest)
+            .ok_or_else(|| execution_error(path, variant, "probability state count overflowed"))?;
+        // Accounting for each sample exactly costs a pass over the cohort per
+        // variant, which is the same order as decoding it. Only a variant whose
+        // upper bound breaches the budget needs that precision, and only to
+        // decide whether it truly breaches it.
+        let total_states = if upper_bound.saturating_mul(size_of::<f32>() as u64)
+            > options.max_decompressed_block_bytes as u64
+        {
+            selected_samples.iter().try_fold(0_u64, |total, &sample| {
+                let ploidy_missing = ploidy_bytes[sample];
+                let missing = ploidy_missing & 0x80 != 0;
+                let stored = state_counts[(ploidy_missing & 0x3f) as usize].1;
+                let charged = match fixed_width {
+                    // A fixed layout reserves the width for a missing sample too.
+                    Some(width) if missing => width,
+                    // A sample wider than the width is still reconstructed in
+                    // full before the layout rejects it, so the budget has to
+                    // cover whichever is larger.
+                    Some(width) => width.max(stored),
+                    // The nested layout appends nothing for a missing sample, so
+                    // charging one would reject scans that never build it.
+                    None if missing => 0,
+                    None => stored,
+                };
+                total.checked_add(charged).ok_or_else(|| {
                     execution_error(path, variant, "probability state count overflowed")
-                })?,
-            None => match uniform_stride_bits {
-                Some(_) => (selected_samples.len() as u64)
-                    .checked_mul(state_counts[min_ploidy as usize].1)
-                    .ok_or_else(|| {
-                        execution_error(path, variant, "probability state count overflowed")
-                    })?,
-                None => selected_samples.iter().try_fold(0_u64, |total, &sample| {
-                    let ploidy = ploidy_bytes[sample] & 0x3f;
-                    total
-                        .checked_add(state_counts[ploidy as usize].1)
-                        .ok_or_else(|| {
-                            execution_error(path, variant, "probability state count overflowed")
-                        })
-                })?,
-            },
+                })
+            })?
+        } else {
+            upper_bound
         };
         check_reconstruction_budget(path, variant, options, total_states)?;
     }
