@@ -861,6 +861,30 @@ impl RemoteObject {
             .map(|metadata| metadata.content_length())
     }
 
+    /// Returns the object's length and a validator identifying this version of
+    /// it, without reading its contents.
+    ///
+    /// A cache keyed on an object's bytes cannot be consulted until those bytes
+    /// have been fetched, which defeats the cache. This is what a caller keys on
+    /// instead: the length plus whichever validator the backend publishes — an
+    /// entity tag where there is one, otherwise a modification time. A backend
+    /// offering neither degrades to length alone, which is weaker but no worse
+    /// than having no cache at all.
+    pub async fn identity(&self) -> Result<(u64, String), opendal::Error> {
+        let metadata = self.operator.stat(&self.path).await?;
+        let length = metadata.content_length();
+        let mut validator = format!("len={length}");
+        if let Some(etag) = metadata.etag() {
+            validator.push_str(";etag=");
+            validator.push_str(etag);
+        }
+        if let Some(modified) = metadata.last_modified() {
+            validator.push_str(";modified=");
+            validator.push_str(&modified.to_string());
+        }
+        Ok((length, validator))
+    }
+
     /// Reads the entire object into memory.
     ///
     /// This is intended for bounded companion metadata such as CSI indexes.

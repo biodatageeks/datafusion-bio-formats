@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn read_ahead_stops_once_one_record_fills_the_window() {
-        let source = ObjectAccess::Local("unused".to_string());
+        let source = ObjectAccess::local_for_test("unused".to_string());
         let mut window = MetadataWindow::new("unused", &source, 1 << 30);
         // Nothing parsed yet: read ahead so the first fetch covers many records.
         assert_eq!(window.read_ahead_bytes(), METADATA_CHUNK_BYTES);

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use bytes::Bytes;
 use datafusion::common::{DataFusionError, Result, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator, expr::InList};
 use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion, sanitize_location};
@@ -34,8 +35,6 @@ pub(crate) struct BgiIndex {
     pub(crate) row_indices: Arc<Vec<usize>>,
     /// The index's own record of every variant, which becomes the catalog.
     pub(crate) variants: Arc<Vec<IndexedVariant>>,
-    pub(crate) bytes_read: u64,
-    pub(crate) primary_bytes_read: u64,
     /// Connection held open for the provider's lifetime.
     ///
     /// A cached remote BGI can be evicted by a later provider that exceeds
@@ -170,7 +169,7 @@ pub(crate) async fn open_optional_bgi(
     )
     .await;
     match result {
-        Ok(index) => Ok((Some(index), IndexReadCost::default())),
+        Ok(index) => Ok((Some(index), cost)),
         Err(error) if !explicit && options.stale_bgi_policy == StaleBgiPolicy::Ignore => {
             debug!(
                 "BGI {}: ignoring a stale index: {error}",
@@ -192,7 +191,36 @@ async fn open_and_validate(
 ) -> Result<BgiIndex> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
     let bgi_source = ObjectAccess::open(bgi_path, &storage_options).await?;
-    let bgi_size = bgi_source.size(bgi_path).await?;
+    let result = open_validated_index(
+        primary_path,
+        primary_source,
+        bgi_path,
+        header,
+        options,
+        cost,
+        &bgi_source,
+    )
+    .await;
+    // Counted however the attempt ended: a rejected index was read all the same.
+    // The primary object's own requests belong to its handle, which the provider
+    // snapshots separately, so they are not added here.
+    cost.requests = cost.requests.saturating_add(bgi_source.requests());
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_validated_index(
+    primary_path: &str,
+    primary_source: &ObjectAccess,
+    bgi_path: &str,
+    header: &BgenHeader,
+    options: &BgenReadOptions,
+    cost: &mut IndexReadCost,
+    bgi_source: &ObjectAccess,
+) -> Result<BgiIndex> {
+    // One stat yields both the size the limits are checked against and the
+    // validator the cache is keyed on, so a cached index costs no extra request.
+    let (bgi_size, bgi_validator) = bgi_source.identity(bgi_path).await?;
     if bgi_size > options.max_bgi_bytes as u64 {
         return Err(index_error(
             bgi_path,
@@ -219,14 +247,13 @@ async fn open_and_validate(
                 ),
             ));
         }
-        let bytes = bgi_source
-            .read_all_bounded(bgi_path, options.max_bgi_bytes)
-            .await?;
         cache_remote_index(
             bgi_path,
-            &bytes,
+            &bgi_validator,
+            bgi_size,
             options.max_bgi_cache_bytes,
             options.bgi_cache_directory.as_deref(),
+            || bgi_source.read_all_bounded(bgi_path, options.max_bgi_bytes),
         )
         .await?
     };
@@ -288,8 +315,6 @@ async fn open_and_validate(
     Ok(BgiIndex {
         row_indices: Arc::new((0..variants.len()).collect()),
         variants: Arc::new(variants),
-        bytes_read: bgi_size,
-        primary_bytes_read: header.object_size.min(IDENTITY_PREFIX_BYTES),
         connection,
         sqlite_path: Arc::new(sqlite_path),
         offset_to_index: Arc::new(offset_to_index),
@@ -665,21 +690,35 @@ async fn validate_identity(
     Ok(())
 }
 
-async fn cache_remote_index(
+/// Returns a local copy of a remote index, downloading it only on a miss.
+///
+/// The key comes from the object's identity rather than its bytes, so the cache
+/// can be consulted before anything is fetched — keying on content would mean
+/// downloading a multi-gigabyte index to discover it was already cached. The
+/// download runs under the cache lease, so concurrent opens of the same index
+/// wait for the first rather than each fetching their own copy.
+async fn cache_remote_index<F, Fut>(
     path: &str,
-    bytes: &[u8],
+    validator: &str,
+    expected_size: u64,
     max_cache_bytes: usize,
     configured_directory: Option<&str>,
-) -> Result<(PathBuf, Connection)> {
-    if bytes.len() > max_cache_bytes {
+    download: F,
+) -> Result<(PathBuf, Connection)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Bytes>>,
+{
+    if expected_size > max_cache_bytes as u64 {
         return Err(index_error(
             path,
             &format!(
-                "remote index size {} exceeds max_bgi_cache_bytes {max_cache_bytes}",
-                bytes.len()
+                "remote index size {expected_size} exceeds max_bgi_cache_bytes {max_cache_bytes}"
             ),
         ));
     }
+    let incoming = usize::try_from(expected_size)
+        .map_err(|_| index_error(path, "remote index size does not fit usize"))?;
     let cache_root = configured_directory
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("DATAFUSION_BIO_BGI_CACHE_DIR").map(PathBuf::from))
@@ -694,19 +733,19 @@ async fn cache_remote_index(
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(path.as_bytes());
-    hasher.update(bytes);
+    hasher.update(validator.as_bytes());
     let key = hasher.finalize().to_hex();
     let destination = cache_root.join(format!("{key}.bgi"));
     let lock = CACHE_LOCK.get_or_init(|| Mutex::new(())).lock().await;
     if tokio::fs::metadata(&destination)
         .await
-        .is_ok_and(|metadata| metadata.len() == bytes.len() as u64)
+        .is_ok_and(|metadata| metadata.len() == expected_size)
     {
         // Reusing an entry still has to respect this provider's limit: entries
         // written under a larger limit would otherwise keep the shared cache
         // above the configured maximum indefinitely. The destination itself is
         // counted as incoming and excluded from eviction, matching the miss path.
-        evict_cache_entries(&cache_root, bytes.len(), max_cache_bytes, &destination).await?;
+        evict_cache_entries(&cache_root, incoming, max_cache_bytes, &destination).await?;
         // Opened before the lease is released so a concurrent provider cannot
         // evict this entry between publishing it and opening it.
         let connection = open_retained_index(&destination)?;
@@ -714,7 +753,10 @@ async fn cache_remote_index(
         return Ok((destination, connection));
     }
 
-    evict_cache_entries(&cache_root, bytes.len(), max_cache_bytes, &destination).await?;
+    evict_cache_entries(&cache_root, incoming, max_cache_bytes, &destination).await?;
+    // Fetched only now that the entry is known to be missing, and under the
+    // lease, so concurrent opens of the same index do not each download it.
+    let bytes = download().await?;
     let temporary = cache_root.join(format!(".{key}.{}.tmp", std::process::id()));
     if tokio::fs::try_exists(&temporary).await.unwrap_or(false) {
         tokio::fs::remove_file(&temporary)
@@ -727,7 +769,7 @@ async fn cache_remote_index(
         .open(&temporary)
         .await
         .map_err(|error| index_error(path, &format!("create cached BGI: {error}")))?;
-    file.write_all(bytes)
+    file.write_all(&bytes)
         .await
         .map_err(|error| index_error(path, &format!("write cached BGI: {error}")))?;
     file.sync_all()

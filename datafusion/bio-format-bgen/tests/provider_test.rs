@@ -1190,6 +1190,87 @@ async fn resolving_metadata_does_not_bridge_genotype_payloads() {
 const METADATA_PROBE_BYTES: u64 = 4 * 1024;
 
 #[tokio::test]
+async fn opening_the_provider_counts_toward_the_requests_a_scan_reports() {
+    // Opening a remote BGEN reads its header and its index before any scan runs.
+    // A scan that then reads nothing itself still performed those requests, and
+    // a counter documented as physical requests issued has to say so.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let context = context(1024);
+    let state = context.state();
+    // Every candidate is filtered out, so the scan itself issues no reads.
+    let plan = provider
+        .scan(
+            &state,
+            Some(&vec![0]),
+            &[col("rsid").eq(lit("absent"))],
+            None,
+        )
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0
+    );
+    let metrics = exec.metrics_snapshot();
+    assert!(
+        metrics[GenotypeMetric::RangeRequests as usize].1 > 0,
+        "opening the provider issued requests the scan must report: {metrics:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cached_remote_index_is_not_downloaded_again() {
+    // The cache is keyed on the index's content, so it could only be consulted
+    // after the index had been downloaded — which is the one cost it exists to
+    // avoid. For a multi-gigabyte BGI that is the whole point of caching it.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let after_first = server.get_requests("cohort.bgen.bgi").len();
+    assert!(after_first > 0, "the first open must fetch the index");
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    let during_second = server.get_requests("cohort.bgen.bgi").len() - after_first;
+    assert_eq!(
+        during_second, 0,
+        "the second open must read the cached index, not fetch it again"
+    );
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+}
+
+#[tokio::test]
 async fn an_index_dropped_by_open_time_validation_still_reports_what_it_cost() {
     // The same accounting applies wherever the index is dropped. Identity
     // validation rejects it earlier than catalog construction does, but the
@@ -1813,10 +1894,13 @@ async fn coalescing_bridges_metadata_gaps_without_collapsing_partitions() {
         1
     );
     collect(plan.clone(), sequential.task_ctx()).await.unwrap();
-    let range_requests = exec.metrics_snapshot()[GenotypeMetric::RangeRequests as usize].1;
+    // Asserted on the planned range count rather than on requests issued:
+    // `RangeRequests` counts every physical request the provider made, opening
+    // included, so it does not isolate the planning decision this is about.
+    let coalesced = exec.metrics_snapshot()[GenotypeMetric::CoalescedRanges as usize].1;
     assert!(
-        range_requests < fixture.rows.len() as u64,
-        "expected coalesced reads, got {range_requests} for {} variants",
+        coalesced < fixture.rows.len() as u64,
+        "expected coalesced reads, got {coalesced} ranges for {} variants",
         fixture.rows.len()
     );
 

@@ -214,12 +214,19 @@ pub(crate) struct BgenFileset {
     pub(crate) header: Arc<BgenHeader>,
     pub(crate) catalog: BgenCatalog,
     pub(crate) bgi: Option<BgiIndex>,
-    /// What an index that was read and then discarded already cost.
+    /// What opening the index cost, whether or not it survived.
     ///
-    /// A discovered index whose rows turn out to be unusable is dropped in
-    /// favour of the walk, but the bytes spent opening it were spent. Counting
-    /// them here keeps a scan from reporting less I/O than it performed.
-    pub(crate) discarded_index_cost: IndexReadCost,
+    /// A discovered index whose identity or rows turn out to be unusable is
+    /// dropped in favour of the walk, but what was spent opening it was spent.
+    /// Holding the cost here rather than on the index keeps it accounted either
+    /// way.
+    pub(crate) index_cost: IndexReadCost,
+    /// Object requests the provider issued before any scan ran.
+    ///
+    /// Snapshotted at construction, so the counters a scan reports include the
+    /// header reads and index work that preceded it without double counting the
+    /// requests the scan makes itself.
+    pub(crate) construction_requests: u64,
     pub(crate) selected_samples: datafusion_bio_format_core::genotype::SampleSelection,
     pub(crate) options: BgenReadOptions,
     /// Probability shape when the fixed layout is in use.
@@ -237,6 +244,8 @@ pub(crate) struct IndexReadCost {
     pub(crate) companion_bytes: u64,
     /// Bytes read from the BGEN object on the index's behalf.
     pub(crate) primary_bytes: u64,
+    /// Object requests issued against either.
+    pub(crate) requests: u64,
 }
 
 /// Read-only DataFusion table provider for BGEN 1.2/1.3 files.
@@ -264,8 +273,7 @@ impl BgenTableProvider {
         // duplicate the index, and since metadata and genotype payloads are
         // interleaved, the walk pulls the payloads with it — so opening a table
         // could download the whole file before a single query ran.
-        let (mut bgi, mut discarded_index_cost) =
-            open_optional_bgi(&path, &source, &header, &options).await?;
+        let (mut bgi, index_cost) = open_optional_bgi(&path, &source, &header, &options).await?;
         // Building the catalog validates the index's rows one by one — their
         // coordinates, allele counts and record ranges — and that happens after
         // the index has been opened. A discovered index whose rows turn out to
@@ -291,10 +299,6 @@ impl BgenTableProvider {
                         "BGEN {}: ignoring the discovered index and walking the object: {error}",
                         sanitize_location(&path)
                     );
-                    discarded_index_cost = IndexReadCost {
-                        companion_bytes: index.bytes_read,
-                        primary_bytes: index.primary_bytes_read,
-                    };
                     bgi = None;
                 }
                 Err(error) => return Err(error),
@@ -332,13 +336,17 @@ impl BgenTableProvider {
             } else {
                 (None, 0, 0)
             };
+        // Snapshotted here, after every construction-time read: the header, the
+        // index's work on the primary object, and the width probe.
+        let construction_requests = source.requests();
         let fileset = Arc::new(BgenFileset {
             path,
             source,
             header,
             catalog,
             bgi,
-            discarded_index_cost,
+            index_cost,
+            construction_requests,
             selected_samples,
             options,
             probability_shape,
@@ -524,23 +532,19 @@ impl TableProvider for BgenTableProvider {
             self.fileset.header.header_bytes_read
                 + self.fileset.catalog.bytes_read
                 + self.fileset.probability_probe_bytes
-                + self
-                    .fileset
-                    .bgi
-                    .as_ref()
-                    .map_or(0, |index| index.primary_bytes_read)
-                + self.fileset.discarded_index_cost.primary_bytes
+                + self.fileset.index_cost.primary_bytes
                 + metadata_cost.bytes,
         );
-        metrics.add(GenotypeMetric::RangeRequests, metadata_cost.requests);
+        metrics.add(
+            GenotypeMetric::RangeRequests,
+            metadata_cost
+                .requests
+                .saturating_add(self.fileset.construction_requests)
+                .saturating_add(self.fileset.index_cost.requests),
+        );
         metrics.add(
             GenotypeMetric::CompanionBytesRead,
-            self.fileset
-                .bgi
-                .as_ref()
-                .map_or(0, |index| index.bytes_read)
-                + self.fileset.discarded_index_cost.companion_bytes
-                + self.fileset.header.companion_sample_bytes,
+            self.fileset.index_cost.companion_bytes + self.fileset.header.companion_sample_bytes,
         );
         // Coalescing is a planning outcome, so it is counted once from the plan.
         // Counting it per read during execution would only restate

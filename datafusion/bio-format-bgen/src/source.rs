@@ -1,4 +1,6 @@
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use datafusion::common::{DataFusionError, Result};
@@ -8,13 +10,45 @@ use datafusion_bio_format_core::object_storage::{
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+/// A handle to one object, counting the requests made through it.
+///
+/// The count is shared by clones, so it totals every request against the object
+/// however the handle was passed around. Counting here rather than at each call
+/// site means a new read cannot be added without being counted.
 #[derive(Clone, Debug)]
-pub(crate) enum ObjectAccess {
+pub(crate) struct ObjectAccess {
+    backing: Backing,
+    requests: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Debug)]
+enum Backing {
     Local(String),
     Remote(RemoteObject),
 }
 
 impl ObjectAccess {
+    fn new(backing: Backing) -> Self {
+        Self {
+            backing,
+            requests: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// A local handle, for tests that never read through it.
+    #[cfg(test)]
+    pub(crate) fn local_for_test(path: String) -> Self {
+        Self::new(Backing::Local(path))
+    }
+
+    /// Object requests issued through this handle and its clones.
+    pub(crate) fn requests(&self) -> u64 {
+        self.requests.load(Ordering::Relaxed)
+    }
+
+    fn count_request(&self) {
+        self.requests.fetch_add(1, Ordering::Relaxed);
+    }
     pub(crate) async fn open(path: &str, options: &ObjectStorageOptions) -> Result<Self> {
         match get_storage_type(path.to_string()) {
             StorageType::LOCAL => {
@@ -25,7 +59,7 @@ impl ObjectAccess {
                         sanitize_location(path)
                     )));
                 }
-                Ok(Self::Local(local))
+                Ok(Self::new(Backing::Local(local)))
             }
             _ => {
                 let object = RemoteObject::open(path.to_string(), options.clone())
@@ -35,7 +69,7 @@ impl ObjectAccess {
                 // object's size as its first act, so a missing object still
                 // fails immediately, and a second stat only doubles the round
                 // trips against remote storage.
-                Ok(Self::Remote(object))
+                Ok(Self::new(Backing::Remote(object)))
             }
         }
     }
@@ -56,12 +90,37 @@ impl ObjectAccess {
     }
 
     pub(crate) async fn size(&self, display_path: &str) -> Result<u64> {
-        match self {
-            Self::Local(path) => std::fs::metadata(path)
+        self.count_request();
+        match &self.backing {
+            Backing::Local(path) => std::fs::metadata(path)
                 .map(|metadata| metadata.len())
                 .map_err(|error| io_error("stat", display_path, error)),
-            Self::Remote(object) => object
+            Backing::Remote(object) => object
                 .size()
+                .await
+                .map_err(|error| external_error("stat", display_path, error)),
+        }
+    }
+
+    /// Returns the object's length and a validator identifying this version of
+    /// it, without reading its contents. See [`RemoteObject::identity`].
+    pub(crate) async fn identity(&self, display_path: &str) -> Result<(u64, String)> {
+        self.count_request();
+        match &self.backing {
+            Backing::Local(path) => {
+                let metadata = std::fs::metadata(path)
+                    .map_err(|error| io_error("stat", display_path, error))?;
+                let mut validator = format!("len={}", metadata.len());
+                if let Ok(modified) = metadata.modified()
+                    && let Ok(since_epoch) =
+                        modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                {
+                    validator.push_str(&format!(";modified={}", since_epoch.as_nanos()));
+                }
+                Ok((metadata.len(), validator))
+            }
+            Backing::Remote(object) => object
+                .identity()
                 .await
                 .map_err(|error| external_error("stat", display_path, error)),
         }
@@ -84,8 +143,9 @@ impl ObjectAccess {
         if expected == 0 {
             return Ok(Bytes::new());
         }
-        match self {
-            Self::Local(path) => {
+        self.count_request();
+        match &self.backing {
+            Backing::Local(path) => {
                 let mut file = tokio::fs::File::open(path)
                     .await
                     .map_err(|error| io_error("open", display_path, error))?;
@@ -98,7 +158,7 @@ impl ObjectAccess {
                     .map_err(|error| io_error("read", display_path, error))?;
                 Ok(Bytes::from(bytes))
             }
-            Self::Remote(object) => object
+            Backing::Remote(object) => object
                 .read_range(range)
                 .await
                 .map_err(|error| external_error("read", display_path, error)),
@@ -121,9 +181,9 @@ impl ObjectAccess {
     }
 
     pub(crate) fn local_path(&self) -> Option<&str> {
-        match self {
-            Self::Local(path) => Some(path),
-            Self::Remote(_) => None,
+        match &self.backing {
+            Backing::Local(path) => Some(path),
+            Backing::Remote(_) => None,
         }
     }
 }
