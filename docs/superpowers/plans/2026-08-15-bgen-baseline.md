@@ -97,6 +97,58 @@ Both readers came in about 3% slower than the published run, so the absolute
 shift is machine state rather than code; the ratio is what this row is for and
 it held. Dosage was the workload this rework most risked spending.
 
+## Partition scaling is capped by range granularity, not by the decoder
+
+Measured on `chr22.first-25000.unphased.bgen`, probability output, fixed layout,
+Rust scan only:
+
+| Partitions | Time | Speedup |
+| --- | --- | --- |
+| 1 | 743.97 ms | 1.00x |
+| 2 | 641.80 ms | **1.16x** |
+| 4 | 354.23 ms | 2.10x |
+| 8 | 204.37 ms | 3.64x |
+
+The 2-partition step is 1.16x, and it is 1.16-1.17x on every workload measured —
+dosage and probability, phased and unphased. That reproducibility is what makes
+it a plan property rather than noise.
+
+**Root cause.** `plan_payload_partitions` caps each coalesced range at
+`payload_bytes / target_partitions`, and a variant's payload cannot be split
+across ranges, so the scan gets `target_partitions + 1` indivisible chunks of
+roughly equal size. `target + 1` chunks never divide evenly into `target`
+partitions: one partition always takes two of them. The planned byte shares are
+
+| Target | Shares |
+| --- | --- |
+| 2 | **87.2%**, 12.8% |
+| 4 | 43.6%, 21.8%, 21.8%, 12.9% |
+| 8 | 21.8%, 10.9% x5, 21.8%, 2.0% |
+
+and 1 / 0.872 = 1.15, which is the measured 2-partition speedup. The decoder is
+not the limit; the largest partition is.
+
+**Confirmed by experiment.** Capping ranges at a fixed 128 KiB instead of one
+partition's share, changing nothing else:
+
+| Partitions | Default cap | 128 KiB cap | Speedup, 128 KiB |
+| --- | --- | --- | --- |
+| 1 | 743.97 ms | 752.56 ms | 1.00x |
+| 2 | 641.80 ms | **414.36 ms** | 1.82x |
+| 4 | 354.23 ms | **234.60 ms** | 3.21x |
+| 8 | 204.37 ms | **147.76 ms** | 5.09x |
+
+One partition is unchanged, so this is purely balance: 8 partitions gain another
+28%. Set `BGEN_BENCH_MAX_RANGE_BYTES` to reproduce.
+
+**Not fixed here, deliberately.** This is pre-existing behaviour on the base
+branch, unrelated to the decode path this work changed, and the fix is a
+trade-off rather than a constant: finer ranges mean more object-store requests,
+which is cheap locally and expensive against remote storage. A real fix wants a
+cap of `payload_bytes / (target_partitions * k)` with a floor, chosen with
+remote reads in mind, plus its own spec scenario and review. Worth its own
+change.
+
 ## The inner loop was not touched
 
 The plan gated a `byte_probabilities_into` rewrite (23% of the profile) on this

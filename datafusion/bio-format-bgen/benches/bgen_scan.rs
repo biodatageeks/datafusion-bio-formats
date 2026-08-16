@@ -415,7 +415,7 @@ fn benchmarks(criterion: &mut Criterion) {
                 if output_mode == BgenOutputMode::Dosage && layout == BgenProbabilityLayout::Fixed {
                     continue;
                 }
-                for partitions in [1_usize, 8] {
+                for partitions in [1_usize, 2, 4, 8] {
                     let table = format!("real_{mode_name}_{layout_name}_p{partitions}");
                     let context = runtime.block_on(try_context(
                         &real_path,
@@ -423,6 +423,14 @@ fn benchmarks(criterion: &mut Criterion) {
                         BgenReadOptions {
                             output_mode,
                             probability_layout: layout,
+                            // Payload ranges are capped at one partition's byte
+                            // share, so a scan gets `target_partitions + 1`
+                            // indivisible chunks and cannot balance them. Set
+                            // this to explore finer range sizing.
+                            max_range_bytes: std::env::var("BGEN_BENCH_MAX_RANGE_BYTES")
+                                .ok()
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(16 * 1024 * 1024),
                             ..Default::default()
                         },
                         partitions,
