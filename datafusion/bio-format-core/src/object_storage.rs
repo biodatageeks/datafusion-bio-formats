@@ -535,6 +535,49 @@ fn http_endpoint(url: &Url) -> Result<String, opendal::Error> {
     })
 }
 
+/// Credentials carried in an HTTP object URL's userinfo, percent-decoded.
+///
+/// Returns `None` when the URL has no username, which is the common case.
+/// A username with no password is still returned, since some servers accept it.
+fn http_credentials(url: &Url) -> Option<(String, Option<String>)> {
+    let username = url.username();
+    if username.is_empty() {
+        return None;
+    }
+    Some((percent_decode(username), url.password().map(percent_decode)))
+}
+
+/// Decodes the `%XX` escapes a URL's userinfo carries.
+///
+/// Credentials routinely contain characters that must be escaped there — `@`
+/// and `:` above all — so passing the raw field through would authenticate with
+/// the wrong secret. Anything that is not a valid escape, or that does not
+/// decode to UTF-8, is returned unchanged rather than rejected: this is a
+/// credential, not a parse target.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = (index + 2 < bytes.len()).then(|| {
+            std::str::from_utf8(&bytes[index + 1..index + 3])
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+        });
+        match (bytes[index], hex.flatten()) {
+            (b'%', Some(byte)) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            (byte, _) => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
+}
+
 /// A remotely stored immutable object with bounded read primitives.
 #[derive(Clone, Debug)]
 pub struct RemoteObject {
@@ -659,7 +702,17 @@ impl RemoteObject {
                     path.push('?');
                     path.push_str(query);
                 }
-                let builder = Http::default().endpoint(&endpoint);
+                // Userinfo in the URL is credentials, and rebuilding the
+                // endpoint from scheme/host/port alone silently dropped them, so
+                // every request went out unauthenticated against a server that
+                // required them.
+                let mut builder = Http::default().endpoint(&endpoint);
+                if let Some((username, password)) = http_credentials(&url) {
+                    builder = builder.username(&username);
+                    if let Some(password) = password {
+                        builder = builder.password(&password);
+                    }
+                }
                 let operator = Operator::new(builder)?
                     .layer(
                         TimeoutLayer::new()
@@ -870,6 +923,36 @@ mod multimember_tests {
 #[cfg(test)]
 mod endpoint_tests {
     use super::*;
+
+    #[test]
+    fn userinfo_becomes_credentials() {
+        // Rebuilding the endpoint from scheme/host/port drops userinfo, so the
+        // credentials have to be carried over explicitly.
+        let url = Url::parse("https://user:pass@example.test/f.bcf").unwrap();
+        assert_eq!(
+            http_credentials(&url),
+            Some(("user".to_string(), Some("pass".to_string())))
+        );
+        // Credentials routinely contain escaped characters.
+        let url = Url::parse("https://a%40b.test:p%3Ass%40word@example.test/f.bcf").unwrap();
+        assert_eq!(
+            http_credentials(&url),
+            Some(("a@b.test".to_string(), Some("p:ss@word".to_string())))
+        );
+        // A username with no password is still credentials.
+        let url = Url::parse("https://token@example.test/f.bcf").unwrap();
+        assert_eq!(http_credentials(&url), Some(("token".to_string(), None)));
+        // The common case carries none.
+        let url = Url::parse("https://example.test/f.bcf").unwrap();
+        assert_eq!(http_credentials(&url), None);
+    }
+
+    #[test]
+    fn a_malformed_escape_is_left_alone() {
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("a%2"), "a%2");
+    }
 
     #[test]
     fn an_ipv6_endpoint_keeps_its_brackets() {
