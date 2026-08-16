@@ -188,7 +188,6 @@ impl ExecutionPlan for BgenExec {
                         )
                         .await?;
                     metrics.add(GenotypeMetric::RangeRequests, 1);
-                    metrics.add(GenotypeMetric::CoalescedRanges, 1);
                     metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
                     // A coalesced range bridges the metadata between consecutive
                     // payloads, so its length is what was downloaded, not what

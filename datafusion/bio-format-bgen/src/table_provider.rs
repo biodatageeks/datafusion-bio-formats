@@ -397,6 +397,16 @@ impl TableProvider for BgenTableProvider {
                 .map_or(0, |index| index.bytes_read)
                 + self.fileset.header.companion_sample_bytes,
         );
+        // Coalescing is a planning outcome, so it is counted once from the plan.
+        // Counting it per read during execution would only restate
+        // RangeRequests, which is incremented in the same loop.
+        metrics.add(
+            GenotypeMetric::CoalescedRanges,
+            partitions
+                .iter()
+                .map(|partition| partition.ranges.len() as u64)
+                .sum(),
+        );
         metrics.add(
             GenotypeMetric::MetadataCandidates,
             self.fileset.catalog.variants.len() as u64,

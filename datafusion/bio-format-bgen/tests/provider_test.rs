@@ -2009,3 +2009,31 @@ async fn the_layout1_budget_ignores_missing_samples() {
         1
     );
 }
+
+#[tokio::test]
+async fn coalesced_ranges_is_a_planning_count() {
+    // Coalescing is decided when the scan is planned, so the counter has to be
+    // meaningful before any range is read. Incrementing it per read would only
+    // restate RangeRequests, which is counted in the same loop.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    let plan = provider
+        .scan(&context.state(), Some(&vec![8]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let planned = exec.metrics_snapshot()[GenotypeMetric::CoalescedRanges as usize].1;
+    assert!(
+        planned > 0,
+        "coalesced ranges must be counted at planning, before any range is read"
+    );
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    assert_eq!(
+        exec.metrics_snapshot()[GenotypeMetric::CoalescedRanges as usize].1,
+        planned,
+        "executing the scan must not add to a planning counter"
+    );
+}
