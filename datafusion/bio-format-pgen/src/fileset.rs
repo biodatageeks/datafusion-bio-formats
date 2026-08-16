@@ -567,27 +567,32 @@ fn parse_pvar(
             sanitize_location(path)
         ))
     })?;
-    let lines: Vec<_> = text.lines().collect();
-    let body_start = lines
-        .iter()
-        .position(|line| !line.starts_with('#'))
-        .unwrap_or(lines.len());
-    let header_index = lines[..body_start]
-        .iter()
-        .rposition(|line| line.starts_with("#CHROM"));
-    let (start_line, columns) = if let Some(index) = header_index {
-        if index + 1 != body_start {
+    let mut lines = text.lines().enumerate();
+    let mut header = None;
+    let mut body_start = 0;
+    let first_body = loop {
+        match lines.next() {
+            Some((line_index, line)) if line.starts_with('#') => {
+                body_start = line_index + 1;
+                if line.starts_with("#CHROM") {
+                    header = Some((line_index, line));
+                }
+            }
+            body => break body,
+        }
+    };
+    let columns = if let Some((header_index, header)) = header {
+        if header_index + 1 != body_start {
             return Err(DataFusionError::Plan(format!(
                 "PVAR {} #CHROM line must be the final header line",
                 sanitize_location(path)
             )));
         }
-        let columns = lines[index]
+        header
             .trim_start_matches('#')
             .split_whitespace()
             .map(str::to_string)
-            .collect::<Vec<_>>();
-        (body_start, columns)
+            .collect::<Vec<_>>()
     } else {
         if body_start > 0 {
             return Err(DataFusionError::Plan(format!(
@@ -595,14 +600,16 @@ fn parse_pvar(
                 sanitize_location(path)
             )));
         }
-        let first_width = lines
+        let first_width = first_body
             .iter()
-            .find(|line| !line.is_empty())
-            .map(|line| line.split_whitespace().count())
+            .copied()
+            .chain(lines.clone())
+            .find(|(_, line)| !line.is_empty())
+            .map(|(_, line)| line.split_whitespace().count())
             .unwrap_or(0);
         // PLINK 2 specifies BIM order for a headerless PVAR. The five-column
         // form omits CM: CHROM, ID, POS, ALT, REF.
-        let columns = match first_width {
+        match first_width {
             5 => vec!["CHROM", "ID", "POS", "ALT", "REF"],
             6.. => vec!["CHROM", "ID", "CM", "POS", "ALT", "REF"],
             _ => {
@@ -614,8 +621,7 @@ fn parse_pvar(
         }
         .into_iter()
         .map(str::to_string)
-        .collect();
-        (0, columns)
+        .collect()
     };
     let column = |name: &str| {
         columns
@@ -640,9 +646,15 @@ fn parse_pvar(
         + 1;
 
     let mut variants = Vec::new();
-    for (line_index, line) in lines.iter().enumerate().skip(start_line) {
+    for (line_index, line) in first_body.into_iter().chain(lines) {
         if line.is_empty() || line.starts_with('#') {
             continue;
+        }
+        if variants.len() >= max_variants {
+            return Err(DataFusionError::Plan(format!(
+                "PVAR {} exceeds configured max_variants {max_variants}",
+                sanitize_location(path)
+            )));
         }
         let fields: Vec<_> = line.split_whitespace().collect();
         if fields.len() < required_width {
@@ -684,12 +696,6 @@ fn parse_pvar(
                 "has malformed ALT allele list".to_string(),
             ));
         }
-        if variants.len() >= max_variants {
-            return Err(DataFusionError::Plan(format!(
-                "PVAR {} exceeds configured max_variants {max_variants}",
-                sanitize_location(path)
-            )));
-        }
         variants.push(PvarVariant {
             chrom: fields[chrom_col].to_string(),
             start: site.start,
@@ -717,25 +723,26 @@ fn parse_psam(path: &str, bytes: &[u8], max_samples: usize) -> Result<Vec<PsamId
             sanitize_location(path)
         ))
     })?;
-    let lines: Vec<_> = text.lines().collect();
-    let body_start = lines
-        .iter()
-        .position(|line| !line.starts_with('#'))
-        .unwrap_or(lines.len());
-    let header = lines[..body_start]
-        .iter()
-        .rfind(|line| line.starts_with("#FID") || line.starts_with("#IID"));
-    let (columns, start) = if let Some(header) = header {
-        (
-            header
-                .trim_start_matches('#')
-                .split_whitespace()
-                .collect::<Vec<_>>(),
-            body_start,
-        )
+    let mut lines = text.lines().enumerate();
+    let mut header = None;
+    let first_body = loop {
+        match lines.next() {
+            Some((_, line)) if line.starts_with('#') => {
+                if line.starts_with("#FID") || line.starts_with("#IID") {
+                    header = Some(line);
+                }
+            }
+            body => break body,
+        }
+    };
+    let columns = if let Some(header) = header {
+        header
+            .trim_start_matches('#')
+            .split_whitespace()
+            .collect::<Vec<_>>()
     } else {
-        let first_width = lines
-            .iter()
+        let first_width = text
+            .lines()
             .find(|line| !line.is_empty())
             .map(|line| line.split_whitespace().count())
             .unwrap_or(0);
@@ -745,7 +752,7 @@ fn parse_psam(path: &str, bytes: &[u8], max_samples: usize) -> Result<Vec<PsamId
                 sanitize_location(path)
             )));
         }
-        (vec!["FID", "IID", "PAT", "MAT", "SEX"], 0)
+        vec!["FID", "IID", "PAT", "MAT", "SEX"]
     };
     let iid_col = columns
         .iter()
@@ -760,9 +767,15 @@ fn parse_psam(path: &str, bytes: &[u8], max_samples: usize) -> Result<Vec<PsamId
     let sid_col = columns.iter().position(|value| *value == "SID");
     let mut identities = Vec::new();
     let mut full_ids = HashSet::new();
-    for (line_index, line) in lines.iter().enumerate().skip(start) {
+    for (line_index, line) in first_body.into_iter().chain(lines) {
         if line.is_empty() || line.starts_with('#') {
             continue;
+        }
+        if identities.len() >= max_samples {
+            return Err(DataFusionError::Plan(format!(
+                "PSAM {} exceeds configured max_samples {max_samples}",
+                sanitize_location(path)
+            )));
         }
         let fields: Vec<_> = line.split_whitespace().collect();
         if fields.len() < columns.len() {
@@ -805,12 +818,6 @@ fn parse_psam(path: &str, bytes: &[u8], max_samples: usize) -> Result<Vec<PsamId
             )));
         }
         identities.push(identity);
-        if identities.len() > max_samples {
-            return Err(DataFusionError::Plan(format!(
-                "PSAM {} exceeds configured max_samples {max_samples}",
-                sanitize_location(path)
-            )));
-        }
     }
     Ok(identities)
 }
@@ -1690,9 +1697,21 @@ mod tests {
         assert_eq!(variants[0].id.as_deref(), Some("v1"));
         assert_eq!(variants[0].reference, "A");
         assert_eq!(variants[0].alternate, vec!["C"]);
-        let error = parse_pvar("cohort.pvar", bytes, CoordinateSystem::ZeroBasedHalfOpen, 1)
-            .unwrap_err()
-            .to_string();
+        let error = parse_pvar(
+            "cohort.pvar",
+            b"1 v1 10 C A\nmalformed\n",
+            CoordinateSystem::ZeroBasedHalfOpen,
+            1,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("max_variants 1"), "{error}");
+    }
+
+    #[test]
+    fn streams_psam_rows_and_enforces_limit_before_parsing_excess_rows() {
+        let bytes = b"#FID IID PAT MAT SEX\nf1 i1 0 0 0\nmalformed\n";
+        let error = parse_psam("cohort.psam", bytes, 1).unwrap_err().to_string();
+        assert!(error.contains("max_samples 1"), "{error}");
     }
 }
