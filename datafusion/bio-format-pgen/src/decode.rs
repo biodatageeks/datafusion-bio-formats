@@ -782,6 +782,8 @@ fn decode_main_into(
                 })?;
             }
             if record_type & 1 != 0 {
+                // Inverted-LD difflist values are stored pre-inversion. PLINK
+                // applies this final inversion after patching the base.
                 for category in output {
                     *category = match *category {
                         0 => 2,
@@ -813,6 +815,8 @@ fn decode_onebit_into(
     output: &mut Vec<u8>,
 ) -> Result<()> {
     let code = cursor.byte("one-bit common-category code")?;
+    // PLINK packs the lower common category in bits 2+ and the positive
+    // distance to the higher category in bits 0-1 (valid codes: 1,2,3,5,6,9).
     let lower = code / 4;
     let delta = code & 3;
     if delta == 0 || lower.checked_add(delta).is_none_or(|value| value > 3) {
@@ -1714,6 +1718,43 @@ mod tests {
         assert_eq!(
             record.gt,
             vec![Some([0, 0]), Some([1, 1]), Some([0, 1]), Some([1, 1])]
+        );
+    }
+
+    #[test]
+    fn decodes_only_the_specified_onebit_common_category_codes() {
+        for (code, expected) in [
+            (1, vec![0, 1]),
+            (2, vec![0, 2]),
+            (3, vec![0, 3]),
+            (5, vec![1, 2]),
+            (6, vec![1, 3]),
+            (9, vec![2, 3]),
+        ] {
+            let bytes = [code, 0b0000_0010, 0];
+            let mut cursor = Cursor::new(&bytes, 0);
+            assert_eq!(
+                decode_main(&mut cursor, PgenMode::Variable, 1, 2, None).unwrap(),
+                expected
+            );
+        }
+
+        let mut cursor = Cursor::new(&[0x08], 0);
+        let error = decode_main(&mut cursor, PgenMode::Variable, 1, 2, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid one-bit common-category code"));
+    }
+
+    #[test]
+    fn inverts_ld_difflist_values_after_patching() {
+        // Patch sample 0 from base category 0 to stored category 2, then apply
+        // the final inverted-LD 0 <-> 2 swap to the entire reconstructed row.
+        let bytes = [1, 0, 2];
+        let mut cursor = Cursor::new(&bytes, 1);
+        assert_eq!(
+            decode_main(&mut cursor, PgenMode::Variable, 3, 4, Some(&[0, 1, 2, 3]),).unwrap(),
+            vec![0, 1, 0, 3]
         );
     }
 
