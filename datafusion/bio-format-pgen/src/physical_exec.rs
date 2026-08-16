@@ -5,7 +5,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use async_stream::try_stream;
-use bytes::Bytes;
 use datafusion::arrow::array::{
     ArrayRef, BooleanBuilder, FixedSizeListArray, FixedSizeListBuilder, Float32Builder, ListArray,
     ListBuilder, StringArray, StringBuilder, StructArray, UInt16Array, UInt16Builder, UInt64Array,
@@ -24,7 +23,7 @@ use datafusion_bio_format_core::range_planning::ByteRange;
 
 use crate::decode::{
     DecodedRecord, GenotypeProjection, GtDecodeWorkspace, decode_biallelic_gt_into,
-    decode_dense_biallelic_gt, decode_main_track, decode_record_and_main,
+    decode_dense_biallelic_gt, decode_main_track_and_validate, decode_record_and_main,
     supports_biallelic_gt_fast_path,
 };
 use crate::fileset::{PgenFileset, PgenMode};
@@ -246,11 +245,9 @@ impl ExecutionPlan for PgenExec {
                 let mut ld_base_index = None;
                 let mut ld_base = Vec::with_capacity(fileset.sample_count);
                 let mut required = assignment.required().peekable();
+                let mut range_reader = fileset.source.range_reader(&fileset.pgen_path).await?;
                 for range in assignment.ranges.iter().copied() {
-                    let bytes = fileset
-                        .source
-                        .read_range(&fileset.pgen_path, range.start..range.end)
-                        .await?;
+                    let bytes = range_reader.read_range(range.start..range.end).await?;
                     metrics.add(GenotypeMetric::RangeRequests, 1);
                     metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
@@ -269,7 +266,7 @@ impl ExecutionPlan for PgenExec {
                             )))?;
                         }
                         let payload =
-                            record_payload(range, &bytes, record.offset, record.end(), variant_index)?;
+                            record_payload(range, bytes, record.offset, record.end(), variant_index)?;
                         let base = record
                             .ld_base
                             .map(|base_index| {
@@ -282,12 +279,13 @@ impl ExecutionPlan for PgenExec {
                             })
                             .transpose()?;
                         if owned.binary_search(&variant_index).is_err() {
-                            let main = decode_main_track(
+                            let main = decode_main_track_and_validate(
                                 payload,
                                 fileset.mode,
                                 record.record_type,
                                 variant_index,
                                 fileset.sample_count,
+                                fileset.variants[variant_index].allele_count(),
                                 base,
                             )?;
                             if retained_bases.contains(&variant_index) {
@@ -612,12 +610,10 @@ fn execute_gt_only(
         let mut ld_base = Vec::with_capacity(fileset.sample_count);
         let mut required = assignment.required().peekable();
         let genotype_projection = GenotypeProjection::gt_only();
+        let mut range_reader = fileset.source.range_reader(&fileset.pgen_path).await?;
 
         for range in assignment.ranges.iter().copied() {
-            let bytes = fileset
-                .source
-                .read_range(&fileset.pgen_path, range.start..range.end)
-                .await?;
+            let bytes = range_reader.read_range(range.start..range.end).await?;
             metrics.add(GenotypeMetric::RangeRequests, 1);
             metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
 
@@ -636,7 +632,7 @@ fn execute_gt_only(
                     )))?;
                 }
                 let payload =
-                    record_payload(range, &bytes, record.offset, record.end(), variant_index)?;
+                    record_payload(range, bytes, record.offset, record.end(), variant_index)?;
                 let base = record
                     .ld_base
                     .map(|base_index| {
@@ -650,12 +646,13 @@ fn execute_gt_only(
                     .transpose()?;
 
                 if owned.binary_search(&variant_index).is_err() {
-                    let main = decode_main_track(
+                    let main = decode_main_track_and_validate(
                         payload,
                         fileset.mode,
                         record.record_type,
                         variant_index,
                         fileset.sample_count,
+                        fileset.variants[variant_index].allele_count(),
                         base,
                     )?;
                     if retained_bases.contains(&variant_index) {
@@ -759,7 +756,7 @@ fn execute_gt_only(
 
 fn record_payload(
     range: ByteRange,
-    bytes: &Bytes,
+    bytes: &[u8],
     start: u64,
     end: u64,
     variant_index: usize,

@@ -278,6 +278,12 @@ dependency anchors required to decode LD-compressed records independently.
 - **THEN** only its owning partition emits it
 - **AND** dependency metrics record the duplicate internal read.
 
+#### Scenario: Dependency auxiliary-track validation
+- **WHEN** an unowned LD base declares patch, phase, dosage, or phased-dosage
+  tracks
+- **THEN** every declared track is consumed and validated without emitting the
+  dependency row.
+
 #### Scenario: Invalid LD chain
 - **WHEN** an LD record has no valid preceding base under the specification
 - **THEN** decoding fails with the dependent variant index.
@@ -450,6 +456,10 @@ storage using bounded header, index, record, PVAR, and PSAM reads.
 #### Scenario: Adjacent selected records
 - **WHEN** selected records and their dependencies occupy nearby ranges
 - **THEN** requests may be coalesced within configured thresholds.
+
+#### Scenario: Local partition range reuse
+- **WHEN** one local partition reads multiple coalesced ranges
+- **THEN** it reuses one open file handle and range buffer for those reads.
 
 ### Requirement: PGEN Integrity And Conformance
 

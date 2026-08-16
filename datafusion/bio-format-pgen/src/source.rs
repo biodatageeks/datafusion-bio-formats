@@ -14,6 +14,19 @@ pub(crate) enum ObjectAccess {
     Remote(RemoteObject),
 }
 
+pub(crate) enum ObjectRangeReader {
+    Local {
+        file: tokio::fs::File,
+        display_path: String,
+        buffer: Vec<u8>,
+    },
+    Remote {
+        object: RemoteObject,
+        display_path: String,
+        buffer: Bytes,
+    },
+}
+
 impl ObjectAccess {
     pub(crate) async fn open(path: &str, options: &ObjectStorageOptions) -> Result<Self> {
         match get_storage_type(path.to_string()) {
@@ -72,36 +85,25 @@ impl ObjectAccess {
         display_path: &str,
         range: std::ops::Range<u64>,
     ) -> Result<Bytes> {
-        if range.end < range.start {
-            return Err(DataFusionError::Execution(format!(
-                "invalid object range {}..{}",
-                range.start, range.end
-            )));
-        }
-        let expected = usize::try_from(range.end - range.start).map_err(|_| {
-            DataFusionError::Execution("object range does not fit usize".to_string())
-        })?;
-        if expected == 0 {
-            return Ok(Bytes::new());
-        }
+        let mut reader = self.range_reader(display_path).await?;
+        reader.read_range(range).await?;
+        Ok(reader.into_bytes())
+    }
+
+    pub(crate) async fn range_reader(&self, display_path: &str) -> Result<ObjectRangeReader> {
         match self {
-            Self::Local(path) => {
-                let mut file = tokio::fs::File::open(path)
+            Self::Local(path) => Ok(ObjectRangeReader::Local {
+                file: tokio::fs::File::open(path)
                     .await
-                    .map_err(|error| io_error("open", display_path, error))?;
-                file.seek(std::io::SeekFrom::Start(range.start))
-                    .await
-                    .map_err(|error| io_error("seek", display_path, error))?;
-                let mut bytes = vec![0; expected];
-                file.read_exact(&mut bytes)
-                    .await
-                    .map_err(|error| io_error("read", display_path, error))?;
-                Ok(Bytes::from(bytes))
-            }
-            Self::Remote(object) => object
-                .read_range(range)
-                .await
-                .map_err(|error| external_error("read", display_path, error)),
+                    .map_err(|error| io_error("open", display_path, error))?,
+                display_path: display_path.to_string(),
+                buffer: Vec::new(),
+            }),
+            Self::Remote(object) => Ok(ObjectRangeReader::Remote {
+                object: object.clone(),
+                display_path: display_path.to_string(),
+                buffer: Bytes::new(),
+            }),
         }
     }
 
@@ -118,6 +120,66 @@ impl ObjectAccess {
             )));
         }
         self.read_range(display_path, 0..size).await
+    }
+}
+
+impl ObjectRangeReader {
+    pub(crate) async fn read_range(&mut self, range: std::ops::Range<u64>) -> Result<&[u8]> {
+        if range.end < range.start {
+            return Err(DataFusionError::Execution(format!(
+                "invalid object range {}..{}",
+                range.start, range.end
+            )));
+        }
+        let expected = usize::try_from(range.end - range.start).map_err(|_| {
+            DataFusionError::Execution("object range does not fit usize".to_string())
+        })?;
+        if expected == 0 {
+            return match self {
+                Self::Local { buffer, .. } => {
+                    buffer.clear();
+                    Ok(buffer)
+                }
+                Self::Remote { buffer, .. } => {
+                    *buffer = Bytes::new();
+                    Ok(buffer)
+                }
+            };
+        }
+        match self {
+            Self::Local {
+                file,
+                display_path,
+                buffer,
+            } => {
+                file.seek(std::io::SeekFrom::Start(range.start))
+                    .await
+                    .map_err(|error| io_error("seek", display_path, error))?;
+                buffer.resize(expected, 0);
+                file.read_exact(buffer)
+                    .await
+                    .map_err(|error| io_error("read", display_path, error))?;
+                Ok(buffer)
+            }
+            Self::Remote {
+                object,
+                display_path,
+                buffer,
+            } => {
+                *buffer = object
+                    .read_range(range)
+                    .await
+                    .map_err(|error| external_error("read", display_path, error))?;
+                Ok(buffer)
+            }
+        }
+    }
+
+    fn into_bytes(self) -> Bytes {
+        match self {
+            Self::Local { buffer, .. } => Bytes::from(buffer),
+            Self::Remote { buffer, .. } => buffer,
+        }
     }
 }
 
@@ -150,4 +212,25 @@ fn external_error(
         "{action} {}: {error}",
         sanitize_location(path)
     ))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObjectAccess;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_range_reader_reuses_its_open_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("ranges.bin");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let source = ObjectAccess::Local(path.to_string_lossy().into_owned());
+        let mut reader = source.range_reader("ranges.bin").await.unwrap();
+
+        // An open Unix file remains readable after unlinking. A range reader
+        // that reopened by path for every request would fail this regression.
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reader.read_range(1..4).await.unwrap(), b"123");
+        assert_eq!(reader.read_range(7..10).await.unwrap(), b"789");
+    }
 }

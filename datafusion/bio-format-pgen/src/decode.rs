@@ -690,16 +690,27 @@ pub(crate) fn decode_record_and_main(
     ))
 }
 
-pub(crate) fn decode_main_track(
+pub(crate) fn decode_main_track_and_validate(
     bytes: &[u8],
     mode: PgenMode,
     record_type: u8,
     variant_index: usize,
     sample_count: usize,
+    allele_count: usize,
     ld_base: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
-    let mut cursor = Cursor::new(bytes, variant_index);
-    decode_main(&mut cursor, mode, record_type, sample_count, ld_base)
+    decode_record_and_main(
+        bytes,
+        mode,
+        record_type,
+        variant_index,
+        sample_count,
+        allele_count,
+        GenotypeProjection::default(),
+        &[],
+        ld_base,
+    )
+    .map(|(_, main)| main)
 }
 
 fn decode_main(

@@ -1050,6 +1050,32 @@ async fn rejects_malformed_indexes_records_and_unsupported_multiallelic_dosage()
         "{error}"
     );
 
+    let fixture = variable_fixture(
+        0x10,
+        &[0x60, 0x02],
+        &[pack_codes(&[0, 1, 2, 3]), vec![1, 1, 3]],
+        &[2, 2],
+    );
+    let provider = PgenTableProvider::try_new(path(&fixture.pgen), Default::default())
+        .await
+        .unwrap();
+    let dependency_context = context(1);
+    dependency_context
+        .register_table("dependency", Arc::new(provider))
+        .unwrap();
+    let error = dependency_context
+        .sql("SELECT genotypes FROM dependency WHERE id = 'v2'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("truncated dosage-presence bitarray"),
+        "{error}"
+    );
+
     let fixture = variable_fixture(0x10, &[0x01], &[vec![0; 5]], &[2]);
     let error = PgenTableProvider::try_new(
         path(&fixture.pgen),
