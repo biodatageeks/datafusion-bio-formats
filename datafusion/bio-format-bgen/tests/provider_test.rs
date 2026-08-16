@@ -91,10 +91,20 @@ impl RangeServer {
 
     /// Publishes an entity tag for the index, as real object stores do.
     fn start_with_index_etag(bgen: Vec<u8>, bgi: Vec<u8>, etag: &str) -> Self {
-        Self::start_inner(bgen, bgi, Some(etag.to_string()))
+        Self::start_inner(bgen, bgi, Some(format!("ETag: \"{etag}\"\r\n")))
     }
 
-    fn start_inner(bgen: Vec<u8>, bgi: Vec<u8>, index_etag: Option<String>) -> Self {
+    /// Publishes only a modification time for the index, as a plain HTTP file
+    /// server does. That is a weak validator: one-second granularity.
+    fn start_with_index_last_modified(bgen: Vec<u8>, bgi: Vec<u8>) -> Self {
+        Self::start_inner(
+            bgen,
+            bgi,
+            Some("Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\n".to_string()),
+        )
+    }
+
+    fn start_inner(bgen: Vec<u8>, bgi: Vec<u8>, index_validator: Option<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -141,8 +151,8 @@ impl RangeServer {
                     range,
                 });
 
-                let validator = match (path.as_str(), &index_etag) {
-                    ("/cohort.bgen.bgi", Some(etag)) => format!("ETag: \"{etag}\"\r\n"),
+                let validator = match (path.as_str(), &index_validator) {
+                    ("/cohort.bgen.bgi", Some(header)) => header.clone(),
                     _ => String::new(),
                 };
                 let body = match path.as_str() {
@@ -1283,6 +1293,38 @@ async fn a_cached_remote_index_is_not_downloaded_again() {
         "the second open must read the cached index, not fetch it again"
     );
     assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn a_modification_time_alone_does_not_authorize_cache_reuse() {
+    // HTTP modification times carry one-second granularity, so two different
+    // bodies of the same length written within the same second are
+    // indistinguishable by one. Reusing on that basis would serve the old index
+    // and, because its rows prune candidates before any record is read, quietly
+    // drop matching variants.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start_with_index_last_modified(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let after_first = server.get_requests("cohort.bgen.bgi").len();
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    assert!(
+        server.get_requests("cohort.bgen.bgi").len() > after_first,
+        "a weak validator must not authorize reuse"
+    );
 }
 
 #[tokio::test]

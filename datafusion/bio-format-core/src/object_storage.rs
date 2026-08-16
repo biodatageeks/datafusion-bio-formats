@@ -866,29 +866,24 @@ impl RemoteObject {
     ///
     /// A cache keyed on an object's bytes cannot be consulted until those bytes
     /// have been fetched, which defeats the cache. This is what a caller keys on
-    /// instead: whichever validator the backend publishes — an entity tag where
-    /// there is one, otherwise a modification time.
+    /// instead — but only when the backend offers something that genuinely
+    /// identifies a version.
     ///
-    /// The validator is `None` when the backend publishes neither. Length alone
-    /// is deliberately not offered as one: a replacement of the same length
-    /// would be indistinguishable, and a caller cannot tell a weak identity from
-    /// a strong one once it is handed a string.
+    /// That means a strong entity tag, and nothing else. A modification time is
+    /// a weak validator by HTTP's own definition: it carries one-second
+    /// granularity, so two different bodies of the same length written inside
+    /// the same second cannot be told apart by it. A weak entity tag (`W/`) says
+    /// as much about itself, and length alone is weaker still. A caller handed a
+    /// string cannot tell these apart from a strong tag, so none of them are
+    /// offered — the validator is `None` and the caller falls back to
+    /// identifying the object by its contents.
     pub async fn identity(&self) -> Result<(u64, Option<String>), opendal::Error> {
         let metadata = self.operator.stat(&self.path).await?;
         let length = metadata.content_length();
-        let mut validator = String::new();
-        if let Some(etag) = metadata.etag() {
-            validator.push_str("etag=");
-            validator.push_str(etag);
-        }
-        if let Some(modified) = metadata.last_modified() {
-            if !validator.is_empty() {
-                validator.push(';');
-            }
-            validator.push_str("modified=");
-            validator.push_str(&modified.to_string());
-        }
-        let validator = (!validator.is_empty()).then(|| format!("len={length};{validator}"));
+        let validator = metadata
+            .etag()
+            .filter(|etag| !etag.is_empty() && !etag.starts_with("W/"))
+            .map(|etag| format!("len={length};etag={etag}"));
         Ok((length, validator))
     }
 
