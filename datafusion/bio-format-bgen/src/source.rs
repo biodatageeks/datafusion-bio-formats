@@ -19,6 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 pub(crate) struct ObjectAccess {
     backing: Backing,
     requests: Arc<AtomicU64>,
+    bytes: Arc<AtomicU64>,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +33,7 @@ impl ObjectAccess {
         Self {
             backing,
             requests: Arc::new(AtomicU64::new(0)),
+            bytes: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -44,6 +46,14 @@ impl ObjectAccess {
     /// Object requests issued through this handle and its clones.
     pub(crate) fn requests(&self) -> u64 {
         self.requests.load(Ordering::Relaxed)
+    }
+
+    /// Bytes returned through this handle and its clones.
+    ///
+    /// Counted where the bytes arrive rather than tallied by each caller, so a
+    /// read added later cannot be left out of what a scan reports.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
     }
 
     fn count_request(&self) {
@@ -148,6 +158,10 @@ impl ObjectAccess {
             return Ok(Bytes::new());
         }
         self.count_request();
+        let counted = |bytes: Bytes| {
+            self.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            bytes
+        };
         match &self.backing {
             Backing::Local(path) => {
                 let mut file = tokio::fs::File::open(path)
@@ -160,11 +174,12 @@ impl ObjectAccess {
                 file.read_exact(&mut bytes)
                     .await
                     .map_err(|error| io_error("read", display_path, error))?;
-                Ok(Bytes::from(bytes))
+                Ok(counted(Bytes::from(bytes)))
             }
             Backing::Remote(object) => object
                 .read_range(range)
                 .await
+                .map(counted)
                 .map_err(|error| external_error("read", display_path, error)),
         }
     }

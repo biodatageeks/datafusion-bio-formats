@@ -2708,3 +2708,31 @@ async fn coalesced_ranges_is_a_planning_count() {
         "executing the scan must not add to a planning counter"
     );
 }
+
+#[tokio::test]
+async fn preliminary_header_reads_are_counted() {
+    // Opening reads the fixed prefix before re-reading the header in full, and
+    // the sample block's length before the block itself. Those overlapping reads
+    // are bytes physically fetched, so a scan that then reads every payload
+    // reports more than the object's size — and would report exactly its size if
+    // the preliminary reads were left out.
+    let fixture = fixture(Codec::None, true);
+    let object_size = fs::metadata(&fixture.bgen).unwrap().len();
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let primary = exec.metrics_snapshot()[GenotypeMetric::PrimaryBytesRead as usize].1;
+    assert!(
+        primary > object_size,
+        "the prefix reads before the header and the sample block must be counted: \
+         {primary} bytes reported for a {object_size}-byte object"
+    );
+}

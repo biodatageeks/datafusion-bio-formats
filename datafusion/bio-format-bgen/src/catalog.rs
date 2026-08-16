@@ -138,7 +138,6 @@ impl BgenVariant {
 #[derive(Clone, Debug)]
 pub(crate) struct BgenCatalog {
     pub(crate) variants: Arc<Vec<Arc<BgenVariant>>>,
-    pub(crate) bytes_read: u64,
 }
 
 /// Sequential read-ahead buffer over the variant records of one BGEN object.
@@ -367,7 +366,6 @@ pub(crate) async fn build_transient_catalog(
 
     Ok(BgenCatalog {
         variants: Arc::new(variants),
-        bytes_read: window.bytes_read,
     })
 }
 
@@ -397,7 +395,6 @@ pub(crate) fn catalog_from_index(
     rows: &[IndexedVariant],
     header: &BgenHeader,
     options: &BgenReadOptions,
-    bytes_read: u64,
 ) -> Result<BgenCatalog> {
     let mut variants = Vec::with_capacity(rows.len());
     for (index, row) in rows.iter().enumerate() {
@@ -458,7 +455,6 @@ pub(crate) fn catalog_from_index(
     }
     Ok(BgenCatalog {
         variants: Arc::new(variants),
-        bytes_read,
     })
 }
 

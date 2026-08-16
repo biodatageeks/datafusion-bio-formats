@@ -214,6 +214,11 @@ async fn open_and_validate(
     // Counted however the attempt ended: a rejected index was read all the same.
     // The primary object's own requests belong to its handle, which the provider
     // snapshots separately, so they are not added here.
+    // Requests come from the handle, which counts them wherever they are made.
+    // Bytes do not: a local index is read by SQLite rather than through the
+    // handle, so the handle would report none for it. The index is read in full
+    // either way — downloaded, or read where it lies — so its size is what is
+    // counted, as it was before the handle existed.
     cost.requests = cost.requests.saturating_add(bgi_source.requests());
     result
 }
@@ -231,6 +236,8 @@ async fn open_validated_index(
     // One stat yields both the size the limits are checked against and the
     // validator the cache is keyed on, so a cached index costs no extra request.
     let (bgi_size, bgi_validator) = bgi_source.identity(bgi_path).await?;
+    // Spent from here on whether or not the index survives validation.
+    cost.companion_bytes = bgi_size;
     if bgi_size > options.max_bgi_bytes as u64 {
         return Err(index_error(
             bgi_path,
@@ -268,9 +275,6 @@ async fn open_validated_index(
         .await?
     };
 
-    // The index is in hand from here, so its bytes are spent whether or not it
-    // survives validation.
-    cost.companion_bytes = bgi_size;
     // Validation runs through the connection opened under the cache lease, so an
     // entry evicted by a concurrent provider cannot make it fail on a path that
     // no longer exists.
@@ -292,7 +296,6 @@ async fn open_validated_index(
         &metadata,
         &rows,
         bgi_path,
-        cost,
     )
     .await?;
 
@@ -623,7 +626,6 @@ async fn validate_identity(
     metadata: &BgiMetadata,
     rows: &[BgiRow],
     bgi_path: &str,
-    cost: &mut IndexReadCost,
 ) -> Result<()> {
     if metadata.file_size != header.object_size {
         return Err(index_error(
@@ -638,9 +640,6 @@ async fn validate_identity(
     let primary_prefix = primary_source
         .read_range(primary_path, 0..identity_length)
         .await?;
-    // Read on the index's behalf, so it belongs to the index's cost whether or
-    // not the comparison below passes.
-    cost.primary_bytes = identity_length;
     if metadata.first_bytes != primary_prefix.as_ref() {
         return Err(index_error(
             bgi_path,

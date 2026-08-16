@@ -221,6 +221,12 @@ pub(crate) struct BgenFileset {
     /// Holding the cost here rather than on the index keeps it accounted either
     /// way.
     pub(crate) index_cost: IndexReadCost,
+    /// Bytes the provider read from the BGEN object before any scan ran.
+    ///
+    /// Taken from the object's handle, which counts what it returns, so the
+    /// header reads, the width probe and the index's identity read are all
+    /// included without each being tallied by hand.
+    pub(crate) construction_bytes: u64,
     /// Object requests the provider issued before any scan ran.
     ///
     /// Snapshotted at construction, so the counters a scan reports include the
@@ -242,8 +248,6 @@ pub(crate) struct BgenFileset {
 pub(crate) struct IndexReadCost {
     /// Bytes read from the index object itself.
     pub(crate) companion_bytes: u64,
-    /// Bytes read from the BGEN object on the index's behalf.
-    pub(crate) primary_bytes: u64,
     /// Object requests issued against either.
     pub(crate) requests: u64,
 }
@@ -289,7 +293,7 @@ impl BgenTableProvider {
             // No bytes of the object go into building this catalog: the index
             // supplied it, and the prefix its identity check read is already
             // reported against the index itself.
-            match catalog_from_index(&path, &index.variants, &header, &options, 0) {
+            match catalog_from_index(&path, &index.variants, &header, &options) {
                 Ok(built) => catalog = Some(built),
                 Err(error)
                     if options.bgi_path.is_none()
@@ -339,6 +343,7 @@ impl BgenTableProvider {
         // Snapshotted here, after every construction-time read: the header, the
         // index's work on the primary object, and the width probe.
         let construction_requests = source.requests();
+        let construction_bytes = source.bytes();
         let fileset = Arc::new(BgenFileset {
             path,
             source,
@@ -347,6 +352,7 @@ impl BgenTableProvider {
             bgi,
             index_cost,
             construction_requests,
+            construction_bytes,
             selected_samples,
             options,
             probability_shape,
@@ -529,18 +535,15 @@ impl TableProvider for BgenTableProvider {
         let metrics = Arc::new(GenotypeScanMetrics::default());
         metrics.add(
             GenotypeMetric::PrimaryBytesRead,
-            self.fileset.header.header_bytes_read
-                + self.fileset.catalog.bytes_read
-                + self.fileset.probability_probe_bytes
-                + self.fileset.index_cost.primary_bytes
-                + metadata_cost.bytes,
+            self.fileset.construction_bytes + metadata_cost.bytes,
         );
         metrics.add(
             GenotypeMetric::RangeRequests,
             metadata_cost
                 .requests
                 .saturating_add(self.fileset.construction_requests)
-                .saturating_add(self.fileset.index_cost.requests),
+                .saturating_add(self.fileset.index_cost.requests)
+                .saturating_add(self.fileset.header.companion_sample_requests),
         );
         metrics.add(
             GenotypeMetric::CompanionBytesRead,
@@ -1326,7 +1329,6 @@ mod tests {
             .collect::<Vec<_>>();
         BgenCatalog {
             variants: Arc::new(variants),
-            bytes_read: 0,
         }
     }
 

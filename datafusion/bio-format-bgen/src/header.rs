@@ -29,9 +29,15 @@ pub(crate) struct BgenHeader {
     pub(crate) sample_names: Vec<String>,
     pub(crate) synthetic_sample_names: bool,
     pub(crate) object_size: u64,
-    pub(crate) header_bytes_read: u64,
     /// Bytes read from an external sample companion, if one was used.
+    ///
+    /// Taken from that companion's own handle, which counts what it returns, so
+    /// a preliminary read cannot be left out. Bytes read from the BGEN object
+    /// itself are not here: they are on the handle the caller passed in, which
+    /// the provider reads once construction is done.
     pub(crate) companion_sample_bytes: u64,
+    /// Requests issued against an external sample companion.
+    pub(crate) companion_sample_requests: u64,
 }
 
 impl BgenHeader {
@@ -161,8 +167,9 @@ impl BgenHeader {
         // Bytes read from an external sample companion are companion I/O, not
         // primary object I/O, so they are tracked separately.
         let mut companion_sample_bytes = 0_u64;
+        let mut companion_sample_requests = 0_u64;
         let has_embedded_samples = flags & (1_u32 << 31) != 0;
-        let (sample_names, synthetic_sample_names, sample_bytes_read) = if has_embedded_samples {
+        let (sample_names, synthetic_sample_names, _) = if has_embedded_samples {
             let sample_block_start = full_header_end;
             let prefix_end = sample_block_start
                 .checked_add(8)
@@ -210,8 +217,10 @@ impl BgenHeader {
                 block_length,
             )
         } else if let Some(sample_path) = &options.sample_path {
-            let (names, bytes) = read_external_samples(sample_path, sample_count, options).await?;
+            let (names, bytes, requests) =
+                read_external_samples(sample_path, sample_count, options).await?;
             companion_sample_bytes = bytes;
+            companion_sample_requests = requests;
             (names, false, 0)
         } else {
             (
@@ -232,8 +241,8 @@ impl BgenHeader {
             sample_names,
             synthetic_sample_names,
             object_size,
-            header_bytes_read: full_header_end + sample_bytes_read,
             companion_sample_bytes,
+            companion_sample_requests,
         })
     }
 }
@@ -242,7 +251,7 @@ async fn read_external_samples(
     path: &str,
     expected_count: u32,
     options: &BgenReadOptions,
-) -> Result<(Vec<String>, u64)> {
+) -> Result<(Vec<String>, u64, u64)> {
     let source = ObjectAccess::open(
         path,
         &options.object_storage_options.clone().unwrap_or_default(),
@@ -309,10 +318,12 @@ async fn read_external_samples(
         }
         names.push(name.to_string());
     }
-    let companion_bytes = bytes.len() as u64;
+    // From the handle rather than from `bytes`: it counts the size request and
+    // every read, including the one `read_all_bounded` makes to size the object.
     Ok((
         validate_sample_names(path, names, expected_count)?,
-        companion_bytes,
+        source.bytes(),
+        source.requests(),
     ))
 }
 
