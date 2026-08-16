@@ -1321,6 +1321,52 @@ async fn an_index_without_a_validator_is_refetched_rather_than_trusted() {
     assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn an_index_downloaded_but_not_cached_still_reports_its_transfer() {
+    // The index can be fetched in full and then fail on a later step — writing
+    // it to the cache, publishing it, opening it. The fallback to the walk is
+    // right, but the transfer happened and has to be reported.
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    // No validator published, so the index is downloaded before the cache is
+    // consulted; the write that follows is what fails.
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a discovered index that cannot be cached is ignored");
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let companion = exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1;
+
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        companion > 0,
+        "the index was transferred before the cache write failed"
+    );
+}
+
 #[tokio::test]
 async fn an_index_rejected_by_a_size_limit_reports_no_bytes_read() {
     // An index turned away by a size limit was stated, never read. Charging its

@@ -215,10 +215,16 @@ async fn open_and_validate(
     // The primary object's own requests belong to its handle, which the provider
     // snapshots separately, so they are not added here.
     // Requests come from the handle, which counts them wherever they are made.
-    // Bytes do not: a local index is read by SQLite rather than through the
-    // handle, so the handle would report none for it. The index is read in full
-    // either way — downloaded, or read where it lies — so its size is what is
-    // counted, as it was before the handle existed.
+    //
+    // Bytes take the larger of two figures, because neither alone is right for
+    // every exit. The handle counts what was actually transferred, which is the
+    // only record when a download succeeded and a later step — publishing it to
+    // the cache, opening it — did not. It reports nothing for a local index,
+    // which SQLite reads rather than the handle, or for a cache hit; those are
+    // read in full all the same, which is what the size covers. An index turned
+    // away by a size limit was neither transferred nor opened, so both are zero
+    // and it is charged nothing.
+    cost.companion_bytes = cost.companion_bytes.max(bgi_source.bytes());
     cost.requests = cost.requests.saturating_add(bgi_source.requests());
     result
 }
