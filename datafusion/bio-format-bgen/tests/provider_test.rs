@@ -1483,6 +1483,33 @@ async fn the_fixed_width_covers_the_widest_catalog_variant() {
 }
 
 #[tokio::test]
+async fn the_derived_fixed_width_respects_max_states_per_sample() {
+    // The width covers the widest catalog variant, so it can exceed the
+    // per-sample state limit even when variant 0 is well inside it. Every
+    // selected sample is padded to that width whether or not the wide variant
+    // is ever decoded, so a filter that excludes it would otherwise allocate
+    // the padding without the limit ever being consulted.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            // Variant 0 stores three states and passes; the triallelic variant
+            // pushes the derived width to six.
+            max_states_per_sample: 5,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("a derived width above the limit must fail planning")
+    .to_string();
+    assert!(
+        error.contains("max_states_per_sample") && error.contains("nested"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn fixed_probability_layout_pads_a_narrower_variant_with_nan() {
     // The fixture mixes widths on purpose: rs1 is unphased biallelic (three
     // states) and rs3 is triallelic (six for a diploid sample). The schema is

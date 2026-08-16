@@ -219,7 +219,7 @@ impl BgenTableProvider {
                 // One width is in play from here on: the schema and the scan
                 // buffers both read `shape.width`, so neither has to know
                 // whether it came from the probe or from the catalog.
-                shape.width = derive_fixed_width(&catalog, shape)?;
+                shape.width = derive_fixed_width(&path, &catalog, shape, &options)?;
                 (Some(shape), bytes, decompressed)
             } else {
                 (None, 0, 0)
@@ -490,7 +490,18 @@ pub(crate) struct ProbeShape {
 /// constant across a file in practice, so the widest state count follows from
 /// the probe plus the catalog at no I/O cost. A sample that turns out to store
 /// more than this is rejected during the scan rather than silently truncated.
-fn derive_fixed_width(catalog: &BgenCatalog, shape: ProbeShape) -> Result<usize> {
+///
+/// The derived width is checked against `max_states_per_sample` here rather than
+/// only per decoded variant. Every emitted sample is padded to this width, so a
+/// query filtered to the narrow variants of a file that also holds a very wide
+/// one would allocate the padding without the widest variant ever being decoded
+/// — the per-variant check would never run.
+fn derive_fixed_width(
+    path: &str,
+    catalog: &BgenCatalog,
+    shape: ProbeShape,
+    options: &BgenReadOptions,
+) -> Result<usize> {
     let mut width = shape.width as u64;
     for variant in catalog.variants.iter() {
         width = width.max(complete_probability_count(
@@ -498,6 +509,14 @@ fn derive_fixed_width(catalog: &BgenCatalog, shape: ProbeShape) -> Result<usize>
             variant.alleles.len(),
             shape.phased,
         )?);
+    }
+    if width > options.max_states_per_sample as u64 {
+        return Err(DataFusionError::Plan(format!(
+            "BGEN {} needs a fixed probability width of {width} to cover its widest variant, \
+             exceeding max_states_per_sample {}; use the nested probability layout",
+            sanitize_location(path),
+            options.max_states_per_sample
+        )));
     }
     usize::try_from(width)
         .map_err(|_| DataFusionError::Plan("BGEN probability width does not fit usize".to_string()))

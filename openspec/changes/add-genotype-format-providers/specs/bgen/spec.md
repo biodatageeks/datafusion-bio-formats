@@ -274,8 +274,8 @@ or dosage values only for selected samples.
 ### Requirement: BGEN Probability Output Layout
 
 The system SHALL emit probability states as a variable-length list per sample by
-default, and SHALL offer a fixed-width layout for files whose variants all store
-the same number of states.
+default, and SHALL offer a fixed-width layout whose width covers the widest
+sample the file's catalog allows.
 
 #### Scenario: Default variable-length layout
 - **WHEN** probability output is requested without selecting a layout
@@ -289,11 +289,42 @@ the same number of states.
 - **AND** a sample with no called genotype is null while still occupying its
   declared width.
 
-#### Scenario: Fixed-width layout rejects a differing variant
-- **WHEN** the fixed probability layout is selected and a variant stores a
-  number of states other than the declared width
-- **THEN** the scan fails naming both counts
+#### Scenario: Fixed-width layout derives its width from the catalog
+- **WHEN** the fixed probability layout is selected
+- **THEN** the width is the widest state count implied by the first variant's
+  declared ploidy and phasing together with every catalog variant's allele count
+- **AND** no probability payload beyond the first variant is read to determine
+  it.
+
+#### Scenario: Fixed-width layout pads a narrower sample
+- **WHEN** the fixed probability layout is selected and a sample stores fewer
+  states than the declared width
+- **THEN** its remaining states are emitted as NaN
+- **AND** the sample's own states are unchanged
+- **AND** a variant declaring a variable ploidy is representable, because
+  padding is decided per sample rather than per variant.
+
+#### Scenario: A missing sample's reserved states read as NaN
+- **WHEN** the fixed probability layout is selected and a sample has no called
+  genotype
+- **THEN** the sample is null
+- **AND** the states it reserves are NaN rather than zero, so a consumer reading
+  the values buffer directly does not observe a probability of zero where there
+  is no genotype.
+
+#### Scenario: Fixed-width layout rejects a wider sample
+- **WHEN** the fixed probability layout is selected and a sample stores more
+  states than the declared width
+- **THEN** the scan fails naming both counts and directs the caller to the
+  default layout
 - **AND** the values are neither padded nor truncated to fit.
+
+#### Scenario: A derived width honours the per-sample state limit
+- **WHEN** the fixed probability layout is selected and the width the catalog
+  implies exceeds the configured maximum states per sample
+- **THEN** planning fails naming both counts and directs the caller to the
+  default layout, because every emitted sample is padded to that width whether
+  or not the widest variant is selected by a filter.
 
 #### Scenario: Fixed-width layout needs a determinable width
 - **WHEN** the fixed probability layout is selected and the first variant

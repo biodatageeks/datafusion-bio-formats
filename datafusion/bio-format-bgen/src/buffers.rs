@@ -219,6 +219,13 @@ impl GenotypeBuffers {
     /// offsets are now countable too. `GenotypeMetric::GenotypeBytes` is
     /// reported from this, and three rounds of review on #220 were spent
     /// settling what those counters mean.
+    ///
+    /// The consequence, unchanged from before but worth stating: a
+    /// [`BufferLayout::NestedProbability`] batch is undercounted by its
+    /// per-sample offsets, four bytes per sample per variant, so such a batch
+    /// can exceed `batch_soft_byte_limit` by roughly a quarter for a diploid
+    /// biallelic cohort. The fixed layout, which emits no per-sample offsets,
+    /// is counted exactly.
     pub(crate) fn bytes_since(&self, mark: BufferMark) -> usize {
         let values = (self.values.len() - mark.values).saturating_mul(size_of::<f32>());
         let ploidy = self.ploidy.len() - mark.ploidy;
