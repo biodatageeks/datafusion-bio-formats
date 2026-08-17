@@ -25,19 +25,23 @@ interleaved in one session:
 
 | | dosage (float32) | hardcall (int8) |
 |---|---:|---:|
-| pgenlib | 1.79 s | 0.83 s |
-| snputils (wraps pgenlib) | 3.26 s | 1.51 s |
-| polars-bio, before fusion | 4.34 s | 2.96 s |
-| **polars-bio, after** | **3.23 s** | **1.94 s** |
+| pgenlib | 1.78 s | 0.83 s |
+| snputils (wraps pgenlib) | 3.18 s | 1.49 s |
+| polars-bio, start of this work | 4.34 s | 2.96 s |
+| **polars-bio, now** | **1.85 s** | **0.94 s** |
 
 pgenlib and snputils reproduced their earlier figures to within 1%, so the
 polars-bio deltas are the change and not session drift.
 
-**The end-to-end gain (1.35× / 1.53×) is much smaller than the scan's, and that
-is the important result.** Materialization into a contiguous array is untouched
-and is now the larger term — about 2.03 s of the 3.23 s dosage total and 1.35 s
-of the 1.94 s hardcall total. Further decoder work buys progressively less; see
-task 1 in polars-bio's `HANDOVER-pgen-perf.md`.
+Fusion alone took the end-to-end figures to 3.23 s / 1.94 s — much less than the
+scan's 1.94× / 2.80×, because materialization was then the larger term. Removing
+it (polars-bio's `read_pgen_matrix`, which streams the scan's batches into a
+preallocated array instead of consolidating them into an Arrow buffer first) is
+what produced the rest. polars-bio is now 1.04× pgenlib on dosage and 1.14× on
+hardcall.
+
+Note the harness no longer charges module import time to the read; see
+polars-bio's `HANDOVER-pgen-perf.md`.
 
 Correctness: bit-identical to pgenlib across all 2,532,408,788 cells in both
 workloads, at every partition count, with a self-test proving the comparison
@@ -160,17 +164,14 @@ so vectorization is limited, but the sample-index delta decoding
 up at ~10% of profile samples before fusion — re-profile, since fusion changed
 the denominator substantially.
 
-### 2. Investigate the dosage peak RSS
+### 2. Peak RSS — resolved
 
-Through polars-bio, dosage peaks at **22.31 GB** against pgenlib's 12.09 GB for
-the identical 10.13 GB output; hardcall is 8.25 GB against 5.02 GB. The rise from
-17.9 GB happened between the `8fbed14` and `52e9fcf` builds, was not a target of
-any change, and still has no explanation.
-
-It is not in the decode. The Rust-only scan peaks at 9.97 GB for `DS` and 2.9 GB
-for `ALT_COUNT`, unchanged by fusion, so the excess is in the materialization
-path — the same place task 1's remaining time is. Resolve before publishing:
-1.85× pgenlib's memory for identical output is not a clean result.
+Dosage now peaks at 13.30 GB against pgenlib's 12.09 GB for the identical
+10.13 GB output, down from 22.31 GB; hardcall is 5.74 GB against 5.02 GB, down
+from 8.25 GB. The old 17.9 → 22.8 GB regression was the DataFrame path's second
+full copy of the values, which `read_pgen_matrix` does not make. Nothing in the
+decode was ever implicated: the Rust-only scan has been flat at 9.97 GB for `DS`
+and 2.9 GB for `ALT_COUNT` throughout.
 
 ### 3. Consider exposing a sparse genotype form
 
