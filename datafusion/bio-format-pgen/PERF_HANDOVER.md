@@ -49,14 +49,15 @@ takes the fused path — across all 2,532,408,788 cells of chr22, via
 
 | Branch | Commit | State |
 |---|---|---|
-| `perf/pgen-batch-array-build` | `25d6bd2` | PR #232, open, pushed |
+| `perf/pgen-batch-array-build` | branch tip | PR #232, open, pushed. The tip moves with docs commits; the code state is `25d6bd2` |
 | `perf/pgen-2bit-packed` | `52e9fcf` | pushed, **no PR** — one commit, misleadingly named |
 
 `perf/pgen-2bit-packed` contains a difflist-buffer reuse, not a packed
 representation. Fold it into #232 or rename it.
 
-polars-bio `feat/bgen-pr220-bench` (`0285723`, pushed) pins the provider at
-`25d6bd2`, so it carries the fusion.
+polars-bio `feat/bgen-pr220-bench` (pushed) pins the provider at `25d6bd2`, the
+last commit that touched code on this branch, so it carries the fusion. Later
+commits here are documentation only — no need to re-pin for them.
 
 ## What was already done
 
