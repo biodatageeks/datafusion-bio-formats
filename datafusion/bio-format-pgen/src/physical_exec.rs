@@ -23,9 +23,10 @@ use datafusion_bio_format_core::genotype::{
 use datafusion_bio_format_core::range_planning::ByteRange;
 
 use crate::decode::{
-    DecodedRecord, GenotypeProjection, GtDecodeWorkspace, decode_biallelic_gt_into,
-    decode_dense_biallelic_gt, decode_main_track_and_validate, decode_record_and_main,
-    supports_biallelic_gt_fast_path,
+    DENSE_DOSAGE_QUADS, DENSE_DOSAGE_QUADS_PLINK1, DENSE_DOSAGE_VALIDITY,
+    DENSE_DOSAGE_VALIDITY_PLINK1, DecodedRecord, GenotypeProjection, GtDecodeWorkspace,
+    decode_biallelic_gt_into, decode_dense_biallelic_gt, decode_main_track_and_validate,
+    decode_record_and_main, supports_biallelic_gt_fast_path, validated_dense_hardcalls,
 };
 use crate::fileset::{PgenFileset, PgenMode};
 
@@ -556,11 +557,6 @@ impl DsBatchBuilder {
         })
     }
 
-    #[inline]
-    fn alt1_dosage(left: u16, right: u16) -> f32 {
-        f32::from(u8::from(left == 1) + u8::from(right == 1))
-    }
-
     /// Appends decoded dosages. These must come from the record's dosage
     /// track when it has one — deriving them from hardcalls would silently
     /// replace a fractional dosage such as 0.125 with an allele count.
@@ -581,34 +577,86 @@ impl DsBatchBuilder {
     }
 
     fn append_codes(&mut self, variant_index: usize, codes: &[u8]) -> Result<()> {
+        // Codes 0..=4 map to a dosage through a table so the loop stays branch
+        // free, and validity is accumulated a byte at a time rather than a bit
+        // at a time. This is the path almost every record takes: plink2 writes
+        // LD-compressed records, which are not eligible for the dense decode,
+        // so this runs once per genotype cell across a whole scan.
+        const DOSAGE: [f32; 5] = [0.0, 1.0, 2.0, 0.0, 1.0];
+        if let Some(code) = codes.iter().copied().find(|&code| code > 4) {
+            return Err(DataFusionError::Execution(format!(
+                "invalid internal biallelic GT code {code}"
+            )));
+        }
+
+        self.dosages.reserve(codes.len());
+        let mut present = true;
         for &code in codes {
-            let (dosage, valid) = match code {
-                0 => (0.0, true),
-                1 => (1.0, true),
-                2 => (2.0, true),
-                3 => (0.0, false),
-                4 => (1.0, true),
-                _ => {
-                    return Err(DataFusionError::Execution(format!(
-                        "invalid internal biallelic GT code {code}"
-                    )));
+            self.dosages.push(DOSAGE[usize::from(code)]);
+            present &= code != 3;
+        }
+
+        if present {
+            // A variant with no missing call is the common case in a dense
+            // callset, and skips the bitmap bookkeeping entirely.
+            self.sample_validity.append_all_valid(codes.len());
+        } else {
+            for chunk in codes.chunks(8) {
+                let mut bits = 0_u8;
+                for (index, &code) in chunk.iter().enumerate() {
+                    if code != 3 {
+                        bits |= 1 << index;
+                    }
                 }
-            };
-            self.dosages.push(dosage);
-            self.sample_validity.append(valid);
+                self.sample_validity.append_packed(bits, chunk.len());
+            }
         }
         self.finish_variant(variant_index);
         Ok(())
     }
 
-    #[inline]
-    fn append_chunk(&mut self, alleles: &[u16], validity: u8, sample_count: usize) {
-        for sample in 0..sample_count {
-            let left = alleles[sample * 2];
-            let right = alleles[sample * 2 + 1];
-            self.dosages.push(Self::alt1_dosage(left, right));
+    /// Appends one whole variant straight from its packed two-bit hardcalls.
+    ///
+    /// Walking the bytes here rather than through a per-quad callback keeps the
+    /// inner loop free of indirect calls so it can be unrolled, and indexes a
+    /// 4 KiB dosage table instead of the ~80 KiB allele table the GT path uses.
+    fn append_dense(&mut self, packed: &[u8], sample_count: usize, mode: PgenMode) {
+        let (quads, validity_of) = if mode == PgenMode::Plink1 {
+            (&DENSE_DOSAGE_QUADS_PLINK1, &DENSE_DOSAGE_VALIDITY_PLINK1)
+        } else {
+            (&DENSE_DOSAGE_QUADS, &DENSE_DOSAGE_VALIDITY)
+        };
+        let full_bytes = sample_count / 4;
+        self.dosages.reserve(sample_count);
+
+        // A variant with no missing call is the common case in a dense
+        // callset, and lets the whole validity run be appended at once instead
+        // of a nibble at a time.
+        let mut all_present = true;
+        for &byte in &packed[..full_bytes] {
+            self.dosages.extend_from_slice(&quads[usize::from(byte)]);
+            all_present &= validity_of[usize::from(byte)] == 0x0f;
         }
-        self.sample_validity.append_packed(validity, sample_count);
+        let remainder = sample_count % 4;
+        if remainder != 0 {
+            let byte = packed[full_bytes];
+            self.dosages
+                .extend_from_slice(&quads[usize::from(byte)][..remainder]);
+        }
+
+        if all_present && remainder == 0 {
+            self.sample_validity.append_all_valid(sample_count);
+        } else {
+            for &byte in &packed[..full_bytes] {
+                self.sample_validity
+                    .append_packed(validity_of[usize::from(byte)], 4);
+            }
+            if remainder != 0 {
+                let byte = packed[full_bytes];
+                self.sample_validity
+                    .append_packed(validity_of[usize::from(byte)], remainder);
+            }
+        }
     }
 
     fn finish_variant(&mut self, variant_index: usize) {
@@ -679,6 +727,14 @@ impl FastFieldBuilder {
         }
     }
 
+    /// Whether hardcall phase orientation affects this field's output.
+    ///
+    /// `GT` distinguishes `(0,1)` from `(1,0)`; `DS` sums them, so a dosage
+    /// scan can validate the phase track without applying it.
+    fn needs_phase(&self) -> bool {
+        matches!(self, Self::Gt(_))
+    }
+
     /// The projection the generic fallback must decode for this field.
     fn projection(&self) -> GenotypeProjection {
         match self {
@@ -694,11 +750,39 @@ impl FastFieldBuilder {
         }
     }
 
-    #[inline]
-    fn append_chunk(&mut self, alleles: &[u16], validity: u8, sample_count: usize) {
+    /// Decodes one dense biallelic record directly into this builder.
+    ///
+    /// `GT` needs the phase pattern, so it goes through the quad callback.
+    /// `DS` does not, so it validates the record once and then walks the
+    /// two-bit codes inline against a compact dosage table.
+    fn append_dense_record(
+        &mut self,
+        payload: &[u8],
+        mode: PgenMode,
+        record_type: u8,
+        variant_index: usize,
+        sample_count: usize,
+    ) -> Result<()> {
         match self {
-            Self::Gt(builder) => builder.append_chunk(alleles, validity, sample_count),
-            Self::Ds(builder) => builder.append_chunk(alleles, validity, sample_count),
+            Self::Gt(builder) => decode_dense_biallelic_gt(
+                payload,
+                mode,
+                record_type,
+                variant_index,
+                sample_count,
+                |alleles, validity, samples| builder.append_chunk(alleles, validity, samples),
+            ),
+            Self::Ds(builder) => {
+                let packed = validated_dense_hardcalls(
+                    payload,
+                    mode,
+                    record_type,
+                    variant_index,
+                    sample_count,
+                )?;
+                builder.append_dense(packed, sample_count, mode);
+                Ok(())
+            }
         }
     }
 
@@ -794,6 +878,35 @@ impl PackedValidityBuilder {
         }
         self.len = new_len;
         self.null_count += count - bits.count_ones() as usize;
+    }
+
+    /// Appends `count` valid entries at once.
+    ///
+    /// Used when a whole variant has no missing call, which avoids touching
+    /// the bitmap once per sample for the common dense case.
+    fn append_all_valid(&mut self, count: usize) {
+        let shift = self.len % 8;
+        let mut remaining = count;
+        if shift != 0 {
+            let head = (8 - shift).min(remaining);
+            let mask = if head == 8 {
+                u8::MAX
+            } else {
+                ((1_u8 << head) - 1) << shift
+            };
+            let last = self.bytes.len() - 1;
+            self.bytes[last] |= mask;
+            self.len += head;
+            remaining -= head;
+        }
+        let whole = remaining / 8;
+        self.bytes.resize(self.bytes.len() + whole, u8::MAX);
+        self.len += whole * 8;
+        remaining -= whole * 8;
+        if remaining != 0 {
+            self.bytes.push((1_u8 << remaining) - 1);
+            self.len += remaining;
+        }
     }
 
     fn finish(&mut self) -> Option<NullBuffer> {
@@ -912,15 +1025,12 @@ fn execute_single_field(
                     && supports_biallelic_gt_fast_path(record.record_type, allele_count)
                     && (fileset.mode == PgenMode::Plink1 || record.record_type & 7 == 0);
                 if direct_dense {
-                    decode_dense_biallelic_gt(
+                    batch.append_dense_record(
                         payload,
                         fileset.mode,
                         record.record_type,
                         variant_index,
                         fileset.sample_count,
-                        |alleles, validity, samples| {
-                            batch.append_chunk(alleles, validity, samples)
-                        },
                     )?;
                     batch.finish_variant(variant_index);
                 } else if supports_biallelic_gt_fast_path(record.record_type, allele_count) {
@@ -934,6 +1044,7 @@ fn execute_single_field(
                         selected_samples,
                         base,
                         retain_main,
+                        batch.needs_phase(),
                     )?;
                     batch.append_codes(variant_index, workspace.selected_codes())?;
                     if retained_bases.contains(&variant_index) {

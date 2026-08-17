@@ -275,6 +275,79 @@ where
     Ok(())
 }
 
+/// Validates a dense biallelic record and returns its packed hardcall bytes.
+///
+/// Performs exactly the checks `decode_dense_biallelic_gt` performs — padding,
+/// the hardcall-phase track, and trailing bytes — but emits nothing, so a
+/// caller that only needs dosages can walk the two-bit codes itself instead of
+/// paying a callback per four samples. The phase track is validated and then
+/// discarded: phase never changes a dosage.
+pub(crate) fn validated_dense_hardcalls(
+    bytes: &[u8],
+    mode: PgenMode,
+    record_type: u8,
+    variant_index: usize,
+    sample_count: usize,
+) -> Result<&[u8]> {
+    if !supports_biallelic_gt_fast_path(record_type, 2)
+        || mode != PgenMode::Plink1 && record_type & 7 != 0
+    {
+        return Err(DataFusionError::Execution(format!(
+            "PGEN variant {variant_index} is not eligible for direct dense dosage decoding"
+        )));
+    }
+
+    let mut cursor = Cursor::new(bytes, variant_index);
+    let packed = cursor.take(sample_count.div_ceil(4), "dense hardcalls")?;
+    validate_packed_padding(packed, sample_count, 2, &cursor)?;
+
+    if mode != PgenMode::Plink1 && record_type != 0xff && record_type & 0x10 != 0 {
+        let heterozygous_count = packed
+            .iter()
+            .map(|&byte| usize::from(HETEROZYGOUS_PER_BYTE[usize::from(byte)]))
+            .sum::<usize>();
+        if heterozygous_count == 0 {
+            return Err(cursor
+                .error("hardcall-phase track is present without heterozygous calls".to_string()));
+        }
+        let first = *cursor
+            .bytes
+            .get(cursor.position)
+            .ok_or_else(|| cursor.error("truncated hardcall-phase track".to_string()))?;
+        if first & 1 != 0 {
+            let present = cursor.take(
+                (heterozygous_count + 1).div_ceil(8),
+                "phase-present bitarray",
+            )?;
+            validate_phase_padding(present, heterozygous_count + 1, &cursor)?;
+            let phased_count = (0..heterozygous_count)
+                .filter(|&index| bit(present, index + 1))
+                .count();
+            let info = cursor.take(phased_count.div_ceil(8), "phase-info bitarray")?;
+            validate_packed_padding(info, phased_count, 1, &cursor)?;
+        } else {
+            let info = cursor.take(
+                (heterozygous_count + 1).div_ceil(8),
+                "implicit phase-info bitarray",
+            )?;
+            if info.first().is_some_and(|byte| byte & 1 != 0) {
+                return Err(
+                    cursor.error("implicit phase track has phase-present marker set".to_string())
+                );
+            }
+            validate_phase_padding(info, heterozygous_count + 1, &cursor)?;
+        }
+    }
+
+    if !cursor.is_finished() {
+        return Err(cursor.error(format!(
+            "{} trailing bytes remain after direct dense dosage decoding",
+            cursor.remaining()
+        )));
+    }
+    Ok(packed)
+}
+
 fn emit_dense_quads<F, P>(packed: &[u8], sample_count: usize, mut phase_pattern: P, emit: &mut F)
 where
     F: FnMut(&[u16], u8, usize),
@@ -319,6 +392,78 @@ struct DecodedQuad {
 }
 
 static DENSE_QUADS: [[DecodedQuad; 16]; 256] = build_dense_quads();
+
+/// ALT dosage for the four samples packed in one dense hardcall byte.
+///
+/// Phase never changes a dosage — a phased heterozygote `(1,0)` and an
+/// unphased one `(0,1)` both carry a single ALT allele — so unlike
+/// `DENSE_QUADS` this needs no phase-pattern dimension. That keeps it at 4 KiB
+/// instead of ~80 KiB, so a dosage scan indexes a table that stays in L1.
+///
+/// Missing calls hold `0.0`; the parallel validity table marks them.
+pub(crate) static DENSE_DOSAGE_QUADS: [[f32; 4]; 256] = build_dense_dosage_quads(false);
+
+/// The PLINK 1 variant, whose two-bit codes use a different order.
+pub(crate) static DENSE_DOSAGE_QUADS_PLINK1: [[f32; 4]; 256] = build_dense_dosage_quads(true);
+
+/// Validity nibble for the four samples packed in one dense hardcall byte.
+pub(crate) static DENSE_DOSAGE_VALIDITY: [u8; 256] = build_dense_dosage_validity(false);
+
+/// The PLINK 1 variant of [`DENSE_DOSAGE_VALIDITY`].
+pub(crate) static DENSE_DOSAGE_VALIDITY_PLINK1: [u8; 256] = build_dense_dosage_validity(true);
+
+/// Maps a raw two-bit code to the internal one, which PLINK 1 permutes.
+const fn internal_code(raw: u8, plink1: bool) -> u8 {
+    if plink1 {
+        match raw {
+            0 => 2,
+            1 => 3,
+            2 => 1,
+            _ => 0,
+        }
+    } else {
+        raw
+    }
+}
+
+const fn build_dense_dosage_quads(plink1: bool) -> [[f32; 4]; 256] {
+    let mut output = [[0.0_f32; 4]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut sample = 0;
+        while sample < 4 {
+            let code = internal_code(((byte >> (sample * 2)) & 3) as u8, plink1);
+            output[byte][sample] = match code {
+                0 => 0.0,
+                1 => 1.0,
+                2 => 2.0,
+                // Missing; the validity table records it and the value is
+                // never read back.
+                _ => 0.0,
+            };
+            sample += 1;
+        }
+        byte += 1;
+    }
+    output
+}
+
+const fn build_dense_dosage_validity(plink1: bool) -> [u8; 256] {
+    let mut output = [0_u8; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut sample = 0;
+        while sample < 4 {
+            let code = internal_code(((byte >> (sample * 2)) & 3) as u8, plink1);
+            if code != 3 {
+                output[byte] |= 1 << sample;
+            }
+            sample += 1;
+        }
+        byte += 1;
+    }
+    output
+}
 
 const fn build_dense_quads() -> [[DecodedQuad; 16]; 256] {
     const EMPTY: DecodedQuad = DecodedQuad {
@@ -408,6 +553,7 @@ pub(crate) fn decode_biallelic_gt_into(
     selected_samples: &[usize],
     ld_base: Option<&[u8]>,
     retain_main: bool,
+    apply_phase: bool,
 ) -> Result<()> {
     if !supports_biallelic_gt_fast_path(record_type, 2) {
         return Err(DataFusionError::Execution(format!(
@@ -451,6 +597,7 @@ pub(crate) fn decode_biallelic_gt_into(
             &workspace.source_to_output,
             &mut workspace.selected_codes,
             workspace.identity_selection,
+            apply_phase,
         )?;
     }
 
@@ -1181,7 +1328,13 @@ fn decode_phase_for_selected_gt(
     source_to_output: &[usize],
     selected_codes: &mut [u8],
     identity_selection: bool,
+    orient: bool,
 ) -> Result<()> {
+    // `orient == false` still parses and validates the phase track but skips
+    // applying it. A dosage projection needs the validation and the cursor
+    // advance, but not the orientation: a phased heterozygote `(1,0)` and an
+    // unphased one `(0,1)` carry the same ALT dosage. Skipping it avoids a full
+    // pass over every sample of every phased record.
     // With a subset selection, phase orientation belongs only in selected_codes:
     // categories must remain the raw main track so it can become a later LD base.
     // For an identity selection, retain_main snapshots categories before this call.
@@ -1209,6 +1362,9 @@ fn decode_phase_for_selected_gt(
         let info = cursor.take(phased_count.div_ceil(8), "phase-info bitarray")?;
         validate_packed_padding(info, phased_count, 1, cursor)?;
 
+        if !orient {
+            return Ok(());
+        }
         let mut heterozygous_index = 0;
         let mut info_index = 0;
         for source in 0..categories.len() {
@@ -1242,6 +1398,9 @@ fn decode_phase_for_selected_gt(
             );
         }
         validate_phase_padding(info, heterozygous_count + 1, cursor)?;
+        if !orient {
+            return Ok(());
+        }
         let mut heterozygous_index = 0;
         for source in 0..categories.len() {
             let category = categories[source];
