@@ -1490,8 +1490,11 @@ fn implicit_haplotype_dosages(
         .collect()
 }
 
+#[inline]
 fn alt1_hardcall_dosage(call: &[u16; 2]) -> f32 {
-    call.iter().filter(|&&allele| allele == 1).count() as f32
+    // Counted branchlessly rather than through an iterator filter/count: this
+    // runs once per genotype cell, billions of times on a whole chromosome.
+    f32::from(u8::from(call[0] == 1) + u8::from(call[1] == 1))
 }
 
 fn category_call(category: u8) -> Option<[u16; 2]> {

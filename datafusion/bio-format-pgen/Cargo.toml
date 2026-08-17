@@ -30,3 +30,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "sync"] }
 [[bench]]
 name = "pgen_scan"
 harness = false
+
+[[bench]]
+name = "pgen_float_build"
+harness = false

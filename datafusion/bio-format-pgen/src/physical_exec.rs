@@ -6,8 +6,9 @@ use std::sync::Arc;
 
 use async_stream::try_stream;
 use datafusion::arrow::array::{
-    ArrayRef, BooleanBuilder, FixedSizeListArray, FixedSizeListBuilder, Float32Builder, ListArray,
-    ListBuilder, StringArray, StringBuilder, StructArray, UInt16Array, UInt16Builder, UInt64Array,
+    ArrayRef, BooleanBuilder, FixedSizeListArray, FixedSizeListBuilder, Float32Array,
+    Float32Builder, ListArray, ListBuilder, StringArray, StringBuilder, StructArray, UInt16Array,
+    UInt16Builder, UInt64Array,
 };
 use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer};
 use datafusion::arrow::datatypes::{DataType, FieldRef, Fields, SchemaRef};
@@ -190,11 +191,22 @@ impl ExecutionPlan for PgenExec {
         let genotype_projection = GenotypeProjection::from_fields(&genotype_fields);
         let genotypes_projected = schema.index_of("genotypes").is_ok();
 
+        // GT and DS both reduce to one value per sample per variant, so both
+        // can be decoded straight into their Arrow buffers by the shared fast
+        // path instead of going through the generic per-variant intermediates.
         if genotypes_projected
             && !assignment.ranges.is_empty()
-            && genotype_fields.as_slice() == ["GT"]
+            && matches!(genotype_fields.as_slice(), [field] if field == "GT" || field == "DS")
         {
-            return execute_gt_only(assignment, fileset, schema, metrics, max_rows, soft_bytes);
+            return execute_single_field(
+                genotype_fields[0].clone(),
+                assignment,
+                fileset,
+                schema,
+                metrics,
+                max_rows,
+                soft_bytes,
+            );
         }
 
         let stream_schema = schema.clone();
@@ -499,6 +511,226 @@ impl GtBatchBuilder {
     }
 }
 
+/// Batch builder for a `DS`-only projection.
+///
+/// Mirrors `GtBatchBuilder`: the decoder writes dosages straight into the Arrow
+/// values buffer and a packed validity bitmap, so a `DS` scan never allocates
+/// the per-variant `Vec<Option<f32>>` the generic path builds. That vector is
+/// eight bytes per genotype cell and one allocation per variant, which on a
+/// whole chromosome is the dominant single-core cost.
+struct DsBatchBuilder {
+    variant_indices: Vec<usize>,
+    dosages: Vec<f32>,
+    sample_validity: PackedValidityBuilder,
+    selected_sample_count: usize,
+    row_capacity: usize,
+    sample_field: FieldRef,
+}
+
+impl DsBatchBuilder {
+    fn new(schema: &SchemaRef, row_capacity: usize, selected_sample_count: usize) -> Result<Self> {
+        let genotype_field = schema.field_with_name("genotypes")?;
+        let DataType::Struct(children) = genotype_field.data_type() else {
+            return Err(DataFusionError::Execution(
+                "PGEN genotypes field is not a struct".to_string(),
+            ));
+        };
+        if children.len() != 1 || children[0].name() != "DS" {
+            return Err(DataFusionError::Execution(
+                "PGEN DS fast path requires an exact DS-only genotype projection".to_string(),
+            ));
+        }
+        let DataType::List(sample_field) = children[0].data_type() else {
+            return Err(DataFusionError::Execution(
+                "PGEN DS field is not a list".to_string(),
+            ));
+        };
+        let cells = row_capacity.saturating_mul(selected_sample_count);
+        Ok(Self {
+            variant_indices: Vec::with_capacity(row_capacity),
+            dosages: Vec::with_capacity(cells),
+            sample_validity: PackedValidityBuilder::new(cells),
+            selected_sample_count,
+            row_capacity,
+            sample_field: sample_field.clone(),
+        })
+    }
+
+    #[inline]
+    fn alt1_dosage(left: u16, right: u16) -> f32 {
+        f32::from(u8::from(left == 1) + u8::from(right == 1))
+    }
+
+    /// Appends decoded dosages. These must come from the record's dosage
+    /// track when it has one — deriving them from hardcalls would silently
+    /// replace a fractional dosage such as 0.125 with an allele count.
+    fn append(&mut self, variant_index: usize, dosages: &[Option<f32>]) {
+        for dosage in dosages {
+            match dosage {
+                Some(dosage) => {
+                    self.dosages.push(*dosage);
+                    self.sample_validity.append(true);
+                }
+                None => {
+                    self.dosages.push(0.0);
+                    self.sample_validity.append(false);
+                }
+            }
+        }
+        self.variant_indices.push(variant_index);
+    }
+
+    fn append_codes(&mut self, variant_index: usize, codes: &[u8]) -> Result<()> {
+        for &code in codes {
+            let (dosage, valid) = match code {
+                0 => (0.0, true),
+                1 => (1.0, true),
+                2 => (2.0, true),
+                3 => (0.0, false),
+                4 => (1.0, true),
+                _ => {
+                    return Err(DataFusionError::Execution(format!(
+                        "invalid internal biallelic GT code {code}"
+                    )));
+                }
+            };
+            self.dosages.push(dosage);
+            self.sample_validity.append(valid);
+        }
+        self.finish_variant(variant_index);
+        Ok(())
+    }
+
+    #[inline]
+    fn append_chunk(&mut self, alleles: &[u16], validity: u8, sample_count: usize) {
+        for sample in 0..sample_count {
+            let left = alleles[sample * 2];
+            let right = alleles[sample * 2 + 1];
+            self.dosages.push(Self::alt1_dosage(left, right));
+        }
+        self.sample_validity.append_packed(validity, sample_count);
+    }
+
+    fn finish_variant(&mut self, variant_index: usize) {
+        self.variant_indices.push(variant_index);
+    }
+
+    fn len(&self) -> usize {
+        self.variant_indices.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.variant_indices.is_empty()
+    }
+
+    fn finish(&mut self, fileset: &PgenFileset, schema: SchemaRef) -> Result<RecordBatch> {
+        let cells = self.row_capacity.saturating_mul(self.selected_sample_count);
+        let validity = self.sample_validity.finish();
+        let dosages = std::mem::replace(&mut self.dosages, Vec::with_capacity(cells));
+        self.sample_validity = PackedValidityBuilder::new(cells);
+        let values = Arc::new(Float32Array::new(dosages.into(), validity)) as ArrayRef;
+        let ds = Arc::new(ListArray::new(
+            self.sample_field.clone(),
+            OffsetBuffer::from_repeated_length(self.selected_sample_count, self.len()),
+            values,
+            None,
+        )) as ArrayRef;
+        let batch = build_gt_batch(fileset, schema, &self.variant_indices, ds)?;
+        self.variant_indices.clear();
+        Ok(batch)
+    }
+}
+
+/// The single-field fast path builds either `GT` or `DS`; the surrounding scan
+/// loop is identical, so it is shared rather than duplicated.
+enum FastFieldBuilder {
+    Gt(GtBatchBuilder),
+    Ds(DsBatchBuilder),
+}
+
+impl FastFieldBuilder {
+    fn new(
+        field: &str,
+        schema: &SchemaRef,
+        row_capacity: usize,
+        selected_sample_count: usize,
+    ) -> Result<Self> {
+        match field {
+            "GT" => Ok(Self::Gt(GtBatchBuilder::new(
+                schema,
+                row_capacity,
+                selected_sample_count,
+            )?)),
+            "DS" => Ok(Self::Ds(DsBatchBuilder::new(
+                schema,
+                row_capacity,
+                selected_sample_count,
+            )?)),
+            other => Err(DataFusionError::Execution(format!(
+                "PGEN fast path does not support genotype field {other}"
+            ))),
+        }
+    }
+
+    fn append(&mut self, variant_index: usize, decoded: &DecodedRecord) {
+        match self {
+            Self::Gt(builder) => builder.append(variant_index, &decoded.gt),
+            Self::Ds(builder) => builder.append(variant_index, &decoded.ds),
+        }
+    }
+
+    /// The projection the generic fallback must decode for this field.
+    fn projection(&self) -> GenotypeProjection {
+        match self {
+            Self::Gt(_) => GenotypeProjection::gt_only(),
+            Self::Ds(_) => GenotypeProjection::from_fields(&["DS".to_string()]),
+        }
+    }
+
+    fn append_codes(&mut self, variant_index: usize, codes: &[u8]) -> Result<()> {
+        match self {
+            Self::Gt(builder) => builder.append_codes(variant_index, codes),
+            Self::Ds(builder) => builder.append_codes(variant_index, codes),
+        }
+    }
+
+    #[inline]
+    fn append_chunk(&mut self, alleles: &[u16], validity: u8, sample_count: usize) {
+        match self {
+            Self::Gt(builder) => builder.append_chunk(alleles, validity, sample_count),
+            Self::Ds(builder) => builder.append_chunk(alleles, validity, sample_count),
+        }
+    }
+
+    fn finish_variant(&mut self, variant_index: usize) {
+        match self {
+            Self::Gt(builder) => builder.finish_variant(variant_index),
+            Self::Ds(builder) => builder.finish_variant(variant_index),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Gt(builder) => builder.len(),
+            Self::Ds(builder) => builder.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Gt(builder) => builder.is_empty(),
+            Self::Ds(builder) => builder.is_empty(),
+        }
+    }
+
+    fn finish(&mut self, fileset: &PgenFileset, schema: SchemaRef) -> Result<RecordBatch> {
+        match self {
+            Self::Gt(builder) => builder.finish(fileset, schema),
+            Self::Ds(builder) => builder.finish(fileset, schema),
+        }
+    }
+}
+
 struct PackedValidityBuilder {
     bytes: Vec<u8>,
     len: usize,
@@ -575,7 +807,8 @@ impl PackedValidityBuilder {
     }
 }
 
-fn execute_gt_only(
+fn execute_single_field(
+    field: String,
     assignment: PgenPartition,
     fileset: Arc<PgenFileset>,
     schema: SchemaRef,
@@ -596,7 +829,7 @@ fn execute_gt_only(
             estimated_row_bytes,
         );
         let mut batch =
-            GtBatchBuilder::new(&schema, partition_row_capacity, selected_sample_count)?;
+            FastFieldBuilder::new(&field, &schema, partition_row_capacity, selected_sample_count)?;
         let mut workspace = GtDecodeWorkspace::new(fileset.sample_count, selected_samples)?;
 
         let owned = assignment.owned();
@@ -609,7 +842,7 @@ fn execute_gt_only(
         let mut ld_base_index = None;
         let mut ld_base = Vec::with_capacity(fileset.sample_count);
         let mut required = assignment.required().peekable();
-        let genotype_projection = GenotypeProjection::gt_only();
+        let genotype_projection = batch.projection();
         let mut range_reader = fileset.source.range_reader(&fileset.pgen_path).await?;
 
         for range in assignment.ranges.iter().copied() {
@@ -719,7 +952,7 @@ fn execute_gt_only(
                         selected_samples,
                         base,
                     )?;
-                    batch.append(variant_index, &decoded.gt);
+                    batch.append(variant_index, &decoded);
                     if retained_bases.contains(&variant_index) {
                         ld_base = main;
                         ld_base_index = Some(variant_index);
@@ -1058,17 +1291,55 @@ fn build_float_sample_array<'a>(
             "PGEN {name} field is not a list"
         )));
     };
-    let mut builder = ListBuilder::new(Float32Builder::new()).with_field(sample_field.clone());
+    // Every emitted row carries the same selected-sample count, so the values
+    // buffer size is known up front and the offsets are a repeated length.
+    // Building the values and validity buffers directly avoids a per-cell
+    // `append_option`, whose capacity check and bitmap bookkeeping dominated
+    // this function: at whole-chromosome scale it runs billions of times.
+    let sample_count = match rows.first() {
+        Some(row) => {
+            let decoded = row.genotypes.as_ref().ok_or_else(|| {
+                DataFusionError::Execution("PGEN genotype row was not decoded".to_string())
+            })?;
+            values(decoded).len()
+        }
+        None => 0,
+    };
+    let total = rows.len().saturating_mul(sample_count);
+    let mut sample_values: Vec<f32> = Vec::with_capacity(total);
+    let mut sample_validity = PackedValidityBuilder::new(total);
     for row in rows {
         let decoded = row.genotypes.as_ref().ok_or_else(|| {
             DataFusionError::Execution("PGEN genotype row was not decoded".to_string())
         })?;
-        for value in values(decoded) {
-            builder.values().append_option(*value);
+        let row_values = values(decoded);
+        if row_values.len() != sample_count {
+            return Err(DataFusionError::Execution(format!(
+                "PGEN {name} row has {} samples; expected {sample_count}",
+                row_values.len()
+            )));
         }
-        builder.append(true);
+        for value in row_values {
+            match value {
+                Some(value) => {
+                    sample_values.push(*value);
+                    sample_validity.append(true);
+                }
+                None => {
+                    sample_values.push(0.0);
+                    sample_validity.append(false);
+                }
+            }
+        }
     }
-    Ok(Arc::new(builder.finish()))
+    let nulls = sample_validity.finish();
+    let values_array = Arc::new(Float32Array::new(sample_values.into(), nulls)) as ArrayRef;
+    Ok(Arc::new(ListArray::new(
+        sample_field.clone(),
+        OffsetBuffer::from_repeated_length(sample_count, rows.len()),
+        values_array,
+        None,
+    )))
 }
 
 fn build_hds_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef> {
