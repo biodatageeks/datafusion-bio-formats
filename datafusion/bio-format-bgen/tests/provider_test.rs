@@ -2090,6 +2090,12 @@ fn differential_reference_oracles_when_installed() {
     create_bgi(&fixture, false);
     let bgen = path(&fixture.bgen);
     let required = std::env::var_os("BGEN_REQUIRE_REFERENCE_ORACLES").is_some();
+    // qctool is gated separately because, unlike the others, it is not
+    // published by any package manager we can install from — bioconda has
+    // `bgen-cpp` for bgenix but nothing for qctool, and building it from source
+    // is a heavy C++ build. Requiring it alongside the rest would mean either
+    // never setting the flag or never having a green CI.
+    let require_qctool = std::env::var_os("BGEN_REQUIRE_QCTOOL").is_some();
     let mut executed = 0;
 
     let python = std::env::var("BGEN_REFERENCE_PYTHON").unwrap_or_else(|_| "python3".to_string());
@@ -2154,14 +2160,17 @@ with BgenReader(sys.argv[1], "", delay_parsing=True) as reader:
             let vcf = fs::read_to_string(qctool_output).unwrap();
             assert!(vcf.contains("rs1") && vcf.contains("GP"), "{vcf}");
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_qctool => {}
         Err(error) => panic!("qctool oracle is unavailable: {error}"),
     }
 
     if required {
+        let wanted = if require_qctool { 4 } else { 3 };
         assert_eq!(
-            executed, 4,
-            "BGEN_REQUIRE_REFERENCE_ORACLES requires snputils, limix/bgen, bgenix, and qctool"
+            executed,
+            wanted,
+            "BGEN_REQUIRE_REFERENCE_ORACLES requires snputils, limix/bgen and bgenix{}",
+            if require_qctool { ", and qctool" } else { "" }
         );
     }
 }

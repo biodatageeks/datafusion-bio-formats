@@ -53,8 +53,7 @@ jobs:
             python=3.11
             bioconda::bcftools
             bioconda::plink2
-            bioconda::bgenix
-            bioconda::qctool
+            bioconda::bgen-cpp
           init-shell: bash
 
       - name: Install reference oracle packages
@@ -64,13 +63,16 @@ jobs:
           # Pinned, so a reference upgrade cannot silently change what
           # "matches" means.
           python -m pip install -r datafusion/bio-format-pgen/benchmark/requirements-pgen-parity.txt
+          # qctool has no conda package and no prebuilt binary, so it is the one
+          # oracle CI cannot require; BGEN_REQUIRE_QCTOOL is left unset and that
+          # comparison stays opt-in for anyone who has built it locally.
           # BGEN parity reads through both snputils and the bgen package.
           python -m pip install bgen
           # Every oracle is checked here rather than at test time: a missing one
           # must fail the install, not quietly turn a differential test into a
           # no-op.
           python -c "import numpy, pgenlib, snputils; from bgen import BgenReader"
-          for tool in bcftools plink2 bgenix qctool; do
+          for tool in bcftools plink2 bgenix; do
             command -v "$tool" >/dev/null || { echo "missing oracle: $tool" >&2; exit 1; }
           done
           echo "PGEN_REFERENCE_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
