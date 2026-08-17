@@ -116,6 +116,8 @@ impl DosageTrack<'_> {
 /// dosage, and phased-dosage intermediates for every variant.
 pub(crate) struct GtDecodeWorkspace {
     categories: Vec<u8>,
+    /// Reused across every variant in a partition; see `decode_difflist_into`.
+    difflist: Vec<(usize, Option<u8>)>,
     selected_codes: Vec<u8>,
     source_to_output: Vec<usize>,
     identity_selection: bool,
@@ -141,6 +143,7 @@ impl GtDecodeWorkspace {
         }
         Ok(Self {
             categories: Vec::with_capacity(sample_count),
+            difflist: Vec::new(),
             selected_codes: Vec::with_capacity(selected_samples.len()),
             source_to_output,
             identity_selection: selected_samples.len() == sample_count
@@ -608,6 +611,7 @@ pub(crate) fn decode_biallelic_gt_into(
         sample_count,
         ld_base,
         &mut workspace.categories,
+        &mut workspace.difflist,
     )?;
 
     workspace.retained_main_valid = false;
@@ -908,6 +912,7 @@ fn decode_main(
     ld_base: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(sample_count);
+    let mut difflist = Vec::new();
     decode_main_into(
         cursor,
         mode,
@@ -915,6 +920,7 @@ fn decode_main(
         sample_count,
         ld_base,
         &mut output,
+        &mut difflist,
     )?;
     Ok(output)
 }
@@ -926,6 +932,7 @@ fn decode_main_into(
     sample_count: usize,
     ld_base: Option<&[u8]>,
     output: &mut Vec<u8>,
+    difflist: &mut Vec<(usize, Option<u8>)>,
 ) -> Result<()> {
     output.clear();
     if mode == PgenMode::Plink1 {
@@ -951,7 +958,7 @@ fn decode_main_into(
             unpack_two_bit(bytes, sample_count, output);
             Ok(())
         }
-        1 => decode_onebit_into(cursor, sample_count, output),
+        1 => decode_onebit_into(cursor, sample_count, output, difflist),
         2 | 3 => {
             let base = ld_base.ok_or_else(|| {
                 cursor.error("LD-compressed record was decoded without its base".to_string())
@@ -963,7 +970,8 @@ fn decode_main_into(
                 )));
             }
             output.extend_from_slice(base);
-            for (sample, value) in decode_difflist(cursor, sample_count, true)? {
+            decode_difflist_into(cursor, sample_count, true, difflist)?;
+            for &(sample, value) in difflist.iter() {
                 output[sample] = value.ok_or_else(|| {
                     cursor.error("LD difflist omitted a genotype value".to_string())
                 })?;
@@ -984,7 +992,8 @@ fn decode_main_into(
         common @ (4 | 6 | 7) => {
             let common = common & 3;
             output.resize(sample_count, common);
-            for (sample, value) in decode_difflist(cursor, sample_count, true)? {
+            decode_difflist_into(cursor, sample_count, true, difflist)?;
+            for &(sample, value) in difflist.iter() {
                 output[sample] = value.ok_or_else(|| {
                     cursor.error("hardcall difflist omitted a genotype value".to_string())
                 })?;
@@ -1000,6 +1009,7 @@ fn decode_onebit_into(
     cursor: &mut Cursor<'_>,
     sample_count: usize,
     output: &mut Vec<u8>,
+    difflist: &mut Vec<(usize, Option<u8>)>,
 ) -> Result<()> {
     let code = cursor.byte("one-bit common-category code")?;
     // PLINK packs the lower common category in bits 2+ and the positive
@@ -1016,7 +1026,8 @@ fn decode_onebit_into(
     for sample in 0..sample_count {
         output.push(lower + (bit(bits, sample) as u8) * delta);
     }
-    for (sample, value) in decode_difflist(cursor, sample_count, true)? {
+    decode_difflist_into(cursor, sample_count, true, difflist)?;
+    for &(sample, value) in difflist.iter() {
         output[sample] = value.ok_or_else(|| {
             cursor.error("one-bit exception omitted a genotype value".to_string())
         })?;
@@ -1034,11 +1045,31 @@ fn unpack_two_bit(bytes: &[u8], sample_count: usize, output: &mut Vec<u8>) {
     output.truncate(sample_count);
 }
 
+/// Allocating wrapper for the cold paths and tests.
 fn decode_difflist(
     cursor: &mut Cursor<'_>,
     sample_count: usize,
     has_values: bool,
 ) -> Result<Vec<(usize, Option<u8>)>> {
+    let mut output = Vec::new();
+    decode_difflist_into(cursor, sample_count, has_values, &mut output)?;
+    Ok(output)
+}
+
+/// Decodes a difflist into a caller-owned buffer.
+///
+/// The hot paths reuse one buffer across every variant in a partition: a scan
+/// of a `plink2 --make-pgen` fileset decodes a difflist for most of its
+/// records, and allocating a fresh `Vec` for each one is ~10^6 allocations on
+/// a chromosome.
+fn decode_difflist_into(
+    cursor: &mut Cursor<'_>,
+    sample_count: usize,
+    has_values: bool,
+    output: &mut Vec<(usize, Option<u8>)>,
+) -> Result<()> {
+    output.clear();
+    output.reserve(sample_count.min(64));
     let length = usize::try_from(cursor.varint("difflist length")?)
         .map_err(|_| cursor.error("difflist length does not fit usize".to_string()))?;
     if length > sample_count {
@@ -1047,7 +1078,7 @@ fn decode_difflist(
         )));
     }
     if length == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let group_count = length.div_ceil(64);
     let id_width = bytes_to_represent(sample_count);
@@ -1070,7 +1101,6 @@ fn decode_difflist(
         validate_packed_padding(values, length, 2, cursor)?;
     }
 
-    let mut result = Vec::with_capacity(length);
     let mut previous_global = None;
     for group in 0..group_count {
         let group_len = (length - group * 64).min(64);
@@ -1101,7 +1131,7 @@ fn decode_difflist(
             }
             let value =
                 packed_values.map(|values| packed_value(values, group * 64 + element, 2) as u8);
-            result.push((sample, value));
+            output.push((sample, value));
             previous_global = Some(sample);
         }
         if group + 1 < group_count {
@@ -1114,7 +1144,7 @@ fn decode_difflist(
             }
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 fn apply_multiallelic_patches(
