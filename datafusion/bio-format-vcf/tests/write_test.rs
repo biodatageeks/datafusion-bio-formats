@@ -1,19 +1,20 @@
 //! Integration tests for VCF write functionality
 
 use datafusion::arrow::array::{
-    Float64Array, Int32Builder, LargeListBuilder, LargeStringBuilder, ListArray, ListBuilder,
-    RecordBatch, StringArray, StringBuilder, StringViewBuilder, StructArray, UInt32Array,
+    Float64Array, Int8Array, Int32Builder, LargeListBuilder, LargeStringBuilder, ListArray,
+    ListBuilder, RecordBatch, StringArray, StringBuilder, StringViewBuilder, StructArray,
+    UInt32Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::catalog::TableProvider;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::{
-    AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
-    VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
-    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY,
-    VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string,
-    to_json_string,
+    AltAlleleMetadata, ContigMetadata, FilterMetadata, GENOTYPE_OUTPUT_MODE_KEY,
+    GENOTYPE_SAMPLE_NAMES_KEY, VCF_ALTERNATIVE_ALLELES_KEY, VCF_CONTIGS_KEY,
+    VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
+    VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_SAMPLE_NAMES_KEY,
+    VcfFieldMetadata, from_json_string, to_json_string,
 };
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use datafusion_bio_format_vcf::writer::VcfCompressionType;
@@ -119,6 +120,81 @@ async fn test_write_vcf_basic() {
     assert!(content.contains("chr1\t200"));
 
     cleanup_files(&[&input_path, output_path]).await;
+}
+
+#[tokio::test]
+async fn test_write_vcf_rejects_lossy_dosage_gt_before_creating_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let output_path = dir.path().join("dosage.vcf");
+
+    let mut gt_metadata = std::collections::HashMap::new();
+    gt_metadata.insert(VCF_FIELD_FORMAT_ID_KEY.to_string(), "GT".to_string());
+    let mut schema_metadata = std::collections::HashMap::new();
+    schema_metadata.insert(GENOTYPE_OUTPUT_MODE_KEY.to_string(), "dosage".to_string());
+    let schema = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("GT", DataType::Int8, true).with_metadata(gt_metadata),
+        ],
+        schema_metadata,
+    ));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![9u32])),
+            Arc::new(UInt32Array::from(vec![10u32])),
+            Arc::new(StringArray::from(vec![Some("rs1")])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["C"])),
+            Arc::new(Float64Array::from(vec![Some(50.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+            Arc::new(Int8Array::from(vec![Some(1)])),
+        ],
+    )
+    .unwrap();
+
+    let context = SessionContext::new();
+    let source = MemTable::try_new(schema.clone(), vec![vec![batch]]).unwrap();
+    context.register_table("source", Arc::new(source)).unwrap();
+    let destination = VcfTableProvider::new_for_write(
+        output_path.to_string_lossy().into_owned(),
+        schema,
+        vec![],
+        vec!["GT".to_string()],
+        vec!["S1".to_string()],
+        true,
+    );
+    context
+        .register_table("dest", Arc::new(destination))
+        .unwrap();
+
+    let error = match context
+        .sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+    {
+        Ok(frame) => frame
+            .collect()
+            .await
+            .expect_err("dosage GT must not be serialized as missing VCF calls")
+            .to_string(),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        error.contains("VCF serialization does not support genotype dosage input"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !output_path.exists(),
+        "an invalid dosage write must not create or truncate its destination"
+    );
 }
 
 #[tokio::test]
@@ -768,10 +844,9 @@ async fn test_write_vcf_from_named_struct_genotypes() {
     cleanup_files(&[output_path]).await;
 }
 
-/// Tests that when the input schema has VCF_GENOTYPES_SAMPLE_NAMES_KEY metadata
-/// on the genotypes field, the writer uses those sample names instead of generating them.
+/// Tests that shared genotype sample metadata is sufficient for VCF writing.
 #[tokio::test]
-async fn test_write_vcf_input_schema_metadata_fallback() {
+async fn test_write_vcf_input_shared_schema_metadata_fallback() {
     let output_path = "/tmp/test_write_input_schema_metadata_fallback.vcf";
 
     let gt_list_field = Field::new(
@@ -783,7 +858,7 @@ async fn test_write_vcf_input_schema_metadata_fallback() {
     // Genotypes field WITH sample name metadata
     let mut genotypes_metadata = std::collections::HashMap::new();
     genotypes_metadata.insert(
-        VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
+        GENOTYPE_SAMPLE_NAMES_KEY.to_string(),
         to_json_string(&vec!["NA12878".to_string(), "NA12891".to_string()]),
     );
 

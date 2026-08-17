@@ -64,6 +64,8 @@
 
 extern crate core;
 
+/// BCF 2.2 physical reader and execution plan.
+mod bcf;
 /// VCF header builder for constructing VCF headers from Arrow schemas.
 pub mod header_builder;
 /// Physical execution plan implementation for VCF queries.

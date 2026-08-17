@@ -4,11 +4,11 @@ use std::sync::Arc;
 use datafusion::arrow;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
-use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
     VCF_FILE_FORMAT_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, to_json_string,
 };
+use datafusion_bio_format_core::{COORDINATE_SYSTEM_METADATA_KEY, GENOTYPE_SAMPLE_NAMES_KEY};
 use serde_json::Value;
 use zarrs::array::Array;
 use zarrs::filesystem::FilesystemStore;
@@ -232,10 +232,16 @@ pub(crate) fn build_logical_schema_with_sample_selection(
                 true,
             )
             .with_metadata(
-                [(
-                    VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
-                    to_json_string(&sample_selection.selected_names),
-                )]
+                [
+                    (
+                        VCF_GENOTYPES_SAMPLE_NAMES_KEY.to_string(),
+                        to_json_string(&sample_selection.selected_names),
+                    ),
+                    (
+                        GENOTYPE_SAMPLE_NAMES_KEY.to_string(),
+                        to_json_string(&sample_selection.selected_names),
+                    ),
+                ]
                 .into_iter()
                 .collect(),
             ),

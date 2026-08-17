@@ -10,6 +10,7 @@ use datafusion::logical_expr::{col, lit};
 use datafusion::physical_plan::{ExecutionPlanProperties, displayable};
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
+use datafusion_bio_format_core::GENOTYPE_SAMPLE_NAMES_KEY;
 use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
     VCF_FILE_FORMAT_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY, from_json_string,
@@ -1247,6 +1248,13 @@ fn vcf_zarr_schema_resolves_requested_sample_subset() {
     let genotype_sample_names: Vec<String> = from_json_string(genotype_sample_names_json)
         .expect("genotypes sample metadata should be JSON");
     assert_eq!(genotype_sample_names, sample_names);
+    let shared_sample_names_json = genotypes
+        .metadata()
+        .get(GENOTYPE_SAMPLE_NAMES_KEY)
+        .expect("shared genotype sample metadata should exist");
+    let shared_sample_names: Vec<String> = from_json_string(shared_sample_names_json)
+        .expect("shared genotype sample metadata should be JSON");
+    assert_eq!(shared_sample_names, sample_names);
 }
 
 #[test]

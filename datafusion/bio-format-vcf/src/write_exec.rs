@@ -3,7 +3,7 @@
 //! This module provides the physical execution plan for writing DataFusion
 //! query results to VCF files.
 
-use crate::serializer::batch_to_vcf_lines;
+use crate::serializer::{batch_to_vcf_lines, validate_vcf_serializable_genotypes};
 use crate::writer::{VcfCompressionType, VcfLocalWriter};
 use datafusion::arrow::array::{
     Array, LargeListArray, ListArray, RecordBatch, StructArray, UInt64Array,
@@ -316,10 +316,14 @@ async fn write_vcf_stream(
     output_schema: SchemaRef,
     source_metadata: Option<HashMap<String, String>>,
 ) -> Result<RecordBatch> {
-    let mut writer = VcfLocalWriter::with_compression(&output_path, compression)?;
-
     // Merge source metadata (contigs, filters, etc.) into the schema used for header writing.
     let header_schema = merge_metadata_into_schema(&input_schema, &source_metadata);
+    validate_vcf_serializable_genotypes(&input_schema)?;
+    validate_vcf_serializable_genotypes(&header_schema)?;
+
+    // Do not create or truncate the destination until the input representation
+    // is known to be losslessly serializable.
+    let mut writer = VcfLocalWriter::with_compression(&output_path, compression)?;
 
     let mut total_count: u64 = 0;
 
