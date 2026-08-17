@@ -6,6 +6,7 @@ members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bbi", "datafusio
     "datafusion/bio-format-gtf", "datafusion/bio-format-vcf", "datafusion/bio-format-fasta",
     "datafusion/bio-format-cram", "datafusion/bio-format-pairs", "datafusion/bio-format-ensembl-cache",
     "datafusion/bio-format-bgen",
+    "datafusion/bio-format-pgen",
     "benchmarks/common", "benchmarks/runner",
 ]
 
