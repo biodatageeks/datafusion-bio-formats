@@ -584,19 +584,23 @@ impl DsBatchBuilder {
         // at a time. This is the path almost every record takes: plink2 writes
         // LD-compressed records, which are not eligible for the dense decode,
         // so this runs once per genotype cell across a whole scan.
-        const DOSAGE: [f32; 5] = [0.0, 1.0, 2.0, 0.0, 1.0];
         if let Some(code) = codes.iter().copied().find(|&code| code > 4) {
             return Err(DataFusionError::Execution(format!(
                 "invalid internal biallelic GT code {code}"
             )));
         }
 
-        self.dosages.reserve(codes.len());
-        let mut present = true;
-        for &code in codes {
-            self.dosages.push(DOSAGE[usize::from(code)]);
-            present &= code != 3;
+        // Written as a slice-to-slice loop over plain arithmetic rather than a
+        // table lookup and `Vec::push`, so LLVM can vectorize it: the per-push
+        // capacity check and the indexed table both block that. `alt_dosage`
+        // is branchless, so this compiles to a NEON/SSE2 widening loop.
+        let start = self.dosages.len();
+        self.dosages.resize(start + codes.len(), 0.0);
+        let output = &mut self.dosages[start..];
+        for (slot, &code) in output.iter_mut().zip(codes) {
+            *slot = f32::from(alt_count_from_code(code));
         }
+        let present = !codes.contains(&3);
 
         if present {
             // A variant with no missing call is the common case in a dense
@@ -754,18 +758,21 @@ impl AltCountBatchBuilder {
     }
 
     fn append_codes(&mut self, variant_index: usize, codes: &[u8]) -> Result<()> {
-        const COUNT: [i8; 5] = [0, 1, 2, 0, 1];
         if let Some(code) = codes.iter().copied().find(|&code| code > 4) {
             return Err(DataFusionError::Execution(format!(
                 "invalid internal biallelic GT code {code}"
             )));
         }
-        self.counts.reserve(codes.len());
-        let mut present = true;
-        for &code in codes {
-            self.counts.push(COUNT[usize::from(code)]);
-            present &= code != 3;
+        // Same shape as the DS path: a slice-to-slice loop over branchless
+        // arithmetic, which vectorizes. int8 output means one lane per byte,
+        // so this is the widest of the expansion loops.
+        let start = self.counts.len();
+        self.counts.resize(start + codes.len(), 0);
+        let output = &mut self.counts[start..];
+        for (slot, &code) in output.iter_mut().zip(codes) {
+            *slot = alt_count_from_code(code);
         }
+        let present = !codes.contains(&3);
         if present {
             self.sample_validity.append_all_valid(codes.len());
         } else {
@@ -995,6 +1002,17 @@ impl FastFieldBuilder {
             Self::AltCount(builder) => builder.finish(fileset, schema),
         }
     }
+}
+
+/// ALT allele count for an internal biallelic GT code.
+///
+/// Codes are 0=`(0,0)`, 1=`(0,1)`, 2=`(1,1)`, 3=missing, 4=`(1,0)`, so the
+/// count is 0, 1, 2, 0, 1. Expressed as arithmetic rather than a lookup table
+/// because a table index blocks vectorization of the surrounding loop, and
+/// this runs once per genotype cell.
+#[inline]
+fn alt_count_from_code(code: u8) -> i8 {
+    (code - 3 * u8::from(code >= 3)) as i8
 }
 
 struct PackedValidityBuilder {
