@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -20,8 +21,40 @@ use datafusion_bio_format_core::genotype::{
 use datafusion_bio_format_core::range_planning::ByteRange;
 
 use crate::buffers::{BufferLayout, GenotypeBuffers, TakenBuffers};
+use crate::catalog::{BgenVariant, resolve_variant};
 use crate::decode::{DecodeScratch, decode_variant};
 use crate::table_provider::{BgenFileset, BgenOutputMode};
+
+/// Returns the bytes of `span` from a buffer that starts at `buffer_start`.
+fn slice_from_range(
+    bytes: &[u8],
+    buffer_start: u64,
+    span: std::ops::Range<u64>,
+    variant_index: usize,
+) -> Result<&[u8]> {
+    let start = span
+        .start
+        .checked_sub(buffer_start)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "BGEN variant {variant_index} starts before its planned range"
+            ))
+        })?;
+    let length = usize::try_from(span.end.saturating_sub(span.start)).map_err(|_| {
+        DataFusionError::Execution(format!(
+            "BGEN variant {variant_index} span does not fit usize"
+        ))
+    })?;
+    let end = start.checked_add(length).ok_or_else(|| {
+        DataFusionError::Execution(format!("BGEN variant {variant_index} span overflowed"))
+    })?;
+    bytes.get(start..end).ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "BGEN variant {variant_index} is outside its planned byte range"
+        ))
+    })
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct BgenReadRange {
@@ -42,7 +75,13 @@ pub(crate) struct BgenPartition {
 /// says about it.
 #[derive(Debug)]
 struct DecodedRow {
-    variant_index: usize,
+    /// The variant this row describes.
+    ///
+    /// Carried per row rather than looked up in the catalog, because a variant
+    /// the catalog knows only from the index gains its identifier and its full
+    /// allele list when the scan parses its record — and that resolved form is
+    /// what the batch has to be built from.
+    variant: Arc<BgenVariant>,
     phased: bool,
     bits: u8,
 }
@@ -52,6 +91,12 @@ pub struct BgenExec {
     pub(crate) fileset: Arc<BgenFileset>,
     pub(crate) schema: SchemaRef,
     pub(crate) partitions: Arc<Vec<BgenPartition>>,
+    /// Variants whose records planning already read, by catalog index.
+    ///
+    /// Planning parses records when a predicate or a projection needs a field
+    /// the index does not record. Carrying the result here keeps the scan from
+    /// reading the same records a second time.
+    pub(crate) resolved: Arc<HashMap<usize, Arc<BgenVariant>>>,
     pub(crate) metrics: Arc<GenotypeScanMetrics>,
     pub(crate) batch_soft_byte_limit: usize,
     pub(crate) cache: Arc<PlanProperties>,
@@ -131,6 +176,7 @@ impl ExecutionPlan for BgenExec {
             ))
         })?;
         let fileset = self.fileset.clone();
+        let resolved = self.resolved.clone();
         let schema = self.schema.clone();
         let stream_schema = schema.clone();
         let metrics = self.metrics.clone();
@@ -172,7 +218,11 @@ impl ExecutionPlan for BgenExec {
                     // the batch's row count comes from the variant offsets.
                     buffers.finish_variant()?;
                     rows.push(DecodedRow {
-                        variant_index,
+                        variant: Arc::clone(
+                            resolved
+                                .get(&variant_index)
+                                .unwrap_or(&fileset.catalog.variants[variant_index]),
+                        ),
                         phased: false,
                         bits: 0,
                     });
@@ -188,45 +238,56 @@ impl ExecutionPlan for BgenExec {
                         )
                         .await?;
                     metrics.add(GenotypeMetric::RangeRequests, 1);
-                    metrics.add(GenotypeMetric::CoalescedRanges, 1);
                     metrics.add(GenotypeMetric::PrimaryBytesRead, bytes.len() as u64);
                     // A coalesced range bridges the metadata between consecutive
                     // payloads, so its length is what was downloaded, not what
                     // was compressed genotype data. Counting the range would
                     // report the bridged metadata as compressed bytes and skew
                     // any compression ratio derived from these counters.
-                    let compressed_bytes: u64 = planned
-                        .variants
-                        .iter()
-                        .map(|&index| fileset.catalog.variants[index].payload_size)
-                        .sum();
-                    metrics.add(GenotypeMetric::CompressedBytes, compressed_bytes);
-
                     for variant_index in planned.variants {
-                        let variant = &fileset.catalog.variants[variant_index];
-                        let relative_start = variant
-                            .payload_offset
-                            .checked_sub(planned.range.start)
-                            .and_then(|value| usize::try_from(value).ok())
-                            .ok_or_else(|| DataFusionError::Execution(
-                                "BGEN payload offset is outside its planned range".to_string(),
-                            ))?;
-                        let payload_size =
-                            usize::try_from(variant.payload_size).map_err(|_| {
-                                DataFusionError::Execution(
-                                    "BGEN payload size does not fit usize".to_string(),
-                                )
-                            })?;
-                        let relative_end = relative_start
-                            .checked_add(payload_size)
-                            .ok_or_else(|| DataFusionError::Execution(
-                                "BGEN payload slice overflowed".to_string(),
-                            ))?;
-                        let payload = bytes.get(relative_start..relative_end).ok_or_else(|| {
-                            DataFusionError::Execution(format!(
-                                "BGEN variant {variant_index} is outside its planned byte range"
-                            ))
+                        let catalogued = &fileset.catalog.variants[variant_index];
+                        // An indexed variant's record was fetched whole, because
+                        // its metadata is what says where the payload starts.
+                        // Parsing it here is also where the index is checked
+                        // against the object it claims to describe: every field
+                        // the index recorded is compared with the record.
+                        let resolved = if let Some(variant) = resolved.get(&variant_index) {
+                            // Planning already read this record, for a predicate
+                            // on a field the index does not carry.
+                            Arc::clone(variant)
+                        } else if catalogued.is_resolved() {
+                            Arc::clone(catalogued)
+                        } else {
+                            let record = slice_from_range(
+                                &bytes,
+                                planned.range.start,
+                                catalogued.record_span(),
+                                variant_index,
+                            )?;
+                            Arc::new(resolve_variant(
+                                &fileset.path,
+                                catalogued,
+                                record,
+                                &fileset.header,
+                                &fileset.options,
+                            )?)
+                        };
+                        let payload_span = resolved.payload_span().ok_or_else(|| {
+                            DataFusionError::Internal(
+                                "BGEN variant stayed unresolved after being parsed".to_string(),
+                            )
                         })?;
+                        metrics.add(
+                            GenotypeMetric::CompressedBytes,
+                            payload_span.end.saturating_sub(payload_span.start),
+                        );
+                        let payload = slice_from_range(
+                            &bytes,
+                            planned.range.start,
+                            payload_span,
+                            variant_index,
+                        )?;
+                        let variant = resolved.as_ref();
                         // `phased` and `bits` come from the block header, so a
                         // projection that wants only those must not reconstruct
                         // per-sample genotypes: the arrays would be built and
@@ -274,7 +335,7 @@ impl ExecutionPlan for BgenExec {
                                 as u64,
                         );
                         rows.push(DecodedRow {
-                            variant_index,
+                            variant: Arc::clone(&resolved),
                             phased: decoded.phased,
                             bits: decoded.bits,
                         });
@@ -332,28 +393,25 @@ fn build_batch(
         .iter()
         .map(|field| match field.name().as_str() {
             "chrom" => Ok(Arc::new(StringArray::from_iter_values(
-                rows.iter()
-                    .map(|row| fileset.catalog.variants[row.variant_index].chrom.as_str()),
+                rows.iter().map(|row| row.variant.chrom.as_str()),
             )) as ArrayRef),
             "start" => Ok(Arc::new(UInt64Array::from_iter_values(
-                rows.iter()
-                    .map(|row| fileset.catalog.variants[row.variant_index].start),
+                rows.iter().map(|row| row.variant.start),
             )) as ArrayRef),
             "end" => Ok(Arc::new(UInt64Array::from_iter_values(
-                rows.iter()
-                    .map(|row| fileset.catalog.variants[row.variant_index].end),
+                rows.iter().map(|row| row.variant.end),
             )) as ArrayRef),
             "id" => Ok(Arc::new(StringArray::from(
                 rows.iter()
-                    .map(|row| fileset.catalog.variants[row.variant_index].id.as_deref())
-                    .collect::<Vec<_>>(),
+                    .map(|row| unresolved_column(&row.variant, "id"))
+                    .collect::<Result<Vec<_>>>()?,
             )) as ArrayRef),
             "rsid" => Ok(Arc::new(StringArray::from(
                 rows.iter()
-                    .map(|row| fileset.catalog.variants[row.variant_index].rsid.as_deref())
+                    .map(|row| row.variant.rsid.as_deref())
                     .collect::<Vec<_>>(),
             )) as ArrayRef),
-            "alleles" => build_alleles(fileset, rows),
+            "alleles" => build_alleles(rows),
             "phased" => Ok(Arc::new(BooleanArray::from(
                 rows.iter().map(|row| row.phased).collect::<Vec<_>>(),
             )) as ArrayRef),
@@ -377,14 +435,38 @@ fn build_batch(
     RecordBatch::try_new(schema, arrays).map_err(DataFusionError::from)
 }
 
-fn build_alleles(fileset: &BgenFileset, rows: &[DecodedRow]) -> Result<ArrayRef> {
+/// Returns a variant's identifier, or an error if its record was never parsed.
+///
+/// A BGI does not record the variant identifier, so a scan that projects it
+/// must read the records. Planning arranges that; this turns a lapse into a
+/// failed query rather than a column of nulls that looks like real data.
+fn unresolved_column<'a>(variant: &'a BgenVariant, column: &str) -> Result<Option<&'a str>> {
+    variant.id().ok_or_else(|| {
+        DataFusionError::Internal(format!(
+            "BGEN column {column} needs variant {} to be read from the object, but the scan \
+             planned no range covering its record",
+            variant.index
+        ))
+    })
+}
+
+fn build_alleles(rows: &[DecodedRow]) -> Result<ArrayRef> {
     let mut builder = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
         "item",
         DataType::Utf8,
         false,
     )));
     for row in rows {
-        for allele in &fileset.catalog.variants[row.variant_index].alleles {
+        // The index records only the first two alleles, so a multiallelic
+        // variant's list is complete only once its record has been parsed.
+        let alleles = row.variant.complete_alleles().ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "BGEN column alleles needs variant {} to be read from the object, but the scan \
+                 planned no range covering its record",
+                row.variant.index
+            ))
+        })?;
+        for allele in alleles {
             builder.values().append_value(allele);
         }
         builder.append(true);

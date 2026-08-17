@@ -11,14 +11,18 @@ each selected sample's declared ploidy. `BgenOutputMode::Dosage` instead emits
 `DS`, the expected copy count of `alleles[1]`, and rejects multiallelic rows.
 
 `genotypes.GP` is a variable-length list per sample by default, because BGEN
-lets each variant store a different number of probability states. A file whose
-variants all store the same number can use
-`BgenProbabilityLayout::Fixed`, which emits a fixed-width list instead and drops
-the per-sample offsets. Those offsets are a quarter of the emitted probability
-bytes for a diploid biallelic cohort. The width is read once from the first
-variant's block header and appears in the schema, so a variant that stores a
-different number of states is rejected rather than padded or truncated; a file
-that genuinely mixes widths has to use the default layout.
+lets each variant store a different number of probability states.
+`BgenProbabilityLayout::Fixed` emits a fixed-width list instead and drops the
+per-sample offsets. Those offsets are a quarter of the emitted probability bytes
+for a diploid biallelic cohort.
+
+The width is derived once, from the first variant's block header widened to
+cover every allele count the catalog reports, and appears in the schema. A
+sample storing fewer states than that is padded with `NaN`, so a file that mixes
+widths — including one whose variants declare a variable ploidy — is still
+representable. Only a sample storing *more* states than the derived width is
+rejected, which is a file the derivation could not have predicted from its first
+variant; use the default layout for it.
 
 ```rust,no_run
 use std::sync::Arc;

@@ -34,6 +34,7 @@ when a query does not need them.
   PVAR pruning, and LD-dependency-aware partitioning. Require its one-thread
   biallelic `GT` scan to meet or beat a pinned `snputils`/`pgenlib` baseline
   before release, then scale through DataFusion-owned partitions.
+  PVAR pruning, and LD-dependency-aware partitioning.
 - Add a gated, read-only GRG mutation view with haplotype and fixed-ploidy
   individual output modes, mutation and sample pruning, graph-aware traversal,
   and an explicit local-file scope for the first implementation.

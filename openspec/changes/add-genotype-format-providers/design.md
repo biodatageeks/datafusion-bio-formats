@@ -43,6 +43,7 @@ cross-format behavioral comparisons, but its whole-file and delegated-reader
 paths are not the target execution architecture.
 
 ### Reference baseline (reviewed 2026-08-16)
+### Reference baseline (2026-07-27)
 
 | Capability | Normative source | Implementation/oracle snapshot |
 | --- | --- | --- |
@@ -52,6 +53,9 @@ paths are not the target execution architecture.
 | PGEN | [`pgen_spec` draft](https://github.com/chrchang/plink-ng/tree/9ee41ce224ea7cd091760d69392a98835715b5b2/pgen_spec) | PLINK 2 at `7b30cf1733c4f50c6699268a9f07fb6af206ed49` and Python `pgenlib` 0.94.1; external oracle only for LGPL components |
 | GRG | [Official GRG model/documentation](https://github.com/aprilweilab/grgl/tree/7b896a00d8b23821e5a779048580f64ae9c34368) plus the required independent on-disk contract | Python/C++ GRGL at `7b896a00d8b23821e5a779048580f64ae9c34368`; external GPL oracle only |
 | Cross-format | Format sources above | BSD-3-Clause `snputils` at `482c6d1dfd6c4001935dfaec81ae01a5e0ec3e53` |
+| PGEN | [`pgen_spec` draft](https://github.com/chrchang/plink-ng/tree/9ee41ce224ea7cd091760d69392a98835715b5b2/pgen_spec) | PLINK 2/`pgenlib` at `9ee41ce224ea7cd091760d69392a98835715b5b2`; external oracle only for LGPL components |
+| GRG | [Official GRG model/documentation](https://github.com/aprilweilab/grgl/tree/7b896a00d8b23821e5a779048580f64ae9c34368) plus the required independent on-disk contract | Python/C++ GRGL at `7b896a00d8b23821e5a779048580f64ae9c34368`; external GPL oracle only |
+| Cross-format | Format sources above | BSD-3-Clause `snputils` at `2cf1511ef1c1fb2effddb969075cce69202e079e` |
 
 These commit pins make conformance results reproducible; they are not permission
 to copy implementation code. Before implementation, each pin is reviewed for
@@ -169,6 +173,8 @@ The format-specific child fields are:
 | BGEN dosage | `DS: List<Float32>` and `PLOIDY: List<UInt8>` |
 | PGEN allele | `GT: List<FixedSizeList<UInt16, 2>>`, `PHASED: List<Boolean>` |
 | PGEN dosage | effective `DS`, optional source-only `DS_STORED`, `HDS: List<FixedSizeList<Float32, 2>>`, and requested hardcall fields |
+| PGEN allele | `GT: List<List<UInt16>>`, `PHASED: List<Boolean>` |
+| PGEN dosage | available `DS` and `HDS` fields plus requested hardcall fields |
 | GRG haplotype | `GT: List<UInt8>` with mutation presence 0/1 or null |
 | GRG individual | `GT: List<UInt8>` with alternate count 0..ploidy or null |
 
@@ -530,6 +536,7 @@ four, and eight partitions respectively, so the one-thread parity and four-core
 scaling gates pass for this fixture.
 
 ### 16. Error model
+### 14. Error model
 
 Format, version, count, offset, compression, allocation-limit, and companion
 errors are detected as early as possible and include the primary object and
@@ -542,6 +549,7 @@ arithmetic. Partial output followed by a corruption error is allowed for
 streaming execution, but the error is not suppressed.
 
 ### 17. Metrics and observability
+### 15. Metrics and observability
 
 Every scan exposes, at minimum:
 
@@ -559,6 +567,7 @@ Metrics permit proving that a pushdown avoided I/O rather than merely discarding
 values after decoding.
 
 ### 18. Testing and benchmarking
+### 16. Testing and benchmarking
 
 Each format receives:
 
@@ -584,6 +593,7 @@ path must have a lower median wall time than the pinned independent snputils
 GT-dosage baseline before the performance task is complete.
 
 ### 19. Licensing boundary
+### 17. Licensing boundary
 
 Runtime code may depend on libraries with project-compatible licenses after
 normal dependency review. LGPL `pgenlib` and GPL `grgl` SHALL NOT be linked,

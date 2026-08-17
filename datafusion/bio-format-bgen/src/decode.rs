@@ -1231,6 +1231,7 @@ fn execution_error(path: &str, variant: &BgenVariant, message: &str) -> DataFusi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::VariantDetail;
 
     #[test]
     fn checked_state_counts_cover_variable_ploidy() {
@@ -1243,17 +1244,20 @@ mod tests {
     fn test_variant() -> BgenVariant {
         BgenVariant {
             index: 0,
-            id: None,
             rsid: None,
             chrom: String::new(),
             start: 0,
             end: 0,
             position: 1,
             alleles: vec![],
+            allele_count: 0,
             record_offset: 0,
             record_size: 0,
-            payload_offset: 0,
-            payload_size: 0,
+            detail: VariantDetail::Parsed {
+                id: None,
+                payload_offset: 0,
+                payload_size: 0,
+            },
         }
     }
 

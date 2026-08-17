@@ -84,9 +84,11 @@ as `rsid`, chromosome, site coordinates, and all encoded alleles in ordered
 - **AND** allele indices are documented as zero-based positions in `alleles`.
 
 #### Scenario: Invalid allele count or length
-- **WHEN** a variant declares zero alleles, an unsupported allele count, or a
-  string length beyond configured limits
-- **THEN** decoding fails with variant byte-offset context.
+- **WHEN** a variant declares fewer than two alleles, an allele count beyond the
+  configured maximum, or a string length beyond configured limits
+- **THEN** decoding fails with variant byte-offset context
+- **AND** the two-allele floor applies because probability states are counts
+  over a variant's alleles, so a single-allele variant encodes no genotype.
 
 ### Requirement: Layout 2 Probability Decode
 
@@ -194,9 +196,29 @@ The system SHALL read the standard SQLite BGI variant index, validate its
 variant offsets and sizes against the selected BGEN object, and use a bounded
 local cache when the BGI object is remote.
 
+Validation SHALL be split by what it costs. Checks that do not require reading
+the object's variants — declared size, identifying prefix, row count against the
+header's variant count, and row ranges tiling the variant region in order — SHALL
+run when the index is opened. The comparison of each row's contents against the
+record it points at SHALL run when a scan reads that record, so that opening a
+table never walks the object.
+
+The system SHALL therefore trust the index for the fields it records when
+pruning candidates, and SHALL offer an explicit option that checks every row
+against its record when the table is opened, for callers who would rather walk
+the object than trust it.
+
 #### Scenario: Local BGI
 - **WHEN** a valid local BGI is resolved
 - **THEN** it is queried directly without copying the complete BGEN file.
+
+#### Scenario: Opening an indexed BGEN
+- **WHEN** a BGEN with a valid BGI is opened
+- **THEN** the object is read only for its header and the bytes the index's
+  identity check covers
+- **AND** no variant record or probability payload is read, because the index
+  already holds every variant's location, chromosome, position, RS identifier
+  and allele count.
 
 #### Scenario: Remote BGI
 - **WHEN** a valid BGI is remote
@@ -204,11 +226,27 @@ local cache when the BGI object is remote.
 - **AND** cache reuse is keyed by remote object identity.
 
 #### Scenario: Stale or inconsistent BGI
-- **WHEN** BGI count, offset, size, or object identity is inconsistent with
+- **WHEN** BGI object identity, row count, or row ranges are inconsistent with
   BGEN
 - **THEN** planning fails or ignores an optional stale index according to an
   explicit documented policy
 - **AND** it never reads an out-of-bounds block.
+
+#### Scenario: Index describing different variants
+- **WHEN** an index identifies the selected object but a row's chromosome,
+  position, RS identifier, allele count, leading alleles, or record size differs
+  from the record it points at
+- **THEN** the scan reading that record fails and names the mismatched field
+- **AND** it never emits the index's values in place of the object's, including
+  for a projection of columns the index itself records.
+
+#### Scenario: Stale row hidden by pushdown
+- **WHEN** a stale row's recorded chromosome, position or RS identifier causes
+  index pushdown to prune the variant, so no scan ever reads its record
+- **THEN** the omission is not detected, because the index is trusted for the
+  fields it records
+- **AND** enabling record verification rejects that index when the table is
+  opened instead.
 
 ### Requirement: Exact BGI Predicate Pushdown
 
@@ -229,7 +267,29 @@ because standard BGI does not store the BGEN variant identifier.
 #### Scenario: Variant identifier query
 - **WHEN** an exact predicate selects the BGEN variant identifier
 - **THEN** the provider evaluates it against parsed BGEN identifying metadata
-- **AND** does not claim that the standard BGI schema contains that identifier.
+- **AND** does not claim that the standard BGI schema contains that identifier
+- **AND** parsing reads the candidates' variant metadata only, leaving their
+  probability payloads unread.
+
+#### Scenario: Projecting a field the index does not record
+- **WHEN** a projection selects the variant identifier, or the alleles of a
+  variant declaring more than two, and no probability payload is read
+- **THEN** the provider reads those variants' record metadata to supply them
+- **AND** a scan that reads payloads takes them from the records it already
+  fetched, without an additional request.
+
+#### Scenario: Metadata reads do not bridge payloads
+- **WHEN** variant metadata is read for records separated by probability
+  payloads
+- **THEN** only touching metadata reads are coalesced, never ones with a payload
+  between them
+- **AND** the gap budget that bridges metadata between two payloads is not
+  applied, since here the gaps are the payloads themselves.
+
+#### Scenario: Records resolved once per query
+- **WHEN** a query both filters on and projects a field the index does not
+  record
+- **THEN** the records read to apply the filter supply the projection as well.
 
 #### Scenario: BGI filtered limit
 - **WHEN** an exact BGI predicate and safe limit are supplied

@@ -141,6 +141,21 @@ impl RangeServer {
         Self::start_inner(bcf, csi, false, true, false)
     }
 
+    /// Rejects every BCF HEAD from the start, mimicking a pre-signed URL that
+    /// authorizes GET and range requests but not HEAD — including while the
+    /// provider is being constructed and reads the header.
+    fn start_denying_bcf_head(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
+        Self::start_inner(bcf, csi, false, false, true)
+    }
+
+    /// Rejects the CSI companion outright and every BCF HEAD, mimicking a
+    /// pre-signed URL that authorizes GET and range requests on one object
+    /// only. The provider must fall back to the unindexed sequential scan and
+    /// that scan must survive without a size preflight.
+    fn start_denying_csi_and_bcf_head(bcf: Vec<u8>, csi: Vec<u8>) -> Self {
+        Self::start_inner(bcf, csi, true, false, true)
+    }
+
     fn start_inner(
         bcf: Vec<u8>,
         csi: Vec<u8>,
@@ -3939,6 +3954,129 @@ async fn write_provider_rejects_bcf_destination_path() -> Result<(), Box<dyn std
     assert!(
         error.contains("BCF write is not supported"),
         "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unindexed_scan_survives_head_refusal_for_get_only_remote_bcf()
+-> Result<(), Box<dyn std::error::Error>> {
+    // With no usable index the scan streams the whole object, which applies the
+    // reader's chunking and so asks the backend for the object length — a HEAD.
+    // A pre-signed URL that authorizes GET and range requests but not HEAD
+    // refuses it, even though reading the object sequentially would succeed.
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server = RangeServer::start_denying_csi_and_bcf_head(
+        std::fs::read(&bcf_path)?,
+        std::fs::read(index_path)?,
+    );
+
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let rows = query(
+        "variants",
+        provider,
+        "SELECT id FROM variants WHERE chrom = 'chr2'",
+    )
+    .await?;
+    assert!(rows.contains("rs3"), "unexpected rows: {rows}");
+    assert!(!rows.contains("rs1"), "unexpected rows: {rows}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unindexed_scan_keeps_chunked_reads_when_the_preflight_is_allowed()
+-> Result<(), Box<dyn std::error::Error>> {
+    // The fallback above must stay a fallback: a backend that answers the size
+    // preflight keeps the chunked concurrent reader, which is what makes a full
+    // scan of a large object bearable. Reading the whole object through one
+    // sequential request would be correct and much slower, and nothing else in
+    // the result would show it, so assert on the request pattern.
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server =
+        RangeServer::start_denying_csi(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+
+    let provider =
+        VcfTableProvider::new(server.url(), Some(Vec::new()), Some(Vec::new()), None, true)?;
+    let rows = query(
+        "variants",
+        provider,
+        "SELECT id FROM variants WHERE chrom = 'chr2'",
+    )
+    .await?;
+    assert!(rows.contains("rs3"), "unexpected rows: {rows}");
+
+    let requests = server.requests.lock().unwrap();
+    let payload_requests = requests
+        .iter()
+        .filter(|request| {
+            request.path.starts_with("/remote.bcf") && !request.path.starts_with("/remote.bcf.csi")
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        payload_requests
+            .iter()
+            .any(|request| request.method == "HEAD"),
+        "the scan must size the object to split it into chunks: {payload_requests:?}"
+    );
+    assert!(
+        payload_requests
+            .iter()
+            .any(|request| request.method == "GET" && request.range.is_some()),
+        "the scan must read the object as ranges, not one whole-object GET: {payload_requests:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn header_read_avoids_head_for_get_only_remote_bcf() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Schema discovery reads the BCF header. Streaming the whole object applies
+    // the reader's chunking, which asks the backend for the object length and so
+    // issues a HEAD; a pre-signed URL that authorizes GET and range requests but
+    // not HEAD then fails before the indexed scan ever runs, even though every
+    // read the scan makes would have succeeded.
+    let (_dir, _vcf_path, bcf_path) = create_equivalent_vcf_and_bcf()?;
+    let index = bcf::fs::index(&bcf_path)?;
+    let index_path = format!("{bcf_path}.csi");
+    noodles_csi::fs::write(&index_path, &index)?;
+    let server =
+        RangeServer::start_denying_bcf_head(std::fs::read(&bcf_path)?, std::fs::read(index_path)?);
+    let bcf_url = server.url();
+    let csi_url = format!("{bcf_url}.csi");
+
+    let provider = VcfTableProvider::new_with_samples_and_format(
+        bcf_url,
+        Some(Vec::new()),
+        Some(Vec::new()),
+        None,
+        None,
+        true,
+        VcfInputFormat::Auto,
+        Some(csi_url),
+    )?;
+    let rows = query(
+        "variants",
+        provider,
+        "SELECT id FROM variants WHERE chrom = 'chr2'",
+    )
+    .await?;
+    assert!(rows.contains("rs3"));
+
+    let requests = server.requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .filter(|request| request.path.starts_with("/remote.bcf")
+                && !request.path.starts_with("/remote.bcf.csi"))
+            .all(|request| request.method != "HEAD"),
+        "reading the header must not probe a GET-only signed URL with HEAD: {requests:?}"
     );
     Ok(())
 }

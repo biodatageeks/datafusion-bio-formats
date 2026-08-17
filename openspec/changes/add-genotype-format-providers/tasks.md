@@ -202,6 +202,36 @@
   current-`pgenlib` oracle compatibility limit.
 - [x] 6.31 Rebase the PGEN implementation on the current genotype-core head and
   verify that it does not revert intervening BCF/core changes.
+- [ ] 6.1 Create the `bio-format-pgen` crate and allele/dosage output options.
+- [ ] 6.2 Resolve standard PGEN/PVAR/PSAM filesets and reject unsupported hybrid
+  companions explicitly.
+- [ ] 6.3 Parse PVAR variants, allele lists, IDs, positions, and optional metadata.
+- [ ] 6.4 Parse PSAM sample identifiers with an explicit documented ID policy.
+- [ ] 6.5 Parse and validate PGEN modes `0x01`, `0x02`, `0x03`, `0x04`, `0x10`,
+  `0x11`, `0x20`, and `0x21`.
+- [ ] 6.6 Parse embedded and external PGEN indexes and validate counts/offsets.
+- [ ] 6.7 Implement biallelic hardcall and missingness decoding.
+- [ ] 6.8 Implement difflist and one-bit genotype representations.
+- [ ] 6.9 Implement phase-present and phase-information decoding.
+- [ ] 6.10 Implement biallelic dosage and dosage-present decoding.
+- [ ] 6.11 Implement phased dosage decoding.
+- [ ] 6.12 Implement multiallelic hardcall patch decoding with PVAR allele indices.
+- [ ] 6.13 Reject unsupported multiallelic dosage portions with a distinct
+  unsupported-feature error.
+- [ ] 6.14 Implement LD base tracking and dependency-prelude planning.
+- [ ] 6.15 Prove partitions emit owned variants once while dependency records
+  remain internal.
+- [ ] 6.16 Apply exact PVAR filters and limits before PGEN payload reads.
+- [ ] 6.17 Apply sample selection within packed, sparse, and dosage paths.
+- [ ] 6.18 Skip PGEN variant record payloads for PVAR-only, exact count, and
+  empty-sample scans after minimal fileset validation.
+- [ ] 6.19 Support local and object-store range reads with index/header
+  coalescing.
+- [ ] 6.20 Add differential tests against PLINK 2 and external `pgenlib`.
+- [ ] 6.21 Add fuzz/property tests for varints, difflists, offsets, LD chains,
+  allele patches, and dosage bounds.
+- [ ] 6.22 Benchmark each record representation, sparse variants, sparse
+  samples, LD-heavy files, dosage output, and parallel record blocks.
 
 ## 7. GRG Provider
 

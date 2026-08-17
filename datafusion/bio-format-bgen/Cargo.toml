@@ -12,6 +12,7 @@ readme = "README.md"
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
+log.workspace = true
 blake3 = "1.8"
 bytes.workspace = true
 datafusion.workspace = true

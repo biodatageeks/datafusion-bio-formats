@@ -1,3 +1,4 @@
+use crate::companion::sanitize_location;
 use async_compression::tokio::bufread::GzipDecoder;
 use futures::StreamExt;
 use log;
@@ -71,14 +72,23 @@ impl CompressionType {
     ///
     /// # Panics
     ///
-    /// Panics if the compression type string is not recognized
+    /// Panics if the compression type string is not recognized. Prefer
+    /// [`Self::try_from_string`] for anything derived from user input.
     pub fn from_string(compression_type: String) -> Self {
+        match Self::try_from_string(&compression_type) {
+            Some(parsed) => parsed,
+            None => panic!("Invalid compression type: {compression_type}"),
+        }
+    }
+
+    /// Creates a CompressionType from a string, or `None` if unrecognized.
+    pub fn try_from_string(compression_type: &str) -> Option<Self> {
         match compression_type.to_lowercase().as_str() {
-            "gz" => CompressionType::GZIP,
-            "bgz" => CompressionType::BGZF,
-            "none" => CompressionType::NONE,
-            "auto" => CompressionType::AUTO,
-            _ => panic!("Invalid compression type: {compression_type}"),
+            "gz" => Some(CompressionType::GZIP),
+            "bgz" => Some(CompressionType::BGZF),
+            "none" => Some(CompressionType::NONE),
+            "auto" => Some(CompressionType::AUTO),
+            _ => None,
         }
     }
 }
@@ -120,16 +130,24 @@ impl StorageType {
     ///
     /// # Panics
     ///
-    /// Panics if the storage type prefix is not recognized
+    /// Panics if the storage type prefix is not recognized. Prefer
+    /// [`Self::try_from_prefix`] for anything derived from user input.
     pub fn from_prefix(object_storage_type: String) -> Self {
+        match Self::try_from_prefix(&object_storage_type) {
+            Some(parsed) => parsed,
+            None => panic!("Invalid object storage type: {object_storage_type}"),
+        }
+    }
+
+    /// Creates a StorageType from a URL prefix, or `None` if unrecognized.
+    pub fn try_from_prefix(object_storage_type: &str) -> Option<Self> {
         match object_storage_type.to_lowercase().as_str() {
-            "gs" => StorageType::GCS,
-            "s3" => StorageType::S3,
-            "abfs" => StorageType::AZBLOB,
-            "local" => StorageType::LOCAL,
-            "file" => StorageType::LOCAL,
-            "http" | "https" => StorageType::HTTP,
-            _ => panic!("Invalid object storage type"),
+            "gs" => Some(StorageType::GCS),
+            "s3" => Some(StorageType::S3),
+            "abfs" => Some(StorageType::AZBLOB),
+            "local" | "file" => Some(StorageType::LOCAL),
+            "http" | "https" => Some(StorageType::HTTP),
+            _ => None,
         }
     }
 }
@@ -181,9 +199,30 @@ pub async fn get_compression_type(
     let buffer = if matches!(storage_type, StorageType::LOCAL) {
         let local_path = file_path.strip_prefix("file://").unwrap_or(&file_path);
         // For local files, read directly
-        let mut file = tokio::fs::File::open(local_path).await.unwrap();
+        // A missing or unreadable path is a normal error for a caller that
+        // passed one, not a reason to take the process down; the signature
+        // already carries it.
+        let mut file = tokio::fs::File::open(local_path).await.map_err(|error| {
+            opendal::Error::new(
+                opendal::ErrorKind::NotFound,
+                format!(
+                    "cannot open {} to detect its compression",
+                    sanitize_location(local_path)
+                ),
+            )
+            .set_source(error)
+        })?;
         let mut buffer = vec![0; 18];
-        let n = file.read(&mut buffer).await.unwrap();
+        let n = file.read(&mut buffer).await.map_err(|error| {
+            opendal::Error::new(
+                opendal::ErrorKind::Unexpected,
+                format!(
+                    "cannot read {} to detect its compression",
+                    sanitize_location(local_path)
+                ),
+            )
+            .set_source(error)
+        })?;
         buffer.truncate(n);
         buffer
     } else {
@@ -199,17 +238,37 @@ pub async fn get_compression_type(
                                 break;
                             }
                         }
-                        Err(_) => {
-                            // If we get an error but have some data, use what we have
-                            break;
+                        // A failed read is not an absence of compression. Using
+                        // the bytes that did arrive would guess from a truncated
+                        // magic number and hand the caller a plain reader for a
+                        // BGZF file, which fails later and further away.
+                        Err(error) => {
+                            return Err(opendal::Error::new(
+                                opendal::ErrorKind::Unexpected,
+                                format!(
+                                    "cannot read {} to detect its compression",
+                                    sanitize_location(&file_path)
+                                ),
+                            )
+                            .set_source(error));
                         }
                     }
                 }
                 buffer
             }
-            Err(e) => {
-                log::error!("Failed to get remote stream for compression detection: {e}");
-                return Ok(CompressionType::NONE);
+            // Reporting an unreadable object as uncompressed sends the caller on
+            // to open it as plain text, so the real failure — a bad credential,
+            // a missing object — surfaces later as a parse error against the
+            // wrong reader. The local path already propagates this.
+            Err(error) => {
+                return Err(opendal::Error::new(
+                    opendal::ErrorKind::Unexpected,
+                    format!(
+                        "cannot open {} to detect its compression",
+                        sanitize_location(&file_path)
+                    ),
+                )
+                .set_source(error));
             }
         }
     };
@@ -269,6 +328,56 @@ pub async fn get_remote_stream_bgzf_async(
         get_remote_stream(file_path.clone(), object_storage_options, None).await?,
     );
     Ok(bgzf::r#async::io::Reader::new(remote_stream))
+}
+
+/// Opens a BGZF reader over one sequential request, without a size preflight.
+///
+/// [`get_remote_stream_bgzf_async`] streams the whole object through the
+/// configured reader chunking, which asks the backend for the object length and
+/// so issues a HEAD. A pre-signed URL that authorizes GET and range requests but
+/// not HEAD therefore fails there, even though every later read the caller makes
+/// would have succeeded. Reading a bounded prefix — a header — needs no length,
+/// so it goes through a single request instead. The caller is responsible for
+/// bounding how much it consumes.
+pub async fn get_remote_stream_bgzf_single_request(
+    file_path: String,
+    object_storage_options: ObjectStorageOptions,
+) -> Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
+    let object = RemoteObject::open(file_path, object_storage_options).await?;
+    let remote_stream = StreamReader::new(object.stream_single_request().await?);
+    Ok(bgzf::r#async::io::Reader::new(remote_stream))
+}
+
+/// Opens a BGZF reader over the whole object, retrying without the size
+/// preflight when the backend refuses it.
+///
+/// Unlike [`get_remote_stream_bgzf_single_request`], this keeps the chunked,
+/// concurrent reader on the common path — a full scan of a large object depends
+/// on it — and gives up that concurrency only for the URLs that cannot support
+/// it. See [`RemoteObject::stream_with_size_preflight_fallback`].
+pub async fn get_remote_stream_bgzf_head_tolerant(
+    file_path: String,
+    object_storage_options: ObjectStorageOptions,
+) -> Result<AsyncReader<StreamReader<FuturesBytesStream, bytes::Bytes>>, opendal::Error> {
+    let object = RemoteObject::open(file_path, object_storage_options).await?;
+    let remote_stream = StreamReader::new(object.stream_with_size_preflight_fallback().await?);
+    Ok(bgzf::r#async::io::Reader::new(remote_stream))
+}
+
+/// Whether an error means the backend refused to report the object's size,
+/// rather than that the object cannot be read.
+///
+/// A pre-signed URL scoped to GET and range requests answers a HEAD with 403,
+/// and a backend with no size capability reports the request as unsupported.
+/// Both leave every actual read authorized, so the caller can retry without the
+/// preflight. Every other kind — a missing object, a bad config, a rate limit —
+/// would fail the retry too, and retrying would only hide the first error
+/// behind the second.
+fn is_refused_size_preflight(error: &opendal::Error) -> bool {
+    matches!(
+        error.kind(),
+        opendal::ErrorKind::PermissionDenied | opendal::ErrorKind::Unsupported
+    )
 }
 
 /// Builds a gzip decoder that decodes **all** members of a multi-member
@@ -335,7 +444,11 @@ pub fn get_storage_type(file_path: String) -> StorageType {
         {
             StorageType::AZBLOB
         }
-        Some(prefix) => StorageType::from_prefix(prefix.to_string()),
+        // A path this crate does not recognize is treated as a local one, so an
+        // unsupported scheme surfaces as a normal "cannot open" error naming the
+        // path. Panicking here would take the process down over a string a user
+        // typed into a query.
+        Some(prefix) => StorageType::try_from_prefix(prefix).unwrap_or(StorageType::LOCAL),
         None => StorageType::LOCAL,
     }
 }
@@ -473,6 +586,71 @@ pub async fn get_remote_stream(
     }
 }
 
+/// Rebuilds the scheme/host/port prefix of an HTTP object URL.
+///
+/// `Url::host_str` returns an IPv6 literal without its brackets, so
+/// reassembling from it would turn `http://[::1]:8080` into `http://::1:8080`,
+/// where the final colon no longer separates a port. `Host`'s Display keeps
+/// them.
+fn http_endpoint(url: &Url) -> Result<String, opendal::Error> {
+    let host = match url.host().ok_or_else(|| {
+        opendal::Error::new(
+            opendal::ErrorKind::ConfigInvalid,
+            "HTTP object URL has no host",
+        )
+    })? {
+        url::Host::Ipv6(address) => format!("[{address}]"),
+        other => other.to_string(),
+    };
+    Ok(match url.port() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    })
+}
+
+/// Credentials carried in an HTTP object URL's userinfo, percent-decoded.
+///
+/// Returns `None` when the URL has no username, which is the common case.
+/// A username with no password is still returned, since some servers accept it.
+fn http_credentials(url: &Url) -> Option<(String, Option<String>)> {
+    let username = url.username();
+    if username.is_empty() {
+        return None;
+    }
+    Some((percent_decode(username), url.password().map(percent_decode)))
+}
+
+/// Decodes the `%XX` escapes a URL's userinfo carries.
+///
+/// Credentials routinely contain characters that must be escaped there — `@`
+/// and `:` above all — so passing the raw field through would authenticate with
+/// the wrong secret. Anything that is not a valid escape, or that does not
+/// decode to UTF-8, is returned unchanged rather than rejected: this is a
+/// credential, not a parse target.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = (index + 2 < bytes.len()).then(|| {
+            std::str::from_utf8(&bytes[index + 1..index + 3])
+                .ok()
+                .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+        });
+        match (bytes[index], hex.flatten()) {
+            (b'%', Some(byte)) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            (byte, _) => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
+}
+
 /// A remotely stored immutable object with bounded read primitives.
 #[derive(Clone, Debug)]
 pub struct RemoteObject {
@@ -591,22 +769,23 @@ impl RemoteObject {
                     )
                     .set_source(error)
                 })?;
-                let host = url.host_str().ok_or_else(|| {
-                    opendal::Error::new(
-                        opendal::ErrorKind::ConfigInvalid,
-                        "HTTP object URL has no host",
-                    )
-                })?;
-                let endpoint = match url.port() {
-                    Some(port) => format!("{}://{host}:{port}", url.scheme()),
-                    None => format!("{}://{host}", url.scheme()),
-                };
+                let endpoint = http_endpoint(&url)?;
                 let mut path = url.path().trim_start_matches('/').to_string();
                 if let Some(query) = url.query() {
                     path.push('?');
                     path.push_str(query);
                 }
-                let builder = Http::default().endpoint(&endpoint);
+                // Userinfo in the URL is credentials, and rebuilding the
+                // endpoint from scheme/host/port alone silently dropped them, so
+                // every request went out unauthenticated against a server that
+                // required them.
+                let mut builder = Http::default().endpoint(&endpoint);
+                if let Some((username, password)) = http_credentials(&url) {
+                    builder = builder.username(&username);
+                    if let Some(password) = password {
+                        builder = builder.password(&password);
+                    }
+                }
                 let operator = Operator::new(builder)?
                     .layer(
                         TimeoutLayer::new()
@@ -682,6 +861,32 @@ impl RemoteObject {
             .map(|metadata| metadata.content_length())
     }
 
+    /// Returns the object's length and a validator identifying this version of
+    /// it, without reading its contents.
+    ///
+    /// A cache keyed on an object's bytes cannot be consulted until those bytes
+    /// have been fetched, which defeats the cache. This is what a caller keys on
+    /// instead — but only when the backend offers something that genuinely
+    /// identifies a version.
+    ///
+    /// That means a strong entity tag, and nothing else. A modification time is
+    /// a weak validator by HTTP's own definition: it carries one-second
+    /// granularity, so two different bodies of the same length written inside
+    /// the same second cannot be told apart by it. A weak entity tag (`W/`) says
+    /// as much about itself, and length alone is weaker still. A caller handed a
+    /// string cannot tell these apart from a strong tag, so none of them are
+    /// offered — the validator is `None` and the caller falls back to
+    /// identifying the object by its contents.
+    pub async fn identity(&self) -> Result<(u64, Option<String>), opendal::Error> {
+        let metadata = self.operator.stat(&self.path).await?;
+        let length = metadata.content_length();
+        let validator = metadata
+            .etag()
+            .filter(|etag| !etag.is_empty() && !etag.starts_with("W/"))
+            .map(|etag| format!("len={length};etag={etag}"));
+        Ok((length, validator))
+    }
+
     /// Reads the entire object into memory.
     ///
     /// This is intended for bounded companion metadata such as CSI indexes.
@@ -731,6 +936,27 @@ impl RemoteObject {
     pub async fn stream_single_request(&self) -> Result<FuturesBytesStream, opendal::Error> {
         let reader = self.operator.reader_with(&self.path).concurrent(1).await?;
         reader.into_bytes_stream(..).await
+    }
+
+    /// Streams the complete object, falling back to a single sequential request
+    /// when the backend refuses the size preflight.
+    ///
+    /// [`Self::stream`] splits a complete-object read into concurrent ranges,
+    /// which needs the object length and so issues a HEAD. That concurrency is
+    /// what makes a full scan of a large object bearable, so it stays the
+    /// default; only a backend that refuses the preflight — a pre-signed URL
+    /// authorizing GET and range requests but not HEAD — drops to
+    /// [`Self::stream_single_request`], whose sequential read needs no length.
+    /// Nothing has been consumed when the preflight fails, so the retry starts
+    /// from the beginning of the object.
+    pub async fn stream_with_size_preflight_fallback(
+        &self,
+    ) -> Result<FuturesBytesStream, opendal::Error> {
+        match self.stream().await {
+            Ok(stream) => Ok(stream),
+            Err(error) if is_refused_size_preflight(&error) => self.stream_single_request().await,
+            Err(error) => Err(error),
+        }
     }
 
     /// Streams a half-open byte range.
@@ -811,5 +1037,100 @@ mod multimember_tests {
         let mut out = String::new();
         decoder.read_to_string(&mut out).await.unwrap();
         assert_eq!(out, "helloworld");
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn userinfo_becomes_credentials() {
+        // Rebuilding the endpoint from scheme/host/port drops userinfo, so the
+        // credentials have to be carried over explicitly.
+        let url = Url::parse("https://user:pass@example.test/f.bcf").unwrap();
+        assert_eq!(
+            http_credentials(&url),
+            Some(("user".to_string(), Some("pass".to_string())))
+        );
+        // Credentials routinely contain escaped characters.
+        let url = Url::parse("https://a%40b.test:p%3Ass%40word@example.test/f.bcf").unwrap();
+        assert_eq!(
+            http_credentials(&url),
+            Some(("a@b.test".to_string(), Some("p:ss@word".to_string())))
+        );
+        // A username with no password is still credentials.
+        let url = Url::parse("https://token@example.test/f.bcf").unwrap();
+        assert_eq!(http_credentials(&url), Some(("token".to_string(), None)));
+        // The common case carries none.
+        let url = Url::parse("https://example.test/f.bcf").unwrap();
+        assert_eq!(http_credentials(&url), None);
+    }
+
+    #[test]
+    fn a_malformed_escape_is_left_alone() {
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("a%2"), "a%2");
+    }
+
+    #[test]
+    fn an_ipv6_endpoint_keeps_its_brackets() {
+        // Without them the endpoint reads as `http://::1:8081`, whose final
+        // colon no longer separates a port.
+        let url = Url::parse("http://[::1]:8081/example.bcf").unwrap();
+        assert_eq!(http_endpoint(&url).unwrap(), "http://[::1]:8081");
+    }
+
+    #[test]
+    fn named_and_ipv4_endpoints_are_unchanged() {
+        for (input, expected) in [
+            ("https://example.test/file.bcf", "https://example.test"),
+            ("http://127.0.0.1:8080/file.bcf", "http://127.0.0.1:8080"),
+            // A scheme's default port normalizes away, which is correct.
+            ("https://example.test:443/f.bcf", "https://example.test"),
+        ] {
+            let url = Url::parse(input).unwrap();
+            assert_eq!(http_endpoint(&url).unwrap(), expected, "{input}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_size_preflight_is_recognized() {
+        // A signed URL that authorizes GET and range requests but not HEAD
+        // answers the preflight with 403, and a backend that cannot report a
+        // size at all reports it as unsupported. Neither says the object is
+        // unreadable, so both are worth retrying without the preflight.
+        for kind in [
+            opendal::ErrorKind::PermissionDenied,
+            opendal::ErrorKind::Unsupported,
+        ] {
+            assert!(
+                is_refused_size_preflight(&opendal::Error::new(kind, "denied")),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_genuine_read_failure_is_not_a_refused_preflight() {
+        // Retrying these without a preflight would only fail again, more
+        // slowly, and would mask the real error behind the second one.
+        for kind in [
+            opendal::ErrorKind::NotFound,
+            opendal::ErrorKind::ConfigInvalid,
+            opendal::ErrorKind::Unexpected,
+            opendal::ErrorKind::RateLimited,
+        ] {
+            assert!(
+                !is_refused_size_preflight(&opendal::Error::new(kind, "failed")),
+                "{kind:?}"
+            );
+        }
     }
 }

@@ -1,4 +1,5 @@
 use datafusion::common::ScalarValue;
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::logical_expr::{Between, Expr, Operator, expr::InList};
 
 use crate::catalog::BgenVariant;
@@ -40,6 +41,24 @@ pub(crate) fn supports_exact_filter(expr: &Expr) -> bool {
     }
 }
 
+/// Whether a predicate reads the variant identifier.
+///
+/// The identifier is the one filterable field a BGI does not record, so a
+/// predicate naming it decides whether planning has to parse variant records
+/// before it can filter exactly.
+pub(crate) fn references_id(expr: &Expr) -> bool {
+    let mut found = false;
+    expr.apply(|node| {
+        if matches!(node, Expr::Column(column) if column.name == "id") {
+            found = true;
+            return Ok(TreeNodeRecursion::Stop);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })
+    .expect("walking an expression cannot fail");
+    found
+}
+
 pub(crate) fn evaluate_exact_filter(variant: &BgenVariant, expr: &Expr) -> bool {
     match expr {
         Expr::BinaryExpr(binary) if binary.op == Operator::And => {
@@ -53,7 +72,14 @@ pub(crate) fn evaluate_exact_filter(variant: &BgenVariant, expr: &Expr) -> bool 
             };
             match column.name.as_str() {
                 "chrom" => compare_string(Some(&variant.chrom), literal, &binary.op),
-                "id" => compare_string(variant.id.as_deref(), literal, &binary.op),
+                // A variant identifier is only known once its record has been
+                // parsed. `scan` resolves every candidate before filtering when
+                // a predicate names `id`, so an unresolved variant does not
+                // reach here; if one did, keeping it is the direction that lets
+                // a later filter still reject it.
+                "id" => variant
+                    .id()
+                    .is_none_or(|id| compare_string(id, literal, &binary.op)),
                 "rsid" => compare_string(variant.rsid.as_deref(), literal, &binary.op),
                 "start" => compare_integer(variant.start, literal, &binary.op),
                 "end" => compare_integer(variant.end, literal, &binary.op),
@@ -113,12 +139,12 @@ fn evaluate_in_list(variant: &BgenVariant, in_list: &InList) -> bool {
     };
     let matches = match column.name.as_str() {
         "chrom" => contains_string(in_list, &variant.chrom),
-        "id" => {
-            let Some(value) = variant.id.as_deref() else {
-                return false;
-            };
-            contains_string(in_list, value)
-        }
+        "id" => match variant.id() {
+            // Unresolved: see the note in `evaluate_exact_filter`.
+            None => return true,
+            Some(None) => return false,
+            Some(Some(value)) => contains_string(in_list, value),
+        },
         "rsid" => {
             let Some(value) = variant.rsid.as_deref() else {
                 return false;
@@ -195,6 +221,7 @@ fn integer(value: &ScalarValue) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use crate::catalog::VariantDetail;
     use datafusion::logical_expr::{col, lit};
 
     use super::*;
@@ -202,17 +229,20 @@ mod tests {
     fn variant(id: Option<&str>) -> BgenVariant {
         BgenVariant {
             index: 0,
-            id: id.map(str::to_string),
             rsid: None,
             chrom: "1".to_string(),
             start: 9,
             end: 10,
             position: 10,
             alleles: vec!["A".to_string(), "C".to_string()],
+            allele_count: 2,
             record_offset: 0,
             record_size: 0,
-            payload_offset: 0,
-            payload_size: 0,
+            detail: VariantDetail::Parsed {
+                id: id.map(str::to_string),
+                payload_offset: 0,
+                payload_size: 0,
+            },
         }
     }
 

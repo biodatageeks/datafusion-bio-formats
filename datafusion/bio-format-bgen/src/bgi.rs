@@ -2,19 +2,21 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
+use bytes::Bytes;
 use datafusion::common::{DataFusionError, Result, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator, expr::InList};
 use datafusion_bio_format_core::companion::{CompanionRule, resolve_companion, sanitize_location};
 use datafusion_bio_format_core::genotype::CoordinateSystem;
+use log::debug;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
-use crate::catalog::BgenCatalog;
+use crate::catalog::IndexedVariant;
 use crate::header::BgenHeader;
 use crate::source::ObjectAccess;
-use crate::table_provider::{BgenReadOptions, StaleBgiPolicy};
+use crate::table_provider::{BgenReadOptions, IndexReadCost, StaleBgiPolicy};
 
 static CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -25,11 +27,14 @@ static CACHE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 /// provides.
 const MAX_SQLITE_PARAMETERS: usize = 900;
 
+/// Bytes of the BGEN object a BGI stores to identify the file it describes.
+const IDENTITY_PREFIX_BYTES: u64 = 1000;
+
 #[derive(Clone)]
 pub(crate) struct BgiIndex {
     pub(crate) row_indices: Arc<Vec<usize>>,
-    pub(crate) bytes_read: u64,
-    pub(crate) primary_bytes_read: u64,
+    /// The index's own record of every variant, which becomes the catalog.
+    pub(crate) variants: Arc<Vec<IndexedVariant>>,
     /// Connection held open for the provider's lifetime.
     ///
     /// A cached remote BGI can be evicted by a later provider that exceeds
@@ -123,14 +128,25 @@ struct BgiRow {
     size: u64,
 }
 
+/// Opens the index a BGEN object should use, if there is a usable one.
+///
+/// Returns the index alongside what a *rejected* index cost: an index that was
+/// read and then found stale is dropped, but its bytes were still fetched, and a
+/// scan that omits them reports less I/O than it performed. The cost is zero
+/// when an index is returned, because the index carries its own.
 pub(crate) async fn open_optional_bgi(
     primary_path: &str,
     primary_source: &ObjectAccess,
     header: &BgenHeader,
-    catalog: &BgenCatalog,
     options: &BgenReadOptions,
-) -> Result<Option<BgiIndex>> {
+) -> Result<(Option<BgiIndex>, IndexReadCost)> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
+    let mut cost = IndexReadCost::default();
+    // Probing for a companion stats each candidate, which is a physical request
+    // against remote storage and belongs in the index's cost like any other.
+    // `exists` opens its own handle, so it is counted here rather than by one.
+    let probes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let probe_counter = Arc::clone(&probes);
     let bgi_path = resolve_companion(
         primary_path,
         "BGI",
@@ -139,12 +155,17 @@ pub(crate) async fn open_optional_bgi(
         false,
         |candidate| {
             let storage_options = storage_options.clone();
-            async move { ObjectAccess::exists(&candidate, &storage_options).await }
+            let probe_counter = Arc::clone(&probe_counter);
+            async move {
+                probe_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ObjectAccess::exists(&candidate, &storage_options).await
+            }
         },
     )
     .await?;
+    cost.requests = probes.load(std::sync::atomic::Ordering::Relaxed);
     let Some(bgi_path) = bgi_path else {
-        return Ok(None);
+        return Ok((None, cost));
     };
 
     let explicit = options.bgi_path.is_some();
@@ -153,13 +174,19 @@ pub(crate) async fn open_optional_bgi(
         primary_source,
         &bgi_path,
         header,
-        catalog,
         options,
+        &mut cost,
     )
     .await;
     match result {
-        Ok(index) => Ok(Some(index)),
-        Err(_) if !explicit && options.stale_bgi_policy == StaleBgiPolicy::Ignore => Ok(None),
+        Ok(index) => Ok((Some(index), cost)),
+        Err(error) if !explicit && options.stale_bgi_policy == StaleBgiPolicy::Ignore => {
+            debug!(
+                "BGI {}: ignoring a stale index: {error}",
+                sanitize_location(&bgi_path)
+            );
+            Ok((None, cost))
+        }
         Err(error) => Err(error),
     }
 }
@@ -169,12 +196,52 @@ async fn open_and_validate(
     primary_source: &ObjectAccess,
     bgi_path: &str,
     header: &BgenHeader,
-    catalog: &BgenCatalog,
     options: &BgenReadOptions,
+    cost: &mut IndexReadCost,
 ) -> Result<BgiIndex> {
     let storage_options = options.object_storage_options.clone().unwrap_or_default();
     let bgi_source = ObjectAccess::open(bgi_path, &storage_options).await?;
-    let bgi_size = bgi_source.size(bgi_path).await?;
+    let result = open_validated_index(
+        primary_path,
+        primary_source,
+        bgi_path,
+        header,
+        options,
+        cost,
+        &bgi_source,
+    )
+    .await;
+    // Counted however the attempt ended: a rejected index was read all the same.
+    // The primary object's own requests belong to its handle, which the provider
+    // snapshots separately, so they are not added here.
+    // Requests come from the handle, which counts them wherever they are made.
+    //
+    // Bytes take the larger of two figures, because neither alone is right for
+    // every exit. The handle counts what was actually transferred, which is the
+    // only record when a download succeeded and a later step — publishing it to
+    // the cache, opening it — did not. It reports nothing for a local index,
+    // which SQLite reads rather than the handle, or for a cache hit; those are
+    // read in full all the same, which is what the size covers. An index turned
+    // away by a size limit was neither transferred nor opened, so both are zero
+    // and it is charged nothing.
+    cost.companion_bytes = cost.companion_bytes.max(bgi_source.bytes());
+    cost.requests = cost.requests.saturating_add(bgi_source.requests());
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn open_validated_index(
+    primary_path: &str,
+    primary_source: &ObjectAccess,
+    bgi_path: &str,
+    header: &BgenHeader,
+    options: &BgenReadOptions,
+    cost: &mut IndexReadCost,
+    bgi_source: &ObjectAccess,
+) -> Result<BgiIndex> {
+    // One stat yields both the size the limits are checked against and the
+    // validator the cache is keyed on, so a cached index costs no extra request.
+    let (bgi_size, bgi_validator) = bgi_source.identity(bgi_path).await?;
     if bgi_size > options.max_bgi_bytes as u64 {
         return Err(index_error(
             bgi_path,
@@ -201,17 +268,21 @@ async fn open_and_validate(
                 ),
             ));
         }
-        let bytes = bgi_source
-            .read_all_bounded(bgi_path, options.max_bgi_bytes)
-            .await?;
         cache_remote_index(
             bgi_path,
-            &bytes,
+            bgi_validator.as_deref(),
+            bgi_size,
             options.max_bgi_cache_bytes,
             options.bgi_cache_directory.as_deref(),
+            || bgi_source.read_all_bounded(bgi_path, options.max_bgi_bytes),
         )
         .await?
     };
+    // Counted only now. An index rejected by a size limit above was never read —
+    // only stated — so charging its advertised size there would report gigabytes
+    // of I/O that never happened. From here it has been downloaded, or opened
+    // where it lies for SQLite to read, so it is read in full either way.
+    cost.companion_bytes = bgi_size;
 
     // Validation runs through the connection opened under the cache lease, so an
     // entry evicted by a concurrent provider cannot make it fail on a path that
@@ -231,7 +302,6 @@ async fn open_and_validate(
         primary_path,
         primary_source,
         header,
-        catalog,
         &metadata,
         &rows,
         bgi_path,
@@ -243,10 +313,30 @@ async fn open_and_validate(
         .enumerate()
         .map(|(index, row)| (row.offset, index))
         .collect();
+    let variants = rows
+        .into_iter()
+        .map(|row| IndexedVariant {
+            chrom: row.chrom,
+            position: row.position,
+            // A parsed record reports an empty RS identifier as absent, so an
+            // index that spells the same thing as an empty string has to agree.
+            rsid: row.rsid.filter(|value| !value.is_empty()),
+            allele_count: row.allele_count,
+            // Only a leading run is usable: these are compared against the
+            // record's alleles by position, so a null `allele1` beside a
+            // present `allele2` would line the second allele up with the first.
+            alleles: [row.allele1, row.allele2]
+                .into_iter()
+                .take_while(Option::is_some)
+                .flatten()
+                .collect(),
+            record_offset: row.offset,
+            record_size: row.size,
+        })
+        .collect::<Vec<_>>();
     Ok(BgiIndex {
-        row_indices: Arc::new((0..rows.len()).collect()),
-        bytes_read: bgi_size,
-        primary_bytes_read: header.object_size.min(1000),
+        row_indices: Arc::new((0..variants.len()).collect()),
+        variants: Arc::new(variants),
         connection,
         sqlite_path: Arc::new(sqlite_path),
         offset_to_index: Arc::new(offset_to_index),
@@ -525,11 +615,23 @@ fn read_sqlite(connection: &Connection, display_path: &str) -> Result<(BgiMetada
     ))
 }
 
+/// Checks that an index describes this object and covers it consistently.
+///
+/// This is the part of validation that can be done without reading the
+/// variants: the object's size and its first bytes identify the file, the
+/// declared variant count fixes how many records the index must describe, and
+/// the row ranges must tile the variant region in order without gaps, overlaps,
+/// or reads that fall outside the object.
+///
+/// Each row's contents are checked against the record it points at when a scan
+/// reads that record — see `resolve_variant`. Rebuilding every record's
+/// metadata here to compare it would mean walking the whole object, which is
+/// exactly the work the index exists to avoid, and it would happen on every
+/// open whether or not the query touches those variants.
 async fn validate_identity(
     primary_path: &str,
     primary_source: &ObjectAccess,
     header: &BgenHeader,
-    catalog: &BgenCatalog,
     metadata: &BgiMetadata,
     rows: &[BgiRow],
     bgi_path: &str,
@@ -543,7 +645,7 @@ async fn validate_identity(
             ),
         ));
     }
-    let identity_length = header.object_size.min(1000);
+    let identity_length = header.object_size.min(IDENTITY_PREFIX_BYTES);
     let primary_prefix = primary_source
         .read_range(primary_path, 0..identity_length)
         .await?;
@@ -553,22 +655,27 @@ async fn validate_identity(
             "Metadata.first_1000_bytes does not match the BGEN object",
         ));
     }
-    if rows.len() != catalog.variants.len() {
+    if rows.len() != header.variant_count as usize {
         return Err(index_error(
             bgi_path,
             &format!(
-                "Variant row count {} differs from BGEN count {}",
+                "Variant row count {} differs from the BGEN header's variant count {}",
                 rows.len(),
-                catalog.variants.len()
+                header.variant_count
             ),
         ));
     }
 
-    for (index, (row, variant)) in rows.iter().zip(catalog.variants.iter()).enumerate() {
+    // Records are laid out end to end from the first variant offset to the end
+    // of the object, so a set of rows that describes this object has to do the
+    // same. Anything else means the index is describing different records, and
+    // catching it here keeps a scan from reading a range that begins mid-record.
+    let mut expected_offset = header.first_variant_offset;
+    for (index, row) in rows.iter().enumerate() {
         let end = row.offset.checked_add(row.size).ok_or_else(|| {
             index_error(bgi_path, &format!("Variant row {index} range overflowed"))
         })?;
-        if row.size == 0 || row.offset < header.first_variant_offset || end > header.object_size {
+        if row.size == 0 || end > header.object_size {
             return Err(index_error(
                 bgi_path,
                 &format!(
@@ -577,39 +684,59 @@ async fn validate_identity(
                 ),
             ));
         }
-        if row.offset != variant.record_offset
-            || row.size != variant.record_size
-            || row.chrom != variant.chrom
-            || row.position != variant.position
-            || row.rsid.as_deref() != variant.rsid.as_deref()
-            || row.allele_count != variant.alleles.len()
-            || row.allele1.as_deref() != variant.alleles.first().map(String::as_str)
-            || row.allele2.as_deref() != variant.alleles.get(1).map(String::as_str)
-        {
+        if row.offset != expected_offset {
             return Err(index_error(
                 bgi_path,
-                &format!("Variant row {index} does not match BGEN metadata"),
+                &format!(
+                    "Variant row {index} starts at {} but the preceding rows end at \
+                     {expected_offset}",
+                    row.offset
+                ),
             ));
         }
+        expected_offset = end;
+    }
+    if expected_offset != header.object_size {
+        return Err(index_error(
+            bgi_path,
+            &format!(
+                "Variant rows end at {expected_offset}, but the object is {} bytes",
+                header.object_size
+            ),
+        ));
     }
     Ok(())
 }
 
-async fn cache_remote_index(
+/// Returns a local copy of a remote index, downloading it only on a miss.
+///
+/// The key comes from the object's identity rather than its bytes, so the cache
+/// can be consulted before anything is fetched — keying on content would mean
+/// downloading a multi-gigabyte index to discover it was already cached. The
+/// download runs under the cache lease, so concurrent opens of the same index
+/// wait for the first rather than each fetching their own copy.
+async fn cache_remote_index<F, Fut>(
     path: &str,
-    bytes: &[u8],
+    validator: Option<&str>,
+    expected_size: u64,
     max_cache_bytes: usize,
     configured_directory: Option<&str>,
-) -> Result<(PathBuf, Connection)> {
-    if bytes.len() > max_cache_bytes {
+    download: F,
+) -> Result<(PathBuf, Connection)>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Bytes>>,
+{
+    if expected_size > max_cache_bytes as u64 {
         return Err(index_error(
             path,
             &format!(
-                "remote index size {} exceeds max_bgi_cache_bytes {max_cache_bytes}",
-                bytes.len()
+                "remote index size {expected_size} exceeds max_bgi_cache_bytes {max_cache_bytes}"
             ),
         ));
     }
+    let incoming = usize::try_from(expected_size)
+        .map_err(|_| index_error(path, "remote index size does not fit usize"))?;
     let cache_root = configured_directory
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("DATAFUSION_BIO_BGI_CACHE_DIR").map(PathBuf::from))
@@ -622,21 +749,45 @@ async fn cache_remote_index(
         .await
         .map_err(|error| index_error(path, &format!("create BGI cache: {error}")))?;
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(path.as_bytes());
-    hasher.update(bytes);
-    let key = hasher.finalize().to_hex();
-    let destination = cache_root.join(format!("{key}.bgi"));
     let lock = CACHE_LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    // A validator identifies *this version* of the object, so an entry keyed on
+    // one can be reused without reading anything. Length alone is not a
+    // validator: a replacement of the same length would be served from the cache
+    // for ever, and open-time validation cannot catch it — that compares the
+    // index against the BGEN object, which has not changed, and the rows' own
+    // chromosomes, positions and identifiers are only checked against records a
+    // scan actually reads. A stale row would prune matching variants first.
+    //
+    // So without one, the object's bytes are its only identity, and they have to
+    // be fetched before the cache can be consulted. That is slower and always
+    // correct.
+    let mut download = Some(download);
+    let (key, downloaded) = match validator {
+        Some(validator) => {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(path.as_bytes());
+            hasher.update(validator.as_bytes());
+            (hasher.finalize().to_hex(), None)
+        }
+        None => {
+            let fetch = download.take().expect("the index is downloaded once");
+            let bytes = fetch().await?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(path.as_bytes());
+            hasher.update(&bytes);
+            (hasher.finalize().to_hex(), Some(bytes))
+        }
+    };
+    let destination = cache_root.join(format!("{key}.bgi"));
     if tokio::fs::metadata(&destination)
         .await
-        .is_ok_and(|metadata| metadata.len() == bytes.len() as u64)
+        .is_ok_and(|metadata| metadata.len() == expected_size)
     {
         // Reusing an entry still has to respect this provider's limit: entries
         // written under a larger limit would otherwise keep the shared cache
         // above the configured maximum indefinitely. The destination itself is
         // counted as incoming and excluded from eviction, matching the miss path.
-        evict_cache_entries(&cache_root, bytes.len(), max_cache_bytes, &destination).await?;
+        evict_cache_entries(&cache_root, incoming, max_cache_bytes, &destination).await?;
         // Opened before the lease is released so a concurrent provider cannot
         // evict this entry between publishing it and opening it.
         let connection = open_retained_index(&destination)?;
@@ -644,17 +795,63 @@ async fn cache_remote_index(
         return Ok((destination, connection));
     }
 
-    evict_cache_entries(&cache_root, bytes.len(), max_cache_bytes, &destination).await?;
+    evict_cache_entries(&cache_root, incoming, max_cache_bytes, &destination).await?;
+    // Fetched only now that the entry is known to be missing, and under the
+    // lease, so concurrent opens of the same index do not each download it.
+    let bytes = match downloaded {
+        Some(bytes) => bytes,
+        None => {
+            let fetch = download.take().expect("the index is downloaded once");
+            fetch().await?
+        }
+    };
+    // The object can change between being stated and being read. Eviction has
+    // already made room for the size the stat reported, so writing a different
+    // body would leave the cache over its limit — and the key, derived from that
+    // stat, would name the wrong contents. Neither is worth repairing here:
+    // reject it, and the caller falls back to the object itself.
+    if bytes.len() as u64 != expected_size {
+        return Err(index_error(
+            path,
+            &format!(
+                "index changed while it was being read: {expected_size} bytes when stated, {} \
+                 when read",
+                bytes.len()
+            ),
+        ));
+    }
+
     let temporary = cache_root.join(format!(".{key}.{}.tmp", std::process::id()));
     if tokio::fs::try_exists(&temporary).await.unwrap_or(false) {
         tokio::fs::remove_file(&temporary)
             .await
             .map_err(|error| index_error(path, &format!("remove stale cached BGI: {error}")))?;
     }
+    // Once the temporary exists, every path out of here removes it. Its name
+    // carries this process's id, so nothing else will ever collect it: a failure
+    // that left it behind would consume disk that no limit accounts for, and
+    // repeated failures would do so without bound.
+    let published = publish_cached_index(path, &temporary, &destination, &bytes).await;
+    if published.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    published?;
+    let connection = open_retained_index(&destination)?;
+    drop(lock);
+    Ok((destination, connection))
+}
+
+/// Writes the index to `temporary` and renames it over `destination`.
+async fn publish_cached_index(
+    path: &str,
+    temporary: &Path,
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<()> {
     let mut file = tokio::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&temporary)
+        .open(temporary)
         .await
         .map_err(|error| index_error(path, &format!("create cached BGI: {error}")))?;
     file.write_all(bytes)
@@ -664,12 +861,10 @@ async fn cache_remote_index(
         .await
         .map_err(|error| index_error(path, &format!("sync cached BGI: {error}")))?;
     drop(file);
-    tokio::fs::rename(&temporary, &destination)
+    tokio::fs::rename(temporary, destination)
         .await
         .map_err(|error| index_error(path, &format!("publish cached BGI: {error}")))?;
-    let connection = open_retained_index(&destination)?;
-    drop(lock);
-    Ok((destination, connection))
+    Ok(())
 }
 
 /// Opens the long-lived read-only connection kept by a [`BgiIndex`].
@@ -729,10 +924,19 @@ async fn evict_cache_entries(
         if total.saturating_add(incoming) <= limit {
             break;
         }
-        tokio::fs::remove_file(&path)
-            .await
-            .map_err(|error| index_error("BGI cache", &format!("evict cache entry: {error}")))?;
-        total = total.saturating_sub(size);
+        // An entry another provider still holds open cannot be removed on
+        // Windows, which locks open files, and a shared cache is exactly where
+        // that happens. Failing the open over it would make an unrelated
+        // concurrent reader break this one, so an entry that will not go is
+        // left in place and its bytes stay counted; the shortfall is reported
+        // below only if the cache genuinely cannot fit the incoming index.
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => total = total.saturating_sub(size),
+            Err(error) => debug!(
+                "BGI cache: leaving {} in place: {error}",
+                sanitize_location(&path.to_string_lossy())
+            ),
+        }
     }
     if total.saturating_add(incoming) > limit {
         return Err(index_error(

@@ -78,6 +78,7 @@ struct HttpRequest {
 
 struct RangeServer {
     address: std::net::SocketAddr,
+    /// Entity tag published for the index object, when the server offers one.
     requests: Arc<Mutex<Vec<HttpRequest>>>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -85,6 +86,45 @@ struct RangeServer {
 
 impl RangeServer {
     fn start(bgen: Vec<u8>, bgi: Vec<u8>) -> Self {
+        Self::start_inner(bgen, bgi, None)
+    }
+
+    /// Publishes an entity tag for the index, as real object stores do.
+    fn start_with_index_etag(bgen: Vec<u8>, bgi: Vec<u8>, etag: &str) -> Self {
+        Self::start_inner(bgen, bgi, Some(format!("ETag: \"{etag}\"\r\n")))
+    }
+
+    /// Reports a different index length than it serves, as an object replaced
+    /// between the stat and the read would.
+    fn start_with_index_size_drift(bgen: Vec<u8>, bgi: Vec<u8>, stated: u64) -> Self {
+        Self::start_full(
+            bgen,
+            bgi,
+            Some("ETag: \"drift\"\r\n".to_string()),
+            Some(stated),
+        )
+    }
+
+    /// Publishes only a modification time for the index, as a plain HTTP file
+    /// server does. That is a weak validator: one-second granularity.
+    fn start_with_index_last_modified(bgen: Vec<u8>, bgi: Vec<u8>) -> Self {
+        Self::start_inner(
+            bgen,
+            bgi,
+            Some("Last-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\n".to_string()),
+        )
+    }
+
+    fn start_inner(bgen: Vec<u8>, bgi: Vec<u8>, index_validator: Option<String>) -> Self {
+        Self::start_full(bgen, bgi, index_validator, None)
+    }
+
+    fn start_full(
+        bgen: Vec<u8>,
+        bgi: Vec<u8>,
+        index_validator: Option<String>,
+        stated_index_size: Option<u64>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -131,6 +171,10 @@ impl RangeServer {
                     range,
                 });
 
+                let validator = match (path.as_str(), &index_validator) {
+                    ("/cohort.bgen.bgi", Some(header)) => header.clone(),
+                    _ => String::new(),
+                };
                 let body = match path.as_str() {
                     "/cohort.bgen" => &bgen,
                     "/cohort.bgen.bgi" => &bgi,
@@ -143,10 +187,15 @@ impl RangeServer {
                     }
                 };
                 if method == "HEAD" {
+                    // A stated length can differ from what is served, as it does
+                    // for an object replaced between the two.
+                    let stated = match (path.as_str(), stated_index_size) {
+                        ("/cohort.bgen.bgi", Some(stated)) => stated,
+                        _ => body.len() as u64,
+                    };
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                        body.len()
+                        "HTTP/1.1 200 OK\r\nContent-Length: {stated}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n"
                     );
                 } else if let Some((start, end)) = range {
                     let end = end.min(body.len() - 1);
@@ -163,7 +212,7 @@ impl RangeServer {
                 } else {
                     let _ = write!(
                         stream,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\n{validator}Connection: close\r\n\r\n",
                         body.len()
                     );
                     let _ = stream.write_all(body);
@@ -249,6 +298,16 @@ fn variants() -> Vec<Variant> {
     ]
 }
 
+/// A diploid biallelic sample whose stored probabilities vary with its index,
+/// so a wide cohort does not compress away to nothing.
+fn sample_probabilities(index: usize) -> SampleProbabilities {
+    SampleProbabilities {
+        ploidy: 2,
+        missing: false,
+        stored: vec![(index % 251) as u32, ((index * 7) % 251) as u32],
+    }
+}
+
 fn sample(ploidy: u8, missing: bool, stored: &[u32]) -> SampleProbabilities {
     SampleProbabilities {
         ploidy,
@@ -258,10 +317,14 @@ fn sample(ploidy: u8, missing: bool, stored: &[u32]) -> SampleProbabilities {
 }
 
 fn fixture(codec: Codec, embedded_samples: bool) -> Fixture {
+    fixture_with_variants(codec, embedded_samples, &variants())
+}
+
+fn fixture_with_variants(codec: Codec, embedded_samples: bool, variants: &[Variant]) -> Fixture {
     let dir = TempDir::new().unwrap();
     let bgen = dir.path().join("cohort.bgen");
     let bgi = dir.path().join("cohort.bgen.bgi");
-    let (bytes, rows) = encode_layout2(codec, embedded_samples, &variants());
+    let (bytes, rows) = encode_layout2(codec, embedded_samples, variants);
     fs::write(&bgen, bytes).unwrap();
     Fixture {
         _dir: dir,
@@ -271,17 +334,47 @@ fn fixture(codec: Codec, embedded_samples: bool) -> Fixture {
     }
 }
 
+/// Enough biallelic variants that the object is several times the 1000-byte
+/// identity prefix, so a read of the variant region is unmistakable in the
+/// server's request log.
+fn many_variants(count: usize) -> Vec<Variant> {
+    (0..count)
+        .map(|index| Variant {
+            id: Box::leak(format!("v{index}").into_boxed_str()),
+            rsid: Box::leak(format!("rs{index}").into_boxed_str()),
+            chrom: "1",
+            position: 10 + index as u32,
+            alleles: vec!["A", "C"],
+            phased: false,
+            bits: 8,
+            samples: vec![
+                sample(2, false, &[255, 0]),
+                sample(2, false, &[0, 255]),
+                sample(2, true, &[0, 0]),
+            ],
+        })
+        .collect()
+}
+
 fn encode_layout2(
     codec: Codec,
     embedded_samples: bool,
     variants: &[Variant],
 ) -> (Vec<u8>, Vec<IndexRow>) {
-    let names = ["s1", "s2", "s3"];
+    encode_layout2_with_samples(codec, embedded_samples, variants, &["s1", "s2", "s3"])
+}
+
+fn encode_layout2_with_samples(
+    codec: Codec,
+    embedded_samples: bool,
+    variants: &[Variant],
+    names: &[&str],
+) -> (Vec<u8>, Vec<IndexRow>) {
     let mut sample_block = Vec::new();
     if embedded_samples {
         sample_block.extend_from_slice(&0_u32.to_le_bytes());
         sample_block.extend_from_slice(&(names.len() as u32).to_le_bytes());
-        for name in names {
+        for name in names.iter() {
             put_string_u16(&mut sample_block, name);
         }
         let length = sample_block.len() as u32;
@@ -955,6 +1048,829 @@ async fn applies_stale_bgi_policy_and_never_ignores_an_explicit_index() {
 }
 
 #[tokio::test]
+async fn opening_an_indexed_bgen_does_not_read_the_variant_region() {
+    // The BGI already records every variant's chromosome, position, RS
+    // identifier, allele count and record range. Walking the object to rebuild
+    // that at construction duplicates the index, and because variant metadata
+    // and genotype payloads are interleaved, the walk's read-ahead drags the
+    // payloads along with it — so opening a table can download the whole file.
+    let variants = many_variants(200);
+    let fixture = fixture_with_variants(Codec::Zstd, true, &variants);
+    create_bgi(&fixture, false);
+    let object_size = fs::metadata(&fixture.bgen).unwrap().len();
+    assert!(
+        object_size > 4 * IDENTITY_PREFIX_BYTES,
+        "fixture must be several times the identity prefix: {object_size}"
+    );
+
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    // Opening the table needs the header and the bytes the BGI's own identity
+    // check covers. Nothing beyond that.
+    let allowed_end = IDENTITY_PREFIX_BYTES.max(fixture.rows[0].offset);
+    let reads = server.get_requests("cohort.bgen");
+    for request in &reads {
+        let end = request
+            .range
+            .map_or(object_size, |(_, end)| end as u64 + 1)
+            .min(object_size);
+        assert!(
+            end <= allowed_end,
+            "opening an indexed BGEN read to byte {end}, past the header and identity prefix \
+             at {allowed_end}: {reads:?}"
+        );
+    }
+}
+
+/// Bytes of the BGEN object the BGI stores for its own identity check.
+const IDENTITY_PREFIX_BYTES: u64 = 1000;
+
+#[tokio::test]
+async fn verifying_index_records_catches_a_stale_row_that_pruning_would_hide() {
+    // Predicates are pushed into the index, so a row with a stale RS identifier
+    // is pruned before its record is ever read: the deferred per-record check
+    // cannot fire for a variant the index never offers as a candidate, and the
+    // query quietly returns nothing. Verification is what closes that, at the
+    // cost of walking the object once.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let connection = Connection::open(&fixture.bgi).unwrap();
+    connection
+        .execute(
+            "UPDATE Variant SET rsid = 'rs-wrong' WHERE rsid = 'rs2'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    // Trusting the index: the variant really does carry rs2, and it is missed.
+    let trusting = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(trusting)).unwrap();
+    let batches = context
+        .sql("SELECT id FROM b WHERE rsid = 'rs2'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0,
+        "pruning trusts the index, so the stale row hides the variant"
+    );
+
+    // Verifying: the same index is rejected when the table is opened.
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            verify_index_records: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("verification must reject an index that describes other variants")
+    .to_string();
+    assert!(
+        error.contains("RS identifier") && error.contains("does not describe this object"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn resolving_metadata_does_not_bridge_genotype_payloads() {
+    // Resolving records reads a bounded prefix of each one. Coalescing those
+    // prefixes under the payload gap budget would merge them straight across the
+    // probability blocks in between, so a dense file would be downloaded almost
+    // whole to answer a metadata query — the very thing moving the index open
+    // ahead of the walk was meant to stop.
+    let samples: Vec<String> = (0..3_000).map(|index| format!("s{index}")).collect();
+    let names: Vec<&str> = samples.iter().map(String::as_str).collect();
+    let variants: Vec<Variant> = (0..8)
+        .map(|index| Variant {
+            id: Box::leak(format!("v{index}").into_boxed_str()),
+            rsid: Box::leak(format!("rs{index}").into_boxed_str()),
+            chrom: "1",
+            position: 10 + index as u32,
+            alleles: vec!["A", "C"],
+            phased: false,
+            bits: 8,
+            samples: (0..names.len()).map(sample_probabilities).collect(),
+        })
+        .collect();
+
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("cohort.bgen");
+    let bgi = dir.path().join("cohort.bgen.bgi");
+    let (bytes, rows) = encode_layout2_with_samples(Codec::None, true, &variants, &names);
+    fs::write(&bgen, bytes).unwrap();
+    let fixture = Fixture {
+        _dir: dir,
+        bgen,
+        bgi,
+        rows,
+    };
+    create_bgi(&fixture, false);
+    // Each record must be larger than the metadata probe, or there is no
+    // payload between the prefixes for coalescing to bridge.
+    assert!(
+        fixture.rows[0].size > 2 * METADATA_PROBE_BYTES,
+        "record size {} must exceed the probe",
+        fixture.rows[0].size
+    );
+
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let before = server.get_requests("cohort.bgen").len();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT chrom FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        variants.len()
+    );
+
+    let during = &server.get_requests("cohort.bgen")[before..];
+    for request in during {
+        let (start, end) = request.range.expect("metadata reads must be ranged");
+        let length = (end - start + 1) as u64;
+        assert!(
+            length <= 2 * METADATA_PROBE_BYTES,
+            "a metadata read of {length} bytes bridged a genotype payload: {during:?}"
+        );
+    }
+}
+
+/// Bytes of each record the metadata probe reads before widening.
+const METADATA_PROBE_BYTES: u64 = 4 * 1024;
+
+#[tokio::test]
+async fn opening_the_provider_counts_toward_the_requests_a_scan_reports() {
+    // Opening a remote BGEN reads its header and its index before any scan runs.
+    // A scan that then reads nothing itself still performed those requests, and
+    // a counter documented as physical requests issued has to say so.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let context = context(1024);
+    let state = context.state();
+    // Every candidate is filtered out, so the scan itself issues no reads.
+    let plan = provider
+        .scan(
+            &state,
+            Some(&vec![0]),
+            &[col("rsid").eq(lit("absent"))],
+            None,
+        )
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0
+    );
+    let metrics = exec.metrics_snapshot();
+    assert!(
+        metrics[GenotypeMetric::RangeRequests as usize].1 > 0,
+        "opening the provider issued requests the scan must report: {metrics:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_cached_remote_index_is_not_downloaded_again() {
+    // The cache is keyed on the index's content, so it could only be consulted
+    // after the index had been downloaded — which is the one cost it exists to
+    // avoid. For a multi-gigabyte BGI that is the whole point of caching it.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start_with_index_etag(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+        "index-v1",
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let after_first = server.get_requests("cohort.bgen.bgi").len();
+    assert!(after_first > 0, "the first open must fetch the index");
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    let during_second = server.get_requests("cohort.bgen.bgi").len() - after_first;
+    assert_eq!(
+        during_second, 0,
+        "the second open must read the cached index, not fetch it again"
+    );
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn an_index_that_changes_between_stat_and_read_is_not_cached() {
+    // The stat decides the cache key and how much room eviction makes. If the
+    // object changes before it is read, the body written would neither match the
+    // key nor fit the space reserved for it.
+    //
+    // What this pins is the user-visible outcome: nothing cached, and the walk
+    // still answering. It does not exercise the length check in
+    // `cache_remote_index` — a server that shortens its body fails the read
+    // first — so that check remains for a backend returning a complete body of a
+    // different length, which this harness cannot produce.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let index = fs::read(&fixture.bgi).unwrap();
+    let server = RangeServer::start_with_index_size_drift(
+        fs::read(&fixture.bgen).unwrap(),
+        index.clone(),
+        // Stated longer than what is served.
+        index.len() as u64 + 4_096,
+    );
+    let cache = fixture._dir.path().join("cache");
+
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a discovered index that changed underneath is ignored");
+
+    let cached = fs::read_dir(&cache)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(cached, 0, "nothing may be published for a changed object");
+
+    // The walk still answers the query.
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT rsid FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn a_failed_cache_publication_leaves_no_temporary_behind() {
+    // A temporary that outlives its failure is disk no limit accounts for: its
+    // name carries this process's id, so nothing else ever collects it, and
+    // eviction only considers `.bgi` entries.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start_with_index_etag(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+        "index-v1",
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    // Replace the published entry with a directory of the same name, so the
+    // rename that publishes the next download fails after the temporary exists.
+    let entry = fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|extension| extension == "bgi"))
+        .expect("the first open caches the index");
+    fs::remove_file(&entry).unwrap();
+    fs::create_dir(&entry).unwrap();
+    fs::write(entry.join("occupied"), b"x").unwrap();
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .expect("a discovered index that cannot be published is ignored");
+
+    let leftovers: Vec<_> = fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed publication left temporaries behind: {leftovers:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_modification_time_alone_does_not_authorize_cache_reuse() {
+    // HTTP modification times carry one-second granularity, so two different
+    // bodies of the same length written within the same second are
+    // indistinguishable by one. Reusing on that basis would serve the old index
+    // and, because its rows prune candidates before any record is read, quietly
+    // drop matching variants.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start_with_index_last_modified(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let after_first = server.get_requests("cohort.bgen.bgi").len();
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    assert!(
+        server.get_requests("cohort.bgen.bgi").len() > after_first,
+        "a weak validator must not authorize reuse"
+    );
+}
+
+#[tokio::test]
+async fn an_index_without_a_validator_is_refetched_rather_than_trusted() {
+    // Length alone cannot identify a version of an object: a replacement of the
+    // same length would be served from the cache for ever, and nothing later
+    // catches it — open-time validation compares the index against the BGEN
+    // object, which has not changed, and a row's own chromosome, position and
+    // identifier are only checked against records a scan actually reads. So a
+    // backend publishing neither an entity tag nor a modification time gives up
+    // the saved download rather than the guarantee.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let options = BgenReadOptions {
+        bgi_cache_directory: Some(path(&cache)),
+        ..Default::default()
+    };
+
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options.clone())
+        .await
+        .unwrap();
+    let after_first = server.get_requests("cohort.bgen.bgi").len();
+    BgenTableProvider::try_new(server.url("cohort.bgen"), options)
+        .await
+        .unwrap();
+    assert!(
+        server.get_requests("cohort.bgen.bgi").len() > after_first,
+        "without a validator the index must be re-read rather than reused"
+    );
+    // Still only one entry: the content-addressed key matches what is there.
+    assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_index_downloaded_but_not_cached_still_reports_its_transfer() {
+    // The index can be fetched in full and then fail on a later step — writing
+    // it to the cache, publishing it, opening it. The fallback to the walk is
+    // right, but the transfer happened and has to be reported.
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    // No validator published, so the index is downloaded before the cache is
+    // consulted; the write that follows is what fails.
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("a discovered index that cannot be cached is ignored");
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let companion = exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1;
+
+    fs::set_permissions(&cache, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        companion > 0,
+        "the index was transferred before the cache write failed"
+    );
+}
+
+#[tokio::test]
+async fn an_index_rejected_by_a_size_limit_reports_no_bytes_read() {
+    // An index turned away by a size limit was stated, never read. Charging its
+    // advertised size would report I/O that did not happen — for a large index,
+    // gigabytes of it.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let index_size = fs::metadata(&fixture.bgi).unwrap().len();
+
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            // Smaller than the index, and discovered by convention, so the
+            // failure is ignored and the object is walked instead.
+            max_bgi_bytes: (index_size - 1) as usize,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("an oversized discovered index is ignored");
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let companion = exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1;
+    assert_eq!(
+        companion, 0,
+        "an index that was never read must not be charged for"
+    );
+}
+
+#[tokio::test]
+async fn an_index_dropped_by_open_time_validation_still_reports_what_it_cost() {
+    // The same accounting applies wherever the index is dropped. Identity
+    // validation rejects it earlier than catalog construction does, but the
+    // index was equally read by then.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, true);
+
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .expect("a stale discovered index is ignored in favour of the walk");
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let metrics = exec.metrics_snapshot();
+    assert!(
+        metrics[GenotypeMetric::CompanionBytesRead as usize].1 > 0,
+        "the index was read before it was rejected: {metrics:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_index_row_the_catalog_rejects_follows_the_stale_index_policy() {
+    // Building the catalog from index rows validates them, and that validation
+    // runs after the index has been opened — so a discovered index whose rows
+    // are individually unusable has to fall back to the walk like any other
+    // stale index, rather than failing the table outright.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let connection = Connection::open(&fixture.bgi).unwrap();
+    connection
+        .execute(
+            "UPDATE Variant SET number_of_alleles = 1 WHERE rsid = 'rs1'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    // Discovered by convention under the default policy: ignore it and walk.
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .expect("a discovered index with an unusable row must fall back to the walk");
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT rsid FROM b ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3,
+        "the walked catalog still sees every variant"
+    );
+
+    // Dropping the index does not unspend what reading it cost. Those bytes were
+    // fetched before it was found unusable, and a scan that does not report them
+    // understates what the query actually did.
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let metrics = exec.metrics_snapshot();
+    assert!(
+        metrics[GenotypeMetric::CompanionBytesRead as usize].1 > 0,
+        "the discarded index was still read: {metrics:?}"
+    );
+
+    // Named explicitly, the caller asked for that index: say why it is unusable.
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            bgi_path: Some(path(&fixture.bgi)),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("an explicitly named index must not be silently ignored")
+    .to_string();
+    assert!(
+        error.contains("allele count 1 is outside supported range 2..="),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_layout2_variant_declaring_one_allele_is_rejected() {
+    // Probability states are counts over a variant's alleles, so a single-allele
+    // variant encodes one state per sample and carries no genotype. Layout 1
+    // fixes the count at two; Layout 2 reads it from the record, so a malformed
+    // one has to be rejected rather than decoded into degenerate values.
+    let single_allele = vec![Variant {
+        id: "v1",
+        rsid: "rs1",
+        chrom: "1",
+        position: 10,
+        alleles: vec!["A"],
+        phased: false,
+        bits: 8,
+        samples: vec![
+            sample(2, false, &[255]),
+            sample(2, false, &[0]),
+            sample(2, true, &[0]),
+        ],
+    }];
+    let dir = TempDir::new().unwrap();
+    let bgen = dir.path().join("cohort.bgen");
+    fs::write(&bgen, encode_layout2(Codec::None, true, &single_allele).0).unwrap();
+
+    let error = BgenTableProvider::try_new(path(&bgen), BgenReadOptions::default())
+        .await
+        .expect_err("a one-allele Layout 2 variant must be rejected")
+        .to_string();
+    assert!(
+        error.contains("allele count 1 is outside supported range 2..="),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn planning_reads_each_record_once_when_a_query_filters_and_projects_it() {
+    // A query that both filters on `id` and projects a variant column resolves
+    // records twice over: once to filter the candidates exactly, once to supply
+    // the projection. The second pass must reuse the first pass's records
+    // rather than fetching them again.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let server = RangeServer::start(
+        fs::read(&fixture.bgen).unwrap(),
+        fs::read(&fixture.bgi).unwrap(),
+    );
+    let cache = fixture._dir.path().join("cache");
+    let provider = BgenTableProvider::try_new(
+        server.url("cohort.bgen"),
+        BgenReadOptions {
+            bgi_cache_directory: Some(path(&cache)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let before = server.get_requests("cohort.bgen").len();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT id FROM b WHERE id != 'missing'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        3
+    );
+    let during = server.get_requests("cohort.bgen").len() - before;
+    assert_eq!(
+        during, 1,
+        "the records resolved for the filter must serve the projection too"
+    );
+}
+
+#[tokio::test]
+async fn metadata_longer_than_the_probe_still_resolves() {
+    // Resolving an indexed record reads a bounded prefix rather than the whole
+    // record, so a variant whose identifier runs past that prefix exercises the
+    // widening loop. It has to converge and return the real identifier.
+    let long_id: &'static str = Box::leak("v".repeat(9_000).into_boxed_str());
+    let mut variants = many_variants(3);
+    variants[1].id = long_id;
+    let fixture = fixture_with_variants(Codec::Zstd, true, &variants);
+    create_bgi(&fixture, false);
+
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT id FROM b ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let ids = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(ids.value(1), long_id);
+    assert_eq!(ids.value(0), "v0");
+    assert_eq!(ids.value(2), "v2");
+}
+
+#[tokio::test]
+async fn an_indexed_scan_matches_an_unindexed_one_column_for_column() {
+    // With an index the catalog comes from the BGI, and the variant identifier,
+    // the alleles past the second and the payload position are parsed from each
+    // record as the scan reads it. Without one every field is parsed up front.
+    // The two must be indistinguishable in the output, including for `v3`,
+    // which has three alleles where the index records only two.
+    let indexed = fixture(Codec::Zstd, true);
+    create_bgi(&indexed, false);
+    let unindexed = fixture(Codec::Zstd, true);
+    assert!(!unindexed.bgi.exists(), "the second fixture has no index");
+
+    for sql in [
+        "SELECT chrom, start, \"end\", id, rsid, alleles FROM b ORDER BY start",
+        "SELECT id FROM b WHERE id = 'v2'",
+        "SELECT id, alleles FROM b WHERE rsid = 'rs3'",
+        "SELECT chrom, start FROM b ORDER BY start",
+        "SELECT rsid, phased, bits FROM b ORDER BY start",
+        "SELECT genotypes FROM b WHERE rsid = 'rs2'",
+        "SELECT id FROM b WHERE id IN ('v1', 'v3') ORDER BY start",
+        "SELECT alleles FROM b WHERE start >= 0 ORDER BY start",
+    ] {
+        let mut rendered = Vec::new();
+        for fixture in [&indexed, &unindexed] {
+            let provider =
+                BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+                    .await
+                    .unwrap();
+            let context = context(1024);
+            context.register_table("b", Arc::new(provider)).unwrap();
+            let batches = context.sql(sql).await.unwrap().collect().await.unwrap();
+            rendered.push(
+                datafusion::arrow::util::pretty::pretty_format_batches(&batches)
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+        assert_eq!(rendered[0], rendered[1], "indexed vs unindexed for: {sql}");
+    }
+}
+
+#[tokio::test]
+async fn a_scan_rejects_an_index_that_describes_different_variants() {
+    // Validating every index row against the object at open time is what made
+    // opening a table read the whole file. The check now happens where each
+    // record is read, so an index that identifies the right file but describes
+    // the wrong variants has to fail the scan rather than emit its own values.
+    let fixture = fixture(Codec::Zstd, true);
+    create_bgi(&fixture, false);
+    let connection = Connection::open(&fixture.bgi).unwrap();
+    connection
+        .execute(
+            "UPDATE Variant SET rsid = 'rs-wrong' WHERE rsid = 'rs2'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    // Opening still succeeds: the file's size and first bytes are untouched, and
+    // the row ranges still tile the object.
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .expect("the index still identifies this object");
+
+    // Including the columns the index carries itself: emitting those straight
+    // from the index would hand back its stale values as though they were the
+    // object's.
+    for sql in [
+        "SELECT id FROM b",
+        "SELECT genotypes FROM b",
+        "SELECT rsid FROM b",
+        "SELECT chrom, start FROM b",
+    ] {
+        let context = context(1024);
+        context
+            .register_table("b", Arc::new(provider.clone()))
+            .unwrap();
+        let error = context
+            .sql(sql)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err("a mismatched index must fail the scan")
+            .to_string();
+        assert!(
+            error.contains("does not match the record"),
+            "unexpected error for {sql}: {error}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn caches_remote_bgi_and_uses_bounded_bgen_ranges() {
     let fixture = fixture(Codec::Zstd, true);
     create_bgi(&fixture, false);
@@ -1277,10 +2193,13 @@ async fn coalescing_bridges_metadata_gaps_without_collapsing_partitions() {
         1
     );
     collect(plan.clone(), sequential.task_ctx()).await.unwrap();
-    let range_requests = exec.metrics_snapshot()[GenotypeMetric::RangeRequests as usize].1;
+    // Asserted on the planned range count rather than on requests issued:
+    // `RangeRequests` counts every physical request the provider made, opening
+    // included, so it does not isolate the planning decision this is about.
+    let coalesced = exec.metrics_snapshot()[GenotypeMetric::CoalescedRanges as usize].1;
     assert!(
-        range_requests < fixture.rows.len() as u64,
-        "expected coalesced reads, got {range_requests} for {} variants",
+        coalesced < fixture.rows.len() as u64,
+        "expected coalesced reads, got {coalesced} ranges for {} variants",
         fixture.rows.len()
     );
 
@@ -2007,5 +2926,61 @@ async fn the_layout1_budget_ignores_missing_samples() {
     assert_eq!(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         1
+    );
+}
+
+#[tokio::test]
+async fn coalesced_ranges_is_a_planning_count() {
+    // Coalescing is decided when the scan is planned, so the counter has to be
+    // meaningful before any range is read. Incrementing it per read would only
+    // restate RangeRequests, which is counted in the same loop.
+    let fixture = fixture(Codec::Zlib, true);
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    let plan = provider
+        .scan(&context.state(), Some(&vec![8]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let planned = exec.metrics_snapshot()[GenotypeMetric::CoalescedRanges as usize].1;
+    assert!(
+        planned > 0,
+        "coalesced ranges must be counted at planning, before any range is read"
+    );
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    assert_eq!(
+        exec.metrics_snapshot()[GenotypeMetric::CoalescedRanges as usize].1,
+        planned,
+        "executing the scan must not add to a planning counter"
+    );
+}
+
+#[tokio::test]
+async fn preliminary_header_reads_are_counted() {
+    // Opening reads the fixed prefix before re-reading the header in full, and
+    // the sample block's length before the block itself. Those overlapping reads
+    // are bytes physically fetched, so a scan that then reads every payload
+    // reports more than the object's size — and would report exactly its size if
+    // the preliminary reads were left out.
+    let fixture = fixture(Codec::None, true);
+    let object_size = fs::metadata(&fixture.bgen).unwrap().len();
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), BgenReadOptions::default())
+        .await
+        .unwrap();
+    let context = context(1024);
+    let state = context.state();
+    let plan = provider
+        .scan(&state, Some(&vec![0]), &[], None)
+        .await
+        .unwrap();
+    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    collect(plan.clone(), context.task_ctx()).await.unwrap();
+    let primary = exec.metrics_snapshot()[GenotypeMetric::PrimaryBytesRead as usize].1;
+    assert!(
+        primary > object_size,
+        "the prefix reads before the header and the sample block must be counted: \
+         {primary} bytes reported for a {object_size}-byte object"
     );
 }
