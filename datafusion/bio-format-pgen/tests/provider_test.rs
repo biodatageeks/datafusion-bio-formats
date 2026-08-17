@@ -597,6 +597,23 @@ async fn decodes_all_fixed_width_and_plink1_modes() {
                     .map(String::as_str),
                 Some("encoded_diploid")
             );
+            // The output shape a caller allocates against. The sample count is
+            // the selected count, not the cohort's, so a subset scan does not
+            // over-allocate: this fixture holds 4 samples and selects 3.
+            assert_eq!(
+                schema
+                    .metadata()
+                    .get("bio.pgen.variant_count")
+                    .map(String::as_str),
+                Some("2")
+            );
+            assert_eq!(
+                schema
+                    .metadata()
+                    .get("bio.pgen.selected_sample_count")
+                    .map(String::as_str),
+                Some("3")
+            );
         }
         let context = context(1);
         context.register_table("p", Arc::new(provider)).unwrap();

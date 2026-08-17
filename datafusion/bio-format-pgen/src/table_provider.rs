@@ -496,6 +496,18 @@ fn build_schema(
                 "bio.pgen.specification_baseline".to_string(),
                 PGEN_SPEC_BASELINE.to_string(),
             ),
+            // The output shape, known from the companions at registration and
+            // exposed so a caller can allocate its destination before scanning.
+            // Assembling a genotype matrix without this means either growing a
+            // multi-gigabyte buffer or holding every batch to count rows first.
+            (
+                "bio.pgen.variant_count".to_string(),
+                fileset.variants.len().to_string(),
+            ),
+            (
+                "bio.pgen.selected_sample_count".to_string(),
+                fileset.selected_samples.source_indices().len().to_string(),
+            ),
         ]),
     )))
 }
