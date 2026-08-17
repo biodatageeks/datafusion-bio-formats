@@ -20,19 +20,24 @@ against the previous build in one session:
 Down from 11.2 s for `DS` at the start of the work. Peak RSS is unchanged at
 9.97 GB for `DS` and 2.9 GB for `ALT_COUNT`.
 
-**These are not yet comparable to pgenlib.** The last measured pgenlib
-scan-equivalent float32 number was 1.51 s, but that came from an earlier
-session, and measurement pitfall 5 below is precisely that polars-bio timings
-drifted up to 1.6× across sessions. Re-measure pgenlib interleaved with the
-current build before making any claim about which is faster.
-
-The last full through-Python comparison, from before fusion:
+The full through-Python comparison, re-measured with this build, all readers
+interleaved in one session:
 
 | | dosage (float32) | hardcall (int8) |
 |---|---:|---:|
-| pgenlib | 1.77 s | 0.83 s |
-| snputils (wraps pgenlib) | 3.24 s | 1.51 s |
-| polars-bio | 4.34 s | 2.96 s |
+| pgenlib | 1.79 s | 0.83 s |
+| snputils (wraps pgenlib) | 3.26 s | 1.51 s |
+| polars-bio, before fusion | 4.34 s | 2.96 s |
+| **polars-bio, after** | **3.23 s** | **1.94 s** |
+
+pgenlib and snputils reproduced their earlier figures to within 1%, so the
+polars-bio deltas are the change and not session drift.
+
+**The end-to-end gain (1.35× / 1.53×) is much smaller than the scan's, and that
+is the important result.** Materialization into a contiguous array is untouched
+and is now the larger term — about 2.03 s of the 3.23 s dosage total and 1.35 s
+of the 1.94 s hardcall total. Further decoder work buys progressively less; see
+task 1 in polars-bio's `HANDOVER-pgen-perf.md`.
 
 Correctness: bit-identical to pgenlib across all 2,532,408,788 cells in both
 workloads, at every partition count, with a self-test proving the comparison
@@ -44,15 +49,14 @@ takes the fused path — across all 2,532,408,788 cells of chr22, via
 
 | Branch | Commit | State |
 |---|---|---|
-| `perf/pgen-batch-array-build` | `8e3bf62` | PR #232, open — **not pushed since `4e493c6`** |
+| `perf/pgen-batch-array-build` | `25d6bd2` | PR #232, open, pushed |
 | `perf/pgen-2bit-packed` | `52e9fcf` | pushed, **no PR** — one commit, misleadingly named |
 
 `perf/pgen-2bit-packed` contains a difflist-buffer reuse, not a packed
 representation. Fold it into #232 or rename it.
 
-polars-bio `feat/bgen-pr220-bench` pins the provider at `52e9fcf`
-(uncommitted `Cargo.toml`/`Cargo.lock` at time of writing), so it does **not**
-yet carry the fusion.
+polars-bio `feat/bgen-pr220-bench` (`0285723`, pushed) pins the provider at
+`25d6bd2`, so it carries the fusion.
 
 ## What was already done
 
@@ -155,18 +159,17 @@ so vectorization is limited, but the sample-index delta decoding
 up at ~10% of profile samples before fusion — re-profile, since fusion changed
 the denominator substantially.
 
-### 2. Investigate the dosage peak-RSS increase
+### 2. Investigate the dosage peak RSS
 
-Between the `8fbed14` and `52e9fcf` builds, dosage peak RSS rose from
-17.9 GB to 22.8 GB while the hardcall path stayed flat at 8.45 GB. This was not
-a target of any change and has no explanation yet. It should be understood
-before these numbers are published; a benchmark that quietly regressed memory
-by 27% is not a clean result.
+Through polars-bio, dosage peaks at **22.31 GB** against pgenlib's 12.09 GB for
+the identical 10.13 GB output; hardcall is 8.25 GB against 5.02 GB. The rise from
+17.9 GB happened between the `8fbed14` and `52e9fcf` builds, was not a target of
+any change, and still has no explanation.
 
-Note that those figures are the **through-polars-bio** path, with Python
-materialization. The Rust-only scan peaks at 9.97 GB for `DS` and 2.9 GB for
-`ALT_COUNT`, unchanged by fusion, so whatever the regression is it is unlikely to
-be in the decode itself.
+It is not in the decode. The Rust-only scan peaks at 9.97 GB for `DS` and 2.9 GB
+for `ALT_COUNT`, unchanged by fusion, so the excess is in the materialization
+path — the same place task 1's remaining time is. Resolve before publishing:
+1.85× pgenlib's memory for identical output is not a clean result.
 
 ### 3. Consider exposing a sparse genotype form
 
