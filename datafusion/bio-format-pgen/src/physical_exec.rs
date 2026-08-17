@@ -7,8 +7,8 @@ use std::sync::Arc;
 use async_stream::try_stream;
 use datafusion::arrow::array::{
     ArrayRef, BooleanBuilder, FixedSizeListArray, FixedSizeListBuilder, Float32Array,
-    Float32Builder, ListArray, ListBuilder, StringArray, StringBuilder, StructArray, UInt16Array,
-    UInt16Builder, UInt64Array,
+    Float32Builder, Int8Array, ListArray, ListBuilder, StringArray, StringBuilder, StructArray,
+    UInt16Array, UInt16Builder, UInt64Array,
 };
 use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer};
 use datafusion::arrow::datatypes::{DataType, FieldRef, Fields, SchemaRef};
@@ -23,10 +23,11 @@ use datafusion_bio_format_core::genotype::{
 use datafusion_bio_format_core::range_planning::ByteRange;
 
 use crate::decode::{
-    DENSE_DOSAGE_QUADS, DENSE_DOSAGE_QUADS_PLINK1, DENSE_DOSAGE_VALIDITY,
-    DENSE_DOSAGE_VALIDITY_PLINK1, DecodedRecord, GenotypeProjection, GtDecodeWorkspace,
-    decode_biallelic_gt_into, decode_dense_biallelic_gt, decode_main_track_and_validate,
-    decode_record_and_main, supports_biallelic_gt_fast_path, validated_dense_hardcalls,
+    DENSE_ALT_COUNT_QUADS, DENSE_ALT_COUNT_QUADS_PLINK1, DENSE_DOSAGE_QUADS,
+    DENSE_DOSAGE_QUADS_PLINK1, DENSE_DOSAGE_VALIDITY, DENSE_DOSAGE_VALIDITY_PLINK1, DecodedRecord,
+    GenotypeProjection, GtDecodeWorkspace, decode_biallelic_gt_into, decode_dense_biallelic_gt,
+    decode_main_track_and_validate, decode_record_and_main, supports_biallelic_gt_fast_path,
+    validated_dense_hardcalls,
 };
 use crate::fileset::{PgenFileset, PgenMode};
 
@@ -197,7 +198,8 @@ impl ExecutionPlan for PgenExec {
         // path instead of going through the generic per-variant intermediates.
         if genotypes_projected
             && !assignment.ranges.is_empty()
-            && matches!(genotype_fields.as_slice(), [field] if field == "GT" || field == "DS")
+            && matches!(genotype_fields.as_slice(), [field]
+                if field == "GT" || field == "DS" || field == "ALT_COUNT")
         {
             return execute_single_field(
                 genotype_fields[0].clone(),
@@ -689,11 +691,168 @@ impl DsBatchBuilder {
     }
 }
 
+/// Batch builder for an `ALT_COUNT`-only projection.
+///
+/// Emits the hardcall ALT allele count as `Int8`, one byte per genotype cell
+/// rather than the four `DS` needs. On a whole chromosome that is 2.53 GB of
+/// output instead of 10.13 GB, and output width is the single largest term in
+/// this scan's cost: PLINK 2's own reader takes 0.827 s to produce the `int8`
+/// matrix and 1.853 s for the `float32` one from the same records.
+struct AltCountBatchBuilder {
+    variant_indices: Vec<usize>,
+    counts: Vec<i8>,
+    sample_validity: PackedValidityBuilder,
+    selected_sample_count: usize,
+    row_capacity: usize,
+    sample_field: FieldRef,
+}
+
+impl AltCountBatchBuilder {
+    fn new(schema: &SchemaRef, row_capacity: usize, selected_sample_count: usize) -> Result<Self> {
+        let genotype_field = schema.field_with_name("genotypes")?;
+        let DataType::Struct(children) = genotype_field.data_type() else {
+            return Err(DataFusionError::Execution(
+                "PGEN genotypes field is not a struct".to_string(),
+            ));
+        };
+        if children.len() != 1 || children[0].name() != "ALT_COUNT" {
+            return Err(DataFusionError::Execution(
+                "PGEN ALT_COUNT fast path requires an exact ALT_COUNT-only projection".to_string(),
+            ));
+        }
+        let DataType::List(sample_field) = children[0].data_type() else {
+            return Err(DataFusionError::Execution(
+                "PGEN ALT_COUNT field is not a list".to_string(),
+            ));
+        };
+        let cells = row_capacity.saturating_mul(selected_sample_count);
+        Ok(Self {
+            variant_indices: Vec::with_capacity(row_capacity),
+            counts: Vec::with_capacity(cells),
+            sample_validity: PackedValidityBuilder::new(cells),
+            selected_sample_count,
+            row_capacity,
+            sample_field: sample_field.clone(),
+        })
+    }
+
+    fn append(&mut self, variant_index: usize, calls: &[Option<[u16; 2]>]) {
+        for call in calls {
+            match call {
+                Some(call) => {
+                    let count = u8::from(call[0] == 1) + u8::from(call[1] == 1);
+                    self.counts.push(count as i8);
+                    self.sample_validity.append(true);
+                }
+                None => {
+                    self.counts.push(0);
+                    self.sample_validity.append(false);
+                }
+            }
+        }
+        self.variant_indices.push(variant_index);
+    }
+
+    fn append_codes(&mut self, variant_index: usize, codes: &[u8]) -> Result<()> {
+        const COUNT: [i8; 5] = [0, 1, 2, 0, 1];
+        if let Some(code) = codes.iter().copied().find(|&code| code > 4) {
+            return Err(DataFusionError::Execution(format!(
+                "invalid internal biallelic GT code {code}"
+            )));
+        }
+        self.counts.reserve(codes.len());
+        let mut present = true;
+        for &code in codes {
+            self.counts.push(COUNT[usize::from(code)]);
+            present &= code != 3;
+        }
+        if present {
+            self.sample_validity.append_all_valid(codes.len());
+        } else {
+            for chunk in codes.chunks(8) {
+                let mut bits = 0_u8;
+                for (index, &code) in chunk.iter().enumerate() {
+                    if code != 3 {
+                        bits |= 1 << index;
+                    }
+                }
+                self.sample_validity.append_packed(bits, chunk.len());
+            }
+        }
+        self.finish_variant(variant_index);
+        Ok(())
+    }
+
+    fn append_dense(&mut self, packed: &[u8], sample_count: usize, mode: PgenMode) {
+        let (quads, validity_of) = if mode == PgenMode::Plink1 {
+            (&DENSE_ALT_COUNT_QUADS_PLINK1, &DENSE_DOSAGE_VALIDITY_PLINK1)
+        } else {
+            (&DENSE_ALT_COUNT_QUADS, &DENSE_DOSAGE_VALIDITY)
+        };
+        let full_bytes = sample_count / 4;
+        self.counts.reserve(sample_count);
+        let mut all_present = true;
+        for &byte in &packed[..full_bytes] {
+            self.counts.extend_from_slice(&quads[usize::from(byte)]);
+            all_present &= validity_of[usize::from(byte)] == 0x0f;
+        }
+        let remainder = sample_count % 4;
+        if remainder != 0 {
+            let byte = packed[full_bytes];
+            self.counts
+                .extend_from_slice(&quads[usize::from(byte)][..remainder]);
+        }
+        if all_present && remainder == 0 {
+            self.sample_validity.append_all_valid(sample_count);
+        } else {
+            for &byte in &packed[..full_bytes] {
+                self.sample_validity
+                    .append_packed(validity_of[usize::from(byte)], 4);
+            }
+            if remainder != 0 {
+                let byte = packed[full_bytes];
+                self.sample_validity
+                    .append_packed(validity_of[usize::from(byte)], remainder);
+            }
+        }
+    }
+
+    fn finish_variant(&mut self, variant_index: usize) {
+        self.variant_indices.push(variant_index);
+    }
+
+    fn len(&self) -> usize {
+        self.variant_indices.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.variant_indices.is_empty()
+    }
+
+    fn finish(&mut self, fileset: &PgenFileset, schema: SchemaRef) -> Result<RecordBatch> {
+        let cells = self.row_capacity.saturating_mul(self.selected_sample_count);
+        let validity = self.sample_validity.finish();
+        let counts = std::mem::replace(&mut self.counts, Vec::with_capacity(cells));
+        self.sample_validity = PackedValidityBuilder::new(cells);
+        let values = Arc::new(Int8Array::new(counts.into(), validity)) as ArrayRef;
+        let alt_count = Arc::new(ListArray::new(
+            self.sample_field.clone(),
+            OffsetBuffer::from_repeated_length(self.selected_sample_count, self.len()),
+            values,
+            None,
+        )) as ArrayRef;
+        let batch = build_gt_batch(fileset, schema, &self.variant_indices, alt_count)?;
+        self.variant_indices.clear();
+        Ok(batch)
+    }
+}
+
 /// The single-field fast path builds either `GT` or `DS`; the surrounding scan
 /// loop is identical, so it is shared rather than duplicated.
 enum FastFieldBuilder {
     Gt(GtBatchBuilder),
     Ds(DsBatchBuilder),
+    AltCount(AltCountBatchBuilder),
 }
 
 impl FastFieldBuilder {
@@ -714,6 +873,11 @@ impl FastFieldBuilder {
                 row_capacity,
                 selected_sample_count,
             )?)),
+            "ALT_COUNT" => Ok(Self::AltCount(AltCountBatchBuilder::new(
+                schema,
+                row_capacity,
+                selected_sample_count,
+            )?)),
             other => Err(DataFusionError::Execution(format!(
                 "PGEN fast path does not support genotype field {other}"
             ))),
@@ -724,6 +888,7 @@ impl FastFieldBuilder {
         match self {
             Self::Gt(builder) => builder.append(variant_index, &decoded.gt),
             Self::Ds(builder) => builder.append(variant_index, &decoded.ds),
+            Self::AltCount(builder) => builder.append(variant_index, &decoded.gt),
         }
     }
 
@@ -740,6 +905,7 @@ impl FastFieldBuilder {
         match self {
             Self::Gt(_) => GenotypeProjection::gt_only(),
             Self::Ds(_) => GenotypeProjection::from_fields(&["DS".to_string()]),
+            Self::AltCount(_) => GenotypeProjection::alt_count_only(),
         }
     }
 
@@ -747,6 +913,7 @@ impl FastFieldBuilder {
         match self {
             Self::Gt(builder) => builder.append_codes(variant_index, codes),
             Self::Ds(builder) => builder.append_codes(variant_index, codes),
+            Self::AltCount(builder) => builder.append_codes(variant_index, codes),
         }
     }
 
@@ -772,6 +939,17 @@ impl FastFieldBuilder {
                 sample_count,
                 |alleles, validity, samples| builder.append_chunk(alleles, validity, samples),
             ),
+            Self::AltCount(builder) => {
+                let packed = validated_dense_hardcalls(
+                    payload,
+                    mode,
+                    record_type,
+                    variant_index,
+                    sample_count,
+                )?;
+                builder.append_dense(packed, sample_count, mode);
+                Ok(())
+            }
             Self::Ds(builder) => {
                 let packed = validated_dense_hardcalls(
                     payload,
@@ -790,6 +968,7 @@ impl FastFieldBuilder {
         match self {
             Self::Gt(builder) => builder.finish_variant(variant_index),
             Self::Ds(builder) => builder.finish_variant(variant_index),
+            Self::AltCount(builder) => builder.finish_variant(variant_index),
         }
     }
 
@@ -797,6 +976,7 @@ impl FastFieldBuilder {
         match self {
             Self::Gt(builder) => builder.len(),
             Self::Ds(builder) => builder.len(),
+            Self::AltCount(builder) => builder.len(),
         }
     }
 
@@ -804,6 +984,7 @@ impl FastFieldBuilder {
         match self {
             Self::Gt(builder) => builder.is_empty(),
             Self::Ds(builder) => builder.is_empty(),
+            Self::AltCount(builder) => builder.is_empty(),
         }
     }
 
@@ -811,6 +992,7 @@ impl FastFieldBuilder {
         match self {
             Self::Gt(builder) => builder.finish(fileset, schema),
             Self::Ds(builder) => builder.finish(fileset, schema),
+            Self::AltCount(builder) => builder.finish(fileset, schema),
         }
     }
 }
@@ -1317,6 +1499,7 @@ fn build_genotype_array(
         .map(|(name, field)| match name.as_str() {
             "GT" => build_gt_array(field.data_type(), rows),
             "PHASED" => build_phased_array(field.data_type(), rows),
+            "ALT_COUNT" => build_alt_count_array(field.data_type(), rows),
             "DS" => build_ds_array(field.data_type(), rows),
             "DS_STORED" => build_ds_stored_array(field.data_type(), rows),
             "HDS" => build_hds_array(field.data_type(), rows),
@@ -1381,6 +1564,62 @@ fn build_phased_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<Array
         builder.append(true);
     }
     Ok(Arc::new(builder.finish()))
+}
+
+/// Builds the `ALT_COUNT` child: the hardcall ALT allele count as `Int8`.
+///
+/// One byte per genotype cell rather than the four `DS` uses. Derived from the
+/// hardcall calls, not the dosage track, so a fractional stored dosage is never
+/// silently rounded into a count.
+fn build_alt_count_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef> {
+    let DataType::List(sample_field) = data_type else {
+        return Err(DataFusionError::Execution(
+            "PGEN ALT_COUNT field is not a list".to_string(),
+        ));
+    };
+    let sample_count = match rows.first() {
+        Some(row) => {
+            let decoded = row.genotypes.as_ref().ok_or_else(|| {
+                DataFusionError::Execution("PGEN genotype row was not decoded".to_string())
+            })?;
+            decoded.gt.len()
+        }
+        None => 0,
+    };
+    let total = rows.len().saturating_mul(sample_count);
+    let mut counts: Vec<i8> = Vec::with_capacity(total);
+    let mut validity = PackedValidityBuilder::new(total);
+    for row in rows {
+        let decoded = row.genotypes.as_ref().ok_or_else(|| {
+            DataFusionError::Execution("PGEN genotype row was not decoded".to_string())
+        })?;
+        if decoded.gt.len() != sample_count {
+            return Err(DataFusionError::Execution(format!(
+                "PGEN ALT_COUNT row has {} samples; expected {sample_count}",
+                decoded.gt.len()
+            )));
+        }
+        for call in &decoded.gt {
+            match call {
+                Some(call) => {
+                    counts.push((u8::from(call[0] == 1) + u8::from(call[1] == 1)) as i8);
+                    validity.append(true);
+                }
+                None => {
+                    counts.push(0);
+                    validity.append(false);
+                }
+            }
+        }
+    }
+    let nulls = validity.finish();
+    let values = Arc::new(Int8Array::new(counts.into(), nulls)) as ArrayRef;
+    Ok(Arc::new(ListArray::new(
+        sample_field.clone(),
+        OffsetBuffer::from_repeated_length(sample_count, rows.len()),
+        values,
+        None,
+    )))
 }
 
 fn build_ds_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef> {

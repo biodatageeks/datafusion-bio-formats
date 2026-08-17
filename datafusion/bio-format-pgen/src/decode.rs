@@ -27,6 +27,15 @@ pub(crate) struct GenotypeProjection {
 }
 
 impl GenotypeProjection {
+    pub(crate) fn alt_count_only() -> Self {
+        // ALT_COUNT is the hardcall allele count, so the GT calls are what the
+        // builder narrows; no dosage track is needed.
+        Self {
+            gt: true,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn gt_only() -> Self {
         Self {
             gt: true,
@@ -38,6 +47,8 @@ impl GenotypeProjection {
         let mut projection = Self::default();
         for field in fields {
             match field.as_str() {
+                // ALT_COUNT is narrowed from the hardcall calls.
+                "ALT_COUNT" => projection.gt = true,
                 "GT" => projection.gt = true,
                 "PHASED" => projection.phased = true,
                 "DS" => projection.ds = true,
@@ -405,6 +416,35 @@ pub(crate) static DENSE_DOSAGE_QUADS: [[f32; 4]; 256] = build_dense_dosage_quads
 
 /// The PLINK 1 variant, whose two-bit codes use a different order.
 pub(crate) static DENSE_DOSAGE_QUADS_PLINK1: [[f32; 4]; 256] = build_dense_dosage_quads(true);
+
+/// ALT allele count for the four samples packed in one dense hardcall byte.
+///
+/// The `int8` counterpart of [`DENSE_DOSAGE_QUADS`], for the `ALT_COUNT` field.
+pub(crate) static DENSE_ALT_COUNT_QUADS: [[i8; 4]; 256] = build_dense_alt_counts(false);
+
+/// The PLINK 1 variant of [`DENSE_ALT_COUNT_QUADS`].
+pub(crate) static DENSE_ALT_COUNT_QUADS_PLINK1: [[i8; 4]; 256] = build_dense_alt_counts(true);
+
+const fn build_dense_alt_counts(plink1: bool) -> [[i8; 4]; 256] {
+    let mut output = [[0_i8; 4]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut sample = 0;
+        while sample < 4 {
+            let code = internal_code(((byte >> (sample * 2)) & 3) as u8, plink1);
+            output[byte][sample] = match code {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                // Missing; the validity table records it.
+                _ => 0,
+            };
+            sample += 1;
+        }
+        byte += 1;
+    }
+    output
+}
 
 /// Validity nibble for the four samples packed in one dense hardcall byte.
 pub(crate) static DENSE_DOSAGE_VALIDITY: [u8; 256] = build_dense_dosage_validity(false);
