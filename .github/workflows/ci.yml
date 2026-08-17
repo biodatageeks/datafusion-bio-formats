@@ -40,8 +40,52 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
+      # The differential tests compare this crate's output against reference
+      # implementations, and each skips itself when its oracle is absent. That
+      # makes a green run without them indistinguishable from a green run with
+      # them. CI installs all of them, verifies each responds, and sets the
+      # REQUIRE_ flags so a missing oracle fails the run rather than skipping.
+      - name: Install reference oracle tools
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: oracles
+          create-args: >-
+            python=3.11
+            bioconda::bcftools
+            bioconda::plink2
+            bioconda::bgenix
+            bioconda::qctool
+          init-shell: bash
+
+      - name: Install reference oracle packages
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          # Pinned, so a reference upgrade cannot silently change what
+          # "matches" means.
+          python -m pip install -r datafusion/bio-format-pgen/benchmark/requirements-pgen-parity.txt
+          # BGEN parity reads through both snputils and the bgen package.
+          python -m pip install bgen
+          # Every oracle is checked here rather than at test time: a missing one
+          # must fail the install, not quietly turn a differential test into a
+          # no-op.
+          python -c "import numpy, pgenlib, snputils; from bgen import BgenReader"
+          for tool in bcftools plink2 bgenix qctool; do
+            command -v "$tool" >/dev/null || { echo "missing oracle: $tool" >&2; exit 1; }
+          done
+          echo "PGEN_REFERENCE_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
+          echo "BGEN_REFERENCE_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
+
       - name: Run tests
+        shell: bash -el {0}
         run: cargo test --all
+        env:
+          # An absent oracle fails the run instead of skipping itself.
+          PGEN_REQUIRE_REFERENCE_ORACLES: "1"
+          PGEN_REFERENCE_PLINK2: plink2
+          PGEN_REQUIRE_PLINK2_ORACLE: "1"
+          BGEN_REQUIRE_REFERENCE_ORACLES: "1"
+          REQUIRE_BCFTOOLS: "1"
 
       - name: Build benchmark runner
         run: cargo build --package datafusion-bio-benchmarks-runner

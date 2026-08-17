@@ -1294,6 +1294,82 @@ async fn empty_extension_footer_is_not_fetched_during_open() {
     assert_eq!(requested_bytes, 37);
 }
 
+/// Filesets written by the pgenlib reference and committed under
+/// `tests/data/pgenlib`, so the decoder is compared against real reference
+/// output on every run rather than only where the oracle is installed.
+///
+/// This does not replace `differential_pgenlib_and_snputils_oracles_when_installed`.
+/// That test additionally checks the direction this one cannot: that the
+/// reference still writes what we expect, and that tools like PLINK 2 accept
+/// what we hand them. Regenerate these files with the pinned
+/// `requirements-pgen-parity.txt` if the reference's output ever changes.
+#[tokio::test]
+async fn pgenlib_written_filesets_decode_without_the_oracle() {
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/pgenlib");
+
+    let provider = PgenTableProvider::try_new(
+        path(&data.join("oracle.pgen")),
+        PgenReadOptions {
+            samples: Some(vec!["s8".to_string(), "s2".to_string(), "s1".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context_ = context(1);
+    context_.register_table("p", Arc::new(provider)).unwrap();
+    let batches = context_
+        .sql("SELECT id, genotypes FROM p ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let ids = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(
+        ids.iter().collect::<Vec<_>>(),
+        vec![Some("v1"), Some("v2"), Some("v3")]
+    );
+    // s8 and s2 respectively, in the requested order.
+    assert_eq!(
+        gt_values(&batches[0], 1, 0),
+        vec![Some(vec![0, 0]), Some(vec![0, 1]), Some(vec![0, 0])]
+    );
+    assert_eq!(
+        gt_values(&batches[0], 1, 1),
+        vec![Some(vec![0, 0]), Some(vec![0, 0]), Some(vec![0, 0])]
+    );
+
+    let dosage_provider = PgenTableProvider::try_new(
+        path(&data.join("dosage.pgen")),
+        PgenReadOptions {
+            genotype_fields: Some(vec!["DS".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let dosage_context = context(1);
+    dosage_context
+        .register_table("dosage", Arc::new(dosage_provider))
+        .unwrap();
+    let dosage_batches = dosage_context
+        .sql("SELECT genotypes FROM dosage")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        ds_values(&dosage_batches[0], 0, 0),
+        vec![Some(0.125), Some(1.0), Some(1.875), None]
+    );
+}
+
 #[tokio::test]
 async fn differential_pgenlib_and_snputils_oracles_when_installed() {
     let python = std::env::var("PGEN_REFERENCE_PYTHON").unwrap_or_else(|_| "python3".to_string());
