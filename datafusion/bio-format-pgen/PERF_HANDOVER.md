@@ -7,34 +7,52 @@ marked otherwise.
 
 Whole chromosome 22 of 1000 Genomes: 993,881 variants × 2,548 samples =
 2,532,408,788 genotypes. Single partition, release build with
-`-C target-cpu=native`, interleaved against pgenlib in one session.
+`-C target-cpu=native`.
+
+The Rust-only scan, excluding materialization — `pgen_ds_profile`, interleaved
+against the previous build in one session:
+
+| field | before fusion | after fusion | speedup |
+|---|---:|---:|---:|
+| `DS` (float32) | 2.31 s | **1.19 s** | 1.94× |
+| `ALT_COUNT` (int8) | 1.65 s | **0.59 s** | 2.80× |
+
+Down from 11.2 s for `DS` at the start of the work. Peak RSS is unchanged at
+9.97 GB for `DS` and 2.9 GB for `ALT_COUNT`.
+
+**These are not yet comparable to pgenlib.** The last measured pgenlib
+scan-equivalent float32 number was 1.51 s, but that came from an earlier
+session, and measurement pitfall 5 below is precisely that polars-bio timings
+drifted up to 1.6× across sessions. Re-measure pgenlib interleaved with the
+current build before making any claim about which is faster.
+
+The last full through-Python comparison, from before fusion:
 
 | | dosage (float32) | hardcall (int8) |
 |---|---:|---:|
 | pgenlib | 1.77 s | 0.83 s |
 | snputils (wraps pgenlib) | 3.24 s | 1.51 s |
-| **polars-bio** | **4.34 s** | **2.96 s** |
-
-The scan alone, excluding materialization, is 2.42 s against pgenlib's 1.51 s
-for the same float32 output — **1.60×**. Down from 11.2 s at the start of the
-work.
+| polars-bio | 4.34 s | 2.96 s |
 
 Correctness: bit-identical to pgenlib across all 2,532,408,788 cells in both
 workloads, at every partition count, with a self-test proving the comparison
-can fail.
+can fail. `ALT_COUNT` and `DS` additionally match the `GT` scan — which never
+takes the fused path — across all 2,532,408,788 cells of chr22, via
+`cargo run --release --example pgen_field_parity -- <path.pgen>`.
 
 ## Branches
 
 | Branch | Commit | State |
 |---|---|---|
-| `perf/pgen-batch-array-build` | `099be29` | PR #232, open |
+| `perf/pgen-batch-array-build` | `8e3bf62` | PR #232, open — **not pushed since `4e493c6`** |
 | `perf/pgen-2bit-packed` | `52e9fcf` | pushed, **no PR** — one commit, misleadingly named |
 
 `perf/pgen-2bit-packed` contains a difflist-buffer reuse, not a packed
 representation. Fold it into #232 or rename it.
 
 polars-bio `feat/bgen-pr220-bench` pins the provider at `52e9fcf`
-(uncommitted `Cargo.toml`/`Cargo.lock` at time of writing).
+(uncommitted `Cargo.toml`/`Cargo.lock` at time of writing), so it does **not**
+yet carry the fusion.
 
 ## What was already done
 
@@ -52,6 +70,10 @@ polars-bio `feat/bgen-pr220-bench` pins the provider at `52e9fcf`
    The count for codes 0..=4 is `0,1,2,0,1`, which is
    `code - 3 * (code >= 3)`. LLVM now emits NEON.
 7. Difflist buffer reused across variants instead of allocated per record.
+8. **The common-value + difflist branch fused into the output buffer** — what
+   was task 1 below. `DS` and `ALT_COUNT` fill their Arrow values slice from the
+   common category and patch the difflist into it, one pass instead of two, for
+   81% of records. See "How the fused decode works" below.
 
 ## Correction to issue #233
 
@@ -85,49 +107,55 @@ packed-then-expand. Packing would make us slower here, not faster.
 
 Update #233 before anyone acts on it.
 
-## Optimizations to implement, in order
+## How the fused decode works
 
-### 1. Fuse the common-value + difflist branch into the output buffer
+`supports_common_difflist_fast_path` picks out main-track representations 4, 6
+and 7. `decode_common_difflist_into` parses only the difflist, returns the common
+category, and leaves validated patches in `GtDecodeWorkspace::patches`. The
+builders' `append_common_difflist` then `resize`s their values slice to the
+mapped common category — one write per sample, nothing read back — and patches
+into it. Validity is one `append_all_valid`/`append_all_invalid` run plus a
+`set_invalid`/`set_valid` per patch, so bitmap work is proportional to the
+difflist, not the sample count.
 
-The highest-value remaining change, targeting 81% of records.
+Three exclusions, each load-bearing:
 
-Today: `decode_main_into` fills a `Vec<u8>` of codes with the common value,
-patches the difflist, and then `append_codes` reads that buffer and writes the
-final `f32`/`i8`. Two full passes over every sample.
+- **`GT`.** It distinguishes `(0,1)` from `(1,0)`, and the fused decode discards
+  the phase orientation. `FastFieldBuilder::needs_phase()` gates this.
+- **LD bases.** A record a later LD-compressed record uses as its base needs its
+  full main track materialized anyway, so `retain_main` skips fusion. That is
+  ~13% of records, and it is why representation 4 still reaches
+  `decode_biallelic_gt_into` sometimes.
+- **Anything with a dosage, HDS or multiallelic track.**
+  `supports_biallelic_gt_fast_path` rejects those; their bytes would be left
+  unparsed.
 
-Fused: fill the builder's output slice directly with `map(common)` — where
-`map` is `alt_count_from_code` for `ALT_COUNT`, or its `f32` cast for `DS` —
-then apply the difflist patches straight into that slice. One pass.
-
-Expected: removes one full read+write pass over 2.53 billion cells.
-
-**The obstacle, and it is the whole difficulty of this change.** Records of
-type `0x14` carry a hardcall-phase track that must still be validated and
-consumed even when its orientation is discarded. Validating it needs the
-heterozygote count, which today comes from scanning the per-sample buffer that
-fusion eliminates. It is derivable without that buffer:
+The hardcall-phase track is still validated and consumed — its length depends on
+the heterozygote count, so misparsing it would shift every following track. The
+count is derived from the difflist rather than from the per-sample buffer fusion
+removes:
 
 ```
 het_count = (common == 1 ? sample_count - difflist_len : 0)
           + (number of difflist entries whose value is 1)
 ```
 
-Both terms are available while parsing the difflist. Get this wrong and the
-phase track is misparsed, which will show up as a trailing-bytes error rather
-than silently — but verify against `validated_dense_hardcalls`, which already
-does the equivalent validation for the dense branch.
+PGEN reserves representation 5, so `common == 1` cannot occur and the first term
+is always zero today; it is written out anyway because the identity is what makes
+the count right. Phase validation is shared with the dense path via
+`validate_phase_track`.
 
-Applies only when the field needs no phase orientation, i.e. `DS` and
-`ALT_COUNT`, not `GT`. `FastFieldBuilder::needs_phase()` already encodes this.
+## Optimizations to implement, in order
 
-### 2. SIMD the difflist patch loop
+### 1. SIMD the difflist patch loop
 
-After (1), the remaining per-variant work is the sparse patch. Patches are
-scattered writes, so vectorization is limited, but the sample-index delta
-decoding (`Cursor::varint`, `decode_difflist_into`) is sequential varint work
-that showed up at ~10% of profile samples. Worth looking at only after (1).
+The remaining per-variant work is the sparse patch. Patches are scattered writes,
+so vectorization is limited, but the sample-index delta decoding
+(`Cursor::varint`, `decode_difflist_into`) is sequential varint work that showed
+up at ~10% of profile samples before fusion — re-profile, since fusion changed
+the denominator substantially.
 
-### 3. Investigate the dosage peak-RSS increase
+### 2. Investigate the dosage peak-RSS increase
 
 Between the `8fbed14` and `52e9fcf` builds, dosage peak RSS rose from
 17.9 GB to 22.8 GB while the hardcall path stayed flat at 8.45 GB. This was not
@@ -135,7 +163,12 @@ a target of any change and has no explanation yet. It should be understood
 before these numbers are published; a benchmark that quietly regressed memory
 by 27% is not a clean result.
 
-### 4. Consider exposing a sparse genotype form
+Note that those figures are the **through-polars-bio** path, with Python
+materialization. The Rust-only scan peaks at 9.97 GB for `DS` and 2.9 GB for
+`ALT_COUNT`, unchanged by fusion, so whatever the regression is it is unlikely to
+be in the decode itself.
+
+### 3. Consider exposing a sparse genotype form
 
 Out of scope for matrix materialization, but pgenlib's
 `ReadDifflistOrGenovecSubsetUnsafe` returns `difflist_common_geno` + `raregeno`
@@ -164,12 +197,31 @@ Keep both green.
 
 ## How to measure
 
-Rust only, no Python, no materialization — this is the number to optimize:
+Rust only, no Python, no materialization — this is the number to optimize. The
+third argument is the genotype field, `DS` by default:
 
 ```bash
 RUSTFLAGS="-C target-cpu=native" cargo run --release \
   -p datafusion-bio-format-pgen --example pgen_ds_profile -- \
-  /path/to/chr22.full.pgen 3
+  /path/to/chr22.full.pgen 3 DS
+```
+
+Build the binary once and interleave it against the previous one rather than
+comparing across sessions — see pitfall 5:
+
+```bash
+cp target/release/examples/pgen_ds_profile /tmp/prof_new   # then git stash, rebuild, /tmp/prof_old
+for i in 1 2 3; do /tmp/prof_old $PGEN 1 DS; /tmp/prof_new $PGEN 1 DS; done
+```
+
+Correctness gate on real records at full scale, no Python: `ALT_COUNT` and `DS`
+against the `GT` scan, which never takes the fused decode. Exits nonzero on any
+disagreement:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo run --release \
+  -p datafusion-bio-format-pgen --example pgen_field_parity -- \
+  /path/to/chr22.full.pgen
 ```
 
 Full reader comparison with the correctness gate:
