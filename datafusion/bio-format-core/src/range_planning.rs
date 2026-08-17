@@ -79,6 +79,54 @@ pub fn coalesce_byte_ranges(
     Ok(coalesced)
 }
 
+/// Coalesces an already-sorted fallible byte-range stream without staging it.
+///
+/// This is intended for large indexes whose record descriptors are decoded on
+/// demand. Input ranges must be ordered by nondecreasing start offset; lookup
+/// errors and unsorted input are returned immediately.
+pub fn try_coalesce_sorted_byte_ranges(
+    ranges: impl IntoIterator<Item = Result<ByteRange>>,
+    max_gap: u64,
+    max_range_size: u64,
+) -> Result<Vec<ByteRange>> {
+    if max_range_size == 0 {
+        return Err(DataFusionError::Plan(
+            "max_range_size must be greater than zero".to_string(),
+        ));
+    }
+
+    let mut coalesced: Vec<ByteRange> = Vec::new();
+    let mut previous_start = None;
+    for next in ranges {
+        let next = next?;
+        if previous_start.is_some_and(|start| next.start < start) {
+            return Err(DataFusionError::Plan(
+                "byte ranges supplied to the streaming coalescer are not sorted".to_string(),
+            ));
+        }
+        previous_start = Some(next.start);
+        let Some(current) = coalesced.last_mut() else {
+            coalesced.push(next);
+            continue;
+        };
+
+        let overlaps = next.start < current.end;
+        let gap = next.start.saturating_sub(current.end);
+        let combined_end = current.end.max(next.end);
+        let combined_size = combined_end.checked_sub(current.start).ok_or_else(|| {
+            DataFusionError::Plan("byte range size arithmetic overflowed".to_string())
+        })?;
+        let nearby = next.start >= current.end && gap <= max_gap && combined_size <= max_range_size;
+
+        if overlaps || nearby {
+            current.end = combined_end;
+        } else {
+            coalesced.push(next);
+        }
+    }
+    Ok(coalesced)
+}
+
 /// Byte ranges assigned to one DataFusion physical partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ByteRangePartition {
@@ -232,6 +280,19 @@ mod tests {
             coalesce_byte_ranges(vec![range(0, 100), range(50, 150)], 0, 10).unwrap(),
             vec![range(0, 150)]
         );
+    }
+
+    #[test]
+    fn streams_fallible_sorted_ranges_without_staging() {
+        let ranges = vec![Ok(range(0, 10)), Ok(range(12, 20)), Ok(range(100, 110))];
+        assert_eq!(
+            try_coalesce_sorted_byte_ranges(ranges, 2, 50).unwrap(),
+            vec![range(0, 20), range(100, 110)]
+        );
+        let unsorted = vec![Ok(range(10, 20)), Ok(range(0, 5))];
+        assert!(try_coalesce_sorted_byte_ranges(unsorted, 0, 50).is_err());
+        let failed = vec![Err(DataFusionError::Plan("lookup failed".to_string()))];
+        assert!(try_coalesce_sorted_byte_ranges(failed, 0, 50).is_err());
     }
 
     #[test]

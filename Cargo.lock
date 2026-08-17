@@ -1574,6 +1574,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-bio-format-pgen"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "criterion",
+ "datafusion",
+ "datafusion-bio-format-core",
+ "flate2",
+ "opendal",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "zstd",
+]
+
+[[package]]
 name = "datafusion-bio-format-vcf"
 version = "1.9.1"
 dependencies = [

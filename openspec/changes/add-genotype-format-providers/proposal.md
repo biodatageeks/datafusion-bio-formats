@@ -31,6 +31,9 @@ when a query does not need them.
   ploidy, multiallelic variants, and optional biallelic dosage output.
 - Add a PLINK 2 PGEN/PVAR/PSAM provider supporting standard header modes,
   hardcalls, phase, biallelic dosage, phased dosage, multiallelic hardcalls,
+  PVAR pruning, and LD-dependency-aware partitioning. Require its one-thread
+  biallelic `GT` scan to meet or beat a pinned `snputils`/`pgenlib` baseline
+  before release, then scale through DataFusion-owned partitions.
   PVAR pruning, and LD-dependency-aware partitioning.
 - Add a gated, read-only GRG mutation view with haplotype and fixed-ploidy
   individual output modes, mutation and sample pruning, graph-aware traversal,
@@ -67,6 +70,9 @@ perform automatic format conversion, or add genotype association algorithms.
   - Remote SQLite BGI files require a bounded local cache.
   - Parallel scans do not guarantee global input order without an explicit
     DataFusion sort.
+  - PGEN release qualification requires a reproducible single-thread oracle
+    benchmark and bounded-memory scaling report, not only internal Criterion
+    timings.
 - Licensing:
   - Apache-2.0/MIT Rust libraries may be considered as runtime dependencies.
   - LGPL `pgenlib` and GPL `grgl` are test or behavioral references only unless
