@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, FixedSizeListArray, Float32Array, ListArray, StringArray, StructArray,
-    UInt16Array,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Int8Array, ListArray, StringArray,
+    StructArray, UInt16Array,
 };
 use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::{TableProviderFilterPushDown, col, lit};
@@ -521,6 +521,24 @@ fn float_sample_values(
         .collect()
 }
 
+fn alt_count_values(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    column: usize,
+    row: usize,
+) -> Vec<Option<i8>> {
+    let values = genotype_struct(batch, column)
+        .column_by_name("ALT_COUNT")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(row);
+    let values = values.as_any().downcast_ref::<Int8Array>().unwrap();
+    (0..values.len())
+        .map(|index| (!values.is_null(index)).then(|| values.value(index)))
+        .collect()
+}
+
 fn hds_values(
     batch: &datafusion::arrow::record_batch::RecordBatch,
     column: usize,
@@ -778,6 +796,144 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
         gt_values(&batches[0], 0, 0),
         vec![Some(vec![0, 0]), Some(vec![0, 1]), Some(vec![1, 1]), None]
     );
+}
+
+/// The common-value + difflist records, in the shapes the fused decode has to
+/// handle: every common category, an LD-compressed record whose base is one of
+/// them, and phase tracks in both the implicit and explicit forms.
+fn common_difflist_records() -> (Vec<u8>, Vec<Vec<u8>>, Vec<usize>) {
+    let records: Vec<(u8, Vec<u8>)> = vec![
+        // Common 0. Record 1 uses this as its LD base, so it must decode its
+        // whole main track rather than take the fused path.
+        (0x04, vec![1, 2, 2]),
+        // LD-compressed against record 0, patching sample 1 to missing.
+        (0x02, vec![1, 1, 3]),
+        // Common 2, with a patch to the missing category.
+        (0x06, vec![1, 3, 3]),
+        // Common 3 and an empty difflist: every call missing.
+        (0x07, vec![0]),
+        // Common 0, two patched heterozygotes, implicit phase track that flips
+        // sample 3 — an orientation GT keeps and the other fields discard.
+        (0x14, vec![2, 1, 5, 2, 0b0000_0100]),
+        // The same with an explicit phase-present bitarray, flipping sample 0.
+        (0x14, vec![2, 0, 5, 1, 0b0000_0011, 0b0000_0001]),
+        // Common 2 with one patched heterozygote, flipped.
+        (0x16, vec![1, 0, 1, 0b0000_0010]),
+        // Common 3 with a phase track, so the heterozygote count the track is
+        // sized by comes from the difflist and not from the common category.
+        (0x17, vec![2, 1, 9, 1, 0]),
+        // Common 0 again, this time not an LD base: the dominant record shape in
+        // a plink2 fileset, and the one the fused decode exists for.
+        (0x04, vec![1, 2, 2]),
+    ];
+    let allele_counts = vec![2; records.len()];
+    let (types, bodies) = records.into_iter().unzip();
+    (types, bodies, allele_counts)
+}
+
+#[tokio::test]
+async fn common_value_difflist_records_agree_across_every_genotype_field() {
+    let (types, records, alleles) = common_difflist_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+
+    // GT keeps the hardcall-phase orientation; ALT_COUNT and DS sum the two
+    // alleles, so they take the fused decode that validates the phase track
+    // without applying it. All three must describe the same calls.
+    let expected_gt = vec![
+        vec![
+            Some(vec![0, 0]),
+            Some(vec![0, 0]),
+            Some(vec![1, 1]),
+            Some(vec![0, 0]),
+        ],
+        vec![Some(vec![0, 0]), None, Some(vec![1, 1]), Some(vec![0, 0])],
+        vec![Some(vec![1, 1]), Some(vec![1, 1]), Some(vec![1, 1]), None],
+        vec![None, None, None, None],
+        vec![
+            Some(vec![0, 0]),
+            Some(vec![0, 1]),
+            Some(vec![0, 0]),
+            Some(vec![1, 0]),
+        ],
+        vec![
+            Some(vec![1, 0]),
+            Some(vec![0, 1]),
+            Some(vec![0, 0]),
+            Some(vec![0, 0]),
+        ],
+        vec![
+            Some(vec![1, 0]),
+            Some(vec![1, 1]),
+            Some(vec![1, 1]),
+            Some(vec![1, 1]),
+        ],
+        vec![None, Some(vec![0, 1]), Some(vec![1, 1]), None],
+        vec![
+            Some(vec![0, 0]),
+            Some(vec![0, 0]),
+            Some(vec![1, 1]),
+            Some(vec![0, 0]),
+        ],
+    ];
+    let expected_counts: Vec<Vec<Option<i8>>> = expected_gt
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|call| {
+                    call.as_ref()
+                        .map(|alleles| alleles.iter().filter(|&&allele| allele == 1).count() as i8)
+                })
+                .collect()
+        })
+        .collect();
+
+    for (field, partitions) in [("GT", 1), ("ALT_COUNT", 1), ("ALT_COUNT", 3), ("DS", 1)] {
+        let provider = PgenTableProvider::try_new(
+            path(&fixture.pgen),
+            PgenReadOptions {
+                genotype_fields: Some(vec![field.to_string()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let query_context = context(partitions);
+        query_context
+            .register_table("p", Arc::new(provider))
+            .unwrap();
+        let batches = query_context
+            .sql("SELECT genotypes FROM p ORDER BY start")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1, "{field} at {partitions} partitions");
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), expected_gt.len());
+        for row in 0..batch.num_rows() {
+            let case = format!("{field} at {partitions} partitions, row {row}");
+            match field {
+                "GT" => assert_eq!(gt_values(batch, 0, row), expected_gt[row], "{case}"),
+                "ALT_COUNT" => {
+                    assert_eq!(
+                        alt_count_values(batch, 0, row),
+                        expected_counts[row],
+                        "{case}"
+                    )
+                }
+                "DS" => assert_eq!(
+                    ds_values(batch, 0, row),
+                    expected_counts[row]
+                        .iter()
+                        .map(|count| count.map(f32::from))
+                        .collect::<Vec<_>>(),
+                    "{case}"
+                ),
+                other => panic!("unexpected field {other}"),
+            }
+        }
+    }
 }
 
 #[tokio::test]

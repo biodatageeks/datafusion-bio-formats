@@ -25,9 +25,9 @@ use datafusion_bio_format_core::range_planning::ByteRange;
 use crate::decode::{
     DENSE_ALT_COUNT_QUADS, DENSE_ALT_COUNT_QUADS_PLINK1, DENSE_DOSAGE_QUADS,
     DENSE_DOSAGE_QUADS_PLINK1, DENSE_DOSAGE_VALIDITY, DENSE_DOSAGE_VALIDITY_PLINK1, DecodedRecord,
-    GenotypeProjection, GtDecodeWorkspace, decode_biallelic_gt_into, decode_dense_biallelic_gt,
-    decode_main_track_and_validate, decode_record_and_main, supports_biallelic_gt_fast_path,
-    validated_dense_hardcalls,
+    GenotypeProjection, GtDecodeWorkspace, decode_biallelic_gt_into, decode_common_difflist_into,
+    decode_dense_biallelic_gt, decode_main_track_and_validate, decode_record_and_main,
+    supports_biallelic_gt_fast_path, supports_common_difflist_fast_path, validated_dense_hardcalls,
 };
 use crate::fileset::{PgenFileset, PgenMode};
 
@@ -621,6 +621,23 @@ impl DsBatchBuilder {
         Ok(())
     }
 
+    /// Appends one whole variant from a common category plus its sparse patches.
+    ///
+    /// The fill is a single `resize`, so a sample is written once and never read
+    /// back; `append_codes` on the same record writes a code per sample and then
+    /// reads every one of them again. Patches touch only the samples that differ
+    /// from the common category.
+    fn append_common_difflist(&mut self, common: u8, patches: &[(usize, u8)], sample_count: usize) {
+        let start = self.dosages.len();
+        self.dosages
+            .resize(start + sample_count, dosage_from_code(common));
+        let output = &mut self.dosages[start..];
+        for &(sample, value) in patches {
+            output[sample] = dosage_from_code(value);
+        }
+        append_common_difflist_validity(&mut self.sample_validity, common, patches, sample_count);
+    }
+
     /// Appends one whole variant straight from its packed two-bit hardcalls.
     ///
     /// Walking the bytes here rather than through a per-quad callback keeps the
@@ -790,6 +807,18 @@ impl AltCountBatchBuilder {
         Ok(())
     }
 
+    /// The `ALT_COUNT` counterpart of `DsBatchBuilder::append_common_difflist`.
+    fn append_common_difflist(&mut self, common: u8, patches: &[(usize, u8)], sample_count: usize) {
+        let start = self.counts.len();
+        self.counts
+            .resize(start + sample_count, alt_count_from_code(common));
+        let output = &mut self.counts[start..];
+        for &(sample, value) in patches {
+            output[sample] = alt_count_from_code(value);
+        }
+        append_common_difflist_validity(&mut self.sample_validity, common, patches, sample_count);
+    }
+
     fn append_dense(&mut self, packed: &[u8], sample_count: usize, mode: PgenMode) {
         let (quads, validity_of) = if mode == PgenMode::Plink1 {
             (&DENSE_ALT_COUNT_QUADS_PLINK1, &DENSE_DOSAGE_VALIDITY_PLINK1)
@@ -924,6 +953,31 @@ impl FastFieldBuilder {
         }
     }
 
+    /// Appends one common-value + difflist record to this builder.
+    ///
+    /// Gated by `needs_phase`: the fused decode validates the record's phase
+    /// track but discards its orientation, which `GT` needs.
+    fn append_common_difflist(
+        &mut self,
+        common: u8,
+        patches: &[(usize, u8)],
+        sample_count: usize,
+    ) -> Result<()> {
+        match self {
+            Self::Ds(builder) => {
+                builder.append_common_difflist(common, patches, sample_count);
+                Ok(())
+            }
+            Self::AltCount(builder) => {
+                builder.append_common_difflist(common, patches, sample_count);
+                Ok(())
+            }
+            Self::Gt(_) => Err(DataFusionError::Execution(
+                "PGEN GT projection cannot use the fused common-value decode".to_string(),
+            )),
+        }
+    }
+
     /// Decodes one dense biallelic record directly into this builder.
     ///
     /// `GT` needs the phase pattern, so it goes through the quad callback.
@@ -1004,6 +1058,9 @@ impl FastFieldBuilder {
     }
 }
 
+/// The internal biallelic GT code for a missing call.
+const MISSING_CODE: u8 = 3;
+
 /// ALT allele count for an internal biallelic GT code.
 ///
 /// Codes are 0=`(0,0)`, 1=`(0,1)`, 2=`(1,1)`, 3=missing, 4=`(1,0)`, so the
@@ -1013,6 +1070,44 @@ impl FastFieldBuilder {
 #[inline]
 fn alt_count_from_code(code: u8) -> i8 {
     (code - 3 * u8::from(code >= 3)) as i8
+}
+
+/// ALT dosage for an internal biallelic GT code.
+///
+/// A missing call yields `0.0`; the validity bitmap is what records it, and the
+/// value is never read back.
+#[inline]
+fn dosage_from_code(code: u8) -> f32 {
+    f32::from(alt_count_from_code(code))
+}
+
+/// Validity for a common category plus its sparse patches.
+///
+/// Appends one run for the whole variant and then touches only the samples whose
+/// validity differs from the common category's, so the bitmap work is
+/// proportional to the difflist rather than to the sample count.
+fn append_common_difflist_validity(
+    validity: &mut PackedValidityBuilder,
+    common: u8,
+    patches: &[(usize, u8)],
+    sample_count: usize,
+) {
+    let start = validity.len;
+    if common == MISSING_CODE {
+        validity.append_all_invalid(sample_count);
+        for &(sample, value) in patches {
+            if value != MISSING_CODE {
+                validity.set_valid(start + sample);
+            }
+        }
+    } else {
+        validity.append_all_valid(sample_count);
+        for &(sample, value) in patches {
+            if value == MISSING_CODE {
+                validity.set_invalid(start + sample);
+            }
+        }
+    }
 }
 
 struct PackedValidityBuilder {
@@ -1106,6 +1201,41 @@ impl PackedValidityBuilder {
         if remaining != 0 {
             self.bytes.push((1_u8 << remaining) - 1);
             self.len += remaining;
+        }
+    }
+
+    /// Appends `count` null entries at once.
+    ///
+    /// The mirror of `append_all_valid`, for a variant whose common category is
+    /// the missing one.
+    fn append_all_invalid(&mut self, count: usize) {
+        let len = self.len + count;
+        self.bytes.resize(len.div_ceil(8), 0);
+        self.len = len;
+        self.null_count += count;
+    }
+
+    /// Marks an already-appended entry valid.
+    #[inline]
+    fn set_valid(&mut self, index: usize) {
+        debug_assert!(index < self.len);
+        let mask = 1_u8 << (index % 8);
+        let byte = &mut self.bytes[index / 8];
+        if *byte & mask == 0 {
+            *byte |= mask;
+            self.null_count -= 1;
+        }
+    }
+
+    /// Marks an already-appended entry null.
+    #[inline]
+    fn set_invalid(&mut self, index: usize) {
+        debug_assert!(index < self.len);
+        let mask = 1_u8 << (index % 8);
+        let byte = &mut self.bytes[index / 8];
+        if *byte & mask != 0 {
+            *byte &= !mask;
+            self.null_count += 1;
         }
     }
 
@@ -1224,12 +1354,36 @@ fn execute_single_field(
                     && !retain_main
                     && supports_biallelic_gt_fast_path(record.record_type, allele_count)
                     && (fileset.mode == PgenMode::Plink1 || record.record_type & 7 == 0);
+                // Most of a plink2 fileset is a common category plus a sparse
+                // difflist, which a field needing no phase orientation can build
+                // in one pass. A record that a later LD record uses as its base
+                // is excluded: that needs the full main track anyway.
+                let fused_common_difflist = !batch.needs_phase()
+                    && workspace.has_identity_selection()
+                    && !retain_main
+                    && supports_biallelic_gt_fast_path(record.record_type, allele_count)
+                    && supports_common_difflist_fast_path(fileset.mode, record.record_type);
                 if direct_dense {
                     batch.append_dense_record(
                         payload,
                         fileset.mode,
                         record.record_type,
                         variant_index,
+                        fileset.sample_count,
+                    )?;
+                    batch.finish_variant(variant_index);
+                } else if fused_common_difflist {
+                    let common = decode_common_difflist_into(
+                        &mut workspace,
+                        payload,
+                        fileset.mode,
+                        record.record_type,
+                        variant_index,
+                        fileset.sample_count,
+                    )?;
+                    batch.append_common_difflist(
+                        common,
+                        workspace.patches(),
                         fileset.sample_count,
                     )?;
                     batch.finish_variant(variant_index);
@@ -1744,7 +1898,14 @@ fn build_hds_array(data_type: &DataType, rows: &[DecodedRow]) -> Result<ArrayRef
 
 #[cfg(test)]
 mod tests {
-    use super::{estimate_genotype_bytes, initial_batch_row_capacity};
+    use std::sync::Arc;
+
+    use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+
+    use super::{
+        AltCountBatchBuilder, DsBatchBuilder, PackedValidityBuilder, estimate_genotype_bytes,
+        initial_batch_row_capacity,
+    };
 
     #[test]
     fn bounds_gt_builder_capacity_by_the_soft_byte_budget() {
@@ -1761,6 +1922,149 @@ mod tests {
         assert_eq!(
             initial_batch_row_capacity(8192, 3, 64 * 1024 * 1024, estimated_row_bytes),
             3
+        );
+    }
+
+    fn single_field_schema(field: &str, value_type: DataType) -> SchemaRef {
+        Arc::new(Schema::new(vec![Field::new(
+            "genotypes",
+            DataType::Struct(
+                vec![Field::new(
+                    field,
+                    DataType::List(Arc::new(Field::new("sample", value_type, true))),
+                    false,
+                )]
+                .into(),
+            ),
+            false,
+        )]))
+    }
+
+    /// The per-sample codes a common category and its patches stand for.
+    fn expand(common: u8, patches: &[(usize, u8)], sample_count: usize) -> Vec<u8> {
+        let mut codes = vec![common; sample_count];
+        for &(sample, value) in patches {
+            codes[sample] = value;
+        }
+        codes
+    }
+
+    struct Case {
+        common: u8,
+        patches: Vec<(usize, u8)>,
+        samples: usize,
+    }
+
+    /// Cases chosen to exercise every way the fused fill and the two-pass
+    /// expansion could disagree: each common category, patches to and from the
+    /// missing category, an empty difflist, and sample counts that do and do not
+    /// end on a validity-byte boundary.
+    fn common_difflist_cases() -> Vec<Case> {
+        [
+            (0, vec![], 16),
+            (0, vec![(0, 2), (5, 1), (15, 2)], 16),
+            (0, vec![(3, 3)], 16),
+            (0, vec![(2, 1), (9, 3), (10, 3)], 13),
+            (2, vec![], 13),
+            (2, vec![(0, 3), (12, 0)], 13),
+            (3, vec![], 16),
+            (3, vec![(1, 1), (4, 2), (11, 0)], 13),
+            (3, vec![(0, 3)], 5),
+            (0, vec![(0, 1)], 1),
+        ]
+        .into_iter()
+        .map(|(common, patches, samples)| Case {
+            common,
+            patches,
+            samples,
+        })
+        .collect()
+    }
+
+    /// Arrow reads the bitmap, its length and its null count, so all three have
+    /// to match — a bitmap that agrees while the null count drifts still yields a
+    /// wrong array.
+    fn assert_same_validity(
+        fused: &PackedValidityBuilder,
+        expanded: &PackedValidityBuilder,
+        case: &str,
+    ) {
+        assert_eq!(fused.bytes, expanded.bytes, "{case}");
+        assert_eq!(fused.len, expanded.len, "{case}");
+        assert_eq!(fused.null_count, expanded.null_count, "{case}");
+    }
+
+    #[test]
+    fn fused_dosage_fill_matches_the_two_pass_expansion() {
+        let schema = single_field_schema("DS", DataType::Float32);
+        for case in common_difflist_cases() {
+            let Case {
+                common,
+                patches,
+                samples,
+            } = case;
+            let mut fused = DsBatchBuilder::new(&schema, 4, samples).unwrap();
+            let mut expanded = DsBatchBuilder::new(&schema, 4, samples).unwrap();
+            fused.append_common_difflist(common, &patches, samples);
+            fused.finish_variant(0);
+            expanded
+                .append_codes(0, &expand(common, &patches, samples))
+                .unwrap();
+
+            let case = format!("common {common}, patches {patches:?}, {samples} samples");
+            assert_eq!(fused.dosages, expanded.dosages, "{case}");
+            assert_same_validity(&fused.sample_validity, &expanded.sample_validity, &case);
+        }
+    }
+
+    #[test]
+    fn fused_allele_count_fill_matches_the_two_pass_expansion() {
+        let schema = single_field_schema("ALT_COUNT", DataType::Int8);
+        for case in common_difflist_cases() {
+            let Case {
+                common,
+                patches,
+                samples,
+            } = case;
+            let mut fused = AltCountBatchBuilder::new(&schema, 4, samples).unwrap();
+            let mut expanded = AltCountBatchBuilder::new(&schema, 4, samples).unwrap();
+            fused.append_common_difflist(common, &patches, samples);
+            fused.finish_variant(0);
+            expanded
+                .append_codes(0, &expand(common, &patches, samples))
+                .unwrap();
+
+            let case = format!("common {common}, patches {patches:?}, {samples} samples");
+            assert_eq!(fused.counts, expanded.counts, "{case}");
+            assert_same_validity(&fused.sample_validity, &expanded.sample_validity, &case);
+        }
+    }
+
+    /// Variants are appended back to back, so a fused fill has to land on
+    /// whatever bit offset the previous ones left the validity bitmap at.
+    #[test]
+    fn fused_fill_matches_the_two_pass_expansion_across_consecutive_variants() {
+        let samples = 13;
+        let schema = single_field_schema("DS", DataType::Float32);
+        let mut fused = DsBatchBuilder::new(&schema, 16, samples).unwrap();
+        let mut expanded = DsBatchBuilder::new(&schema, 16, samples).unwrap();
+        for (variant, case) in common_difflist_cases().into_iter().enumerate() {
+            let patches = case
+                .patches
+                .into_iter()
+                .filter(|&(sample, _)| sample < samples)
+                .collect::<Vec<_>>();
+            fused.append_common_difflist(case.common, &patches, samples);
+            fused.finish_variant(variant);
+            expanded
+                .append_codes(variant, &expand(case.common, &patches, samples))
+                .unwrap();
+        }
+        assert_eq!(fused.dosages, expanded.dosages);
+        assert_same_validity(
+            &fused.sample_validity,
+            &expanded.sample_validity,
+            "consecutive variants",
         );
     }
 }

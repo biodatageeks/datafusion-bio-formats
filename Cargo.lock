@@ -1584,6 +1584,7 @@ dependencies = [
  "datafusion",
  "datafusion-bio-format-core",
  "flate2",
+ "futures",
  "opendal",
  "serde",
  "serde_json",
