@@ -13,6 +13,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use datafusion::arrow::array::Array;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_bgen::{BgenOutputMode, BgenReadOptions, BgenTableProvider};
 use futures::StreamExt;
@@ -160,10 +161,50 @@ async fn main() {
             .unwrap();
         let mut rows = 0_usize;
         let mut batches = 0_usize;
+        let digest_enabled = std::env::var("BGEN_DIGEST").is_ok();
+        let mut digest = 0xcbf29ce484222325_u64;
         while let Some(batch) = stream.next().await {
             let batch = batch.unwrap();
             rows += batch.num_rows();
             batches += 1;
+            // FNV over every emitted dosage bit pattern and every ploidy byte,
+            // so two builds can be compared cell for cell rather than by total.
+            if !digest_enabled {
+                continue;
+            }
+            let genotypes = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::StructArray>()
+                .expect("genotypes struct");
+            for child in [0_usize, 1] {
+                let column = genotypes.column(child);
+                let list = column
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::ListArray>()
+                    .expect("list child");
+                let values = list.values();
+                if let Some(floats) = values
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::Float32Array>()
+                {
+                    for index in 0..floats.len() {
+                        let bits = if floats.is_null(index) {
+                            0xffff_ffff_u32
+                        } else {
+                            floats.value(index).to_bits()
+                        };
+                        digest = (digest ^ bits as u64).wrapping_mul(0x100000001b3);
+                    }
+                } else if let Some(bytes) = values
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::UInt8Array>()
+                {
+                    for index in 0..bytes.len() {
+                        digest = (digest ^ bytes.value(index) as u64).wrapping_mul(0x100000001b3);
+                    }
+                }
+            }
         }
         let scan = started.elapsed();
         // The floor above was measured on one thread, so subtracting it only
@@ -172,14 +213,14 @@ async fn main() {
         if target == 1 {
             println!(
                 "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}   \
-                 inflate floor {:>6.3} s, everything else {:>6.3} s",
+                 inflate floor {:>6.3} s, everything else {:>6.3} s, digest {digest:016x}",
                 scan.as_secs_f64(),
                 inflate.as_secs_f64(),
                 scan.as_secs_f64() - inflate.as_secs_f64()
             );
         } else {
             println!(
-                "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}",
+                "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}   digest {digest:016x}",
                 scan.as_secs_f64()
             );
         }
