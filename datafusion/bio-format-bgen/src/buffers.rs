@@ -46,6 +46,13 @@ pub(crate) struct GenotypeBuffers {
     /// Index into `values` where the sample being written began.
     sample_start: usize,
     variant_offsets: Vec<i32>,
+    /// Whether the `PLOIDY` child is projected.
+    ///
+    /// It is one byte per genotype — 2.53 GB on a whole chromosome of this
+    /// cohort — and a scan that does not emit it should not pay to build it.
+    /// The decoders push unconditionally and this decides whether the push
+    /// lands, so the choice lives in one place rather than in every path.
+    collect_ploidy: bool,
     ploidy: Vec<u8>,
     ploidy_offsets: Vec<i32>,
 }
@@ -62,9 +69,10 @@ pub(crate) struct TakenBuffers {
 }
 
 impl GenotypeBuffers {
-    pub(crate) fn new(layout: BufferLayout) -> Self {
+    pub(crate) fn new(layout: BufferLayout, collect_ploidy: bool) -> Self {
         Self {
             layout,
+            collect_ploidy,
             values: Vec::new(),
             sample_offsets: match layout {
                 BufferLayout::NestedProbability => vec![0],
@@ -75,7 +83,7 @@ impl GenotypeBuffers {
             sample_start: 0,
             variant_offsets: vec![0],
             ploidy: Vec::new(),
-            ploidy_offsets: vec![0],
+            ploidy_offsets: if collect_ploidy { vec![0] } else { Vec::new() },
         }
     }
 
@@ -174,7 +182,9 @@ impl GenotypeBuffers {
 
     #[inline]
     pub(crate) fn push_ploidy(&mut self, ploidy: u8) {
-        self.ploidy.push(ploidy);
+        if self.collect_ploidy {
+            self.ploidy.push(ploidy);
+        }
     }
 
     /// Appends `count` samples that all declare `ploidy`.
@@ -183,7 +193,9 @@ impl GenotypeBuffers {
     /// value for every sample, so the column is a run and can be written as
     /// one instead of a byte at a time.
     pub(crate) fn extend_uniform_ploidy(&mut self, ploidy: u8, count: usize) {
-        self.ploidy.resize(self.ploidy.len() + count, ploidy);
+        if self.collect_ploidy {
+            self.ploidy.resize(self.ploidy.len() + count, ploidy);
+        }
     }
 
     /// Closes `count` called samples whose values are already in the buffer.
@@ -210,12 +222,14 @@ impl GenotypeBuffers {
                     "BGEN sample offsets exceed the 32-bit Arrow list limit".to_string(),
                 )
             })?);
-        self.ploidy_offsets
-            .push(i32::try_from(self.ploidy.len()).map_err(|_| {
-                DataFusionError::Execution(
-                    "BGEN ploidy offsets exceed the 32-bit Arrow list limit".to_string(),
-                )
-            })?);
+        if self.collect_ploidy {
+            self.ploidy_offsets
+                .push(i32::try_from(self.ploidy.len()).map_err(|_| {
+                    DataFusionError::Execution(
+                        "BGEN ploidy offsets exceed the 32-bit Arrow list limit".to_string(),
+                    )
+                })?);
+        }
         Ok(())
     }
 
@@ -302,8 +316,16 @@ impl GenotypeBuffers {
         self.variant_offsets = Vec::with_capacity(variant_offsets.len());
         self.variant_offsets.push(0);
         self.ploidy = Vec::with_capacity(ploidy.len());
-        self.ploidy_offsets = Vec::with_capacity(ploidy_offsets.len());
-        self.ploidy_offsets.push(0);
+        // Mirror the constructor: a buffer that does not collect ploidy keeps
+        // its offsets empty rather than carrying a lone sentinel, so `take()`
+        // leaves the same invariant `new()` established.
+        self.ploidy_offsets = if self.collect_ploidy {
+            let mut offsets = Vec::with_capacity(ploidy_offsets.len());
+            offsets.push(0);
+            offsets
+        } else {
+            Vec::new()
+        };
         self.samples = 0;
         self.sample_start = 0;
 
@@ -324,7 +346,7 @@ mod tests {
 
     #[test]
     fn a_fixed_layout_pads_a_short_sample_with_nan_and_writes_no_offsets() {
-        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(4));
+        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(4), true);
         buffers.extend_states([0.5, 0.25, 0.25]);
         buffers.finish_sample().unwrap();
         buffers.push_ploidy(2);
@@ -346,7 +368,7 @@ mod tests {
 
     #[test]
     fn a_fixed_layout_rejects_a_sample_wider_than_its_width() {
-        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(3));
+        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(3), true);
         buffers.extend_states([0.25, 0.25, 0.25, 0.25]);
         let error = buffers.finish_sample().unwrap_err().to_string();
         assert!(
@@ -357,7 +379,7 @@ mod tests {
 
     #[test]
     fn a_fixed_layout_pads_a_missing_sample_to_the_full_width() {
-        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(3));
+        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(3), true);
         buffers.finish_missing_sample().unwrap();
         buffers.extend_states([1.0, 0.0, 0.0]);
         buffers.finish_sample().unwrap();
@@ -384,7 +406,7 @@ mod tests {
 
     #[test]
     fn a_nested_layout_writes_one_offset_per_sample_and_no_padding() {
-        let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability);
+        let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability, true);
         buffers.extend_states([0.5, 0.5]);
         buffers.finish_sample().unwrap();
         buffers.finish_missing_sample().unwrap();
@@ -407,7 +429,7 @@ mod tests {
 
     #[test]
     fn validity_appears_only_once_a_sample_is_missing() {
-        let mut buffers = GenotypeBuffers::new(BufferLayout::Dosage);
+        let mut buffers = GenotypeBuffers::new(BufferLayout::Dosage, true);
         for value in [0.0_f32, 1.0, 2.0] {
             buffers.push_state(value);
             buffers.finish_sample().unwrap();
@@ -417,7 +439,7 @@ mod tests {
             "a fully called cohort must write no validity bytes at all"
         );
 
-        let mut buffers = GenotypeBuffers::new(BufferLayout::Dosage);
+        let mut buffers = GenotypeBuffers::new(BufferLayout::Dosage, true);
         buffers.push_state(0.0);
         buffers.finish_sample().unwrap();
         buffers.finish_missing_sample().unwrap();
@@ -437,7 +459,7 @@ mod tests {
 
     #[test]
     fn rollback_restores_every_buffer_to_its_mark() {
-        let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability);
+        let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability, true);
         buffers.extend_states([1.0, 0.0]);
         buffers.finish_sample().unwrap();
         buffers.push_ploidy(2);
@@ -458,7 +480,7 @@ mod tests {
 
     #[test]
     fn take_resets_the_buffers_and_keeps_their_capacity() {
-        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(2));
+        let mut buffers = GenotypeBuffers::new(BufferLayout::FixedProbability(2), true);
         buffers.extend_states([0.5, 0.5]);
         buffers.finish_sample().unwrap();
         buffers.push_ploidy(2);

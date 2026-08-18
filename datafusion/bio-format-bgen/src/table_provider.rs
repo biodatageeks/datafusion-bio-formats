@@ -16,7 +16,7 @@ use datafusion_bio_format_core::genotype::{
     CoordinateSystem, GENOTYPE_COUNTED_ALLELE_KEY, GENOTYPE_OUTPUT_MODE_KEY,
     GENOTYPE_SOURCE_BIT_PRECISION_KEY, GENOTYPE_STATE_ORDER_KEY, GenotypeMetric,
     GenotypeScanMetrics, MissingSamplePolicy, PredicateGuarantee, can_push_limit_below_filters,
-    resolve_samples,
+    resolve_genotype_fields, resolve_samples,
 };
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use datafusion_bio_format_core::range_planning::{
@@ -117,6 +117,14 @@ pub struct BgenReadOptions {
     pub bgi_path: Option<String>,
     /// Requested sample names in output order.
     pub samples: Option<Vec<String>>,
+    /// Children of the `genotypes` struct to emit, in output order.
+    ///
+    /// `None` emits all of them, which is what a caller that does not know the
+    /// option gets. The available names are the output mode's value child —
+    /// `DS` for dosage, `GP` for probability — and `PLOIDY`. `PLOIDY` is one
+    /// byte per genotype, so a caller that only wants dosages can ask for
+    /// `["DS"]` and not pay for it.
+    pub genotype_fields: Option<Vec<String>>,
     /// Behavior for absent requested samples.
     pub missing_sample_policy: MissingSamplePolicy,
     /// Output coordinate presentation.
@@ -183,6 +191,7 @@ impl Default for BgenReadOptions {
             sample_path: None,
             bgi_path: None,
             samples: None,
+            genotype_fields: None,
             missing_sample_policy: MissingSamplePolicy::Error,
             coordinate_system: CoordinateSystem::ZeroBasedHalfOpen,
             object_storage_options: None,
@@ -602,6 +611,11 @@ impl TableProvider for BgenTableProvider {
 }
 
 fn validate_options(options: &BgenReadOptions) -> Result<()> {
+    // Before the object is opened. Resolving the selection needs only the read
+    // options, and a bad one used to surface from `build_schema` — after the
+    // header, the catalog, and on a remote file without a usable index a read
+    // of the whole object, all to report a configuration mistake.
+    genotype_children(options)?;
     for (name, value) in [
         ("max_sample_block_bytes", options.max_sample_block_bytes),
         ("max_header_bytes", options.max_header_bytes),
@@ -761,7 +775,7 @@ async fn probe_probability_width(
     let variant = &variant;
     let mut scratch = DecodeScratch::new();
     // The probe selects no sample, so nothing is written into these.
-    let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability);
+    let mut buffers = GenotypeBuffers::new(BufferLayout::NestedProbability, false);
     let decoded = decode_variant(
         path,
         variant,
@@ -808,6 +822,40 @@ fn fixed_list_width(width: usize) -> Result<i32> {
              use the nested probability layout"
         ))
     })
+}
+
+/// The `genotypes` struct children this scan emits, in output order.
+///
+/// The value child's name follows the output mode, so the available set is
+/// resolved per fileset rather than fixed.
+pub(crate) fn genotype_children(options: &BgenReadOptions) -> Result<Vec<String>> {
+    let value_child = match options.output_mode {
+        BgenOutputMode::Dosage => "DS",
+        BgenOutputMode::Probability => "GP",
+    };
+    let available = vec![value_child.to_string(), "PLOIDY".to_string()];
+    let names = resolve_genotype_fields(&available, options.genotype_fields.as_deref())?
+        .names()
+        .to_vec();
+    if names.is_empty() {
+        return Err(DataFusionError::Plan(
+            "BGEN genotype_fields selected no children; omit the genotypes column from the \
+             projection instead"
+                .to_string(),
+        ));
+    }
+    // A projection must keep the value child. Without it the decoder would still
+    // reconstruct every genotype — the block cannot be validated otherwise — for
+    // an array that is then discarded, while the batch sizer and `GenotypeBytes`
+    // counted bytes that were never emitted. Serving that badly is worse than
+    // refusing it.
+    if names.iter().all(|name| name == "PLOIDY") {
+        return Err(DataFusionError::Plan(format!(
+            "BGEN genotype_fields must include {value_child}; a projection of PLOIDY alone \
+             is not supported"
+        )));
+    }
+    Ok(names)
 }
 
 fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
@@ -864,12 +912,18 @@ fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
             (GENOTYPE_OUTPUT_MODE_KEY.to_string(), "dosage".to_string()),
         ])),
     };
-    let genotypes = Field::new(
-        "genotypes",
-        DataType::Struct(Fields::from(vec![genotype_child, ploidy])),
-        false,
-    )
-    .with_metadata(sample_metadata);
+    let children = genotype_children(&fileset.options)?
+        .into_iter()
+        .map(|name| {
+            if name == "PLOIDY" {
+                ploidy.clone()
+            } else {
+                genotype_child.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let genotypes = Field::new("genotypes", DataType::Struct(Fields::from(children)), false)
+        .with_metadata(sample_metadata);
     let fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt64, false),

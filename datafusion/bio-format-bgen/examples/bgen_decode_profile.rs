@@ -9,6 +9,10 @@
 //! Usage:
 //!   cargo run --release -p datafusion-bio-format-bgen --example bgen_decode_profile \
 //!     -- <path.bgen> [partitions...]
+//!
+//! The floor phase reads the whole file into memory to walk its records, which
+//! is fine for a chromosome — chr22 is 160 MB — and is not for a whole-genome
+//! BGEN. Point it at one chromosome at a time.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -44,14 +48,12 @@ async fn main() {
         bytes.len() / 1_000_000
     );
     assert_eq!(layout, 2, "this probe only walks layout 2");
-    // Layout 2 defines three compression modes and the reader supports all of
-    // them; this probe only inflates. Dispatching on the flag lands one commit
-    // later in the stack, and until then a clear refusal beats handing a zstd
-    // or uncompressed block to libdeflate and reporting its complaint.
-    assert_eq!(
-        compression, 1,
-        "this probe only handles zlib (flag 1); see perf/bgen-projectable-ploidy \
-         for full dispatch"
+    // Layout 2 defines three compression modes and this probe handles all of
+    // them, so only an out-of-range flag is refused. The zlib-only assertion the
+    // previous commit carried is superseded by the dispatch below.
+    assert!(
+        compression <= 2,
+        "unknown BGEN compression flag {compression}"
     );
 
     // --- Phase A: walk the records and decompress every payload ---
@@ -98,23 +100,38 @@ async fn main() {
         if out.len() < expanded {
             out.resize(expanded, 0);
         }
-        let written = decompressor
-            .zlib_decompress(
-                &bytes[data_start..data_start + data_len],
-                &mut out[..expanded],
-            )
-            .expect("inflate");
-        // Touch the output so the decompression cannot be optimized away.
-        checksum += written as u64 + out[written - 1] as u64;
+        let payload = &bytes[data_start..data_start + data_len];
+        let written = match compression {
+            // Nothing to decompress; copying the block is what a reader still
+            // does to hand it to the decoder.
+            0 => {
+                out[..expanded].copy_from_slice(payload);
+                expanded
+            }
+            1 => decompressor
+                .zlib_decompress(payload, &mut out[..expanded])
+                .expect("zlib inflate"),
+            _ => zstd::bulk::decompress_to_buffer(payload, &mut out[..expanded])
+                .expect("zstd decompress"),
+        };
+        // Touch the output so the decompression cannot be optimized away. A
+        // zero-length block is pathological but representable, and indexing
+        // `written - 1` would panic on it.
+        checksum += written as u64 + out[..written].last().copied().unwrap_or(0) as u64;
     }
     let inflate = inflate_started.elapsed();
 
+    let codec = match compression {
+        0 => "copy (none)",
+        1 => "zlib inflate",
+        _ => "zstd decode",
+    };
     println!(
         "\nrecord walk      {:>8.3} s   ({variant_count} records)",
         walk.as_secs_f64()
     );
     println!(
-        "zlib inflate     {:>8.3} s   {:.2} GB out from {:.2} GB in, {:.2} GB/s produced  [checksum {checksum}]",
+        "{codec:<16} {:>8.3} s   {:.2} GB out from {:.2} GB in, {:.2} GB/s produced  [checksum {checksum}]",
         inflate.as_secs_f64(),
         decompressed_total as f64 / 1e9,
         compressed_total as f64 / 1e9,
@@ -142,6 +159,13 @@ async fn main() {
             path.clone(),
             BgenReadOptions {
                 output_mode: BgenOutputMode::Dosage,
+                // `BGEN_PLOIDY=1` keeps the PLOIDY child, to compare what a
+                // scan that emits it costs against one that does not.
+                genotype_fields: if std::env::var("BGEN_PLOIDY").is_ok() {
+                    None
+                } else {
+                    Some(vec!["DS".to_string()])
+                },
                 ..Default::default()
             },
         )
@@ -177,7 +201,9 @@ async fn main() {
                 .as_any()
                 .downcast_ref::<datafusion::arrow::array::StructArray>()
                 .expect("genotypes struct");
-            for child in [0_usize, 1] {
+            // However many children the projection kept: this defaults to DS
+            // alone, so a fixed [0, 1] would index past the struct.
+            for child in 0..genotypes.num_columns() {
                 let column = genotypes.column(child);
                 let list = column
                     .as_any()
@@ -213,14 +239,20 @@ async fn main() {
         if target == 1 {
             println!(
                 "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}   \
-                 inflate floor {:>6.3} s, everything else {:>6.3} s, digest {digest:016x}",
+                 inflate floor {:>6.3} s, everything else {:>6.3} s, digest {}",
                 scan.as_secs_f64(),
                 inflate.as_secs_f64(),
-                scan.as_secs_f64() - inflate.as_secs_f64()
+                scan.as_secs_f64() - inflate.as_secs_f64(),
+                // Printing the untouched seed would read as a real digest.
+                if digest_enabled {
+                    format!("{digest:016x}")
+                } else {
+                    "disabled".to_string()
+                }
             );
         } else {
             println!(
-                "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}   digest {digest:016x}",
+                "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}",
                 scan.as_secs_f64()
             );
         }

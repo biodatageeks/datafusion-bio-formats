@@ -956,6 +956,164 @@ async fn whole_cohort_dosage_matches_the_per_sample_decode() {
 }
 
 #[tokio::test]
+async fn the_whole_cohort_fill_bails_to_the_per_sample_error() {
+    // The bulk fill is only valid while every unphased pair sums within the
+    // denominator, so it pre-checks and declines otherwise. The decline has to
+    // land on the per-sample path's error rather than on a silently different
+    // answer, and that hand-off is the one branch of the fill without its own
+    // test.
+    let variants = vec![Variant {
+        id: "over",
+        rsid: "rsover",
+        chrom: "1",
+        position: 10,
+        alleles: vec!["A", "C"],
+        phased: false,
+        bits: 8,
+        samples: vec![
+            sample(2, false, &[255, 0]),
+            sample(2, false, &[0, 255]),
+            // 200 + 200 exceeds the 8-bit denominator, which no valid file
+            // stores and the fill must not quietly accept.
+            sample(2, false, &[200, 200]),
+        ],
+    }];
+    let fixture = fixture_with_variants(Codec::Zlib, true, &variants);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect_err("a stored sum above the denominator must not decode")
+        .to_string();
+    assert!(
+        error.contains("exceeds denominator"),
+        "the fill must decline to the per-sample diagnosis: {error}"
+    );
+}
+
+#[tokio::test]
+async fn genotype_fields_select_the_struct_children() {
+    // PLOIDY is a byte per genotype — on a whole chromosome of this cohort it is
+    // 2.53 GB the caller of a dosage read never asked for — and it is held alive
+    // as long as the values are, because a NumPy view of the result keeps the
+    // whole Arrow struct. A scan that does not emit it must not build it.
+    let fixture = fixture_with_variants(Codec::Zlib, true, &fully_called_variants());
+
+    // Default: both children, in the order the struct declares them.
+    let all = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: Vec<String> = match all
+        .schema()
+        .field_with_name("genotypes")
+        .unwrap()
+        .data_type()
+    {
+        datafusion::arrow::datatypes::DataType::Struct(fields) => {
+            fields.iter().map(|f| f.name().to_string()).collect()
+        }
+        other => panic!("genotypes is {other:?}"),
+    };
+    assert_eq!(names, vec!["DS".to_string(), "PLOIDY".to_string()]);
+
+    // DS only: the struct has one child and the values are unchanged.
+    let ds_only = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            genotype_fields: Some(vec!["DS".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: Vec<String> = match ds_only
+        .schema()
+        .field_with_name("genotypes")
+        .unwrap()
+        .data_type()
+    {
+        datafusion::arrow::datatypes::DataType::Struct(fields) => {
+            fields.iter().map(|f| f.name().to_string()).collect()
+        }
+        other => panic!("genotypes is {other:?}"),
+    };
+    assert_eq!(names, vec!["DS".to_string()]);
+
+    let both_context = context(1024);
+    both_context.register_table("all", Arc::new(all)).unwrap();
+    both_context
+        .register_table("ds", Arc::new(ds_only))
+        .unwrap();
+    let with_ploidy = both_context
+        .sql("SELECT genotypes FROM all ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let without = both_context
+        .sql("SELECT genotypes FROM ds ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    for row in 0..2 {
+        assert_eq!(
+            dosage_values(&with_ploidy[0], 0, row),
+            dosage_values(&without[0], 0, row),
+            "row {row}"
+        );
+    }
+    // Deselecting it removes the child rather than emptying it: a consumer that
+    // asks for PLOIDY on this scan gets a schema error, not a null column.
+    let struct_array = without[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert_eq!(struct_array.num_columns(), 1);
+    assert!(struct_array.column_by_name("PLOIDY").is_none());
+
+    // PLOIDY without the value child is rejected; see
+    // `a_projection_without_the_value_child_is_rejected`.
+
+    // An unknown child is rejected at plan time rather than silently ignored.
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            genotype_fields: Some(vec!["GP".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("GP"), "{error}");
+}
+
+#[tokio::test]
 async fn decodes_layout1_uncompressed_and_zlib() {
     for codec in [Codec::None, Codec::Zlib] {
         let dir = TempDir::new().unwrap();
@@ -2440,6 +2598,114 @@ async fn a_large_in_list_does_not_fail_index_lookup() {
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         0
     );
+}
+
+#[tokio::test]
+async fn fixed_probability_layout_survives_ploidy_being_projected_first() {
+    // The fixed layout is detected from the schema, and the detection used to
+    // look at the struct's first child. Ordering PLOIDY ahead of GP made it read
+    // a `List<UInt8>` where it expected a `FixedSizeList`, conclude the batch
+    // was nested, and build the values from a `sample_offsets` buffer the fixed
+    // layout never fills.
+    let fixture = fixture(Codec::Zlib, true);
+    let context = context(1024);
+
+    let ordered = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            genotype_fields: Some(vec!["PLOIDY".to_string(), "GP".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let schema = TableProvider::schema(&ordered);
+    let genotypes = schema.field_with_name("genotypes").unwrap();
+    assert!(
+        format!("{:?}", genotypes.data_type()).contains("FixedSizeList"),
+        "the fixed width must survive the reordering: {:?}",
+        genotypes.data_type()
+    );
+    context.register_table("o", Arc::new(ordered)).unwrap();
+    let rows = context
+        .sql("SELECT genotypes FROM o WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a reordered fixed-layout projection must still decode");
+    assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    let struct_array = rows[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let names: Vec<&str> = struct_array
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect();
+    assert_eq!(names, vec!["PLOIDY", "GP"]);
+}
+
+#[tokio::test]
+async fn an_empty_genotype_selection_says_so() {
+    // `Some(vec![])` is a selection of nothing, not a selection of PLOIDY, and
+    // it used to be reported with the PLOIDY-alone message because an `all`
+    // predicate is vacuously true on an empty list.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            genotype_fields: Some(Vec::new()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("selected no children"), "{error}");
+}
+
+#[tokio::test]
+async fn genotype_fields_are_validated_before_the_file_is_opened() {
+    // The selection needs only the read options, so a bad one must not cost a
+    // header read, a catalog build, or — on a remote file without a usable
+    // index — a read of the whole object first.
+    let error = BgenTableProvider::try_new(
+        "/nonexistent/never-opened.bgen",
+        BgenReadOptions {
+            genotype_fields: Some(vec!["NOPE".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("NOPE"),
+        "the field error must arrive before the open error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_projection_without_the_value_child_is_rejected() {
+    // PLOIDY alone would leave the decoder reconstructing every probability for
+    // an array that is then discarded, and the batch sizer counting bytes that
+    // are never emitted. Rejecting it is better than serving it badly.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            genotype_fields: Some(vec!["PLOIDY".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("GP"), "{error}");
 }
 
 #[tokio::test]
