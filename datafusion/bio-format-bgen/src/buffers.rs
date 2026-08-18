@@ -185,10 +185,13 @@ impl GenotypeBuffers {
         &self.values
     }
 
-    /// Drops everything written, keeping the allocations.
+    /// Drops everything a variant wrote, keeping the allocations.
     ///
     /// The matrix path decodes one variant at a time and moves its row into the
-    /// caller's array, so the buffer is a scratch pad rather than a batch.
+    /// caller's array, so the buffer is a scratch pad rather than a batch. Row
+    /// bookkeeping — `variant_offsets` and the ploidy offsets — is untouched,
+    /// because that path never calls [`Self::finish_variant`]; this resets what
+    /// a variant writes, not the batch it would have belonged to.
     pub(crate) fn reset(&mut self) {
         self.values.clear();
         self.sample_offsets.clear();

@@ -22,7 +22,7 @@ use datafusion::common::{DataFusionError, Result};
 use crate::buffers::{BufferLayout, GenotypeBuffers};
 use crate::catalog::resolve_variant;
 use crate::decode::{DecodeScratch, decode_variant};
-use crate::physical_exec::{BgenPartition, slice_from_range};
+use crate::physical_exec::{BgenReadRange, slice_from_range};
 use crate::table_provider::{
     BgenFileset, BgenOutputMode, BgenReadOptions, BgenTableProvider, plan_payload_partitions,
 };
@@ -75,13 +75,19 @@ impl GenotypeMatrixReader {
     }
 
     /// The variant start positions, in row order.
+    ///
+    /// These are the `start` the scan emits, which the configured coordinate
+    /// system has already adjusted — not the raw one-based BGEN position, which
+    /// would label every row one base later than the DataFrame path under the
+    /// zero-based default. Allocated per call; a caller that wants them once
+    /// should keep the result rather than ask again.
     pub fn positions(&self) -> Vec<u64> {
         self.provider
             .fileset()
             .catalog
             .variants
             .iter()
-            .map(|variant| variant.position as u64)
+            .map(|variant| variant.start)
             .collect()
     }
 
@@ -146,7 +152,11 @@ impl GenotypeMatrixReader {
                 .flat_map(|range| range.variants.iter())
                 .copied()
                 .min()
-                .unwrap_or(cursor);
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "BGEN matrix partition reports rows but names no variants".to_string(),
+                    )
+                })?;
             if first != cursor {
                 return Err(DataFusionError::Execution(
                     "BGEN matrix partitions are not contiguous in variant order".to_string(),
@@ -162,60 +172,93 @@ impl GenotypeMatrixReader {
             )));
         }
 
-        // The ranges are fetched here because the object source is async;
-        // decoding is what runs in parallel afterwards. Input is bounded by the
-        // range planner rather than by the file.
-        let mut loaded = Vec::with_capacity(partitions.len());
-        for partition in &partitions {
-            let mut ranges = Vec::with_capacity(partition.ranges.len());
-            for range in &partition.ranges {
-                let bytes = fileset
-                    .source
-                    .read_range(&fileset.path, range.range.start..range.range.end)
-                    .await?;
-                ranges.push((range.range, bytes.to_vec()));
-            }
-            loaded.push(ranges);
-        }
-
-        let mut rest = values;
+        // Precomputed so a range carries no state from the one before it: a
+        // range's rows are its variants, in order, so where each starts is
+        // known before any of them is read. That is what lets the input be
+        // fetched a round at a time rather than all at once.
         let mut slices = Vec::with_capacity(partitions.len());
+        let mut rest = values;
         for rows in &owned {
             let (head, tail) = rest.split_at_mut(rows * shape.samples);
             slices.push(head);
             rest = tail;
         }
-
-        std::thread::scope(|scope| {
-            let handles = partitions
-                .iter()
-                .zip(loaded.iter())
-                .zip(slices)
-                .map(|((partition, ranges), slice)| {
-                    let fileset = Arc::clone(&fileset);
-                    let options = self.options.clone();
-                    scope.spawn(move || {
-                        decode_partition(
-                            &fileset,
-                            &options,
-                            partition,
-                            ranges,
-                            slice,
-                            shape.samples,
-                            missing,
-                        )
+        let starts = partitions
+            .iter()
+            .map(|partition| {
+                partition
+                    .ranges
+                    .iter()
+                    .scan(0_usize, |row, range| {
+                        let start = *row;
+                        *row += range.variants.len();
+                        Some(start)
                     })
-                })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // One range per partition per round. Buffering every range of every
+        // partition first would hold the whole compressed file — and on a
+        // sample subset the destination is the small half — so resident input
+        // is bounded by the range planner instead.
+        let rounds = partitions
+            .iter()
+            .map(|partition| partition.ranges.len())
+            .max()
+            .unwrap_or(0);
+        for round in 0..rounds {
+            // `Bytes` is Arc-backed, so a range is shared with the decoder
+            // rather than copied out of the read.
+            let mut loaded: Vec<Option<(&BgenReadRange, bytes::Bytes)>> =
+                Vec::with_capacity(partitions.len());
+            for partition in &partitions {
+                match partition.ranges.get(round) {
+                    Some(planned) => {
+                        let bytes = fileset
+                            .source
+                            .read_range(&fileset.path, planned.range.start..planned.range.end)
+                            .await?;
+                        loaded.push(Some((planned, bytes)));
+                    }
+                    None => loaded.push(None),
+                }
+            }
+            let borrowed = loaded
+                .iter()
+                .map(|slot| slot.as_ref().map(|(planned, bytes)| (*planned, &bytes[..])))
                 .collect::<Vec<_>>();
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle.join().map_err(|_| {
-                        DataFusionError::Execution("BGEN matrix decoder panicked".to_string())
-                    })?
-                })
-                .collect::<Result<Vec<_>>>()
-        })?;
+
+            std::thread::scope(|scope| {
+                let handles = borrowed
+                    .iter()
+                    .zip(slices.iter_mut())
+                    .zip(&starts)
+                    .filter_map(|((slot, slice), partition_starts)| {
+                        slot.map(|(planned, bytes)| {
+                            let fileset = Arc::clone(&fileset);
+                            let options = self.options.clone();
+                            let start = partition_starts[round];
+                            let samples = shape.samples;
+                            scope.spawn(move || {
+                                decode_range(
+                                    &fileset, &options, planned, bytes, slice, samples, missing,
+                                    start,
+                                )
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().map_err(|_| {
+                            DataFusionError::Execution("BGEN matrix decoder panicked".to_string())
+                        })?
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })?;
+        }
         Ok(shape)
     }
 }
@@ -242,80 +285,81 @@ pub async fn read_genotype_matrix(
     Ok((shape, positions))
 }
 
-type LoadedRanges = Vec<(
-    datafusion_bio_format_core::range_planning::ByteRange,
-    Vec<u8>,
-)>;
-
-/// Decodes one partition's variants into its own slice of the matrix.
-fn decode_partition(
+/// Decodes one byte range's variants into the partition's slice of the matrix.
+///
+/// Carries nothing between calls: `start` is where this range's rows begin, and
+/// a range's variants are contiguous rows in order, so the input can be fetched
+/// a round at a time without a resumable decoder.
+#[allow(clippy::too_many_arguments)]
+fn decode_range(
     fileset: &BgenFileset,
     options: &BgenReadOptions,
-    partition: &BgenPartition,
-    ranges: &LoadedRanges,
+    planned: &BgenReadRange,
+    bytes: &[u8],
     values: &mut [f32],
     samples: usize,
     missing: f32,
+    start: usize,
 ) -> Result<()> {
     let selected_samples = fileset.selected_samples.source_indices();
     let mut scratch = DecodeScratch::new();
     // Dosage layout, no PLOIDY: this path emits one value per sample and
     // nothing else, so the buffer holds exactly one row at a time.
     let mut buffers = GenotypeBuffers::new(BufferLayout::Dosage, false);
-    let mut row = 0_usize;
 
-    for ((range, bytes), planned) in ranges.iter().zip(&partition.ranges) {
-        for &variant_index in &planned.variants {
-            let catalogued = &fileset.catalog.variants[variant_index];
-            let span = catalogued.scan_span();
-            let record = slice_from_range(bytes, range.start, span, variant_index)?;
-            let owned;
-            let resolved = if catalogued.is_resolved() {
-                catalogued
-            } else {
-                owned =
-                    resolve_variant(&fileset.path, catalogued, record, &fileset.header, options)?;
-                &owned
-            };
-            let payload_span = resolved.payload_span().ok_or_else(|| {
-                DataFusionError::Internal(
-                    "BGEN variant stayed unresolved after being parsed".to_string(),
-                )
+    for (offset, &variant_index) in planned.variants.iter().enumerate() {
+        let catalogued = &fileset.catalog.variants[variant_index];
+        let record = slice_from_range(
+            bytes,
+            planned.range.start,
+            catalogued.scan_span(),
+            variant_index,
+        )?;
+        let owned;
+        let resolved = if catalogued.is_resolved() {
+            catalogued
+        } else {
+            owned = resolve_variant(&fileset.path, catalogued, record, &fileset.header, options)?;
+            &owned
+        };
+        let payload_span = resolved.payload_span().ok_or_else(|| {
+            DataFusionError::Internal(
+                "BGEN variant stayed unresolved after being parsed".to_string(),
+            )
+        })?;
+        let payload = slice_from_range(bytes, planned.range.start, payload_span, variant_index)?;
+
+        buffers.reset();
+        decode_variant(
+            &fileset.path,
+            resolved,
+            &fileset.header,
+            payload,
+            selected_samples,
+            options,
+            &mut scratch,
+            &mut buffers,
+        )?;
+
+        let row = start + offset;
+        let out = values
+            .get_mut(row * samples..(row + 1) * samples)
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "BGEN variant {variant_index} row {row} is outside the matrix"
+                ))
             })?;
-            let payload = slice_from_range(bytes, range.start, payload_span, variant_index)?;
-
-            buffers.reset();
-            decode_variant(
-                &fileset.path,
-                resolved,
-                &fileset.header,
-                payload,
-                selected_samples,
-                options,
-                &mut scratch,
-                &mut buffers,
-            )?;
-
-            let out = values
-                .get_mut(row * samples..(row + 1) * samples)
-                .ok_or_else(|| {
-                    DataFusionError::Execution(format!(
-                        "BGEN variant {variant_index} row {row} is outside the matrix"
-                    ))
-                })?;
-            let decoded = buffers.values();
-            if decoded.len() != samples {
-                return Err(DataFusionError::Execution(format!(
-                    "BGEN variant {variant_index} decoded {} values; expected {samples}",
-                    decoded.len()
-                )));
-            }
-            // A missing dosage is NaN in the buffer; the caller chooses what it
-            // wants to see instead.
-            for (slot, &value) in out.iter_mut().zip(decoded) {
-                *slot = if value.is_nan() { missing } else { value };
-            }
-            row += 1;
+        let decoded = buffers.values();
+        if decoded.len() != samples {
+            return Err(DataFusionError::Execution(format!(
+                "BGEN variant {variant_index} decoded {} values; expected {samples}",
+                decoded.len()
+            )));
+        }
+        // A missing dosage is NaN in the buffer; the caller chooses what it
+        // wants to see instead.
+        for (slot, &value) in out.iter_mut().zip(decoded) {
+            *slot = if value.is_nan() { missing } else { value };
         }
     }
     Ok(())

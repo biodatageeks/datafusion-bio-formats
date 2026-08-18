@@ -3459,3 +3459,50 @@ async fn the_matrix_reader_matches_the_scan_cell_for_cell() {
         }
     }
 }
+
+#[tokio::test]
+async fn the_matrix_positions_follow_the_coordinate_system() {
+    // The matrix labels its rows, and those labels have to be the `start` the
+    // scan emits. Reading the raw one-based BGEN position instead puts every
+    // row one base later than the DataFrame path under a zero-based read, which
+    // no assertion about values would catch.
+    let fixture = fixture_with_variants(Codec::Zlib, true, &fully_called_variants());
+    for zero_based in [false, true] {
+        let options = BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            genotype_fields: Some(vec!["DS".to_string()]),
+            coordinate_system: if zero_based {
+                datafusion_bio_format_core::genotype::CoordinateSystem::ZeroBasedHalfOpen
+            } else {
+                datafusion_bio_format_core::genotype::CoordinateSystem::OneBasedClosed
+            },
+            ..Default::default()
+        };
+        let provider = BgenTableProvider::try_new(path(&fixture.bgen), options.clone())
+            .await
+            .unwrap();
+        let context = context(1024);
+        context.register_table("b", Arc::new(provider)).unwrap();
+        let batches = context
+            .sql("SELECT start FROM b ORDER BY start")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let scanned = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+            .unwrap();
+        let scanned: Vec<u64> = (0..scanned.len()).map(|i| scanned.value(i)).collect();
+
+        let reader = datafusion_bio_format_bgen::matrix::GenotypeMatrixReader::open(
+            path(&fixture.bgen),
+            options,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reader.positions(), scanned, "zero_based {zero_based}");
+    }
+}
