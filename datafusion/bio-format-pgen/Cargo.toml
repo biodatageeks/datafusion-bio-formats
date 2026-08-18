@@ -16,6 +16,7 @@ bytes.workspace = true
 datafusion.workspace = true
 datafusion-bio-format-core = { path = "../bio-format-core" }
 flate2.workspace = true
+futures.workspace = true
 opendal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,7 +25,6 @@ zstd = "0.13"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
-futures.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["fs", "io-util", "net", "sync"] }
 

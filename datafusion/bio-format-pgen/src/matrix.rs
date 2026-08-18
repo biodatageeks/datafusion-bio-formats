@@ -15,7 +15,8 @@
 //! its position in the selection, so partitions own disjoint row ranges and need
 //! no coordination to write them.
 
-use std::ops::Range;
+use std::collections::HashSet;
+use std::iter::Peekable;
 use std::sync::Arc;
 
 use datafusion::common::{DataFusionError, Result};
@@ -27,7 +28,7 @@ use crate::decode::{
     supports_common_difflist_fast_path, validated_dense_hardcalls,
 };
 use crate::fileset::{PgenFileset, PgenMode};
-use crate::physical_exec::{PgenPartition, alt_count_from_code, record_payload};
+use crate::physical_exec::{MergedIndices, PgenPartition, alt_count_from_code, record_payload};
 use crate::table_provider::{PgenReadOptions, plan_payload_partitions};
 
 /// The internal code for a missing call.
@@ -219,31 +220,16 @@ async fn decode_matrix(
     let partitions =
         plan_payload_partitions(selection, fileset, threads, max_range_gap, max_range_bytes)?;
 
-    // Byte ranges are fetched here, in order, because the object source is
-    // async; decoding is what runs in parallel afterwards.
-    let mut loaded = Vec::with_capacity(partitions.len());
-    let mut reader = fileset.source.range_reader(&fileset.pgen_path).await?;
-    for partition in &partitions {
-        let mut ranges = Vec::with_capacity(partition.ranges.len());
-        for range in partition.ranges.iter().copied() {
-            let bytes = reader.read_range(range.start..range.end).await?;
-            ranges.push((range, bytes.to_vec()));
-        }
-        loaded.push(ranges);
-    }
-
     // Partitions own contiguous, ascending row ranges, so the destination
     // splits into disjoint pieces and the workers never share a byte.
     let mut cursor = 0;
-    let mut work = Vec::with_capacity(partitions.len());
-    for (partition, ranges) in partitions.iter().zip(loaded) {
+    for partition in &partitions {
         if partition.owned.start != cursor {
             return Err(DataFusionError::Execution(
                 "PGEN matrix partitions are not contiguous in variant order".to_string(),
             ));
         }
         cursor = partition.owned.end;
-        work.push((partition, ranges, partition.owned.clone()));
     }
     if cursor != variants {
         return Err(DataFusionError::Execution(format!(
@@ -254,10 +240,10 @@ async fn decode_matrix(
     match &mut destination {
         MatrixData::AltCount { values, missing } => {
             let missing = *missing;
-            decode_into(
+            decode_rounds(
                 fileset,
                 field,
-                &work,
+                &partitions,
                 values,
                 samples,
                 move |code| {
@@ -270,14 +256,15 @@ async fn decode_matrix(
                 // ALT_COUNT never reads the dosage track, so the general path
                 // narrows the hardcall it already has.
                 move |dosage| dosage.map_or(missing, |value| value as i8),
-            )?;
+            )
+            .await?;
         }
         MatrixData::Dosage { values, missing } => {
             let missing = *missing;
-            decode_into(
+            decode_rounds(
                 fileset,
                 field,
-                &work,
+                &partitions,
                 values,
                 samples,
                 move |code| {
@@ -288,21 +275,29 @@ async fn decode_matrix(
                     }
                 },
                 move |dosage| dosage.unwrap_or(missing),
-            )?;
+            )
+            .await?;
         }
     }
     Ok(())
 }
 
-type LoadedRanges = Vec<(ByteRange, Vec<u8>)>;
-type PartitionWork<'a> = (&'a PgenPartition, LoadedRanges, Range<usize>);
-
-#[allow(clippy::too_many_arguments)]
-fn decode_into<T, F, D>(
-    fileset: &Arc<PgenFileset>,
+/// Fetches and decodes the fileset a round at a time: one byte range per
+/// partition, read concurrently, then decoded in parallel.
+///
+/// Reading every range of every partition up front was simpler, but it held the
+/// whole compressed PGEN in memory on top of the destination matrix — and on a
+/// sample subset the destination is small while the input is not — and it left
+/// object-store latency serial no matter how many decoders were asked for. A
+/// round holds `partitions * max_range_bytes` instead, and its reads overlap.
+///
+/// The decoders keep their per-partition state across rounds, so a variant that
+/// depends on an LD base decoded in an earlier round still finds it.
+async fn decode_rounds<'a, T, F, D>(
+    fileset: &'a PgenFileset,
     field: MatrixField,
-    work: &[PartitionWork<'_>],
-    values: &mut [T],
+    partitions: &'a [PgenPartition],
+    values: &'a mut [T],
     samples: usize,
     value_of: F,
     dosage_of: D,
@@ -313,89 +308,191 @@ where
     D: Fn(Option<f32>) -> T + Copy + Send + Sync,
 {
     let mut rest = values;
-    let mut slices = Vec::with_capacity(work.len());
-    for (_, _, owned) in work {
-        let (head, tail) = rest.split_at_mut(owned.len() * samples);
-        slices.push(head);
+    let mut decoders = Vec::with_capacity(partitions.len());
+    for partition in partitions {
+        let (head, tail) = rest.split_at_mut(partition.owned.len() * samples);
         rest = tail;
+        decoders.push(PartitionDecoder::new(
+            fileset, field, partition, head, samples, value_of, dosage_of,
+        )?);
     }
 
-    std::thread::scope(|scope| {
-        let handles = work
+    // One reader per partition: they seek independently, so a round's reads do
+    // not have to wait on each other.
+    let mut readers = Vec::with_capacity(partitions.len());
+    for _ in partitions {
+        readers.push(fileset.source.range_reader(&fileset.pgen_path).await?);
+    }
+
+    let rounds = partitions
+        .iter()
+        .map(|partition| partition.ranges.len())
+        .max()
+        .unwrap_or(0);
+    for round in 0..rounds {
+        let fetches = readers
+            .iter_mut()
+            .zip(partitions)
+            .map(|(reader, partition)| async move {
+                match partition.ranges.get(round).copied() {
+                    Some(range) => {
+                        reader.read_range(range.start..range.end).await?;
+                        Ok::<_, DataFusionError>(Some(range))
+                    }
+                    // A partition with fewer ranges than the widest one sits
+                    // this round out.
+                    None => Ok(None),
+                }
+            });
+        let fetched = futures::future::try_join_all(fetches).await?;
+        // The decoders read out of the readers' own buffers, so a range is
+        // never copied and the buffers are reused from one round to the next.
+        let loaded = readers
             .iter()
-            .zip(slices)
-            .map(|((partition, ranges, _), slice)| {
-                scope.spawn(move || {
-                    decode_partition(
-                        fileset, field, partition, ranges, slice, samples, value_of, dosage_of,
-                    )
-                })
-            })
+            .zip(&fetched)
+            .map(|(reader, range)| range.map(|range| (range, reader.bytes())))
             .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().map_err(|_| {
-                    DataFusionError::Execution("PGEN matrix decoder panicked".to_string())
-                })?
-            })
-            .collect::<Result<Vec<_>>>()
-    })?;
+
+        std::thread::scope(|scope| {
+            let handles = decoders
+                .iter_mut()
+                .zip(&loaded)
+                .filter_map(|(decoder, slot)| {
+                    slot.map(|(range, bytes)| {
+                        scope.spawn(move || decoder.decode_range(range, bytes))
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        DataFusionError::Execution("PGEN matrix decoder panicked".to_string())
+                    })?
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+    }
     Ok(())
 }
 
-/// Decodes one partition's variants into its own slice of the matrix.
+/// One partition's decode, resumable across byte ranges.
 ///
-/// Mirrors the scan's per-record dispatch — direct dense, fused common-value,
-/// the biallelic fast path, then the general decoder — but each branch writes
-/// its values at their final address instead of into an Arrow builder.
-#[allow(clippy::too_many_arguments)]
-fn decode_partition<T, F, D>(
-    fileset: &PgenFileset,
+/// Everything the record loop carries between ranges lives here — the
+/// workspace, the retained LD base, the position in the required-variant list
+/// and the next destination row — because a partition is now handed its input
+/// a range at a time rather than all at once.
+struct PartitionDecoder<'a, T, F, D> {
+    fileset: &'a PgenFileset,
     field: MatrixField,
-    partition: &PgenPartition,
-    ranges: &LoadedRanges,
-    values: &mut [T],
+    values: &'a mut [T],
     samples: usize,
     value_of: F,
     dosage_of: D,
-) -> Result<()>
+    workspace: GtDecodeWorkspace,
+    projection: GenotypeProjection,
+    owned: &'a [usize],
+    retained: HashSet<usize>,
+    /// Lazy rather than collected: the whole selection is a usize per variant,
+    /// and materialising it per partition costs more than the walk it saves.
+    required: Peekable<MergedIndices<'a>>,
+    ld_base_index: Option<usize>,
+    ld_base: Vec<u8>,
+    row: usize,
+}
+
+impl<'a, T, F, D> PartitionDecoder<'a, T, F, D>
 where
     T: Copy,
     F: Fn(u8) -> T,
     D: Fn(Option<f32>) -> T,
 {
-    let selected = fileset.selected_samples.source_indices();
-    let mut workspace = GtDecodeWorkspace::new(fileset.sample_count, selected)?;
-    let projection = match field {
-        MatrixField::AltCount => GenotypeProjection::alt_count_only(),
-        MatrixField::Dosage => GenotypeProjection::from_fields(&["DS".to_string()]),
-    };
-
-    let owned = partition.owned();
-    let mut retained = std::collections::HashSet::new();
-    for index in partition.required() {
-        if let Some(base) = fileset.records.record(index)?.ld_base {
-            retained.insert(base);
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        fileset: &'a PgenFileset,
+        field: MatrixField,
+        partition: &'a PgenPartition,
+        values: &'a mut [T],
+        samples: usize,
+        value_of: F,
+        dosage_of: D,
+    ) -> Result<Self> {
+        let selected = fileset.selected_samples.source_indices();
+        let projection = match field {
+            MatrixField::AltCount => GenotypeProjection::alt_count_only(),
+            MatrixField::Dosage => GenotypeProjection::from_fields(&["DS".to_string()]),
+        };
+        let mut retained = HashSet::new();
+        for index in partition.required() {
+            if let Some(base) = fileset.records.record(index)?.ld_base {
+                retained.insert(base);
+            }
         }
+        Ok(Self {
+            fileset,
+            field,
+            values,
+            samples,
+            value_of,
+            dosage_of,
+            workspace: GtDecodeWorkspace::new(fileset.sample_count, selected)?,
+            projection,
+            owned: partition.owned(),
+            retained,
+            required: partition.required().peekable(),
+            ld_base_index: None,
+            ld_base: Vec::with_capacity(fileset.sample_count),
+            row: 0,
+        })
     }
-    let mut ld_base_index = None;
-    let mut ld_base = Vec::with_capacity(fileset.sample_count);
-    let mut required = partition.required().peekable();
-    let mut row = 0;
 
-    for (range, bytes) in ranges {
+    /// Decodes every variant of this partition that lives in `range`.
+    ///
+    /// Mirrors the scan's per-record dispatch — direct dense, fused
+    /// common-value, the biallelic fast path, then the general decoder — but
+    /// each branch writes its values at their final address instead of into an
+    /// Arrow builder.
+    fn decode_range(&mut self, range: ByteRange, bytes: &[u8]) -> Result<()> {
+        // Destructured so the loop can borrow the LD base and the workspace at
+        // the same time, the way it could when these were locals.
+        let Self {
+            fileset,
+            field,
+            values,
+            samples,
+            value_of,
+            dosage_of,
+            workspace,
+            projection,
+            owned,
+            retained,
+            required,
+            ld_base_index,
+            ld_base,
+            row,
+        } = self;
+        // The row cursor runs in a local rather than through a `&mut` field:
+        // the loop is per-record, and reaching through a reference for each
+        // step costs measurably at whole-chromosome scale. It is written back
+        // once the range is done; an error aborts the whole matrix read, so a
+        // cursor left stale on that path is never observed.
+        let fileset: &PgenFileset = fileset;
+        let field = *field;
+        let samples = *samples;
+        let values: &mut [T] = values;
+        let mut next_row = *row;
+        let selected = fileset.selected_samples.source_indices();
+
         while let Some(&variant_index) = required.peek() {
             let record = fileset.records.record(variant_index)?;
             if record.offset >= range.end {
                 break;
             }
-            let payload =
-                record_payload(*range, bytes, record.offset, record.end(), variant_index)?;
+            let payload = record_payload(range, bytes, record.offset, record.end(), variant_index)?;
             let base = record
                 .ld_base
                 .map(|base_index| {
-                    if ld_base_index != Some(base_index) {
+                    if *ld_base_index != Some(base_index) {
                         return Err(DataFusionError::Execution(format!(
                             "PGEN variant {variant_index} dependency base {base_index} was not decoded first"
                         )));
@@ -417,18 +514,18 @@ where
                     base,
                 )?;
                 if retained.contains(&variant_index) {
-                    ld_base = main;
-                    ld_base_index = Some(variant_index);
+                    *ld_base = main;
+                    *ld_base_index = Some(variant_index);
                 }
                 required.next();
                 continue;
             }
 
             let out = values
-                .get_mut(row * samples..(row + 1) * samples)
+                .get_mut(next_row * samples..(next_row + 1) * samples)
                 .ok_or_else(|| {
                     DataFusionError::Execution(format!(
-                        "PGEN variant {variant_index} row {row} is outside the matrix"
+                        "PGEN variant {variant_index} row {next_row} is outside the matrix"
                     ))
                 })?;
             let allele_count = fileset.variants[variant_index].allele_count();
@@ -457,7 +554,7 @@ where
                 && supports_common_difflist_fast_path(fileset.mode, record.record_type)
             {
                 let common = decode_common_difflist_into(
-                    &mut workspace,
+                    workspace,
                     payload,
                     fileset.mode,
                     record.record_type,
@@ -472,7 +569,7 @@ where
                 }
             } else if biallelic {
                 decode_biallelic_gt_into(
-                    &mut workspace,
+                    workspace,
                     payload,
                     fileset.mode,
                     record.record_type,
@@ -487,8 +584,8 @@ where
                     *slot = value_of(code);
                 }
                 if retain_main {
-                    workspace.swap_main_track(&mut ld_base);
-                    ld_base_index = Some(variant_index);
+                    workspace.swap_main_track(ld_base);
+                    *ld_base_index = Some(variant_index);
                 }
             } else {
                 let (decoded, main) = decode_record_and_main(
@@ -498,21 +595,22 @@ where
                     variant_index,
                     fileset.sample_count,
                     allele_count,
-                    projection,
+                    *projection,
                     selected,
                     base,
                 )?;
-                write_general(out, field, &decoded, &value_of, &dosage_of);
+                write_general(out, field, &decoded, value_of, dosage_of);
                 if retain_main {
-                    ld_base = main;
-                    ld_base_index = Some(variant_index);
+                    *ld_base = main;
+                    *ld_base_index = Some(variant_index);
                 }
             }
-            row += 1;
+            next_row += 1;
             required.next();
         }
+        *row = next_row;
+        Ok(())
     }
-    Ok(())
 }
 
 /// The internal code of one sample in a packed dense hardcall track.

@@ -1806,8 +1806,26 @@ async fn matrix_alt_count(
     threads: usize,
     samples: Option<Vec<String>>,
 ) -> Vec<i8> {
+    matrix_alt_count_in_ranges(
+        fixture,
+        threads,
+        samples,
+        PgenReadOptions::default().max_range_bytes,
+    )
+    .await
+}
+
+/// The same read with the range planner's byte budget pinned, so a test can
+/// choose how many rounds of input a partition is decoded from.
+async fn matrix_alt_count_in_ranges(
+    fixture: &Fixture,
+    threads: usize,
+    samples: Option<Vec<String>>,
+    max_range_bytes: u64,
+) -> Vec<i8> {
     let options = PgenReadOptions {
         samples,
+        max_range_bytes,
         ..Default::default()
     };
     let shape =
@@ -1873,6 +1891,27 @@ async fn matrix_path_matches_the_scan_on_every_record_representation() {
             expected,
             "threads {threads}"
         );
+    }
+}
+
+#[tokio::test]
+async fn matrix_path_decodes_the_same_matrix_across_many_byte_ranges() {
+    // The decoders keep their state — workspace, retained LD base, row cursor —
+    // between the ranges a partition is fed, because the input arrives a range
+    // at a time rather than all at once. A byte budget this small puts nearly
+    // every record in its own range, so an LD chain crosses rounds and a lost
+    // cursor shows up as shifted rows.
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+    let expected = matrix_alt_count(&fixture, 1, None).await;
+    for threads in [1, 2, 4, 8] {
+        for max_range_bytes in [1_u64, 8, 64] {
+            assert_eq!(
+                matrix_alt_count_in_ranges(&fixture, threads, None, max_range_bytes).await,
+                expected,
+                "threads {threads}, max_range_bytes {max_range_bytes}"
+            );
+        }
     }
 }
 
