@@ -114,12 +114,16 @@ pub async fn genotype_matrix_shape(
 /// `destination` must be exactly `variants * samples` long; use
 /// [`genotype_matrix_shape`] to size it. `threads` bounds the decoders, which
 /// write disjoint row ranges and so never contend.
+///
+/// Returns the shape and the variant start positions, in row order. The
+/// positions come from the fileset this already opened, so a caller that needs
+/// them does not have to parse the PVAR a second time to get them.
 pub async fn read_genotype_matrix(
     pgen_path: String,
     options: &PgenReadOptions,
     mut destination: MatrixData<'_>,
     threads: usize,
-) -> Result<MatrixShape> {
+) -> Result<(MatrixShape, Vec<u64>)> {
     let field = destination.field();
     let fileset = Arc::new(PgenFileset::open(pgen_path, options).await?);
     let samples = fileset.selected_samples.source_indices().len();
@@ -135,8 +139,15 @@ pub async fn read_genotype_matrix(
             destination.len()
         )));
     }
+    let positions = || {
+        fileset
+            .variants
+            .iter()
+            .map(|variant| variant.start)
+            .collect::<Vec<_>>()
+    };
     if expected == 0 {
-        return Ok(shape);
+        return Ok((shape, positions()));
     }
 
     let threads = threads.max(1);
@@ -221,7 +232,7 @@ pub async fn read_genotype_matrix(
             )?;
         }
     }
-    Ok(shape)
+    Ok((shape, positions()))
 }
 
 type LoadedRanges = Vec<(ByteRange, Vec<u8>)>;
