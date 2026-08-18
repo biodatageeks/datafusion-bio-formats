@@ -3392,3 +3392,70 @@ async fn preliminary_header_reads_are_counted() {
          {primary} bytes reported for a {object_size}-byte object"
     );
 }
+
+#[tokio::test]
+async fn the_matrix_reader_matches_the_scan_cell_for_cell() {
+    // The matrix path exists to avoid the consolidation the scan's consumer
+    // does, not to decode differently. It reuses the scan's per-variant decode,
+    // and this is the check that it stays that way: the same fixture read both
+    // ways, compared as bit patterns, at every partition count.
+    // Biallelic throughout: the shared fixture carries a multiallelic variant
+    // that dosage mode rejects, and an error is not something to compare a
+    // matrix against.
+    let fixture = fixture_with_variants(Codec::Zlib, true, &fully_called_variants());
+    let options = BgenReadOptions {
+        output_mode: BgenOutputMode::Dosage,
+        genotype_fields: Some(vec!["DS".to_string()]),
+        ..Default::default()
+    };
+
+    let provider = BgenTableProvider::try_new(path(&fixture.bgen), options.clone())
+        .await
+        .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM b ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let expected: Vec<Vec<Option<f32>>> = (0..batches[0].num_rows())
+        .map(|row| dosage_values(&batches[0], 0, row))
+        .collect();
+
+    let shape = datafusion_bio_format_bgen::matrix::genotype_matrix_shape(
+        path(&fixture.bgen),
+        options.clone(),
+    )
+    .await
+    .unwrap();
+    for threads in [1_usize, 2, 4] {
+        let mut values = vec![0.0_f32; shape.variants * shape.samples];
+        let (produced, positions) = datafusion_bio_format_bgen::matrix::read_genotype_matrix(
+            path(&fixture.bgen),
+            options.clone(),
+            &mut values,
+            f32::NAN,
+            threads,
+        )
+        .await
+        .unwrap();
+        assert_eq!(produced, shape, "threads {threads}");
+        assert_eq!(positions.len(), shape.variants);
+        for (row, want) in expected.iter().enumerate() {
+            for (column, cell) in want.iter().enumerate() {
+                let got = values[row * shape.samples + column];
+                match cell {
+                    Some(value) => assert_eq!(
+                        got.to_bits(),
+                        value.to_bits(),
+                        "threads {threads} row {row} column {column}"
+                    ),
+                    None => assert!(got.is_nan(), "threads {threads} row {row} column {column}"),
+                }
+            }
+        }
+    }
+}

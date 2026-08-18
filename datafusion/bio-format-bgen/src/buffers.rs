@@ -180,6 +180,26 @@ impl GenotypeBuffers {
         Ok(())
     }
 
+    /// The values written so far.
+    pub(crate) fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    /// Drops everything written, keeping the allocations.
+    ///
+    /// The matrix path decodes one variant at a time and moves its row into the
+    /// caller's array, so the buffer is a scratch pad rather than a batch.
+    pub(crate) fn reset(&mut self) {
+        self.values.clear();
+        self.sample_offsets.clear();
+        if self.layout == BufferLayout::NestedProbability {
+            self.sample_offsets.push(0);
+        }
+        self.valid = None;
+        self.samples = 0;
+        self.sample_start = 0;
+    }
+
     #[inline]
     pub(crate) fn push_ploidy(&mut self, ploidy: u8) {
         if self.collect_ploidy {
