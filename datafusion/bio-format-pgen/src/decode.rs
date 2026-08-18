@@ -28,12 +28,11 @@ pub(crate) struct GenotypeProjection {
 
 impl GenotypeProjection {
     pub(crate) fn alt_count_only() -> Self {
-        // ALT_COUNT is the hardcall allele count, so the GT calls are what the
-        // builder narrows; no dosage track is needed.
-        Self {
-            gt: true,
-            ..Self::default()
-        }
+        // ALT_COUNT is the hardcall allele count, so the GT calls are exactly
+        // what the builder narrows and no dosage track is needed. It is the
+        // same projection as `gt_only` and says so by construction, rather than
+        // by two literals that happen to agree.
+        Self::gt_only()
     }
 
     pub(crate) fn gt_only() -> Self {

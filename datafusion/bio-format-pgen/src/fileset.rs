@@ -578,6 +578,13 @@ enum PvarStop {
 const PARALLEL_PVAR_MIN_BYTES: usize = 1 << 20;
 
 /// The most chunks a PVAR body is split into, regardless of core count.
+///
+/// Parsing a chunk is memory-bound, so the split stops paying well before the
+/// core count on a large host: past that point each extra chunk costs a thread,
+/// a `Vec` to join and a share of the reconciliation without shortening the
+/// wall clock. The cap is a bound on that waste rather than a tuned optimum —
+/// the PVAR parse is a prologue measured in tens of milliseconds, so it is set
+/// generously and deliberately not derived from `available_parallelism`.
 const PARALLEL_PVAR_MAX_CHUNKS: usize = 16;
 
 fn parse_pvar(

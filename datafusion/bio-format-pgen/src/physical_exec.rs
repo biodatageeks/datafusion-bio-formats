@@ -44,7 +44,7 @@ impl PgenPartition {
         &self.selection[self.owned.clone()]
     }
 
-    pub(crate) fn required(&self) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn required(&self) -> MergedIndices<'_> {
         MergedIndices {
             owned: self.owned(),
             dependencies: &self.dependencies,
@@ -54,7 +54,9 @@ impl PgenPartition {
     }
 }
 
-struct MergedIndices<'a> {
+/// Owned and dependency indices merged in file order, resumable because the
+/// matrix decoder carries one across the byte ranges of its partition.
+pub(crate) struct MergedIndices<'a> {
     owned: &'a [usize],
     dependencies: &'a [usize],
     owned_position: usize,
@@ -1263,7 +1265,8 @@ fn execute_single_field(
     let stream = try_stream! {
         let selected_samples = fileset.selected_samples.source_indices();
         let selected_sample_count = selected_samples.len();
-        let estimated_row_bytes = estimate_genotype_bytes(selected_sample_count, &["GT".to_string()]);
+        let estimated_row_bytes =
+            estimate_genotype_bytes(selected_sample_count, std::slice::from_ref(&field));
         let mut sizer = GenotypeBatchSizer::new(max_rows, soft_bytes)?;
         let partition_row_capacity = initial_batch_row_capacity(
             max_rows,
@@ -1481,6 +1484,8 @@ fn estimate_genotype_bytes(samples: usize, fields: &[String]) -> usize {
             "PHASED" => samples.saturating_mul(2),
             "DS" => samples.saturating_mul(5),
             "DS_STORED" => samples.saturating_mul(5),
+            // One `i8` per sample plus validity and the list offset.
+            "ALT_COUNT" => samples.saturating_mul(2),
             "HDS" => samples.saturating_mul(9),
             _ => 0,
         })
@@ -1922,6 +1927,26 @@ mod tests {
         assert_eq!(
             initial_batch_row_capacity(8192, 3, 64 * 1024 * 1024, estimated_row_bytes),
             3
+        );
+    }
+
+    #[test]
+    fn sizes_alt_count_batches_by_its_own_width_not_by_gt() {
+        // An `ALT_COUNT` row is a byte per sample, not the five `GT` needs; a
+        // GT-shaped estimate would flush batches roughly five times too often
+        // and report the same inflation as `GenotypeBytes`.
+        let alt_count = estimate_genotype_bytes(100_000, &["ALT_COUNT".to_string()]);
+        assert_eq!(alt_count, 200_000);
+        let gt = estimate_genotype_bytes(100_000, &["GT".to_string()]);
+        assert!(alt_count < gt);
+        assert_eq!(
+            initial_batch_row_capacity(8192, 8192, 64 * 1024 * 1024, alt_count),
+            335
+        );
+        // A multi-field projection must not price `ALT_COUNT` at zero.
+        assert_eq!(
+            estimate_genotype_bytes(100_000, &["GT".to_string(), "ALT_COUNT".to_string()]),
+            gt + alt_count
         );
     }
 
