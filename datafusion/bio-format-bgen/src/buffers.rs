@@ -177,6 +177,31 @@ impl GenotypeBuffers {
         self.ploidy.push(ploidy);
     }
 
+    /// Appends `count` samples that all declare `ploidy`.
+    ///
+    /// A uniform-ploidy variant has already been checked to declare the same
+    /// value for every sample, so the column is a run and can be written as
+    /// one instead of a byte at a time.
+    pub(crate) fn extend_uniform_ploidy(&mut self, ploidy: u8, count: usize) {
+        self.ploidy.resize(self.ploidy.len() + count, ploidy);
+    }
+
+    /// Closes `count` called samples whose values are already in the buffer.
+    ///
+    /// The dosage layout writes exactly one value per called sample and keeps
+    /// no per-sample offsets, so closing a run of them is bookkeeping that does
+    /// not have to be repeated per sample. Only valid for
+    /// [`BufferLayout::Dosage`]; the caller has established that every one of
+    /// the `count` samples is called.
+    pub(crate) fn close_called_dosage_run(&mut self, count: usize) {
+        debug_assert_eq!(self.layout, BufferLayout::Dosage);
+        if let Some(builder) = self.valid.as_mut() {
+            builder.append_n(count, true);
+        }
+        self.samples += count;
+        self.sample_start = self.values.len();
+    }
+
     /// Closes a variant's samples into one output row.
     pub(crate) fn finish_variant(&mut self) -> Result<()> {
         self.variant_offsets

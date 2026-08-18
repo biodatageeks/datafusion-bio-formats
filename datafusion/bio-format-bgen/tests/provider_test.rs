@@ -822,6 +822,139 @@ async fn emits_biallelic_dosage_and_rejects_multiallelic_selection() {
     assert_eq!(flags.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
 }
 
+/// Fully called biallelic 8-bit variants, phased and unphased, which is the
+/// shape the whole-cohort dosage fill claims.
+fn fully_called_variants() -> Vec<Variant> {
+    vec![
+        Variant {
+            id: "u1",
+            rsid: "rsu1",
+            chrom: "1",
+            position: 10,
+            alleles: vec!["A", "C"],
+            phased: false,
+            bits: 8,
+            samples: vec![
+                sample(2, false, &[255, 0]),
+                sample(2, false, &[0, 255]),
+                sample(2, false, &[13, 200]),
+            ],
+        },
+        Variant {
+            id: "p1",
+            rsid: "rsp1",
+            chrom: "1",
+            position: 20,
+            alleles: vec!["G", "T"],
+            phased: true,
+            bits: 8,
+            samples: vec![
+                sample(2, false, &[255, 0]),
+                sample(2, false, &[0, 0]),
+                sample(2, false, &[7, 191]),
+            ],
+        },
+    ]
+}
+
+#[tokio::test]
+async fn whole_cohort_dosage_matches_the_per_sample_decode() {
+    // A whole-cohort scan of a fully called variant takes the bulk fill; asking
+    // for the same samples in a different order does not, because the selection
+    // is no longer the cohort in file order. The two must agree cell for cell —
+    // the fill exists to be faster, not to be different.
+    let fixture = fixture_with_variants(Codec::Zlib, true, &fully_called_variants());
+
+    let whole = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let whole_context = context(1024);
+    whole_context
+        .register_table("whole", Arc::new(whole))
+        .unwrap();
+    let whole_batches = whole_context
+        .sql("SELECT genotypes FROM whole ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let reordered = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            samples: Some(vec!["s3".to_string(), "s2".to_string(), "s1".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let reordered_context = context(1024);
+    reordered_context
+        .register_table("reordered", Arc::new(reordered))
+        .unwrap();
+    let reordered_batches = reordered_context
+        .sql("SELECT genotypes FROM reordered ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    for row in 0..2 {
+        let bulk = dosage_values(&whole_batches[0], 0, row);
+        let mut per_sample = dosage_values(&reordered_batches[0], 0, row);
+        per_sample.reverse();
+        assert_eq!(bulk.len(), 3, "row {row}");
+        assert_eq!(bulk, per_sample, "row {row}");
+        // Bit-identical, not merely close: the differential oracles compare
+        // every cell against pgenlib and the `bgen` package.
+        for (left, right) in bulk.iter().zip(per_sample.iter()) {
+            assert_eq!(
+                left.map(f32::to_bits),
+                right.map(f32::to_bits),
+                "row {row} bit pattern"
+            );
+        }
+        // Every sample declares ploidy 2 and the column is written as a run.
+        assert_eq!(ploidy_values(&whole_batches[0], 0, row), vec![2, 2, 2]);
+    }
+
+    // A missing sample keeps the variant off the bulk fill; it must still decode.
+    let with_missing = fixture_with_variants(Codec::Zlib, true, &variants());
+    let provider = BgenTableProvider::try_new(
+        path(&with_missing.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let missing_context = context(1024);
+    missing_context
+        .register_table("m", Arc::new(provider))
+        .unwrap();
+    let batches = missing_context
+        .sql("SELECT genotypes FROM m WHERE chrom = '1' ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        dosage_values(&batches[0], 0, 0),
+        vec![Some(0.0), Some(1.0), None]
+    );
+}
+
 #[tokio::test]
 async fn decodes_layout1_uncompressed_and_zlib() {
     for codec in [Codec::None, Codec::Zlib] {

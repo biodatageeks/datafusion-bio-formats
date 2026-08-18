@@ -36,6 +36,12 @@ pub(crate) struct DecodeScratch {
     stored: Vec<u64>,
     complete: Vec<u64>,
     offsets: Vec<u64>,
+    /// Whether the scan selects the whole cohort in file order, answered once.
+    ///
+    /// The selection is fixed for a partition, so asking per variant would walk
+    /// the cohort an extra time for every one of them to learn something that
+    /// cannot have changed.
+    identity_selection: Option<bool>,
 }
 
 impl DecodeScratch {
@@ -46,7 +52,19 @@ impl DecodeScratch {
             stored: Vec::new(),
             complete: Vec::new(),
             offsets: Vec::new(),
+            identity_selection: None,
         }
+    }
+
+    /// Whether `selected` is `0..sample_count`, computed on first use.
+    fn identity_selection(&mut self, selected: &[usize], sample_count: usize) -> bool {
+        *self.identity_selection.get_or_insert_with(|| {
+            selected.len() == sample_count
+                && selected
+                    .iter()
+                    .enumerate()
+                    .all(|(index, &sample)| index == sample)
+        })
     }
 }
 
@@ -306,12 +324,15 @@ fn decode_layout2(
     scratch: &mut DecodeScratch,
     buffers: &mut GenotypeBuffers,
 ) -> Result<DecodedGenotypes> {
+    let identity_selection =
+        scratch.identity_selection(selected_samples, header.sample_count as usize);
     let DecodeScratch {
         zlib,
         block: block_buffer,
         stored,
         complete,
         offsets: sample_bit_offsets,
+        identity_selection: _,
     } = scratch;
     let block_length = read_u32(payload, 0)? as usize;
     if payload.len() != block_length.saturating_add(4) {
@@ -387,6 +408,7 @@ fn decode_layout2(
         stored,
         complete,
         sample_bit_offsets,
+        identity_selection,
         buffers,
     )
 }
@@ -402,6 +424,7 @@ fn decode_layout2_block(
     stored: &mut Vec<u64>,
     complete: &mut Vec<u64>,
     sample_bit_offsets: &mut Vec<u64>,
+    identity_selection: bool,
     buffers: &mut GenotypeBuffers,
 ) -> Result<DecodedGenotypes> {
     let sample_count = read_u32(block, 0)?;
@@ -534,25 +557,40 @@ fn decode_layout2_block(
         .transpose()
         .map_err(|_| execution_error(path, variant, "state count does not fit usize"))?;
 
+    // Every sample of a uniform-ploidy variant must declare exactly `min_ploidy`
+    // with no reserved bit, which is one comparison per sample over the whole
+    // cohort of every variant in the file. Folding it into an OR lets it
+    // vectorize; the per-sample diagnosis is rebuilt by a second walk only when
+    // the fold reports a violation, which is the path that ends in an error
+    // anyway. `any_missing` falls out of the same pass, and the dosage fill
+    // below needs it.
+    let mut uniform_violation = 0_u8;
+    let mut any_missing = 0_u8;
     sample_bit_offsets.clear();
     if uniform_stride_bits.is_some() {
-        for (sample, &ploidy_missing) in ploidy_bytes.iter().enumerate() {
-            if ploidy_missing & 0x40 != 0 {
-                return Err(execution_error(
-                    path,
-                    variant,
-                    &format!("sample {sample} has a non-zero reserved ploidy bit"),
-                ));
-            }
-            if ploidy_missing & 0x3f != min_ploidy {
-                return Err(execution_error(
-                    path,
-                    variant,
-                    &format!(
-                        "sample {sample} ploidy {} is outside declared range",
-                        ploidy_missing & 0x3f
-                    ),
-                ));
+        for &ploidy_missing in ploidy_bytes.iter() {
+            uniform_violation |= (ploidy_missing & 0x7f) ^ min_ploidy;
+            any_missing |= ploidy_missing & 0x80;
+        }
+        if uniform_violation != 0 {
+            for (sample, &ploidy_missing) in ploidy_bytes.iter().enumerate() {
+                if ploidy_missing & 0x40 != 0 {
+                    return Err(execution_error(
+                        path,
+                        variant,
+                        &format!("sample {sample} has a non-zero reserved ploidy bit"),
+                    ));
+                }
+                if ploidy_missing & 0x3f != min_ploidy {
+                    return Err(execution_error(
+                        path,
+                        variant,
+                        &format!(
+                            "sample {sample} ploidy {} is outside declared range",
+                            ploidy_missing & 0x3f
+                        ),
+                    ));
+                }
             }
         }
     } else {
@@ -695,6 +733,67 @@ fn decode_layout2_block(
     // lookups; the general path below still handles every other encoding.
     if allele_count == 2 && bits == 8 && min_ploidy == max_ploidy && min_ploidy > 0 {
         let stride = min_ploidy as usize;
+
+        // A whole-cohort dosage read of a diploid, fully called, uniform-ploidy
+        // variant is what a `plink2 --export bgen` file is almost entirely made
+        // of, and it is the one shape with nothing to decide per sample: the
+        // selection is the cohort in order, so the stored bytes are walked
+        // rather than gathered; every sample declares the same ploidy, so that
+        // column is a run; and none is missing, so no sample needs its own
+        // validity. What is left is two bytes in and one `f32` out, which is a
+        // shape the compiler can vectorize.
+        //
+        // The dosages are written by the same expression the per-sample path
+        // uses, so this produces bit-identical values rather than merely close
+        // ones — the differential oracles compare every cell.
+        if identity_selection
+            && any_missing == 0
+            && stride == 2
+            && options.output_mode == BgenOutputMode::Dosage
+            && let Some(pairs) = probability_bytes.get(..2 * selected_samples.len())
+        {
+            let count = selected_samples.len();
+            let ploidy_numerator = min_ploidy as u64 * denominator;
+            let sum_bound_exceeded = if phased {
+                // Each haplotype stores its own probability, so a byte can never
+                // exceed the 8-bit denominator and the bound cannot be broken.
+                false
+            } else {
+                // Unphased stores P(AA) and P(AB); their sum is a probability
+                // and must not exceed the denominator. Checked in its own pass
+                // so the fill below stays branch-free.
+                pairs
+                    .chunks_exact(2)
+                    .any(|pair| pair[0] as u64 + pair[1] as u64 > denominator)
+            };
+            if !sum_bound_exceeded {
+                let values = buffers.values_mut();
+                values.reserve(count);
+                if phased {
+                    values.extend(pairs.chunks_exact(2).map(|pair| {
+                        (ploidy_numerator - (pair[0] as u64 + pair[1] as u64)) as f32
+                            / denominator as f32
+                    }));
+                } else {
+                    values.extend(pairs.chunks_exact(2).map(|pair| {
+                        let sum = pair[0] as u64 + pair[1] as u64;
+                        (pair[1] as u64 + min_ploidy as u64 * (denominator - sum)) as f32
+                            / denominator as f32
+                    }));
+                }
+                buffers.close_called_dosage_run(count);
+                buffers.extend_uniform_ploidy(min_ploidy, count);
+
+                return Ok(DecodedGenotypes {
+                    phased,
+                    bits,
+                    decompressed_bytes: block.len(),
+                    state_width: uniform_state_width,
+                    declared_ploidy: uniform_stride_bits.map(|_| min_ploidy),
+                });
+            }
+        }
+
         for &sample in selected_samples {
             let ploidy_missing = ploidy_bytes[sample];
             buffers.push_ploidy(ploidy_missing & 0x3f);
