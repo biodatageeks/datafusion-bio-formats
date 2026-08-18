@@ -27,6 +27,14 @@ pub(crate) struct GenotypeProjection {
 }
 
 impl GenotypeProjection {
+    pub(crate) fn alt_count_only() -> Self {
+        // ALT_COUNT is the hardcall allele count, so the GT calls are exactly
+        // what the builder narrows and no dosage track is needed. It is the
+        // same projection as `gt_only` and says so by construction, rather than
+        // by two literals that happen to agree.
+        Self::gt_only()
+    }
+
     pub(crate) fn gt_only() -> Self {
         Self {
             gt: true,
@@ -38,6 +46,8 @@ impl GenotypeProjection {
         let mut projection = Self::default();
         for field in fields {
             match field.as_str() {
+                // ALT_COUNT is narrowed from the hardcall calls.
+                "ALT_COUNT" => projection.gt = true,
                 "GT" => projection.gt = true,
                 "PHASED" => projection.phased = true,
                 "DS" => projection.ds = true,
@@ -105,6 +115,13 @@ impl DosageTrack<'_> {
 /// dosage, and phased-dosage intermediates for every variant.
 pub(crate) struct GtDecodeWorkspace {
     categories: Vec<u8>,
+    /// Reused across every variant in a partition; see `decode_difflist_into`.
+    difflist: Vec<(usize, Option<u8>)>,
+    /// The validated patches of the most recent fused common-value decode.
+    ///
+    /// Compacted out of `difflist` so the builder's patch loop is a plain slice
+    /// walk with no per-entry `Option` to unwrap.
+    patches: Vec<(usize, u8)>,
     selected_codes: Vec<u8>,
     source_to_output: Vec<usize>,
     identity_selection: bool,
@@ -130,6 +147,8 @@ impl GtDecodeWorkspace {
         }
         Ok(Self {
             categories: Vec::with_capacity(sample_count),
+            difflist: Vec::new(),
+            patches: Vec::new(),
             selected_codes: Vec::with_capacity(selected_samples.len()),
             source_to_output,
             identity_selection: selected_samples.len() == sample_count
@@ -152,6 +171,11 @@ impl GtDecodeWorkspace {
 
     pub(crate) fn has_identity_selection(&self) -> bool {
         self.identity_selection
+    }
+
+    /// The sparse patches left by the most recent [`decode_common_difflist_into`].
+    pub(crate) fn patches(&self) -> &[(usize, u8)] {
+        &self.patches
     }
 
     pub(crate) fn swap_main_track(&mut self, track: &mut Vec<u8>) {
@@ -275,6 +299,49 @@ where
     Ok(())
 }
 
+/// Validates a dense biallelic record and returns its packed hardcall bytes.
+///
+/// Performs exactly the checks `decode_dense_biallelic_gt` performs — padding,
+/// the hardcall-phase track, and trailing bytes — but emits nothing, so a
+/// caller that only needs dosages can walk the two-bit codes itself instead of
+/// paying a callback per four samples. The phase track is validated and then
+/// discarded: phase never changes a dosage.
+pub(crate) fn validated_dense_hardcalls(
+    bytes: &[u8],
+    mode: PgenMode,
+    record_type: u8,
+    variant_index: usize,
+    sample_count: usize,
+) -> Result<&[u8]> {
+    if !supports_biallelic_gt_fast_path(record_type, 2)
+        || mode != PgenMode::Plink1 && record_type & 7 != 0
+    {
+        return Err(DataFusionError::Execution(format!(
+            "PGEN variant {variant_index} is not eligible for direct dense dosage decoding"
+        )));
+    }
+
+    let mut cursor = Cursor::new(bytes, variant_index);
+    let packed = cursor.take(sample_count.div_ceil(4), "dense hardcalls")?;
+    validate_packed_padding(packed, sample_count, 2, &cursor)?;
+
+    if mode != PgenMode::Plink1 && record_type != 0xff && record_type & 0x10 != 0 {
+        let heterozygous_count = packed
+            .iter()
+            .map(|&byte| usize::from(HETEROZYGOUS_PER_BYTE[usize::from(byte)]))
+            .sum::<usize>();
+        validate_phase_track(&mut cursor, heterozygous_count)?;
+    }
+
+    if !cursor.is_finished() {
+        return Err(cursor.error(format!(
+            "{} trailing bytes remain after direct dense dosage decoding",
+            cursor.remaining()
+        )));
+    }
+    Ok(packed)
+}
+
 fn emit_dense_quads<F, P>(packed: &[u8], sample_count: usize, mut phase_pattern: P, emit: &mut F)
 where
     F: FnMut(&[u16], u8, usize),
@@ -319,6 +386,107 @@ struct DecodedQuad {
 }
 
 static DENSE_QUADS: [[DecodedQuad; 16]; 256] = build_dense_quads();
+
+/// ALT dosage for the four samples packed in one dense hardcall byte.
+///
+/// Phase never changes a dosage — a phased heterozygote `(1,0)` and an
+/// unphased one `(0,1)` both carry a single ALT allele — so unlike
+/// `DENSE_QUADS` this needs no phase-pattern dimension. That keeps it at 4 KiB
+/// instead of ~80 KiB, so a dosage scan indexes a table that stays in L1.
+///
+/// Missing calls hold `0.0`; the parallel validity table marks them.
+pub(crate) static DENSE_DOSAGE_QUADS: [[f32; 4]; 256] = build_dense_dosage_quads(false);
+
+/// The PLINK 1 variant, whose two-bit codes use a different order.
+pub(crate) static DENSE_DOSAGE_QUADS_PLINK1: [[f32; 4]; 256] = build_dense_dosage_quads(true);
+
+/// ALT allele count for the four samples packed in one dense hardcall byte.
+///
+/// The `int8` counterpart of [`DENSE_DOSAGE_QUADS`], for the `ALT_COUNT` field.
+pub(crate) static DENSE_ALT_COUNT_QUADS: [[i8; 4]; 256] = build_dense_alt_counts(false);
+
+/// The PLINK 1 variant of [`DENSE_ALT_COUNT_QUADS`].
+pub(crate) static DENSE_ALT_COUNT_QUADS_PLINK1: [[i8; 4]; 256] = build_dense_alt_counts(true);
+
+const fn build_dense_alt_counts(plink1: bool) -> [[i8; 4]; 256] {
+    let mut output = [[0_i8; 4]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut sample = 0;
+        while sample < 4 {
+            let code = internal_code(((byte >> (sample * 2)) & 3) as u8, plink1);
+            output[byte][sample] = match code {
+                0 => 0,
+                1 => 1,
+                2 => 2,
+                // Missing; the validity table records it.
+                _ => 0,
+            };
+            sample += 1;
+        }
+        byte += 1;
+    }
+    output
+}
+
+/// Validity nibble for the four samples packed in one dense hardcall byte.
+pub(crate) static DENSE_DOSAGE_VALIDITY: [u8; 256] = build_dense_dosage_validity(false);
+
+/// The PLINK 1 variant of [`DENSE_DOSAGE_VALIDITY`].
+pub(crate) static DENSE_DOSAGE_VALIDITY_PLINK1: [u8; 256] = build_dense_dosage_validity(true);
+
+/// Maps a raw two-bit code to the internal one, which PLINK 1 permutes.
+const fn internal_code(raw: u8, plink1: bool) -> u8 {
+    if plink1 {
+        match raw {
+            0 => 2,
+            1 => 3,
+            2 => 1,
+            _ => 0,
+        }
+    } else {
+        raw
+    }
+}
+
+const fn build_dense_dosage_quads(plink1: bool) -> [[f32; 4]; 256] {
+    let mut output = [[0.0_f32; 4]; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut sample = 0;
+        while sample < 4 {
+            let code = internal_code(((byte >> (sample * 2)) & 3) as u8, plink1);
+            output[byte][sample] = match code {
+                0 => 0.0,
+                1 => 1.0,
+                2 => 2.0,
+                // Missing; the validity table records it and the value is
+                // never read back.
+                _ => 0.0,
+            };
+            sample += 1;
+        }
+        byte += 1;
+    }
+    output
+}
+
+const fn build_dense_dosage_validity(plink1: bool) -> [u8; 256] {
+    let mut output = [0_u8; 256];
+    let mut byte = 0;
+    while byte < 256 {
+        let mut sample = 0;
+        while sample < 4 {
+            let code = internal_code(((byte >> (sample * 2)) & 3) as u8, plink1);
+            if code != 3 {
+                output[byte] |= 1 << sample;
+            }
+            sample += 1;
+        }
+        byte += 1;
+    }
+    output
+}
 
 const fn build_dense_quads() -> [[DecodedQuad; 16]; 256] {
     const EMPTY: DecodedQuad = DecodedQuad {
@@ -408,6 +576,7 @@ pub(crate) fn decode_biallelic_gt_into(
     selected_samples: &[usize],
     ld_base: Option<&[u8]>,
     retain_main: bool,
+    apply_phase: bool,
 ) -> Result<()> {
     if !supports_biallelic_gt_fast_path(record_type, 2) {
         return Err(DataFusionError::Execution(format!(
@@ -422,6 +591,7 @@ pub(crate) fn decode_biallelic_gt_into(
         sample_count,
         ld_base,
         &mut workspace.categories,
+        &mut workspace.difflist,
     )?;
 
     workspace.retained_main_valid = false;
@@ -451,6 +621,7 @@ pub(crate) fn decode_biallelic_gt_into(
             &workspace.source_to_output,
             &mut workspace.selected_codes,
             workspace.identity_selection,
+            apply_phase,
         )?;
     }
 
@@ -461,6 +632,86 @@ pub(crate) fn decode_biallelic_gt_into(
         )));
     }
     Ok(())
+}
+
+/// Whether a record's main track is one common category plus a sparse difflist.
+///
+/// These are main-track representations 4, 6 and 7 — 81% of the records in a
+/// `plink2 --make-pgen` fileset. Unlike every other representation they have no
+/// per-sample base to unpack, so a projection that needs no phase orientation
+/// can fill its output slice from the common category and patch it, instead of
+/// materializing a code buffer and then reading it back.
+pub(crate) fn supports_common_difflist_fast_path(mode: PgenMode, record_type: u8) -> bool {
+    mode != PgenMode::Plink1 && record_type != 0xff && matches!(record_type & 7, 4 | 6 | 7)
+}
+
+/// Decodes a common-value + difflist main track without materializing it.
+///
+/// Returns the common category. The sparse patches land in the workspace, to be
+/// read back through [`GtDecodeWorkspace::patches`]; together they describe the
+/// same codes `decode_biallelic_gt_into` would have written, leaving the caller
+/// to fill and patch its output buffer in one pass rather than two.
+///
+/// The hardcall-phase track is validated and consumed but never applied, so this
+/// is correct only for a projection whose output does not distinguish `(0,1)`
+/// from `(1,0)` — `DS` and `ALT_COUNT`, not `GT`.
+pub(crate) fn decode_common_difflist_into(
+    workspace: &mut GtDecodeWorkspace,
+    bytes: &[u8],
+    mode: PgenMode,
+    record_type: u8,
+    variant_index: usize,
+    sample_count: usize,
+) -> Result<u8> {
+    if !supports_biallelic_gt_fast_path(record_type, 2)
+        || !supports_common_difflist_fast_path(mode, record_type)
+    {
+        return Err(DataFusionError::Execution(format!(
+            "PGEN variant {variant_index} is not eligible for the fused common-value decode"
+        )));
+    }
+    let GtDecodeWorkspace {
+        difflist, patches, ..
+    } = workspace;
+    let common = record_type & 3;
+    let mut cursor = Cursor::new(bytes, variant_index);
+    decode_difflist_into(&mut cursor, sample_count, true, difflist)?;
+    patches.clear();
+    patches.reserve(difflist.len());
+    for &(sample, value) in difflist.iter() {
+        let value = value.ok_or_else(|| {
+            cursor.error("hardcall difflist omitted a genotype value".to_string())
+        })?;
+        patches.push((sample, value));
+    }
+
+    if record_type & 0x10 != 0 {
+        // The heterozygote count the phase track is sized by normally comes from
+        // scanning the decoded per-sample codes — precisely the pass this decode
+        // removes. It is derivable from the difflist alone: every unpatched
+        // sample carries the common category, so it is heterozygous exactly when
+        // that category is.
+        //
+        // PGEN reserves main-track representation 5, so a common category of 1
+        // cannot occur here and the first term is always zero today. It is
+        // written out because the identity, not the current encoding, is what
+        // makes the count right.
+        let common_heterozygotes = if common == 1 {
+            sample_count - patches.len()
+        } else {
+            0
+        };
+        let patched_heterozygotes = patches.iter().filter(|&&(_, value)| value == 1).count();
+        validate_phase_track(&mut cursor, common_heterozygotes + patched_heterozygotes)?;
+    }
+
+    if !cursor.is_finished() {
+        return Err(cursor.error(format!(
+            "{} trailing bytes remain after decoding the declared GT tracks",
+            cursor.remaining()
+        )));
+    }
+    Ok(common)
 }
 
 #[cfg(test)]
@@ -721,6 +972,7 @@ fn decode_main(
     ld_base: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(sample_count);
+    let mut difflist = Vec::new();
     decode_main_into(
         cursor,
         mode,
@@ -728,6 +980,7 @@ fn decode_main(
         sample_count,
         ld_base,
         &mut output,
+        &mut difflist,
     )?;
     Ok(output)
 }
@@ -739,6 +992,7 @@ fn decode_main_into(
     sample_count: usize,
     ld_base: Option<&[u8]>,
     output: &mut Vec<u8>,
+    difflist: &mut Vec<(usize, Option<u8>)>,
 ) -> Result<()> {
     output.clear();
     if mode == PgenMode::Plink1 {
@@ -764,7 +1018,7 @@ fn decode_main_into(
             unpack_two_bit(bytes, sample_count, output);
             Ok(())
         }
-        1 => decode_onebit_into(cursor, sample_count, output),
+        1 => decode_onebit_into(cursor, sample_count, output, difflist),
         2 | 3 => {
             let base = ld_base.ok_or_else(|| {
                 cursor.error("LD-compressed record was decoded without its base".to_string())
@@ -776,7 +1030,8 @@ fn decode_main_into(
                 )));
             }
             output.extend_from_slice(base);
-            for (sample, value) in decode_difflist(cursor, sample_count, true)? {
+            decode_difflist_into(cursor, sample_count, true, difflist)?;
+            for &(sample, value) in difflist.iter() {
                 output[sample] = value.ok_or_else(|| {
                     cursor.error("LD difflist omitted a genotype value".to_string())
                 })?;
@@ -797,7 +1052,8 @@ fn decode_main_into(
         common @ (4 | 6 | 7) => {
             let common = common & 3;
             output.resize(sample_count, common);
-            for (sample, value) in decode_difflist(cursor, sample_count, true)? {
+            decode_difflist_into(cursor, sample_count, true, difflist)?;
+            for &(sample, value) in difflist.iter() {
                 output[sample] = value.ok_or_else(|| {
                     cursor.error("hardcall difflist omitted a genotype value".to_string())
                 })?;
@@ -813,6 +1069,7 @@ fn decode_onebit_into(
     cursor: &mut Cursor<'_>,
     sample_count: usize,
     output: &mut Vec<u8>,
+    difflist: &mut Vec<(usize, Option<u8>)>,
 ) -> Result<()> {
     let code = cursor.byte("one-bit common-category code")?;
     // PLINK packs the lower common category in bits 2+ and the positive
@@ -829,7 +1086,8 @@ fn decode_onebit_into(
     for sample in 0..sample_count {
         output.push(lower + (bit(bits, sample) as u8) * delta);
     }
-    for (sample, value) in decode_difflist(cursor, sample_count, true)? {
+    decode_difflist_into(cursor, sample_count, true, difflist)?;
+    for &(sample, value) in difflist.iter() {
         output[sample] = value.ok_or_else(|| {
             cursor.error("one-bit exception omitted a genotype value".to_string())
         })?;
@@ -847,11 +1105,31 @@ fn unpack_two_bit(bytes: &[u8], sample_count: usize, output: &mut Vec<u8>) {
     output.truncate(sample_count);
 }
 
+/// Allocating wrapper for the cold paths and tests.
 fn decode_difflist(
     cursor: &mut Cursor<'_>,
     sample_count: usize,
     has_values: bool,
 ) -> Result<Vec<(usize, Option<u8>)>> {
+    let mut output = Vec::new();
+    decode_difflist_into(cursor, sample_count, has_values, &mut output)?;
+    Ok(output)
+}
+
+/// Decodes a difflist into a caller-owned buffer.
+///
+/// The hot paths reuse one buffer across every variant in a partition: a scan
+/// of a `plink2 --make-pgen` fileset decodes a difflist for most of its
+/// records, and allocating a fresh `Vec` for each one is ~10^6 allocations on
+/// a chromosome.
+fn decode_difflist_into(
+    cursor: &mut Cursor<'_>,
+    sample_count: usize,
+    has_values: bool,
+    output: &mut Vec<(usize, Option<u8>)>,
+) -> Result<()> {
+    output.clear();
+    output.reserve(sample_count.min(64));
     let length = usize::try_from(cursor.varint("difflist length")?)
         .map_err(|_| cursor.error("difflist length does not fit usize".to_string()))?;
     if length > sample_count {
@@ -860,7 +1138,7 @@ fn decode_difflist(
         )));
     }
     if length == 0 {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let group_count = length.div_ceil(64);
     let id_width = bytes_to_represent(sample_count);
@@ -883,7 +1161,6 @@ fn decode_difflist(
         validate_packed_padding(values, length, 2, cursor)?;
     }
 
-    let mut result = Vec::with_capacity(length);
     let mut previous_global = None;
     for group in 0..group_count {
         let group_len = (length - group * 64).min(64);
@@ -914,7 +1191,7 @@ fn decode_difflist(
             }
             let value =
                 packed_values.map(|values| packed_value(values, group * 64 + element, 2) as u8);
-            result.push((sample, value));
+            output.push((sample, value));
             previous_global = Some(sample);
         }
         if group + 1 < group_count {
@@ -927,7 +1204,7 @@ fn decode_difflist(
             }
         }
     }
-    Ok(result)
+    Ok(())
 }
 
 fn apply_multiallelic_patches(
@@ -1181,7 +1458,13 @@ fn decode_phase_for_selected_gt(
     source_to_output: &[usize],
     selected_codes: &mut [u8],
     identity_selection: bool,
+    orient: bool,
 ) -> Result<()> {
+    // `orient == false` still parses and validates the phase track but skips
+    // applying it. A dosage projection needs the validation and the cursor
+    // advance, but not the orientation: a phased heterozygote `(1,0)` and an
+    // unphased one `(0,1)` carry the same ALT dosage. Skipping it avoids a full
+    // pass over every sample of every phased record.
     // With a subset selection, phase orientation belongs only in selected_codes:
     // categories must remain the raw main track so it can become a later LD base.
     // For an identity selection, retain_main snapshots categories before this call.
@@ -1209,6 +1492,9 @@ fn decode_phase_for_selected_gt(
         let info = cursor.take(phased_count.div_ceil(8), "phase-info bitarray")?;
         validate_packed_padding(info, phased_count, 1, cursor)?;
 
+        if !orient {
+            return Ok(());
+        }
         let mut heterozygous_index = 0;
         let mut info_index = 0;
         for source in 0..categories.len() {
@@ -1242,6 +1528,9 @@ fn decode_phase_for_selected_gt(
             );
         }
         validate_phase_padding(info, heterozygous_count + 1, cursor)?;
+        if !orient {
+            return Ok(());
+        }
         let mut heterozygous_index = 0;
         for source in 0..categories.len() {
             let category = categories[source];
@@ -1490,8 +1779,11 @@ fn implicit_haplotype_dosages(
         .collect()
 }
 
+#[inline]
 fn alt1_hardcall_dosage(call: &[u16; 2]) -> f32 {
-    call.iter().filter(|&&allele| allele == 1).count() as f32
+    // Counted branchlessly rather than through an iterator filter/count: this
+    // runs once per genotype cell, billions of times on a whole chromosome.
+    f32::from(u8::from(call[0] == 1) + u8::from(call[1] == 1))
 }
 
 fn category_call(category: u8) -> Option<[u16; 2]> {
@@ -1502,6 +1794,53 @@ fn category_call(category: u8) -> Option<[u16; 2]> {
         3 => None,
         _ => None,
     }
+}
+
+/// Parses and validates a hardcall-phase track without applying its orientation.
+///
+/// A projection that sums the two alleles — `DS`, `ALT_COUNT` — still has to
+/// consume this track: its length depends on the heterozygote count, so
+/// misparsing it would silently shift every following track. It just does not
+/// need the orientation, because a phased heterozygote and an unphased one carry
+/// the same allele count.
+///
+/// `heterozygous_count` is however the caller derived it: from the packed
+/// hardcall bytes for a dense record, or from the common category and the
+/// difflist for a fused one.
+fn validate_phase_track(cursor: &mut Cursor<'_>, heterozygous_count: usize) -> Result<()> {
+    if heterozygous_count == 0 {
+        return Err(
+            cursor.error("hardcall-phase track is present without heterozygous calls".to_string())
+        );
+    }
+    let first = *cursor
+        .bytes
+        .get(cursor.position)
+        .ok_or_else(|| cursor.error("truncated hardcall-phase track".to_string()))?;
+    if first & 1 != 0 {
+        let present = cursor.take(
+            (heterozygous_count + 1).div_ceil(8),
+            "phase-present bitarray",
+        )?;
+        validate_phase_padding(present, heterozygous_count + 1, cursor)?;
+        let phased_count = (0..heterozygous_count)
+            .filter(|&index| bit(present, index + 1))
+            .count();
+        let info = cursor.take(phased_count.div_ceil(8), "phase-info bitarray")?;
+        validate_packed_padding(info, phased_count, 1, cursor)?;
+    } else {
+        let info = cursor.take(
+            (heterozygous_count + 1).div_ceil(8),
+            "implicit phase-info bitarray",
+        )?;
+        if info.first().is_some_and(|byte| byte & 1 != 0) {
+            return Err(
+                cursor.error("implicit phase track has phase-present marker set".to_string())
+            );
+        }
+        validate_phase_padding(info, heterozygous_count + 1, cursor)?;
+    }
+    Ok(())
 }
 
 fn validate_phase_padding(bytes: &[u8], bit_count: usize, cursor: &Cursor<'_>) -> Result<()> {
@@ -1794,6 +2133,151 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("invalid sample index 63"), "{error}");
+    }
+
+    /// The eligible common-value records, with the phase-track shapes that make
+    /// the derived heterozygote count load-bearing.
+    ///
+    /// Each entry is `(record_type, bytes, main-track codes)`; the codes are what
+    /// the record's main track decodes to before any phase orientation, and their
+    /// length is the sample count.
+    fn common_difflist_records() -> Vec<(u8, Vec<u8>, Vec<u8>)> {
+        vec![
+            // Common 0, no phase track: the 81% case.
+            (0x04, vec![1, 2, 2], vec![0, 0, 2, 0]),
+            // Common 2, and a patch to the missing category.
+            (0x06, vec![1, 3, 3], vec![2, 2, 2, 3]),
+            // Common 3 with an empty difflist: every call missing.
+            (0x07, vec![0], vec![3, 3, 3, 3]),
+            // Common 0 with two patched heterozygotes and an implicit phase
+            // track, which is sized by the count derived from the difflist.
+            (0x14, vec![2, 1, 5, 2, 0b0000_0100], vec![0, 1, 0, 1]),
+            // The same, with an explicit phase-present bitarray.
+            (
+                0x14,
+                vec![2, 0, 5, 1, 0b0000_0011, 0b0000_0001],
+                vec![1, 1, 0, 0],
+            ),
+            // Common 2 with one patched heterozygote and a phase track.
+            (0x16, vec![1, 0, 1, 0b0000_0010], vec![1, 2, 2, 2]),
+            // Common 3 with a phase track, so the derived count must ignore the
+            // all-missing base and see only the patched heterozygote.
+            (0x17, vec![2, 1, 9, 1, 0], vec![3, 1, 2, 3]),
+            // Eight patches of which one is heterozygous, so the phase track is
+            // one byte for the true count and two for the difflist length: a
+            // count derived from the wrong term truncates the record here.
+            (
+                0x14,
+                vec![8, 0, 0xa9, 0xaa, 1, 1, 1, 1, 1, 1, 1, 0b0000_0010],
+                vec![1, 2, 2, 2, 2, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+        ]
+    }
+
+    fn fused_common_difflist(
+        record_type: u8,
+        bytes: &[u8],
+        sample_count: usize,
+    ) -> Result<Vec<u8>> {
+        let selected = (0..sample_count).collect::<Vec<_>>();
+        let mut workspace = GtDecodeWorkspace::new(sample_count, &selected)?;
+        let common = decode_common_difflist_into(
+            &mut workspace,
+            bytes,
+            PgenMode::Variable,
+            record_type,
+            0,
+            sample_count,
+        )?;
+        let mut codes = vec![common; sample_count];
+        for &(sample, value) in workspace.patches() {
+            codes[sample] = value;
+        }
+        Ok(codes)
+    }
+
+    #[test]
+    fn fused_common_difflist_reconstructs_the_main_track_and_consumes_the_phase_track() {
+        for (record_type, bytes, expected) in common_difflist_records() {
+            assert!(
+                supports_common_difflist_fast_path(PgenMode::Variable, record_type),
+                "record type {record_type:#04x} should be eligible"
+            );
+            let samples = expected.len();
+            // The main track the existing decoder produces is the reference. The
+            // fused decode never materializes it, so agreement here is what says
+            // the common category and the patches describe the same calls.
+            let mut cursor = Cursor::new(&bytes, 0);
+            let reference =
+                decode_main(&mut cursor, PgenMode::Variable, record_type, samples, None)
+                    .unwrap_or_else(|error| panic!("record type {record_type:#04x}: {error}"));
+            assert_eq!(reference, expected, "record type {record_type:#04x}");
+            assert_eq!(
+                fused_common_difflist(record_type, &bytes, samples)
+                    .unwrap_or_else(|error| panic!("record type {record_type:#04x}: {error}")),
+                expected,
+                "record type {record_type:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn fused_common_difflist_rejects_a_misderived_phase_track() {
+        // A phase track whose length disagrees with the derived heterozygote
+        // count leaves bytes behind rather than reading the wrong ones as the
+        // next record's, so the failure surfaces instead of corrupting output.
+        let mut bytes = vec![2, 1, 5, 2, 0b0000_0100];
+        bytes.push(0);
+        let error = fused_common_difflist(0x14, &bytes, 4)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("1 trailing bytes remain"), "{error}");
+
+        // Type 0x14 declares a phase track, but a difflist that patches nothing
+        // to the heterozygous category leaves no heterozygote to phase.
+        let error = fused_common_difflist(0x14, &[1, 2, 2, 0], 4)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("phase track is present without heterozygous calls"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn fused_common_difflist_refuses_ineligible_records() {
+        // Main tracks that carry a per-sample base have nothing to fuse, and a
+        // PLINK 1 fileset has no representation byte at all.
+        for (mode, record_type) in [
+            (PgenMode::Variable, 0x00),
+            (PgenMode::Variable, 0x01),
+            (PgenMode::Variable, 0x02),
+            (PgenMode::Plink1, 0xff),
+        ] {
+            assert!(!supports_common_difflist_fast_path(mode, record_type));
+        }
+
+        // A dosage or multiallelic track alongside a common-value main track is
+        // rejected by the biallelic gate instead: those bytes would be left
+        // unparsed.
+        for (mode, record_type) in [
+            (PgenMode::Variable, 0x00),
+            (PgenMode::Variable, 0x01),
+            (PgenMode::Variable, 0x02),
+            (PgenMode::Variable, 0x24),
+            (PgenMode::Variable, 0x0c),
+            (PgenMode::Plink1, 0xff),
+        ] {
+            let mut workspace = GtDecodeWorkspace::new(4, &[0, 1, 2, 3]).unwrap();
+            let error =
+                decode_common_difflist_into(&mut workspace, &[1, 2, 2], mode, record_type, 0, 4)
+                    .unwrap_err()
+                    .to_string();
+            assert!(
+                error.contains("not eligible for the fused common-value decode"),
+                "record type {record_type:#04x}: {error}"
+            );
+        }
     }
 
     fn pack_two_bit_values(values: &[u8]) -> Vec<u8> {

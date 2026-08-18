@@ -16,6 +16,7 @@ bytes.workspace = true
 datafusion.workspace = true
 datafusion-bio-format-core = { path = "../bio-format-core" }
 flate2.workspace = true
+futures.workspace = true
 opendal.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,4 +30,8 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "sync"] }
 
 [[bench]]
 name = "pgen_scan"
+harness = false
+
+[[bench]]
+name = "pgen_float_build"
 harness = false

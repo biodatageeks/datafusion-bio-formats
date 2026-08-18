@@ -555,11 +555,57 @@ fn decode_text_companion(path: &str, bytes: &[u8], max_decoded: usize) -> Result
     Ok(decoded)
 }
 
+/// Column positions a PVAR body is parsed against, resolved once from the header.
+struct PvarLayout {
+    chrom: usize,
+    position: usize,
+    id: usize,
+    reference: usize,
+    alternate: usize,
+    width: usize,
+}
+
+/// What stopped a chunk parser short of consuming its whole range.
+enum PvarStop {
+    /// `max_variants` was already reached and another variant line followed.
+    Limit,
+    /// A line was malformed; the payload is the detail for `pvar_line_error`.
+    Malformed(String),
+}
+
+/// Bodies below this parse faster in one thread than split across several: a
+/// small PVAR fits in cache and the spawn cost dominates the work.
+const PARALLEL_PVAR_MIN_BYTES: usize = 1 << 20;
+
+/// The most chunks a PVAR body is split into, regardless of core count.
+///
+/// Parsing a chunk is memory-bound, so the split stops paying well before the
+/// core count on a large host: past that point each extra chunk costs a thread,
+/// a `Vec` to join and a share of the reconciliation without shortening the
+/// wall clock. The cap is a bound on that waste rather than a tuned optimum —
+/// the PVAR parse is a prologue measured in tens of milliseconds, so it is set
+/// generously and deliberately not derived from `available_parallelism`.
+const PARALLEL_PVAR_MAX_CHUNKS: usize = 16;
+
 fn parse_pvar(
     path: &str,
     bytes: &[u8],
     coordinates: CoordinateSystem,
     max_variants: usize,
+) -> Result<Vec<PvarVariant>> {
+    parse_pvar_chunked(path, bytes, coordinates, max_variants, None)
+}
+
+/// `chunks` pins how many pieces the body is split into; `None` decides from the
+/// body size and the host's core count. Tests pin it, because reconciling the
+/// row limit across chunk boundaries only has anything to reconcile when a
+/// particular boundary falls in a particular place.
+fn parse_pvar_chunked(
+    path: &str,
+    bytes: &[u8],
+    coordinates: CoordinateSystem,
+    max_variants: usize,
+    chunks: Option<usize>,
 ) -> Result<Vec<PvarVariant>> {
     let text = std::str::from_utf8(bytes).map_err(|error| {
         DataFusionError::Plan(format!(
@@ -567,22 +613,36 @@ fn parse_pvar(
             sanitize_location(path)
         ))
     })?;
-    let mut lines = text.lines().enumerate();
-    let mut header = None;
-    let mut body_start = 0;
-    let first_body = loop {
-        match lines.next() {
-            Some((line_index, line)) if line.starts_with('#') => {
-                body_start = line_index + 1;
-                if line.starts_with("#CHROM") {
-                    header = Some((line_index, line));
-                }
-            }
-            body => break body,
+
+    // The header is walked with byte offsets, not through `lines()`, so the
+    // body's start is known as a byte position and can be split for parallel
+    // parsing. Line semantics match `str::lines`: split on `\n`, strip a
+    // trailing `\r`.
+    let mut header: Option<(usize, &str)> = None;
+    let mut header_lines = 0;
+    let mut body_start_byte = 0;
+    let mut offset = 0;
+    while offset < text.len() {
+        let rest = &text[offset..];
+        let (raw, next) = match rest.find('\n') {
+            Some(newline) => (&rest[..newline], offset + newline + 1),
+            None => (rest, text.len()),
+        };
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if !line.starts_with('#') {
+            break;
         }
-    };
+        if line.starts_with("#CHROM") {
+            header = Some((header_lines, line));
+        }
+        header_lines += 1;
+        offset = next;
+        body_start_byte = offset;
+    }
+    let body = &text[body_start_byte..];
+
     let columns = if let Some((header_index, header)) = header {
-        if header_index + 1 != body_start {
+        if header_index + 1 != header_lines {
             return Err(DataFusionError::Plan(format!(
                 "PVAR {} #CHROM line must be the final header line",
                 sanitize_location(path)
@@ -594,18 +654,16 @@ fn parse_pvar(
             .map(str::to_string)
             .collect::<Vec<_>>()
     } else {
-        if body_start > 0 {
+        if header_lines > 0 {
             return Err(DataFusionError::Plan(format!(
                 "PVAR {} header does not end with #CHROM",
                 sanitize_location(path)
             )));
         }
-        let first_width = first_body
-            .iter()
-            .copied()
-            .chain(lines.clone())
-            .find(|(_, line)| !line.is_empty())
-            .map(|(_, line)| line.split_whitespace().count())
+        let first_width = body
+            .lines()
+            .find(|line| !line.is_empty())
+            .map(|line| line.split_whitespace().count())
             .unwrap_or(0);
         // PLINK 2 specifies BIM order for a headerless PVAR. The five-column
         // form omits CM: CHROM, ID, POS, ALT, REF.
@@ -634,78 +692,216 @@ fn parse_pvar(
                 ))
             })
     };
-    let chrom_col = column("CHROM")?;
-    let pos_col = column("POS")?;
-    let id_col = column("ID")?;
-    let ref_col = column("REF")?;
-    let alt_col = column("ALT")?;
-    let required_width = [chrom_col, pos_col, id_col, ref_col, alt_col]
-        .into_iter()
-        .max()
-        .unwrap_or(0)
-        + 1;
+    let (chrom, position, id, reference, alternate) = (
+        column("CHROM")?,
+        column("POS")?,
+        column("ID")?,
+        column("REF")?,
+        column("ALT")?,
+    );
+    let layout = PvarLayout {
+        chrom,
+        position,
+        id,
+        reference,
+        alternate,
+        width: [chrom, position, id, reference, alternate]
+            .into_iter()
+            .max()
+            .unwrap_or(0)
+            + 1,
+    };
+    let layout = &layout;
 
+    let chunks = pvar_chunk_ranges(body, chunks.unwrap_or_else(|| pvar_chunk_count(body)));
+    let parsed = if chunks.len() <= 1 {
+        chunks
+            .iter()
+            .map(|&(start, end)| {
+                parse_pvar_chunk(&body[start..end], coordinates, max_variants, layout)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        // Scoped threads borrow `body` and `layout` directly, so the body is
+        // never copied and no runtime is involved. The work is CPU-bound and
+        // joins before this returns.
+        std::thread::scope(|scope| {
+            let handles = chunks
+                .iter()
+                .map(|&(start, end)| {
+                    scope.spawn(move || {
+                        parse_pvar_chunk(&body[start..end], coordinates, max_variants, layout)
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().map_err(|_| {
+                        DataFusionError::Plan(format!(
+                            "PVAR {} chunk parser panicked",
+                            sanitize_location(path)
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        })?
+    };
+
+    let limit_error = || {
+        DataFusionError::Plan(format!(
+            "PVAR {} exceeds configured max_variants {max_variants}",
+            sanitize_location(path)
+        ))
+    };
+    let mut variants = Vec::with_capacity(parsed.iter().map(|(rows, _)| rows.len()).sum());
+    for ((rows, stop), &(chunk_start, _)) in parsed.into_iter().zip(&chunks) {
+        // Whichever condition comes first in the file wins, exactly as it does
+        // when one pass reads the whole body. The limit trips inside this
+        // chunk's rows when they would carry the total past it, which is
+        // earlier than any error the chunk reports, because a chunk stops at
+        // its first bad line.
+        if variants.len() + rows.len() > max_variants {
+            return Err(limit_error());
+        }
+        variants.extend(rows);
+        if let Some((chunk_line, stop)) = stop {
+            // The chunk stopped, so a further line exists. A serial pass would
+            // check the limit before reading it.
+            if variants.len() >= max_variants {
+                return Err(limit_error());
+            }
+            return Err(match stop {
+                PvarStop::Limit => limit_error(),
+                PvarStop::Malformed(detail) => {
+                    let preceding = body[..chunk_start].bytes().filter(|&b| b == b'\n').count();
+                    pvar_line_error(path, header_lines + preceding + chunk_line, detail)
+                }
+            });
+        }
+    }
+    Ok(variants)
+}
+
+/// Byte ranges covering `body`, each holding whole lines.
+///
+/// Split points are advanced to the next newline, so a range never starts or
+/// ends mid-line and each chunk can be parsed independently.
+fn pvar_chunk_ranges(body: &str, target_chunks: usize) -> Vec<(usize, usize)> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    if target_chunks <= 1 {
+        return vec![(0, body.len())];
+    }
+
+    let bytes = body.as_bytes();
+    let mut ranges = Vec::with_capacity(target_chunks);
+    let mut start = 0;
+    for chunk in 1..target_chunks {
+        if start >= bytes.len() {
+            break;
+        }
+        let mut cut = (bytes.len() * chunk / target_chunks).max(start);
+        while cut < bytes.len() && bytes[cut] != b'\n' {
+            cut += 1;
+        }
+        // A newline is a char boundary and so is the byte after it, so slicing
+        // here is always valid UTF-8.
+        if cut < bytes.len() {
+            cut += 1;
+        }
+        if cut > start {
+            ranges.push((start, cut));
+            start = cut;
+        }
+    }
+    if start < bytes.len() {
+        ranges.push((start, bytes.len()));
+    }
+    ranges
+}
+
+/// How many pieces to split a body into, from its size and the host's cores.
+fn pvar_chunk_count(body: &str) -> usize {
+    if body.len() < PARALLEL_PVAR_MIN_BYTES {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1)
+        .min(PARALLEL_PVAR_MAX_CHUNKS)
+}
+
+/// Parses one chunk, reporting where it stopped in chunk-local line numbers.
+fn parse_pvar_chunk(
+    body: &str,
+    coordinates: CoordinateSystem,
+    max_variants: usize,
+    layout: &PvarLayout,
+) -> (Vec<PvarVariant>, Option<(usize, PvarStop)>) {
     let mut variants = Vec::new();
-    for (line_index, line) in first_body.into_iter().chain(lines) {
+    for (chunk_line, line) in body.lines().enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        // A chunk cannot know the running total, so the exact limit is the
+        // caller's job. This bounds a chunk's own allocation on a file far over
+        // the limit, and changes no output: whatever this reports, the caller
+        // re-derives the same answer from the counts.
         if variants.len() >= max_variants {
-            return Err(DataFusionError::Plan(format!(
-                "PVAR {} exceeds configured max_variants {max_variants}",
-                sanitize_location(path)
-            )));
+            return (variants, Some((chunk_line, PvarStop::Limit)));
         }
-        let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() < required_width {
-            return Err(pvar_line_error(
-                path,
-                line_index,
-                format!(
-                    "has {} columns; at least {required_width} required",
-                    fields.len()
-                ),
-            ));
+        match parse_pvar_record(line, coordinates, layout) {
+            Ok(variant) => variants.push(variant),
+            Err(detail) => return (variants, Some((chunk_line, PvarStop::Malformed(detail)))),
         }
-        let position = fields[pos_col].parse::<u64>().map_err(|error| {
-            pvar_line_error(path, line_index, format!("has invalid POS: {error}"))
-        })?;
-        let site = coordinates
-            .site(position)
-            .map_err(|error| pvar_line_error(path, line_index, error.to_string()))?;
-        let reference = fields[ref_col];
-        if reference.is_empty() || reference == "." || reference.contains(',') {
-            return Err(pvar_line_error(
-                path,
-                line_index,
-                "has malformed REF allele".to_string(),
-            ));
-        }
-        let alternate = fields[alt_col]
-            .split(',')
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        if alternate.is_empty()
-            || alternate
-                .iter()
-                .any(|allele| allele.is_empty() || allele == ".")
-        {
-            return Err(pvar_line_error(
-                path,
-                line_index,
-                "has malformed ALT allele list".to_string(),
-            ));
-        }
-        variants.push(PvarVariant {
-            chrom: fields[chrom_col].to_string(),
-            start: site.start,
-            end: site.end,
-            id: (fields[id_col] != ".").then(|| fields[id_col].to_string()),
-            reference: reference.to_string(),
-            alternate,
-        });
     }
-    Ok(variants)
+    (variants, None)
+}
+
+fn parse_pvar_record(
+    line: &str,
+    coordinates: CoordinateSystem,
+    layout: &PvarLayout,
+) -> std::result::Result<PvarVariant, String> {
+    let fields: Vec<_> = line.split_whitespace().collect();
+    if fields.len() < layout.width {
+        return Err(format!(
+            "has {} columns; at least {} required",
+            fields.len(),
+            layout.width
+        ));
+    }
+    let position = fields[layout.position]
+        .parse::<u64>()
+        .map_err(|error| format!("has invalid POS: {error}"))?;
+    let site = coordinates
+        .site(position)
+        .map_err(|error| error.to_string())?;
+    let reference = fields[layout.reference];
+    if reference.is_empty() || reference == "." || reference.contains(',') {
+        return Err("has malformed REF allele".to_string());
+    }
+    let alternate = fields[layout.alternate]
+        .split(',')
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if alternate.is_empty()
+        || alternate
+            .iter()
+            .any(|allele| allele.is_empty() || allele == ".")
+    {
+        return Err("has malformed ALT allele list".to_string());
+    }
+    Ok(PvarVariant {
+        chrom: fields[layout.chrom].to_string(),
+        start: site.start,
+        end: site.end,
+        id: (fields[layout.id] != ".").then(|| fields[layout.id].to_string()),
+        reference: reference.to_string(),
+        alternate,
+    })
 }
 
 fn pvar_line_error(path: &str, line_index: usize, detail: String) -> DataFusionError {
@@ -1706,6 +1902,178 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("max_variants 1"), "{error}");
+    }
+
+    /// A body large enough to cross `PARALLEL_PVAR_MIN_BYTES` and be split.
+    fn large_pvar(rows: usize, malformed_at: Option<usize>) -> (String, usize) {
+        let mut text = String::from("##fileformat=PVARv1.0\n#CHROM\tPOS\tID\tREF\tALT\n");
+        let header_lines = 2;
+        for row in 0..rows {
+            if Some(row) == malformed_at {
+                text.push_str("22\tnot-a-position\tbad\tA\tC\n");
+            } else {
+                let position = row + 1;
+                text.push_str(&format!("22\t{position}\trs{row}\tA\tC\n"));
+            }
+        }
+        (text, header_lines)
+    }
+
+    /// `rows` valid records, split into exactly `chunks` pieces.
+    fn parse_pinned(text: &str, max_variants: usize, chunks: usize) -> Result<Vec<PvarVariant>> {
+        parse_pvar_chunked(
+            "cohort.pvar",
+            text.as_bytes(),
+            CoordinateSystem::ZeroBasedHalfOpen,
+            max_variants,
+            Some(chunks),
+        )
+    }
+
+    #[test]
+    fn enforces_the_row_limit_on_a_body_with_no_bad_line() {
+        // Nothing stops any chunk here, so the only thing that can enforce the
+        // limit is reconciling the counts as the chunks are joined.
+        let (text, _) = large_pvar(400, None);
+        assert_eq!(parse_pinned(&text, 400, 8).unwrap().len(), 400);
+        let error = parse_pinned(&text, 399, 8).unwrap_err().to_string();
+        assert!(error.contains("max_variants 399"), "{error}");
+    }
+
+    #[test]
+    fn the_row_limit_beats_a_malformed_row_reached_at_the_same_moment() {
+        // 400 good rows then a bad one, with the limit at exactly 400: a serial
+        // pass checks the limit before reading the bad line, so the limit wins.
+        // A chunk cannot see that on its own — it only knows its own rows — so
+        // this is what the reconciliation exists for.
+        let (mut text, header_lines) = large_pvar(400, None);
+        text.push_str("22\tnot-a-position\tbad\tA\tC\n");
+        let error = parse_pinned(&text, 400, 8).unwrap_err().to_string();
+        assert!(error.contains("max_variants 400"), "{error}");
+
+        // One more allowed row and the bad line is read, so it reports instead.
+        let error = parse_pinned(&text, 401, 8).unwrap_err().to_string();
+        assert!(
+            error.contains(&format!("line {} has invalid POS", header_lines + 401)),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn chunk_ranges_cover_the_body_on_line_boundaries() {
+        // Whatever the split points land on, the ranges must tile the body
+        // exactly and never cut a line: a chunk that starts mid-line would
+        // parse a fragment as a record.
+        for body in [
+            "".to_string(),
+            "a\n".to_string(),
+            "a\nbb\nccc\n".to_string(),
+            "a\nbb\nccc".to_string(),
+            "x\n".repeat(400_000),
+            format!("{}\nlast-line-without-newline", "y\n".repeat(400_000)),
+        ] {
+            let ranges = pvar_chunk_ranges(&body, 8);
+            if body.is_empty() {
+                assert!(ranges.is_empty());
+                continue;
+            }
+            assert_eq!(ranges.first().unwrap().0, 0);
+            assert_eq!(ranges.last().unwrap().1, body.len());
+            for window in ranges.windows(2) {
+                assert_eq!(window[0].1, window[1].0, "ranges must be contiguous");
+            }
+            for &(start, end) in &ranges {
+                assert!(start < end);
+                assert!(start == 0 || body.as_bytes()[start - 1] == b'\n');
+                assert!(end == body.len() || body.as_bytes()[end - 1] == b'\n');
+            }
+            // Splitting must not change how many lines there are.
+            let split_lines: usize = ranges
+                .iter()
+                .map(|&(start, end)| body[start..end].lines().count())
+                .sum();
+            assert_eq!(split_lines, body.lines().count());
+        }
+    }
+
+    #[test]
+    fn parses_a_split_pvar_identically_to_a_single_chunk() {
+        let rows = 60_000;
+        let (text, _) = large_pvar(rows, None);
+        assert!(
+            text.len() > PARALLEL_PVAR_MIN_BYTES,
+            "fixture must be large enough to be split"
+        );
+        let variants = parse_pvar(
+            "cohort.pvar",
+            text.as_bytes(),
+            CoordinateSystem::ZeroBasedHalfOpen,
+            usize::MAX,
+        )
+        .unwrap();
+        // Order and content must survive being parsed out of order.
+        assert_eq!(variants.len(), rows);
+        for (row, variant) in variants.iter().enumerate() {
+            assert_eq!(variant.chrom, "22");
+            assert_eq!(variant.start, row as u64);
+            assert_eq!(variant.id.as_deref(), Some(format!("rs{row}").as_str()));
+            assert_eq!(variant.reference, "A");
+            assert_eq!(variant.alternate, vec!["C"]);
+        }
+    }
+
+    #[test]
+    fn reports_the_file_line_of_a_malformed_row_in_a_split_body() {
+        // The chunk that finds the bad line only knows its own line numbers, so
+        // this is what catches a missing chunk offset.
+        for malformed_at in [0_usize, 1, 30_000, 59_999] {
+            let (text, header_lines) = large_pvar(60_000, Some(malformed_at));
+            let error = parse_pvar(
+                "cohort.pvar",
+                text.as_bytes(),
+                CoordinateSystem::ZeroBasedHalfOpen,
+                usize::MAX,
+            )
+            .unwrap_err()
+            .to_string();
+            let expected = format!("line {} has invalid POS", header_lines + malformed_at + 1);
+            assert!(error.contains(&expected), "{error} (expected {expected})");
+        }
+    }
+
+    #[test]
+    fn enforces_the_row_limit_before_a_malformed_row_in_a_split_body() {
+        // A serial pass checks the limit before reading the offending line, and
+        // the limit is reached in an earlier chunk than the bad line. The
+        // reconciliation across chunks has to reproduce that ordering.
+        let (text, _) = large_pvar(60_000, Some(50_000));
+        let error = parse_pvar(
+            "cohort.pvar",
+            text.as_bytes(),
+            CoordinateSystem::ZeroBasedHalfOpen,
+            10_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("max_variants 10000"), "{error}");
+    }
+
+    #[test]
+    fn reports_a_malformed_row_that_precedes_the_row_limit() {
+        // The mirror of the test above: the bad line comes first, so it wins.
+        let (text, header_lines) = large_pvar(60_000, Some(100));
+        let error = parse_pvar(
+            "cohort.pvar",
+            text.as_bytes(),
+            CoordinateSystem::ZeroBasedHalfOpen,
+            50_000,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(&format!("line {} has invalid POS", header_lines + 101)),
+            "{error}"
+        );
     }
 
     #[test]

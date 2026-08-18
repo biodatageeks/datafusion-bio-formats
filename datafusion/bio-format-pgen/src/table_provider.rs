@@ -119,7 +119,7 @@ impl PgenTableProvider {
     /// Opens and validates a local or remote PGEN/PVAR/PSAM fileset.
     pub async fn try_new(pgen_path: impl Into<String>, options: PgenReadOptions) -> Result<Self> {
         validate_options(&options)?;
-        let available = ["GT", "PHASED", "DS", "DS_STORED", "HDS"]
+        let available = ["GT", "ALT_COUNT", "PHASED", "DS", "DS_STORED", "HDS"]
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -365,6 +365,25 @@ fn build_schema(
                     "encoded_diploid".to_string(),
                 ),
             ])),
+            "ALT_COUNT" => Field::new(
+                "ALT_COUNT",
+                DataType::List(Arc::new(Field::new("sample", DataType::Int8, true))),
+                false,
+            )
+            .with_metadata(HashMap::from([
+                (
+                    GENOTYPE_OUTPUT_MODE_KEY.to_string(),
+                    "hardcall_allele_count".to_string(),
+                ),
+                (
+                    GENOTYPE_COUNTED_ALLELE_KEY.to_string(),
+                    "PVAR ALT allele index 1".to_string(),
+                ),
+                (
+                    "bio.pgen.ploidy_semantics".to_string(),
+                    "encoded_diploid".to_string(),
+                ),
+            ])),
             "PHASED" => Field::new(
                 "PHASED",
                 DataType::List(Arc::new(Field::new("sample", DataType::Boolean, true))),
@@ -477,6 +496,18 @@ fn build_schema(
                 "bio.pgen.specification_baseline".to_string(),
                 PGEN_SPEC_BASELINE.to_string(),
             ),
+            // The output shape, known from the companions at registration and
+            // exposed so a caller can allocate its destination before scanning.
+            // Assembling a genotype matrix without this means either growing a
+            // multi-gigabyte buffer or holding every batch to count rows first.
+            (
+                "bio.pgen.variant_count".to_string(),
+                fileset.variants.len().to_string(),
+            ),
+            (
+                "bio.pgen.selected_sample_count".to_string(),
+                fileset.selected_samples.source_indices().len().to_string(),
+            ),
         ]),
     )))
 }
@@ -500,7 +531,7 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Result
     }
 }
 
-fn plan_payload_partitions(
+pub(crate) fn plan_payload_partitions(
     selected: Arc<Vec<usize>>,
     fileset: &PgenFileset,
     target_partitions: usize,

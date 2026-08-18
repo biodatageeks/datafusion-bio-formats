@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, FixedSizeListArray, Float32Array, ListArray, StringArray, StructArray,
-    UInt16Array,
+    Array, BooleanArray, FixedSizeListArray, Float32Array, Int8Array, ListArray, StringArray,
+    StructArray, UInt16Array,
 };
 use datafusion::catalog::TableProvider;
 use datafusion::logical_expr::{TableProviderFilterPushDown, col, lit};
@@ -521,6 +521,24 @@ fn float_sample_values(
         .collect()
 }
 
+fn alt_count_values(
+    batch: &datafusion::arrow::record_batch::RecordBatch,
+    column: usize,
+    row: usize,
+) -> Vec<Option<i8>> {
+    let values = genotype_struct(batch, column)
+        .column_by_name("ALT_COUNT")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .value(row);
+    let values = values.as_any().downcast_ref::<Int8Array>().unwrap();
+    (0..values.len())
+        .map(|index| (!values.is_null(index)).then(|| values.value(index)))
+        .collect()
+}
+
 fn hds_values(
     batch: &datafusion::arrow::record_batch::RecordBatch,
     column: usize,
@@ -578,6 +596,23 @@ async fn decodes_all_fixed_width_and_plink1_modes() {
                     .get("bio.pgen.ploidy_semantics")
                     .map(String::as_str),
                 Some("encoded_diploid")
+            );
+            // The output shape a caller allocates against. The sample count is
+            // the selected count, not the cohort's, so a subset scan does not
+            // over-allocate: this fixture holds 4 samples and selects 3.
+            assert_eq!(
+                schema
+                    .metadata()
+                    .get("bio.pgen.variant_count")
+                    .map(String::as_str),
+                Some("2")
+            );
+            assert_eq!(
+                schema
+                    .metadata()
+                    .get("bio.pgen.selected_sample_count")
+                    .map(String::as_str),
+                Some("3")
             );
         }
         let context = context(1);
@@ -778,6 +813,144 @@ async fn decodes_variable_representations_indexes_phase_dosage_and_patches() {
         gt_values(&batches[0], 0, 0),
         vec![Some(vec![0, 0]), Some(vec![0, 1]), Some(vec![1, 1]), None]
     );
+}
+
+/// The common-value + difflist records, in the shapes the fused decode has to
+/// handle: every common category, an LD-compressed record whose base is one of
+/// them, and phase tracks in both the implicit and explicit forms.
+fn common_difflist_records() -> (Vec<u8>, Vec<Vec<u8>>, Vec<usize>) {
+    let records: Vec<(u8, Vec<u8>)> = vec![
+        // Common 0. Record 1 uses this as its LD base, so it must decode its
+        // whole main track rather than take the fused path.
+        (0x04, vec![1, 2, 2]),
+        // LD-compressed against record 0, patching sample 1 to missing.
+        (0x02, vec![1, 1, 3]),
+        // Common 2, with a patch to the missing category.
+        (0x06, vec![1, 3, 3]),
+        // Common 3 and an empty difflist: every call missing.
+        (0x07, vec![0]),
+        // Common 0, two patched heterozygotes, implicit phase track that flips
+        // sample 3 — an orientation GT keeps and the other fields discard.
+        (0x14, vec![2, 1, 5, 2, 0b0000_0100]),
+        // The same with an explicit phase-present bitarray, flipping sample 0.
+        (0x14, vec![2, 0, 5, 1, 0b0000_0011, 0b0000_0001]),
+        // Common 2 with one patched heterozygote, flipped.
+        (0x16, vec![1, 0, 1, 0b0000_0010]),
+        // Common 3 with a phase track, so the heterozygote count the track is
+        // sized by comes from the difflist and not from the common category.
+        (0x17, vec![2, 1, 9, 1, 0]),
+        // Common 0 again, this time not an LD base: the dominant record shape in
+        // a plink2 fileset, and the one the fused decode exists for.
+        (0x04, vec![1, 2, 2]),
+    ];
+    let allele_counts = vec![2; records.len()];
+    let (types, bodies) = records.into_iter().unzip();
+    (types, bodies, allele_counts)
+}
+
+#[tokio::test]
+async fn common_value_difflist_records_agree_across_every_genotype_field() {
+    let (types, records, alleles) = common_difflist_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+
+    // GT keeps the hardcall-phase orientation; ALT_COUNT and DS sum the two
+    // alleles, so they take the fused decode that validates the phase track
+    // without applying it. All three must describe the same calls.
+    let expected_gt = vec![
+        vec![
+            Some(vec![0, 0]),
+            Some(vec![0, 0]),
+            Some(vec![1, 1]),
+            Some(vec![0, 0]),
+        ],
+        vec![Some(vec![0, 0]), None, Some(vec![1, 1]), Some(vec![0, 0])],
+        vec![Some(vec![1, 1]), Some(vec![1, 1]), Some(vec![1, 1]), None],
+        vec![None, None, None, None],
+        vec![
+            Some(vec![0, 0]),
+            Some(vec![0, 1]),
+            Some(vec![0, 0]),
+            Some(vec![1, 0]),
+        ],
+        vec![
+            Some(vec![1, 0]),
+            Some(vec![0, 1]),
+            Some(vec![0, 0]),
+            Some(vec![0, 0]),
+        ],
+        vec![
+            Some(vec![1, 0]),
+            Some(vec![1, 1]),
+            Some(vec![1, 1]),
+            Some(vec![1, 1]),
+        ],
+        vec![None, Some(vec![0, 1]), Some(vec![1, 1]), None],
+        vec![
+            Some(vec![0, 0]),
+            Some(vec![0, 0]),
+            Some(vec![1, 1]),
+            Some(vec![0, 0]),
+        ],
+    ];
+    let expected_counts: Vec<Vec<Option<i8>>> = expected_gt
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|call| {
+                    call.as_ref()
+                        .map(|alleles| alleles.iter().filter(|&&allele| allele == 1).count() as i8)
+                })
+                .collect()
+        })
+        .collect();
+
+    for (field, partitions) in [("GT", 1), ("ALT_COUNT", 1), ("ALT_COUNT", 3), ("DS", 1)] {
+        let provider = PgenTableProvider::try_new(
+            path(&fixture.pgen),
+            PgenReadOptions {
+                genotype_fields: Some(vec![field.to_string()]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let query_context = context(partitions);
+        query_context
+            .register_table("p", Arc::new(provider))
+            .unwrap();
+        let batches = query_context
+            .sql("SELECT genotypes FROM p ORDER BY start")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(batches.len(), 1, "{field} at {partitions} partitions");
+        let batch = &batches[0];
+        assert_eq!(batch.num_rows(), expected_gt.len());
+        for row in 0..batch.num_rows() {
+            let case = format!("{field} at {partitions} partitions, row {row}");
+            match field {
+                "GT" => assert_eq!(gt_values(batch, 0, row), expected_gt[row], "{case}"),
+                "ALT_COUNT" => {
+                    assert_eq!(
+                        alt_count_values(batch, 0, row),
+                        expected_counts[row],
+                        "{case}"
+                    )
+                }
+                "DS" => assert_eq!(
+                    ds_values(batch, 0, row),
+                    expected_counts[row]
+                        .iter()
+                        .map(|count| count.map(f32::from))
+                        .collect::<Vec<_>>(),
+                    "{case}"
+                ),
+                other => panic!("unexpected field {other}"),
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -1625,4 +1798,234 @@ np.testing.assert_array_equal(observed_unused_alt, unused_alt_alleles)
         ds_values(&dosage_batches[0], 0, 0),
         vec![Some(0.125), Some(1.0), Some(1.875), None]
     );
+}
+
+/// Reads a genotype field through the matrix path.
+async fn matrix_alt_count(
+    fixture: &Fixture,
+    threads: usize,
+    samples: Option<Vec<String>>,
+) -> Vec<i8> {
+    matrix_alt_count_in_ranges(
+        fixture,
+        threads,
+        samples,
+        PgenReadOptions::default().max_range_bytes,
+    )
+    .await
+}
+
+/// The same read with the range planner's byte budget pinned, so a test can
+/// choose how many rounds of input a partition is decoded from.
+async fn matrix_alt_count_in_ranges(
+    fixture: &Fixture,
+    threads: usize,
+    samples: Option<Vec<String>>,
+    max_range_bytes: u64,
+) -> Vec<i8> {
+    let options = PgenReadOptions {
+        samples,
+        max_range_bytes,
+        ..Default::default()
+    };
+    let shape =
+        datafusion_bio_format_pgen::matrix::genotype_matrix_shape(path(&fixture.pgen), &options)
+            .await
+            .unwrap();
+    let mut values = vec![0_i8; shape.variants * shape.samples];
+    datafusion_bio_format_pgen::matrix::read_genotype_matrix(
+        path(&fixture.pgen),
+        &options,
+        datafusion_bio_format_pgen::matrix::MatrixData::AltCount {
+            values: &mut values,
+            missing: -9,
+        },
+        threads,
+    )
+    .await
+    .unwrap();
+    values
+}
+
+#[tokio::test]
+async fn matrix_path_matches_the_scan_on_every_record_representation() {
+    // The same fixture the scan tests use: dense, one-bit, common-value with and
+    // without a phase track, LD-compressed, multiallelic, and a dosage track.
+    // Decoding into a caller's buffer takes different branches than building
+    // Arrow does, so agreement here is what says the branches agree.
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+
+    let provider = PgenTableProvider::try_new(
+        path(&fixture.pgen),
+        PgenReadOptions {
+            genotype_fields: Some(vec!["ALT_COUNT".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1);
+    context.register_table("p", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM p ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let expected = (0..batches[0].num_rows())
+        .flat_map(|row| {
+            alt_count_values(&batches[0], 0, row)
+                .into_iter()
+                .map(|value| value.unwrap_or(-9))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    // Every partition count must give the same matrix: partitions own disjoint
+    // row ranges, and an off-by-one in that split would interleave variants.
+    for threads in [1, 2, 4, 8] {
+        assert_eq!(
+            matrix_alt_count(&fixture, threads, None).await,
+            expected,
+            "threads {threads}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn matrix_path_decodes_the_same_matrix_across_many_byte_ranges() {
+    // The decoders keep their state — workspace, retained LD base, row cursor —
+    // between the ranges a partition is fed, because the input arrives a range
+    // at a time rather than all at once. A byte budget this small puts nearly
+    // every record in its own range, so an LD chain crosses rounds and a lost
+    // cursor shows up as shifted rows.
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+    let expected = matrix_alt_count(&fixture, 1, None).await;
+    for threads in [1, 2, 4, 8] {
+        for max_range_bytes in [1_u64, 8, 64] {
+            assert_eq!(
+                matrix_alt_count_in_ranges(&fixture, threads, None, max_range_bytes).await,
+                expected,
+                "threads {threads}, max_range_bytes {max_range_bytes}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn matrix_path_honours_sample_selection() {
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+    let all = matrix_alt_count(&fixture, 1, None).await;
+    let subset =
+        matrix_alt_count(&fixture, 1, Some(vec!["s3".to_string(), "s1".to_string()])).await;
+    assert_eq!(subset.len(), all.len() / 2);
+    for variant in 0..records_len(&all, 4) {
+        assert_eq!(
+            subset[variant * 2],
+            all[variant * 4 + 2],
+            "variant {variant}"
+        );
+        assert_eq!(
+            subset[variant * 2 + 1],
+            all[variant * 4],
+            "variant {variant}"
+        );
+    }
+}
+
+fn records_len(values: &[i8], samples: usize) -> usize {
+    values.len() / samples
+}
+
+#[tokio::test]
+async fn matrix_path_rejects_a_wrongly_sized_destination() {
+    let fixture = fixed_fixture(2);
+    let options = PgenReadOptions::default();
+    let mut values = vec![0_i8; 3];
+    let error = datafusion_bio_format_pgen::matrix::read_genotype_matrix(
+        path(&fixture.pgen),
+        &options,
+        datafusion_bio_format_pgen::matrix::MatrixData::AltCount {
+            values: &mut values,
+            missing: -9,
+        },
+        1,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("expected 8"), "{error}");
+}
+
+#[tokio::test]
+async fn matrix_path_keeps_fractional_dosages() {
+    // The general decoder is the only branch that sees a stored dosage track,
+    // and its values are genuinely fractional. An earlier draft of this path
+    // routed them through the internal-code mapping, which can only say 0, 1
+    // or 2 — every dosage came out as zero and every fast-path fixture still
+    // passed. This is the fixture that disagrees.
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+
+    let provider = PgenTableProvider::try_new(
+        path(&fixture.pgen),
+        PgenReadOptions {
+            genotype_fields: Some(vec!["DS".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1);
+    context.register_table("d", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM d ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let expected = (0..batches[0].num_rows())
+        .flat_map(|row| {
+            ds_values(&batches[0], 0, row)
+                .into_iter()
+                .map(|value| value.unwrap_or(f32::NAN))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        expected.iter().any(|value| value.fract() != 0.0),
+        "fixture must carry a fractional dosage or this proves nothing"
+    );
+
+    let options = PgenReadOptions::default();
+    let shape =
+        datafusion_bio_format_pgen::matrix::genotype_matrix_shape(path(&fixture.pgen), &options)
+            .await
+            .unwrap();
+    for threads in [1, 4] {
+        let mut values = vec![0.0_f32; shape.variants * shape.samples];
+        datafusion_bio_format_pgen::matrix::read_genotype_matrix(
+            path(&fixture.pgen),
+            &options,
+            datafusion_bio_format_pgen::matrix::MatrixData::Dosage {
+                values: &mut values,
+                missing: f32::NAN,
+            },
+            threads,
+        )
+        .await
+        .unwrap();
+        for (index, (observed, want)) in values.iter().zip(&expected).enumerate() {
+            if want.is_nan() {
+                assert!(observed.is_nan(), "cell {index} threads {threads}");
+            } else {
+                assert_eq!(observed, want, "cell {index} threads {threads}");
+            }
+        }
+    }
 }

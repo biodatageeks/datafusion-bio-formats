@@ -175,6 +175,17 @@ impl ObjectRangeReader {
         }
     }
 
+    /// The bytes of the most recent [`Self::read_range`].
+    ///
+    /// Lets a caller hand the loaded range to a decoder without copying it out,
+    /// and lets the reader's buffer be reused for the next range.
+    pub(crate) fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Local { buffer, .. } => buffer,
+            Self::Remote { buffer, .. } => buffer,
+        }
+    }
+
     fn into_bytes(self) -> Bytes {
         match self {
             Self::Local { buffer, .. } => Bytes::from(buffer),
