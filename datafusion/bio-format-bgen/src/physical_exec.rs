@@ -192,6 +192,9 @@ impl ExecutionPlan for BgenExec {
             let mut scratch = DecodeScratch::new();
             // The decoder appends into these, and a finished batch moves them
             // into its Arrow arrays.
+            let emits_ploidy = crate::table_provider::genotype_children(&fileset.options)?
+                .iter()
+                .any(|name| name == "PLOIDY");
             let mut buffers = GenotypeBuffers::new(
                 match (fileset.options.output_mode, fileset.probability_shape) {
                     (BgenOutputMode::Dosage, _) => BufferLayout::Dosage,
@@ -200,6 +203,7 @@ impl ExecutionPlan for BgenExec {
                     }
                     (BgenOutputMode::Probability, None) => BufferLayout::NestedProbability,
                 },
+                emits_ploidy,
             );
 
             if assignment.ranges.is_empty() {
@@ -505,8 +509,8 @@ fn build_genotypes(
         sample_offsets,
         nulls,
         variant_offsets,
-        ploidy,
-        ploidy_offsets,
+        mut ploidy,
+        mut ploidy_offsets,
     } = buffers;
     let genotype_values: ArrayRef = match mode {
         BgenOutputMode::Probability => {
@@ -554,16 +558,25 @@ fn build_genotypes(
             )?)
         }
     };
-    // Declared ploidy is never null.
-    let ploidy = Arc::new(ListArray::try_new(
-        Arc::new(Field::new("item", DataType::UInt8, false)),
-        OffsetBuffer::new(ScalarBuffer::from(ploidy_offsets)),
-        Arc::new(UInt8Array::from(ploidy)),
-        None,
-    )?);
+    // The children are whatever the projection asked for, in its order; a
+    // deselected `PLOIDY` was never collected, so there is nothing to build.
+    let mut children = Vec::with_capacity(fields.len());
+    for field in fields.iter() {
+        if field.name() == "PLOIDY" {
+            // Declared ploidy is never null.
+            children.push(Arc::new(ListArray::try_new(
+                Arc::new(Field::new("item", DataType::UInt8, false)),
+                OffsetBuffer::new(ScalarBuffer::from(std::mem::take(&mut ploidy_offsets))),
+                Arc::new(UInt8Array::from(std::mem::take(&mut ploidy))),
+                None,
+            )?) as ArrayRef);
+        } else {
+            children.push(Arc::clone(&genotype_values));
+        }
+    }
     Ok(Arc::new(StructArray::try_new(
         fields.clone(),
-        vec![genotype_values, ploidy],
+        children,
         None,
     )?))
 }

@@ -956,6 +956,136 @@ async fn whole_cohort_dosage_matches_the_per_sample_decode() {
 }
 
 #[tokio::test]
+async fn genotype_fields_select_the_struct_children() {
+    // PLOIDY is a byte per genotype — on a whole chromosome of this cohort it is
+    // 2.53 GB the caller of a dosage read never asked for — and it is held alive
+    // as long as the values are, because a NumPy view of the result keeps the
+    // whole Arrow struct. A scan that does not emit it must not build it.
+    let fixture = fixture_with_variants(Codec::Zlib, true, &fully_called_variants());
+
+    // Default: both children, in the order the struct declares them.
+    let all = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: Vec<String> = match all
+        .schema()
+        .field_with_name("genotypes")
+        .unwrap()
+        .data_type()
+    {
+        datafusion::arrow::datatypes::DataType::Struct(fields) => {
+            fields.iter().map(|f| f.name().to_string()).collect()
+        }
+        other => panic!("genotypes is {other:?}"),
+    };
+    assert_eq!(names, vec!["DS".to_string(), "PLOIDY".to_string()]);
+
+    // DS only: the struct has one child and the values are unchanged.
+    let ds_only = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            genotype_fields: Some(vec!["DS".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let names: Vec<String> = match ds_only
+        .schema()
+        .field_with_name("genotypes")
+        .unwrap()
+        .data_type()
+    {
+        datafusion::arrow::datatypes::DataType::Struct(fields) => {
+            fields.iter().map(|f| f.name().to_string()).collect()
+        }
+        other => panic!("genotypes is {other:?}"),
+    };
+    assert_eq!(names, vec!["DS".to_string()]);
+
+    let both_context = context(1024);
+    both_context.register_table("all", Arc::new(all)).unwrap();
+    both_context
+        .register_table("ds", Arc::new(ds_only))
+        .unwrap();
+    let with_ploidy = both_context
+        .sql("SELECT genotypes FROM all ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let without = both_context
+        .sql("SELECT genotypes FROM ds ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    for row in 0..2 {
+        assert_eq!(
+            dosage_values(&with_ploidy[0], 0, row),
+            dosage_values(&without[0], 0, row),
+            "row {row}"
+        );
+    }
+    // Deselecting it removes the child rather than emptying it: a consumer that
+    // asks for PLOIDY on this scan gets a schema error, not a null column.
+    let struct_array = without[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert_eq!(struct_array.num_columns(), 1);
+    assert!(struct_array.column_by_name("PLOIDY").is_none());
+
+    // PLOIDY only is also a valid projection.
+    let ploidy_only = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            genotype_fields: Some(vec!["PLOIDY".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let ploidy_context = context(1024);
+    ploidy_context
+        .register_table("p", Arc::new(ploidy_only))
+        .unwrap();
+    let batches = ploidy_context
+        .sql("SELECT genotypes FROM p ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(ploidy_values(&batches[0], 0, 0), vec![2, 2, 2]);
+
+    // An unknown child is rejected at plan time rather than silently ignored.
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            genotype_fields: Some(vec!["GP".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("GP"), "{error}");
+}
+
+#[tokio::test]
 async fn decodes_layout1_uncompressed_and_zlib() {
     for codec in [Codec::None, Codec::Zlib] {
         let dir = TempDir::new().unwrap();

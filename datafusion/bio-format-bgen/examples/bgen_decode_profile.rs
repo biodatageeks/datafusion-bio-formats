@@ -142,6 +142,13 @@ async fn main() {
             path.clone(),
             BgenReadOptions {
                 output_mode: BgenOutputMode::Dosage,
+                // `BGEN_PLOIDY=1` keeps the PLOIDY child, to compare what a
+                // scan that emits it costs against one that does not.
+                genotype_fields: if std::env::var("BGEN_PLOIDY").is_ok() {
+                    None
+                } else {
+                    Some(vec!["DS".to_string()])
+                },
                 ..Default::default()
             },
         )
