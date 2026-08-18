@@ -985,7 +985,11 @@ static EIGHT_BIT_PROBABILITY: std::sync::LazyLock<[f32; 256]> = std::sync::LazyL
 /// Returns `None` when an unphased stored sum exceeds `denominator`, which is
 /// the same input the general path rejects. A byte can never exceed an 8-bit
 /// denominator, so the per-haplotype phased bound cannot be violated here.
-#[inline]
+// `#[inline]` alone is not enough here: the caller is the whole layout-2 decode
+// body, and LLVM declines to inline into it. Left as a plain hint, this function
+// stays an out-of-line call taken once per sample — 15% of a whole-chromosome
+// scan in a profile of one.
+#[inline(always)]
 fn byte_dosage_numerator(values: &[u8], denominator: u64, ploidy: u8, phased: bool) -> Option<u64> {
     if phased {
         let sum: u64 = values.iter().map(|&value| value as u64).sum();

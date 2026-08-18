@@ -122,6 +122,12 @@ impl GenotypeBuffers {
         self.close_sample(false)
     }
 
+    // Called once per sample, from a caller large enough that LLVM will not
+    // inline it on a hint alone — `finish_sample` and `finish_missing_sample`
+    // carry `#[inline]`, but they only delegate here, so the hint stopped one
+    // level short of the work. Out of line this was 18% of a whole-chromosome
+    // scan.
+    #[inline(always)]
     fn close_sample(&mut self, valid: bool) -> Result<()> {
         match self.layout {
             BufferLayout::FixedProbability(width) => {
