@@ -121,14 +121,85 @@ pub async fn genotype_matrix_shape(
 pub async fn read_genotype_matrix(
     pgen_path: String,
     options: &PgenReadOptions,
-    mut destination: MatrixData<'_>,
+    destination: MatrixData<'_>,
     threads: usize,
 ) -> Result<(MatrixShape, Vec<u64>)> {
+    let reader = GenotypeMatrixReader::open(pgen_path, options).await?;
+    let positions = reader.positions();
+    reader.read_into(destination, threads).await?;
+    Ok((reader.shape(), positions))
+}
+
+/// An opened fileset, ready to decode into a destination.
+///
+/// Opening parses the PVAR and PSAM — 108 MB of text on a whole chromosome. A
+/// caller that must learn the shape before it can allocate would otherwise pay
+/// that twice, once to ask and once to decode, and on the hardcall workload the
+/// second parse is a fifth of the whole operation.
+pub struct GenotypeMatrixReader {
+    fileset: Arc<PgenFileset>,
+    /// Read-coalescing bounds, kept because they belong to the request rather
+    /// than to the fileset and the decode still needs them.
+    max_range_gap: u64,
+    max_range_bytes: u64,
+}
+
+impl GenotypeMatrixReader {
+    /// Opens a fileset and reads its companions.
+    pub async fn open(pgen_path: String, options: &PgenReadOptions) -> Result<Self> {
+        Ok(Self {
+            fileset: Arc::new(PgenFileset::open(pgen_path, options).await?),
+            max_range_gap: options.max_range_gap,
+            max_range_bytes: options.max_range_bytes,
+        })
+    }
+
+    /// The shape a decode will produce.
+    pub fn shape(&self) -> MatrixShape {
+        MatrixShape {
+            variants: self.fileset.variants.len(),
+            samples: self.fileset.selected_samples.source_indices().len(),
+        }
+    }
+
+    /// The selected sample names, in column order.
+    pub fn sample_names(&self) -> &[String] {
+        self.fileset.selected_samples.names()
+    }
+
+    /// The variant start positions, in row order.
+    pub fn positions(&self) -> Vec<u64> {
+        self.fileset
+            .variants
+            .iter()
+            .map(|variant| variant.start)
+            .collect()
+    }
+
+    /// Decodes into `destination`, which must be exactly `variants * samples`
+    /// long.
+    pub async fn read_into(&self, destination: MatrixData<'_>, threads: usize) -> Result<()> {
+        decode_matrix(
+            &self.fileset,
+            destination,
+            threads,
+            self.max_range_gap,
+            self.max_range_bytes,
+        )
+        .await
+    }
+}
+
+async fn decode_matrix(
+    fileset: &Arc<PgenFileset>,
+    mut destination: MatrixData<'_>,
+    threads: usize,
+    max_range_gap: u64,
+    max_range_bytes: u64,
+) -> Result<()> {
     let field = destination.field();
-    let fileset = Arc::new(PgenFileset::open(pgen_path, options).await?);
     let samples = fileset.selected_samples.source_indices().len();
     let variants = fileset.variants.len();
-    let shape = MatrixShape { variants, samples };
 
     let expected = variants
         .checked_mul(samples)
@@ -139,26 +210,14 @@ pub async fn read_genotype_matrix(
             destination.len()
         )));
     }
-    let positions = || {
-        fileset
-            .variants
-            .iter()
-            .map(|variant| variant.start)
-            .collect::<Vec<_>>()
-    };
     if expected == 0 {
-        return Ok((shape, positions()));
+        return Ok(());
     }
 
     let threads = threads.max(1);
     let selection = Arc::new((0..variants).collect::<Vec<_>>());
-    let partitions = plan_payload_partitions(
-        selection,
-        &fileset,
-        threads,
-        options.max_range_gap,
-        options.max_range_bytes,
-    )?;
+    let partitions =
+        plan_payload_partitions(selection, fileset, threads, max_range_gap, max_range_bytes)?;
 
     // Byte ranges are fetched here, in order, because the object source is
     // async; decoding is what runs in parallel afterwards.
@@ -196,7 +255,7 @@ pub async fn read_genotype_matrix(
         MatrixData::AltCount { values, missing } => {
             let missing = *missing;
             decode_into(
-                &fileset,
+                fileset,
                 field,
                 &work,
                 values,
@@ -216,7 +275,7 @@ pub async fn read_genotype_matrix(
         MatrixData::Dosage { values, missing } => {
             let missing = *missing;
             decode_into(
-                &fileset,
+                fileset,
                 field,
                 &work,
                 values,
@@ -232,7 +291,7 @@ pub async fn read_genotype_matrix(
             )?;
         }
     }
-    Ok((shape, positions()))
+    Ok(())
 }
 
 type LoadedRanges = Vec<(ByteRange, Vec<u8>)>;
