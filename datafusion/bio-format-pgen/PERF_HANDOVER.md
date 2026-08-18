@@ -156,7 +156,55 @@ the count right. Phase validation is shared with the dense path via
 
 ## Optimizations to implement, in order
 
-### 1. SIMD the difflist patch loop
+### 1. Wire `matrix::read_genotype_matrix` into polars-bio
+
+The provider half is done, tested and measured (`src/matrix.rs`). Nothing
+consumes it yet, so none of its gain reaches a user.
+
+Measured on chr22, release + `target-cpu=native`, against what polars-bio does
+today (Arrow batches plus a copy):
+
+| | direct, 1 thread | direct, 8 | polars-bio today, t1 | t8 |
+|---|---:|---:|---:|---:|
+| `DS` | 1.301 s | **0.373 s** | 1.665 s | 0.902 s |
+| `ALT_COUNT` | 0.683 s | **0.229 s** | 0.694 s | 0.414 s |
+
+Scaling goes 1.85× → 3.49× on dosage, because the copy that capped at ~2.8× is
+gone. Expect peak RSS to drop from ~13.5 GB to ~10.2 GB as well, since the Arrow
+intermediate disappears — that would take the last axis where pgenlib leads.
+
+What it needs, in polars-bio:
+
+1. **Extract the options conversion.** `src/scan.rs`, the `InputFormat::Pgen`
+   arm, already builds a `NativePgenReadOptions` from the PyO3 `PgenReadOptions`.
+   Lift that into a function; the new binding needs the same conversion and it
+   should not be written twice.
+2. **Add a `#[pyfunction]`** taking the path, `PgenReadOptions`, the field name,
+   a thread count, and the destination. Take the destination through
+   `pyo3::buffer::PyBuffer<f32>` / `<i8>` — PyO3 has it built in, so this needs
+   no numpy crate and no new dependency. Check `!readonly()`,
+   `is_c_contiguous()`, and that `item_count()` equals
+   `variants * samples` from `genotype_matrix_shape` before forming the slice;
+   the slice itself is `from_raw_parts_mut` over `buf_ptr()`, which is the
+   unsafe step and the only one. Decode inside `py.allow_threads`, since the
+   provider spawns its own threads and must not hold the GIL.
+3. **Rewire `read_pgen_matrix`** in `polars_bio/io.py` to allocate the array and
+   hand it to the binding. `copy_threads` becomes the decoder's thread count.
+   Keep the default tied to `datafusion.execution.target_partitions` so a
+   single-partition read stays single-threaded and a "one thread" measurement
+   remains one.
+4. **The existing tests should pass unchanged** — `tests/test_pgen_io.py` already
+   asserts values, missing sentinels, sample subsetting, field rejection and
+   partition independence against the DataFrame path. That is the regression
+   net; if any of it fails, the binding is wrong, not the tests.
+5. Re-run the benchmark and refresh `PGEN_BENCHMARK.md` and the blog post.
+
+One caveat to carry into the writeups: the direct-decode figures above are the
+Rust path only. They exclude the Python-side work polars-bio's number includes
+(metadata, the positions array), so the end-to-end gain will be smaller than
+0.902 → 0.373 suggests.
+
+### 2. SIMD the difflist patch loop
 
 The remaining per-variant work is the sparse patch. Patches are scattered writes,
 so vectorization is limited, but the sample-index delta decoding
@@ -164,16 +212,17 @@ so vectorization is limited, but the sample-index delta decoding
 up at ~10% of profile samples before fusion — re-profile, since fusion changed
 the denominator substantially.
 
-### 2. Peak RSS — resolved
+### 3. Peak RSS — resolved
 
-Dosage now peaks at 13.30 GB against pgenlib's 12.09 GB for the identical
-10.13 GB output, down from 22.31 GB; hardcall is 5.74 GB against 5.02 GB, down
-from 8.25 GB. The old 17.9 → 22.8 GB regression was the DataFrame path's second
+Dosage now peaks at 13.50 GB against pgenlib's 12.38 GB for the identical
+10.13 GB output, down from 22.31 GB; hardcall is 6.13 GB against 5.14 GB, down
+from 8.25 GB. Task 1 should close the rest, since it removes the Arrow
+intermediate entirely. The old 17.9 → 22.8 GB regression was the DataFrame path's second
 full copy of the values, which `read_pgen_matrix` does not make. Nothing in the
 decode was ever implicated: the Rust-only scan has been flat at 9.97 GB for `DS`
 and 2.9 GB for `ALT_COUNT` throughout.
 
-### 3. Consider exposing a sparse genotype form
+### 4. Consider exposing a sparse genotype form
 
 Out of scope for matrix materialization, but pgenlib's
 `ReadDifflistOrGenovecSubsetUnsafe` returns `difflist_common_geno` + `raregeno`
