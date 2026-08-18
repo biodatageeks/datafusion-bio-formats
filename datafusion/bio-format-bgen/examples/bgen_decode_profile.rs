@@ -48,25 +48,16 @@ async fn main() {
         bytes.len() / 1_000_000
     );
     assert_eq!(layout, 2, "this probe only walks layout 2");
-    // Layout 2 defines three compression modes and the reader supports all of
-    // them; this probe only inflates. Dispatching on the flag lands one commit
-    // later in the stack, and until then a clear refusal beats handing a zstd
-    // or uncompressed block to libdeflate and reporting its complaint.
-    assert_eq!(
-        compression, 1,
-        "this probe only handles zlib (flag 1); see perf/bgen-projectable-ploidy \
-         for full dispatch"
-    );
-
-    // --- Phase A: walk the records and decompress every payload ---
-    let mut decompressor = libdeflater::Decompressor::new();
-    // Layout 2 defines three compression modes and the reader supports all of
-    // them, so the floor is measured in whichever one the file uses rather than
-    // in the zlib case this example was first written against.
+    // Layout 2 defines three compression modes and this probe handles all of
+    // them, so only an out-of-range flag is refused. The zlib-only assertion the
+    // previous commit carried is superseded by the dispatch below.
     assert!(
         compression <= 2,
         "unknown BGEN compression flag {compression}"
     );
+
+    // --- Phase A: walk the records and decompress every payload ---
+    let mut decompressor = libdeflater::Decompressor::new();
     let mut out = vec![0_u8; 64 << 20];
     let mut cursor = start_of_data;
     let mut walked = 0_usize;
