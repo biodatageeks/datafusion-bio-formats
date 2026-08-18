@@ -1068,7 +1068,7 @@ const MISSING_CODE: u8 = 3;
 /// because a table index blocks vectorization of the surrounding loop, and
 /// this runs once per genotype cell.
 #[inline]
-fn alt_count_from_code(code: u8) -> i8 {
+pub(crate) fn alt_count_from_code(code: u8) -> i8 {
     (code - 3 * u8::from(code >= 3)) as i8
 }
 
@@ -1452,7 +1452,7 @@ fn execute_single_field(
     )))
 }
 
-fn record_payload(
+pub(crate) fn record_payload(
     range: ByteRange,
     bytes: &[u8],
     start: u64,

@@ -531,7 +531,7 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Result
     }
 }
 
-fn plan_payload_partitions(
+pub(crate) fn plan_payload_partitions(
     selected: Arc<Vec<usize>>,
     fileset: &PgenFileset,
     target_partitions: usize,

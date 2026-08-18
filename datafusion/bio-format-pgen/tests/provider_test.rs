@@ -1799,3 +1799,194 @@ np.testing.assert_array_equal(observed_unused_alt, unused_alt_alleles)
         vec![Some(0.125), Some(1.0), Some(1.875), None]
     );
 }
+
+/// Reads a genotype field through the matrix path.
+async fn matrix_alt_count(
+    fixture: &Fixture,
+    threads: usize,
+    samples: Option<Vec<String>>,
+) -> Vec<i8> {
+    let options = PgenReadOptions {
+        samples,
+        ..Default::default()
+    };
+    let shape =
+        datafusion_bio_format_pgen::matrix::genotype_matrix_shape(path(&fixture.pgen), &options)
+            .await
+            .unwrap();
+    let mut values = vec![0_i8; shape.variants * shape.samples];
+    datafusion_bio_format_pgen::matrix::read_genotype_matrix(
+        path(&fixture.pgen),
+        &options,
+        datafusion_bio_format_pgen::matrix::MatrixData::AltCount {
+            values: &mut values,
+            missing: -9,
+        },
+        threads,
+    )
+    .await
+    .unwrap();
+    values
+}
+
+#[tokio::test]
+async fn matrix_path_matches_the_scan_on_every_record_representation() {
+    // The same fixture the scan tests use: dense, one-bit, common-value with and
+    // without a phase track, LD-compressed, multiallelic, and a dosage track.
+    // Decoding into a caller's buffer takes different branches than building
+    // Arrow does, so agreement here is what says the branches agree.
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+
+    let provider = PgenTableProvider::try_new(
+        path(&fixture.pgen),
+        PgenReadOptions {
+            genotype_fields: Some(vec!["ALT_COUNT".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1);
+    context.register_table("p", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM p ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let expected = (0..batches[0].num_rows())
+        .flat_map(|row| {
+            alt_count_values(&batches[0], 0, row)
+                .into_iter()
+                .map(|value| value.unwrap_or(-9))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    // Every partition count must give the same matrix: partitions own disjoint
+    // row ranges, and an off-by-one in that split would interleave variants.
+    for threads in [1, 2, 4, 8] {
+        assert_eq!(
+            matrix_alt_count(&fixture, threads, None).await,
+            expected,
+            "threads {threads}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn matrix_path_honours_sample_selection() {
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+    let all = matrix_alt_count(&fixture, 1, None).await;
+    let subset =
+        matrix_alt_count(&fixture, 1, Some(vec!["s3".to_string(), "s1".to_string()])).await;
+    assert_eq!(subset.len(), all.len() / 2);
+    for variant in 0..records_len(&all, 4) {
+        assert_eq!(
+            subset[variant * 2],
+            all[variant * 4 + 2],
+            "variant {variant}"
+        );
+        assert_eq!(
+            subset[variant * 2 + 1],
+            all[variant * 4],
+            "variant {variant}"
+        );
+    }
+}
+
+fn records_len(values: &[i8], samples: usize) -> usize {
+    values.len() / samples
+}
+
+#[tokio::test]
+async fn matrix_path_rejects_a_wrongly_sized_destination() {
+    let fixture = fixed_fixture(2);
+    let options = PgenReadOptions::default();
+    let mut values = vec![0_i8; 3];
+    let error = datafusion_bio_format_pgen::matrix::read_genotype_matrix(
+        path(&fixture.pgen),
+        &options,
+        datafusion_bio_format_pgen::matrix::MatrixData::AltCount {
+            values: &mut values,
+            missing: -9,
+        },
+        1,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("expected 8"), "{error}");
+}
+
+#[tokio::test]
+async fn matrix_path_keeps_fractional_dosages() {
+    // The general decoder is the only branch that sees a stored dosage track,
+    // and its values are genuinely fractional. An earlier draft of this path
+    // routed them through the internal-code mapping, which can only say 0, 1
+    // or 2 — every dosage came out as zero and every fast-path fixture still
+    // passed. This is the fixture that disagrees.
+    let (types, records, alleles) = variable_records();
+    let fixture = variable_fixture(0x10, &types, &records, &alleles);
+
+    let provider = PgenTableProvider::try_new(
+        path(&fixture.pgen),
+        PgenReadOptions {
+            genotype_fields: Some(vec!["DS".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1);
+    context.register_table("d", Arc::new(provider)).unwrap();
+    let batches = context
+        .sql("SELECT genotypes FROM d ORDER BY start")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let expected = (0..batches[0].num_rows())
+        .flat_map(|row| {
+            ds_values(&batches[0], 0, row)
+                .into_iter()
+                .map(|value| value.unwrap_or(f32::NAN))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        expected.iter().any(|value| value.fract() != 0.0),
+        "fixture must carry a fractional dosage or this proves nothing"
+    );
+
+    let options = PgenReadOptions::default();
+    let shape =
+        datafusion_bio_format_pgen::matrix::genotype_matrix_shape(path(&fixture.pgen), &options)
+            .await
+            .unwrap();
+    for threads in [1, 4] {
+        let mut values = vec![0.0_f32; shape.variants * shape.samples];
+        datafusion_bio_format_pgen::matrix::read_genotype_matrix(
+            path(&fixture.pgen),
+            &options,
+            datafusion_bio_format_pgen::matrix::MatrixData::Dosage {
+                values: &mut values,
+                missing: f32::NAN,
+            },
+            threads,
+        )
+        .await
+        .unwrap();
+        for (index, (observed, want)) in values.iter().zip(&expected).enumerate() {
+            if want.is_nan() {
+                assert!(observed.is_nan(), "cell {index} threads {threads}");
+            } else {
+                assert_eq!(observed, want, "cell {index} threads {threads}");
+            }
+        }
+    }
+}
