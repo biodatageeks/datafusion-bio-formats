@@ -316,8 +316,16 @@ impl GenotypeBuffers {
         self.variant_offsets = Vec::with_capacity(variant_offsets.len());
         self.variant_offsets.push(0);
         self.ploidy = Vec::with_capacity(ploidy.len());
-        self.ploidy_offsets = Vec::with_capacity(ploidy_offsets.len());
-        self.ploidy_offsets.push(0);
+        // Mirror the constructor: a buffer that does not collect ploidy keeps
+        // its offsets empty rather than carrying a lone sentinel, so `take()`
+        // leaves the same invariant `new()` established.
+        self.ploidy_offsets = if self.collect_ploidy {
+            let mut offsets = Vec::with_capacity(ploidy_offsets.len());
+            offsets.push(0);
+            offsets
+        } else {
+            Vec::new()
+        };
         self.samples = 0;
         self.sample_start = 0;
 

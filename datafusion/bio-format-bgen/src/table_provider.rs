@@ -910,7 +910,7 @@ fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
         BgenOutputMode::Dosage => "DS",
         BgenOutputMode::Probability => "GP",
     };
-    if !children.iter().any(|field| field.name() != "PLOIDY") {
+    if children.iter().all(|field| field.name() == "PLOIDY") {
         return Err(DataFusionError::Plan(format!(
             "BGEN genotype_fields must include {value_child}; a projection of PLOIDY alone \
              is not supported"

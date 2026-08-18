@@ -956,6 +956,55 @@ async fn whole_cohort_dosage_matches_the_per_sample_decode() {
 }
 
 #[tokio::test]
+async fn the_whole_cohort_fill_bails_to_the_per_sample_error() {
+    // The bulk fill is only valid while every unphased pair sums within the
+    // denominator, so it pre-checks and declines otherwise. The decline has to
+    // land on the per-sample path's error rather than on a silently different
+    // answer, and that hand-off is the one branch of the fill without its own
+    // test.
+    let variants = vec![Variant {
+        id: "over",
+        rsid: "rsover",
+        chrom: "1",
+        position: 10,
+        alleles: vec!["A", "C"],
+        phased: false,
+        bits: 8,
+        samples: vec![
+            sample(2, false, &[255, 0]),
+            sample(2, false, &[0, 255]),
+            // 200 + 200 exceeds the 8-bit denominator, which no valid file
+            // stores and the fill must not quietly accept.
+            sample(2, false, &[200, 200]),
+        ],
+    }];
+    let fixture = fixture_with_variants(Codec::Zlib, true, &variants);
+    let provider = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            output_mode: BgenOutputMode::Dosage,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let context = context(1024);
+    context.register_table("b", Arc::new(provider)).unwrap();
+    let error = context
+        .sql("SELECT genotypes FROM b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect_err("a stored sum above the denominator must not decode")
+        .to_string();
+    assert!(
+        error.contains("exceeds denominator"),
+        "the fill must decline to the per-sample diagnosis: {error}"
+    );
+}
+
+#[tokio::test]
 async fn genotype_fields_select_the_struct_children() {
     // PLOIDY is a byte per genotype — on a whole chromosome of this cohort it is
     // 2.53 GB the caller of a dosage read never asked for — and it is held alive

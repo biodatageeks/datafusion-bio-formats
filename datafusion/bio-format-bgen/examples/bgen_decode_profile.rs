@@ -9,6 +9,10 @@
 //! Usage:
 //!   cargo run --release -p datafusion-bio-format-bgen --example bgen_decode_profile \
 //!     -- <path.bgen> [partitions...]
+//!
+//! The floor phase reads the whole file into memory to walk its records, which
+//! is fine for a chromosome — chr22 is 160 MB — and is not for a whole-genome
+//! BGEN. Point it at one chromosome at a time.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -119,8 +123,10 @@ async fn main() {
             _ => zstd::bulk::decompress_to_buffer(payload, &mut out[..expanded])
                 .expect("zstd decompress"),
         };
-        // Touch the output so the decompression cannot be optimized away.
-        checksum += written as u64 + out[written - 1] as u64;
+        // Touch the output so the decompression cannot be optimized away. A
+        // zero-length block is pathological but representable, and indexing
+        // `written - 1` would panic on it.
+        checksum += written as u64 + out[..written].last().copied().unwrap_or(0) as u64;
     }
     let inflate = inflate_started.elapsed();
 
@@ -204,7 +210,9 @@ async fn main() {
                 .as_any()
                 .downcast_ref::<datafusion::arrow::array::StructArray>()
                 .expect("genotypes struct");
-            for child in [0_usize, 1] {
+            // However many children the projection kept: this defaults to DS
+            // alone, so a fixed [0, 1] would index past the struct.
+            for child in 0..genotypes.num_columns() {
                 let column = genotypes.column(child);
                 let list = column
                     .as_any()
@@ -240,14 +248,20 @@ async fn main() {
         if target == 1 {
             println!(
                 "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}   \
-                 inflate floor {:>6.3} s, everything else {:>6.3} s, digest {digest:016x}",
+                 inflate floor {:>6.3} s, everything else {:>6.3} s, digest {}",
                 scan.as_secs_f64(),
                 inflate.as_secs_f64(),
-                scan.as_secs_f64() - inflate.as_secs_f64()
+                scan.as_secs_f64() - inflate.as_secs_f64(),
+                // Printing the untouched seed would read as a real digest.
+                if digest_enabled {
+                    format!("{digest:016x}")
+                } else {
+                    "disabled".to_string()
+                }
             );
         } else {
             println!(
-                "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}   digest {digest:016x}",
+                "scan t={target:<2}         {:>8.3} s   rows={rows} batches={batches}",
                 scan.as_secs_f64()
             );
         }
