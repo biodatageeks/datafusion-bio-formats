@@ -2650,6 +2650,46 @@ async fn fixed_probability_layout_survives_ploidy_being_projected_first() {
 }
 
 #[tokio::test]
+async fn an_empty_genotype_selection_says_so() {
+    // `Some(vec![])` is a selection of nothing, not a selection of PLOIDY, and
+    // it used to be reported with the PLOIDY-alone message because an `all`
+    // predicate is vacuously true on an empty list.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            genotype_fields: Some(Vec::new()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("selected no children"), "{error}");
+}
+
+#[tokio::test]
+async fn genotype_fields_are_validated_before_the_file_is_opened() {
+    // The selection needs only the read options, so a bad one must not cost a
+    // header read, a catalog build, or — on a remote file without a usable
+    // index — a read of the whole object first.
+    let error = BgenTableProvider::try_new(
+        "/nonexistent/never-opened.bgen",
+        BgenReadOptions {
+            genotype_fields: Some(vec!["NOPE".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("NOPE"),
+        "the field error must arrive before the open error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn a_projection_without_the_value_child_is_rejected() {
     // PLOIDY alone would leave the decoder reconstructing every probability for
     // an array that is then discarded, and the batch sizer counting bytes that

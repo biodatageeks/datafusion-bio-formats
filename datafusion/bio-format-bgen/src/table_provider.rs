@@ -611,6 +611,11 @@ impl TableProvider for BgenTableProvider {
 }
 
 fn validate_options(options: &BgenReadOptions) -> Result<()> {
+    // Before the object is opened. Resolving the selection needs only the read
+    // options, and a bad one used to surface from `build_schema` — after the
+    // header, the catalog, and on a remote file without a usable index a read
+    // of the whole object, all to report a configuration mistake.
+    genotype_children(options)?;
     for (name, value) in [
         ("max_sample_block_bytes", options.max_sample_block_bytes),
         ("max_header_bytes", options.max_header_bytes),
@@ -829,11 +834,28 @@ pub(crate) fn genotype_children(options: &BgenReadOptions) -> Result<Vec<String>
         BgenOutputMode::Probability => "GP",
     };
     let available = vec![value_child.to_string(), "PLOIDY".to_string()];
-    Ok(
-        resolve_genotype_fields(&available, options.genotype_fields.as_deref())?
-            .names()
-            .to_vec(),
-    )
+    let names = resolve_genotype_fields(&available, options.genotype_fields.as_deref())?
+        .names()
+        .to_vec();
+    if names.is_empty() {
+        return Err(DataFusionError::Plan(
+            "BGEN genotype_fields selected no children; omit the genotypes column from the \
+             projection instead"
+                .to_string(),
+        ));
+    }
+    // A projection must keep the value child. Without it the decoder would still
+    // reconstruct every genotype — the block cannot be validated otherwise — for
+    // an array that is then discarded, while the batch sizer and `GenotypeBytes`
+    // counted bytes that were never emitted. Serving that badly is worse than
+    // refusing it.
+    if names.iter().all(|name| name == "PLOIDY") {
+        return Err(DataFusionError::Plan(format!(
+            "BGEN genotype_fields must include {value_child}; a projection of PLOIDY alone \
+             is not supported"
+        )));
+    }
+    Ok(names)
 }
 
 fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
@@ -900,22 +922,6 @@ fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
             }
         })
         .collect::<Vec<_>>();
-    // A projection must keep the value child. Without it the decoder would still
-    // reconstruct every genotype — the block cannot be validated otherwise — for
-    // an array that is then discarded, while the batch sizer and `GenotypeBytes`
-    // counted bytes that were never emitted. Serving that badly is worse than
-    // refusing it; a caller wanting ploidy alone is asking for a column this
-    // scan does not have a cheap path to.
-    let value_child = match fileset.options.output_mode {
-        BgenOutputMode::Dosage => "DS",
-        BgenOutputMode::Probability => "GP",
-    };
-    if children.iter().all(|field| field.name() == "PLOIDY") {
-        return Err(DataFusionError::Plan(format!(
-            "BGEN genotype_fields must include {value_child}; a projection of PLOIDY alone \
-             is not supported"
-        )));
-    }
     let genotypes = Field::new("genotypes", DataType::Struct(Fields::from(children)), false)
         .with_metadata(sample_metadata);
     let fields = vec![
