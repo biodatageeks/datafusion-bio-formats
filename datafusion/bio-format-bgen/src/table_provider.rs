@@ -269,6 +269,11 @@ pub struct BgenTableProvider {
 }
 
 impl BgenTableProvider {
+    /// The opened fileset, for the matrix path.
+    pub(crate) fn fileset(&self) -> &Arc<BgenFileset> {
+        &self.fileset
+    }
+
     /// Opens a local or remote BGEN file and builds its validated metadata catalog.
     pub async fn try_new(path: impl Into<String>, options: BgenReadOptions) -> Result<Self> {
         validate_options(&options)?;
@@ -1222,7 +1227,7 @@ async fn resolve_variant_metadata(
     Ok((resolved, cost))
 }
 
-fn plan_payload_partitions(
+pub(crate) fn plan_payload_partitions(
     selected: &[usize],
     catalog: &BgenCatalog,
     target_partitions: usize,

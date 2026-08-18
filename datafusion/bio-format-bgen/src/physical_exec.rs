@@ -26,7 +26,7 @@ use crate::decode::{DecodeScratch, decode_variant};
 use crate::table_provider::{BgenFileset, BgenOutputMode};
 
 /// Returns the bytes of `span` from a buffer that starts at `buffer_start`.
-fn slice_from_range(
+pub(crate) fn slice_from_range(
     bytes: &[u8],
     buffer_start: u64,
     span: std::ops::Range<u64>,

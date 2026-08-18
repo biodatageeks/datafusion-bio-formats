@@ -8,6 +8,7 @@ mod catalog;
 mod decode;
 mod filter;
 mod header;
+pub mod matrix;
 mod physical_exec;
 mod source;
 mod table_provider;
