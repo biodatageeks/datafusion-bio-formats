@@ -483,7 +483,10 @@ fn fixed_probability_width(data_type: &DataType) -> Option<i32> {
     let DataType::Struct(fields) = data_type else {
         return None;
     };
-    let DataType::List(sample) = fields.first()?.data_type() else {
+    // By name, not by position: a projection chooses the order of the struct's
+    // children, so the value child is not necessarily the first one.
+    let genotype = fields.iter().find(|field| field.name() != "PLOIDY")?;
+    let DataType::List(sample) = genotype.data_type() else {
         return None;
     };
     match sample.data_type() {

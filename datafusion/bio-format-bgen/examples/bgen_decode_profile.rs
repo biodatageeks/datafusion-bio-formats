@@ -56,6 +56,13 @@ async fn main() {
 
     // --- Phase A: walk the records and decompress every payload ---
     let mut decompressor = libdeflater::Decompressor::new();
+    // Layout 2 defines three compression modes and the reader supports all of
+    // them, so the floor is measured in whichever one the file uses rather than
+    // in the zlib case this example was first written against.
+    assert!(
+        compression <= 2,
+        "unknown BGEN compression flag {compression}"
+    );
     let mut out = vec![0_u8; 64 << 20];
     let mut cursor = start_of_data;
     let mut walked = 0_usize;
@@ -98,23 +105,36 @@ async fn main() {
         if out.len() < expanded {
             out.resize(expanded, 0);
         }
-        let written = decompressor
-            .zlib_decompress(
-                &bytes[data_start..data_start + data_len],
-                &mut out[..expanded],
-            )
-            .expect("inflate");
+        let payload = &bytes[data_start..data_start + data_len];
+        let written = match compression {
+            // Nothing to decompress; copying the block is what a reader still
+            // does to hand it to the decoder.
+            0 => {
+                out[..expanded].copy_from_slice(payload);
+                expanded
+            }
+            1 => decompressor
+                .zlib_decompress(payload, &mut out[..expanded])
+                .expect("zlib inflate"),
+            _ => zstd::bulk::decompress_to_buffer(payload, &mut out[..expanded])
+                .expect("zstd decompress"),
+        };
         // Touch the output so the decompression cannot be optimized away.
         checksum += written as u64 + out[written - 1] as u64;
     }
     let inflate = inflate_started.elapsed();
 
+    let codec = match compression {
+        0 => "copy (none)",
+        1 => "zlib inflate",
+        _ => "zstd decode",
+    };
     println!(
         "\nrecord walk      {:>8.3} s   ({variant_count} records)",
         walk.as_secs_f64()
     );
     println!(
-        "zlib inflate     {:>8.3} s   {:.2} GB out from {:.2} GB in, {:.2} GB/s produced  [checksum {checksum}]",
+        "{codec:<16} {:>8.3} s   {:.2} GB out from {:.2} GB in, {:.2} GB/s produced  [checksum {checksum}]",
         inflate.as_secs_f64(),
         decompressed_total as f64 / 1e9,
         compressed_total as f64 / 1e9,

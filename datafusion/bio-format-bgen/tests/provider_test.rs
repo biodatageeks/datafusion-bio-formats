@@ -1046,29 +1046,8 @@ async fn genotype_fields_select_the_struct_children() {
     assert_eq!(struct_array.num_columns(), 1);
     assert!(struct_array.column_by_name("PLOIDY").is_none());
 
-    // PLOIDY only is also a valid projection.
-    let ploidy_only = BgenTableProvider::try_new(
-        path(&fixture.bgen),
-        BgenReadOptions {
-            output_mode: BgenOutputMode::Dosage,
-            genotype_fields: Some(vec!["PLOIDY".to_string()]),
-            ..Default::default()
-        },
-    )
-    .await
-    .unwrap();
-    let ploidy_context = context(1024);
-    ploidy_context
-        .register_table("p", Arc::new(ploidy_only))
-        .unwrap();
-    let batches = ploidy_context
-        .sql("SELECT genotypes FROM p ORDER BY start")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    assert_eq!(ploidy_values(&batches[0], 0, 0), vec![2, 2, 2]);
+    // PLOIDY without the value child is rejected; see
+    // `a_projection_without_the_value_child_is_rejected`.
 
     // An unknown child is rejected at plan time rather than silently ignored.
     let error = BgenTableProvider::try_new(
@@ -2570,6 +2549,74 @@ async fn a_large_in_list_does_not_fail_index_lookup() {
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         0
     );
+}
+
+#[tokio::test]
+async fn fixed_probability_layout_survives_ploidy_being_projected_first() {
+    // The fixed layout is detected from the schema, and the detection used to
+    // look at the struct's first child. Ordering PLOIDY ahead of GP made it read
+    // a `List<UInt8>` where it expected a `FixedSizeList`, conclude the batch
+    // was nested, and build the values from a `sample_offsets` buffer the fixed
+    // layout never fills.
+    let fixture = fixture(Codec::Zlib, true);
+    let context = context(1024);
+
+    let ordered = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            probability_layout: BgenProbabilityLayout::Fixed,
+            genotype_fields: Some(vec!["PLOIDY".to_string(), "GP".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let schema = TableProvider::schema(&ordered);
+    let genotypes = schema.field_with_name("genotypes").unwrap();
+    assert!(
+        format!("{:?}", genotypes.data_type()).contains("FixedSizeList"),
+        "the fixed width must survive the reordering: {:?}",
+        genotypes.data_type()
+    );
+    context.register_table("o", Arc::new(ordered)).unwrap();
+    let rows = context
+        .sql("SELECT genotypes FROM o WHERE rsid = 'rs1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .expect("a reordered fixed-layout projection must still decode");
+    assert_eq!(rows.iter().map(|batch| batch.num_rows()).sum::<usize>(), 1);
+    let struct_array = rows[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let names: Vec<&str> = struct_array
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect();
+    assert_eq!(names, vec!["PLOIDY", "GP"]);
+}
+
+#[tokio::test]
+async fn a_projection_without_the_value_child_is_rejected() {
+    // PLOIDY alone would leave the decoder reconstructing every probability for
+    // an array that is then discarded, and the batch sizer counting bytes that
+    // are never emitted. Rejecting it is better than serving it badly.
+    let fixture = fixture(Codec::Zlib, true);
+    let error = BgenTableProvider::try_new(
+        path(&fixture.bgen),
+        BgenReadOptions {
+            genotype_fields: Some(vec!["PLOIDY".to_string()]),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("GP"), "{error}");
 }
 
 #[tokio::test]

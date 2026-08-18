@@ -900,11 +900,21 @@ fn build_schema(fileset: &BgenFileset) -> Result<SchemaRef> {
             }
         })
         .collect::<Vec<_>>();
-    if children.is_empty() {
-        return Err(DataFusionError::Plan(
-            "BGEN genotype_fields selected no children; omit the genotypes column instead"
-                .to_string(),
-        ));
+    // A projection must keep the value child. Without it the decoder would still
+    // reconstruct every genotype — the block cannot be validated otherwise — for
+    // an array that is then discarded, while the batch sizer and `GenotypeBytes`
+    // counted bytes that were never emitted. Serving that badly is worse than
+    // refusing it; a caller wanting ploidy alone is asking for a column this
+    // scan does not have a cheap path to.
+    let value_child = match fileset.options.output_mode {
+        BgenOutputMode::Dosage => "DS",
+        BgenOutputMode::Probability => "GP",
+    };
+    if !children.iter().any(|field| field.name() != "PLOIDY") {
+        return Err(DataFusionError::Plan(format!(
+            "BGEN genotype_fields must include {value_child}; a projection of PLOIDY alone \
+             is not supported"
+        )));
     }
     let genotypes = Field::new("genotypes", DataType::Struct(Fields::from(children)), false)
         .with_metadata(sample_metadata);
