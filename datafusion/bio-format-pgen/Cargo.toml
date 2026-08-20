@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-pgen"
-version = "0.1.0"
+version = "0.2.0"
 description = "PLINK 2 PGEN/PVAR/PSAM genotype support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
