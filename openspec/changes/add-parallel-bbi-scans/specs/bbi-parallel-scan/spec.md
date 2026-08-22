@@ -27,6 +27,13 @@ cir-tree layout.
 - **THEN** the provider uses one source partition instead of opening multiple
   independent readers for the narrow lookup
 
+#### Scenario: Residual coordinate predicate
+
+- **WHEN** a coordinate-column predicate cannot be converted into an explicit
+  indexed region
+- **THEN** the predicate does not disable source parallelism for the remaining
+  whole-file scan
+
 ### Requirement: Partition-invariant BBI content
 
 Parallel BBI scans MUST emit the same records and original coordinates as the

@@ -545,6 +545,18 @@ async fn unfiltered_single_chromosome_scan_can_split_but_filtered_scan_stays_ser
         1,
         "an explicitly selected chromosome should not fan out"
     );
+
+    let residual_plan = table
+        .scan(&ctx.state(), None, &[col("end").gt(lit(0u32))], None)
+        .await?;
+    assert_eq!(
+        residual_plan
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        4,
+        "a residual coordinate predicate should not disable full-file parallelism"
+    );
     Ok(())
 }
 

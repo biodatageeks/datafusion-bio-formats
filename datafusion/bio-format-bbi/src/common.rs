@@ -52,6 +52,12 @@ pub(crate) struct BbiScanRegion {
     pub(crate) ownership_end: Option<u32>,
 }
 
+/// Native regions plus whether they came from an indexable genomic selection.
+pub(crate) struct BbiScanPlan {
+    pub(crate) regions: Vec<BbiScanRegion>,
+    pub(crate) has_explicit_region: bool,
+}
+
 /// Index-derived work estimate for one primary BBI data block on one
 /// chromosome. Blocks that span a chromosome boundary produce one estimate per
 /// covered chromosome; this is rare and reflects that either query can require
@@ -165,10 +171,14 @@ pub(crate) fn plan_bbi_scan_regions(
     chroms: &[(String, u32)],
     coordinate_system_zero_based: bool,
     widen_to_chromosome: bool,
-) -> Vec<BbiScanRegion> {
+) -> BbiScanPlan {
     let analysis = extract_genomic_regions(filters, coordinate_system_zero_based);
+    let has_explicit_region = !analysis.regions.is_empty();
     if analysis.unsatisfiable {
-        return Vec::new();
+        return BbiScanPlan {
+            regions: Vec::new(),
+            has_explicit_region,
+        };
     }
 
     let source_regions = if analysis.regions.is_empty() {
@@ -196,7 +206,7 @@ pub(crate) fn plan_bbi_scan_regions(
         // De-duplicate by chromosome so overlapping or OR'd ranges never scan the
         // same chromosome twice (which would duplicate rows).
         let mut seen = HashSet::new();
-        return source_regions
+        let regions = source_regions
             .into_iter()
             .filter(|region| seen.insert(region.chrom.clone()))
             .filter_map(|region| {
@@ -217,12 +227,20 @@ pub(crate) fn plan_bbi_scan_regions(
                 })
             })
             .collect();
+        return BbiScanPlan {
+            regions,
+            has_explicit_region,
+        };
     }
 
-    source_regions
+    let regions = source_regions
         .into_iter()
         .filter_map(|region| convert_genomic_region_to_bbi(region, &chrom_lengths))
-        .collect()
+        .collect();
+    BbiScanPlan {
+        regions,
+        has_explicit_region,
+    }
 }
 
 fn convert_genomic_region_to_bbi(

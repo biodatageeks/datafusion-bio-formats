@@ -53,9 +53,10 @@ prevents duplicates.
 
 ### Avoid fan-out for narrow lookups
 
-A scan selecting one explicit genomic region remains one partition. Whole-file
-scans may split even when the file contains only one chromosome; multi-region
-scans may also split a dominant chromosome.
+A scan selecting one explicit index region remains one partition. Residual
+coordinate-column predicates that do not produce an index region retain
+whole-file partitioning. Whole-file scans may split even when the file contains
+only one chromosome; multi-region scans may also split a dominant chromosome.
 
 ### Keep decoded batches bounded
 

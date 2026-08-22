@@ -112,16 +112,16 @@ impl TableProvider for BigWigTableProvider {
         // `widen_to_chromosome = true`: BigWigRead clips interval values to the
         // query window, so we scan whole chromosomes and let DataFusion's Inexact
         // re-filter drop surplus rows, rather than emitting clipped coordinates.
-        let regions = plan_bbi_scan_regions(
+        let scan_plan = plan_bbi_scan_regions(
             filters,
             &self.chroms,
             self.coordinate_system_zero_based,
             true,
         );
         let partitions = plan_bbi_partitions(
-            regions,
+            scan_plan.regions,
             state.config().target_partitions(),
-            !filters.iter().any(is_genomic_coordinate_filter),
+            !scan_plan.has_explicit_region,
             true,
             &self.block_work,
         );

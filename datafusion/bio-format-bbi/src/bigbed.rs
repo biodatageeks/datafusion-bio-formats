@@ -166,16 +166,16 @@ impl TableProvider for BigBedTableProvider {
         let schema = project_schema(&self.schema, projection);
         // `widen_to_chromosome = false`: BigBedRead returns full overlapping BED
         // entries (coordinates are never clipped), so positional pruning is safe.
-        let regions = plan_bbi_scan_regions(
+        let scan_plan = plan_bbi_scan_regions(
             filters,
             &self.chroms,
             self.coordinate_system_zero_based,
             false,
         );
         let partitions = plan_bbi_partitions(
-            regions,
+            scan_plan.regions,
             state.config().target_partitions(),
-            !filters.iter().any(is_genomic_coordinate_filter),
+            !scan_plan.has_explicit_region,
             false,
             &self.block_work,
         );
