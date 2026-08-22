@@ -20,4 +20,5 @@
 ## 4. Verification
 
 - [x] 4.1 Run formatting, crate tests, clippy, and strict OpenSpec validation.
-- [ ] 4.2 Record whole-file t=1 through t=8 benchmark evidence downstream.
+- [x] 4.2 Record whole-file t=1 through t=8 benchmark evidence downstream
+  (`bioformats-benchmark/results/bbi_scaling_full_scan.json`).
