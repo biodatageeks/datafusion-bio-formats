@@ -7,7 +7,7 @@ files are commonly dominated by one or two chromosomes, so assigning whole
 chromosomes by length leaves large stragglers.
 
 BigTools can traverse the primary cir-tree without reading or decompressing
-payload blocks. Its block coordinates and compressed sizes provide a cheap,
+payload blocks. Its block coordinates and encoded on-disk sizes provide a cheap,
 format-native estimate of actual scan work.
 
 ## Goals / Non-Goals
@@ -32,9 +32,9 @@ chromosome-local work units. This adds bounded index I/O to construction but no
 payload reads or decompression, and it avoids reparsing the layout for every
 scan.
 
-### Balance using compressed block work
+### Balance using encoded block work
 
-The existing core partition balancer receives each selected region's compressed
+The existing core partition balancer receives each selected region's encoded
 byte total plus observed block positions. It may split a dominant region at
 block-informed coordinate boundaries, then assigns the resulting regions to the
 requested partitions.
@@ -68,7 +68,7 @@ overhead without allocating value buffers.
 - Boundary ownership mistakes could duplicate, omit, or clip rows. Tests compare
   complete sorted content and row counts across partition counts and filtered
   scans.
-- Independent shards can read a compressed block on both sides of a boundary.
+- Independent shards can read a payload block on both sides of a boundary.
   Plan diagnostics retain this conservative duplication in per-partition byte
   estimates.
 - Provider construction performs extra cir-tree index I/O. The layout is cached

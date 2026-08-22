@@ -9,7 +9,7 @@ parallelize index traversal, decompression, or decoding at the source.
 - Partition whole-file BigWig and BigBed scans according to the configured
   DataFusion target partition count.
 - Weight and split scan regions using primary cir-tree block coordinates and
-  compressed sizes rather than chromosome length alone.
+  encoded on-disk sizes rather than chromosome length alone.
 - Preserve exact row ownership across independently queried shard boundaries,
   including BigWig's coordinate-clipping behavior.
 - Keep narrow single-region queries serial while allowing unfiltered

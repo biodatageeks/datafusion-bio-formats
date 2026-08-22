@@ -14,7 +14,7 @@ cir-tree layout.
 
 #### Scenario: One chromosome dominates encoded work
 
-- **WHEN** a whole-file scan contains one region whose compressed block work
+- **WHEN** a whole-file scan contains one region whose encoded block work
   dominates the other selected regions
 - **THEN** the planner MAY split that region at block-informed coordinate
   boundaries
