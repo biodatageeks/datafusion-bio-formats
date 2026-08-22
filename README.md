@@ -642,6 +642,15 @@ cargo doc --no-deps --all-features --open
 
 This project uses a forked version of [noodles](https://github.com/zaeleus/noodles) from [biodatageeks/noodles](https://github.com/biodatageeks/noodles) for enhanced support of certain file formats (CRAM, FASTA, VCF, GFF).
 
+The `datafusion-bio-format-bbi` crate temporarily pins
+[`biodatageeks/bigtools`](https://github.com/biodatageeks/bigtools) revision
+`0d7a5728eb39ee97fddef59cd3da469186bec90d`. It provides primary cir-tree block
+metadata, bounded unclipped BigWig reads, and traversal-limit classification for
+block-aware BigWig/BigBed source partitions. This will move back to an upstream
+release after [bigtools#106](https://github.com/jackh726/bigtools/pull/106) is
+published. Cargo fetches git dependencies during builds, which requires Git and
+network access.
+
 ## Related Projects
 
 - [polars-bio](https://github.com/biodatageeks/polars-bio) - Polars extensions for bioinformatics
