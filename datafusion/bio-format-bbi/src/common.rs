@@ -86,7 +86,7 @@ pub(crate) fn bbi_block_index(chroms: &[ChromInfo], blocks: &[BBIDataBlock]) -> 
         }
         for chrom in &chroms_by_id[first..last] {
             let start = if chrom.id() == block.start_chrom_id {
-                block.start_base
+                block.start_base.min(chrom.length)
             } else {
                 0
             };
@@ -95,7 +95,9 @@ pub(crate) fn bbi_block_index(chroms: &[ChromInfo], blocks: &[BBIDataBlock]) -> 
             } else {
                 chrom.length
             };
-            if start < end {
+            // A zero-width BigBed insertion can be the only record in a real
+            // encoded block. Retain it as work even though it has no span.
+            if start <= end {
                 by_chrom
                     .entry(chrom.name.clone())
                     .or_default()
@@ -270,10 +272,11 @@ struct BbiWorkSegment {
 /// Multi-region scans may always split a dominant chromosome so it does not
 /// monopolize one partition.
 ///
-/// The number of partitions is capped at the number of useful block-start
-/// segments. This avoids opening multiple readers that all decode the same
-/// indivisible block. A missing layout means traversal hit its safety limit, so
-/// the optimization falls back to one serial partition.
+/// The number of partitions is capped at the number of coordinate-overlap
+/// connected block components. This avoids opening multiple readers that all
+/// decode a long block spanning several later block starts. A missing layout
+/// means traversal hit its safety limit, so the optimization falls back to one
+/// serial partition.
 pub(crate) fn plan_bbi_partitions(
     regions: Vec<BbiScanRegion>,
     target_partitions: usize,
@@ -295,6 +298,9 @@ pub(crate) fn plan_bbi_partitions(
         .enumerate()
         .flat_map(|(region_index, region)| region_work_segments(region_index, region, block_index))
         .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return vec![Vec::new()];
+    }
     let ranges = weighted_segment_ranges(&segments, target_partitions);
 
     ranges
@@ -312,9 +318,16 @@ fn candidate_blocks<'a>(
     };
     let upper = work
         .blocks
-        .partition_point(|block| block.start < region.end);
-    let lower = work.prefix_max_end[..upper].partition_point(|&end| end <= region.start);
+        .partition_point(|block| block.start <= region.end);
+    let lower = work.prefix_max_end[..upper].partition_point(|&end| end < region.start);
     &work.blocks[lower..upper]
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BbiBlockComponent {
+    start: u32,
+    maximum_end: u32,
+    estimated_bytes: u64,
 }
 
 fn region_work_segments(
@@ -322,41 +335,63 @@ fn region_work_segments(
     region: &BbiScanRegion,
     block_index: &BbiBlockIndex,
 ) -> Vec<BbiWorkSegment> {
-    let mut boundaries: Vec<(u32, u64)> = Vec::new();
+    let mut components: Vec<BbiBlockComponent> = Vec::new();
     for block in candidate_blocks(block_index, region)
         .iter()
-        .filter(|block| block.end > region.start)
+        .filter(|block| block.end >= region.start)
     {
-        let boundary = block.start.max(region.start);
-        if let Some((last_boundary, bytes)) = boundaries.last_mut()
-            && *last_boundary == boundary
+        let start = block.start.max(region.start).min(region.end);
+        let end = block.end.max(start).min(region.end);
+        if let Some(component) = components.last_mut()
+            && (component.start == start || start < component.maximum_end)
         {
-            *bytes = bytes.saturating_add(block.data_size);
+            component.maximum_end = component.maximum_end.max(end);
+            component.estimated_bytes = component.estimated_bytes.saturating_add(block.data_size);
         } else {
-            boundaries.push((boundary, block.data_size));
+            components.push(BbiBlockComponent {
+                start,
+                maximum_end: end,
+                estimated_bytes: block.data_size,
+            });
         }
     }
 
-    if boundaries.is_empty() {
-        boundaries.push((region.start, 0));
-    } else {
-        // Coordinates before the first block contain no independent work, so
-        // keep them with the first block instead of creating an empty shard.
-        boundaries[0].0 = region.start;
+    if components.is_empty() {
+        return Vec::new();
+    }
+    // Coordinates before the first block contain no independent work, so keep
+    // them with the first block instead of creating an empty shard.
+    components[0].start = region.start;
+
+    // A zero-width insertion at the region's inclusive lookup endpoint is read
+    // by the preceding query. Charge that work there because it cannot form a
+    // non-empty coordinate segment of its own.
+    if components.len() > 1
+        && components
+            .last()
+            .is_some_and(|component| component.start == region.end)
+    {
+        let endpoint = components.pop().expect("endpoint component is present");
+        let preceding = components
+            .last_mut()
+            .expect("preceding component is present");
+        preceding.estimated_bytes = preceding
+            .estimated_bytes
+            .saturating_add(endpoint.estimated_bytes);
     }
 
-    boundaries
+    components
         .iter()
         .enumerate()
-        .filter_map(|(index, &(start, estimated_bytes))| {
-            let end = boundaries
+        .filter_map(|(index, component)| {
+            let end = components
                 .get(index + 1)
-                .map_or(region.end, |&(next, _)| next);
-            (start < end).then_some(BbiWorkSegment {
+                .map_or(region.end, |next| next.start);
+            (component.start < end).then_some(BbiWorkSegment {
                 region_index,
-                start,
+                start: component.start,
                 end,
-                estimated_bytes,
+                estimated_bytes: component.estimated_bytes,
             })
         })
         .collect()
@@ -385,25 +420,32 @@ fn weighted_segment_ranges(
         }
 
         let latest_end = segments.len() - remaining_partitions;
-        let target = if total_bytes == 0 {
-            (segments.len() * (partition + 1) / partition_count) as u128
+        let end = if total_bytes == 0 {
+            (segments.len() * (partition + 1) / partition_count).clamp(start + 1, latest_end)
         } else {
-            total_bytes * (partition + 1) as u128 / partition_count as u128
+            let target = total_bytes * (partition + 1) as u128 / partition_count as u128;
+            closest_prefix_cut(&prefix_bytes, start + 1, latest_end, target)
         };
-        let end = (start + 1..=latest_end)
-            .min_by_key(|&candidate| {
-                let cumulative = if total_bytes == 0 {
-                    candidate as u128
-                } else {
-                    prefix_bytes[candidate]
-                };
-                cumulative.abs_diff(target)
-            })
-            .expect("a BBI partition must contain at least one work segment");
         ranges.push(start..end);
         start = end;
     }
     ranges
+}
+
+fn closest_prefix_cut(prefix: &[u128], lower: usize, upper: usize, target: u128) -> usize {
+    let candidates = &prefix[lower..=upper];
+    let offset = candidates.partition_point(|&value| value < target);
+    let upper_candidate = if offset < candidates.len() {
+        lower + offset
+    } else {
+        upper
+    };
+    let lower_candidate = upper_candidate.saturating_sub(1).max(lower);
+    if prefix[lower_candidate].abs_diff(target) <= prefix[upper_candidate].abs_diff(target) {
+        lower_candidate
+    } else {
+        upper_candidate
+    }
 }
 
 fn segments_to_regions(
@@ -433,7 +475,7 @@ fn segments_to_regions(
                 // query window but overlap it. Later shards discard that overlap
                 // because the preceding shard owns those record starts.
                 ownership_start: (shard_start != original.start).then_some(shard_start),
-                ownership_end: Some(shard_end),
+                ownership_end: (shard_end != original.end).then_some(shard_end),
             });
         }
         start = end;
@@ -460,7 +502,7 @@ pub(crate) fn partition_estimated_bytes(
                 .map(|region| {
                     candidate_blocks(block_index, region)
                         .iter()
-                        .filter(|block| block.end > region.start)
+                        .filter(|block| block.end >= region.start)
                         .map(|block| block.data_size)
                         .sum::<u64>()
                 })
@@ -574,7 +616,9 @@ mod partition_tests {
         assert_eq!((partitions[1][0].start, partitions[1][0].end), (200, 400));
         assert_eq!(
             partition_estimated_bytes(&partitions, Some(&index)),
-            vec![500, 500]
+            // BigTools' cir-tree lookup is inclusive at the coordinate
+            // boundary, so each shard also touches its neighbor's edge block.
+            vec![600, 600]
         );
     }
 
@@ -583,6 +627,46 @@ mod partition_tests {
         let index = block_index(&[(0, 400, 1_000)]);
         let partitions = plan_bbi_partitions(vec![region()], 8, true, Some(&index));
         assert_eq!(partitions, vec![vec![region()]]);
+    }
+
+    #[test]
+    fn overlapping_blocks_form_one_indivisible_component() {
+        let index = block_index(&[(0, 250, 100), (100, 300, 200), (200, 400, 300)]);
+
+        let partitions = plan_bbi_partitions(vec![region()], 8, true, Some(&index));
+
+        assert_eq!(partitions, vec![vec![region()]]);
+        assert_eq!(
+            partition_estimated_bytes(&partitions, Some(&index)),
+            vec![600]
+        );
+    }
+
+    #[test]
+    fn zero_width_block_contributes_real_work() {
+        let index = block_index(&[(100, 100, 50)]);
+
+        let partitions = plan_bbi_partitions(vec![region()], 8, true, Some(&index));
+
+        assert_eq!(partitions, vec![vec![region()]]);
+        assert_eq!(
+            partition_estimated_bytes(&partitions, Some(&index)),
+            vec![50]
+        );
+    }
+
+    #[test]
+    fn blockless_parallel_scan_uses_one_empty_partition() {
+        let partitions =
+            plan_bbi_partitions(vec![region()], 8, true, Some(&BbiBlockIndex::default()));
+        assert_eq!(partitions, vec![Vec::new()]);
+    }
+
+    #[test]
+    fn weighted_cut_binary_search_uses_lower_candidate_on_ties() {
+        let prefix = [0, 400, 500, 600, 1_000];
+        assert_eq!(closest_prefix_cut(&prefix, 1, 3, 550), 2);
+        assert_eq!(closest_prefix_cut(&prefix, 1, 3, 590), 3);
     }
 
     #[test]

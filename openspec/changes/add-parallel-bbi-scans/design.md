@@ -35,10 +35,13 @@ provider construction succeeds and scanning falls back to one source partition.
 
 ### Balance using encoded block work
 
-A BBI-specific linear partitioner groups blocks by start coordinate and places
-cuts using cumulative encoded byte weights. It never cuts below an observed
-block boundary, so the useful source-partition count may be lower than the
-requested target when a file contains fewer independently readable blocks.
+A BBI-specific partitioner groups coordinate-overlapping blocks into indivisible
+components and places cuts between components using cumulative encoded byte
+weights. Prefix construction is linear in the selected blocks and each cut uses
+a binary search. A long block therefore cannot be reread by several shards just
+because later blocks start inside it, and the useful source-partition count may
+be lower than requested when a file contains fewer independently readable
+components.
 
 ### Separate query windows from row ownership
 
@@ -70,9 +73,9 @@ overhead without allocating value buffers.
 - Boundary ownership mistakes could duplicate, omit, or clip rows. Tests compare
   complete sorted content and row counts across partition counts and filtered
   scans.
-- Independent shards can read a payload block on both sides of a boundary.
-  Plan diagnostics retain this conservative duplication in per-partition byte
-  estimates.
+- BigTools' inclusive cir-tree lookup can read the touching edge block on both
+  sides of a component boundary. This duplication is limited to neighboring
+  shards; plan diagnostics retain it in per-partition byte estimates.
 - Provider construction performs extra cir-tree index I/O. The layout is cached
   on the provider, the benchmark includes construction in end-to-end timing,
   and limit exhaustion falls back to the pre-existing serial scan path.

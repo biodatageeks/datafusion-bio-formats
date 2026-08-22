@@ -90,8 +90,6 @@ fn write_bigbed_fixture_inner() -> TestResult<NamedTempFile> {
 fn write_partition_bigwig_fixture() -> TestResult<NamedTempFile> {
     std::thread::spawn(|| -> TestResult<NamedTempFile> {
         let mut bedgraph = NamedTempFile::new()?;
-        // target_partitions=4 places chr1 ownership boundaries at 250, 500,
-        // and 750. These intervals cross all three boundaries.
         writeln!(bedgraph, "chr1\t240\t260\t1.0")?;
         writeln!(bedgraph, "chr1\t490\t510\t2.0")?;
         writeln!(bedgraph, "chr1\t740\t760\t3.0")?;
@@ -99,7 +97,10 @@ fn write_partition_bigwig_fixture() -> TestResult<NamedTempFile> {
         bedgraph.flush()?;
 
         let bigwig = NamedTempFile::new()?;
-        let out = BigWigWrite::create_file(bigwig.path(), skewed_chrom_sizes())?;
+        let mut out = BigWigWrite::create_file(bigwig.path(), skewed_chrom_sizes())?;
+        // Force distinct same-chromosome primary blocks so tests exercise real
+        // index-derived cuts rather than inferred coordinate quartiles.
+        out.options.items_per_slot = 1;
         let input = File::open(bedgraph.path())?;
         let data = BedParserStreamingIterator::from_bedgraph_file(input, false);
         out.write(data, runtime())?;
@@ -113,6 +114,7 @@ fn write_partition_bigbed_fixture() -> TestResult<NamedTempFile> {
     std::thread::spawn(|| -> TestResult<NamedTempFile> {
         let mut bed = NamedTempFile::new()?;
         writeln!(bed, "chr1\t240\t260\tfeature1\t1")?;
+        writeln!(bed, "chr1\t490\t490\tboundary\t0")?;
         writeln!(bed, "chr1\t490\t510\tfeature2\t2")?;
         writeln!(bed, "chr1\t740\t760\tfeature3\t3")?;
         writeln!(bed, "chr2\t10\t20\tfeature4\t4")?;
@@ -128,6 +130,7 @@ fn write_partition_bigbed_fixture() -> TestResult<NamedTempFile> {
         };
         out.autosql = Some(bigtools::bed::autosql::bed_autosql(&first_rest));
         out.options.compress = false;
+        out.options.items_per_slot = 1;
         let input = File::open(bed.path())?;
         let data = BedParserStreamingIterator::from_bed_file(input, false);
         out.write(data, runtime())?;
@@ -805,13 +808,17 @@ async fn bigwig_full_scan_uses_block_bounded_partitions_without_boundary_corrupt
     let count_plan = count.create_physical_plan().await?;
     let leaf = find_leaf_exec(&count_plan);
     assert_eq!(leaf.name(), "BigWigExec");
-    assert_eq!(leaf.properties().output_partitioning().partition_count(), 2);
+    assert_eq!(leaf.properties().output_partitioning().partition_count(), 4);
     let count_plan_text = DisplayableExecutionPlan::new(count_plan.as_ref())
         .indent(false)
         .to_string();
     assert!(
         count_plan_text.contains("estimated_data_bytes=["),
         "BigWig plan should expose index-derived partition work:\n{count_plan_text}"
+    );
+    assert!(
+        count_plan_text.contains("chr1:0-490") && count_plan_text.contains("chr1:490-740"),
+        "BigWig plan should use observed same-chromosome block cuts:\n{count_plan_text}"
     );
 
     let actual = parallel
@@ -856,7 +863,10 @@ async fn bigbed_full_scan_uses_block_bounded_partitions_without_duplicates() -> 
         )?),
     )?;
     let expected = serial
-        .sql("SELECT chrom, start, \"end\", name, score FROM bb ORDER BY chrom, start")
+        .sql(
+            "SELECT chrom, start, \"end\", name, score FROM bb \
+             ORDER BY chrom, start, \"end\", name",
+        )
         .await?
         .collect()
         .await?;
@@ -874,7 +884,7 @@ async fn bigbed_full_scan_uses_block_bounded_partitions_without_duplicates() -> 
     let count_plan = count.create_physical_plan().await?;
     let leaf = find_leaf_exec(&count_plan);
     assert_eq!(leaf.name(), "BigBedExec");
-    assert_eq!(leaf.properties().output_partitioning().partition_count(), 2);
+    assert_eq!(leaf.properties().output_partitioning().partition_count(), 4);
     let count_plan_text = DisplayableExecutionPlan::new(count_plan.as_ref())
         .indent(false)
         .to_string();
@@ -882,9 +892,16 @@ async fn bigbed_full_scan_uses_block_bounded_partitions_without_duplicates() -> 
         count_plan_text.contains("estimated_data_bytes=["),
         "BigBed plan should expose index-derived partition work:\n{count_plan_text}"
     );
+    assert!(
+        count_plan_text.contains("chr1:0-490") && count_plan_text.contains("chr1:490-740"),
+        "BigBed plan should use observed same-chromosome block cuts:\n{count_plan_text}"
+    );
 
     let actual = parallel
-        .sql("SELECT chrom, start, \"end\", name, score FROM bb ORDER BY chrom, start")
+        .sql(
+            "SELECT chrom, start, \"end\", name, score FROM bb \
+             ORDER BY chrom, start, \"end\", name",
+        )
         .await?
         .collect()
         .await?;
@@ -892,7 +909,7 @@ async fn bigbed_full_scan_uses_block_bounded_partitions_without_duplicates() -> 
         pretty_format_batches(&actual)?.to_string(),
         pretty_format_batches(&expected)?.to_string()
     );
-    assert_eq!(actual.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
+    assert_eq!(actual.iter().map(RecordBatch::num_rows).sum::<usize>(), 5);
 
     let filtered_plan = parallel
         .sql("SELECT count(*) FROM bb WHERE chrom = 'chr1'")
@@ -941,7 +958,7 @@ async fn bbi_full_scan_partition_count_tracks_every_target_from_one_to_eight() -
                 .await?;
             let leaf = find_leaf_exec(&plan);
             let source_partitions = leaf.properties().output_partitioning().partition_count();
-            assert_eq!(source_partitions, target.min(2));
+            assert_eq!(source_partitions, target.min(4));
             let plan_text = DisplayableExecutionPlan::new(plan.as_ref())
                 .indent(false)
                 .to_string();
@@ -957,7 +974,8 @@ async fn bbi_full_scan_partition_count_tracks_every_target_from_one_to_eight() -
                 .await?
                 .collect()
                 .await?;
-            assert_eq!(count_star_value(&batches[0]), 4);
+            let expected_rows = if table == "bb" { 5 } else { 4 };
+            assert_eq!(count_star_value(&batches[0]), expected_rows);
         }
     }
     Ok(())
