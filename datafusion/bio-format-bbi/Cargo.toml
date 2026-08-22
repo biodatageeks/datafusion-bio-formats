@@ -13,10 +13,10 @@ readme = "README.md"
 datafusion.workspace = true
 async-trait.workspace = true
 datafusion-bio-format-core = { path = "../bio-format-core" }
-bigtools = { git = "https://github.com/biodatageeks/bigtools.git", rev = "7ce5f99e2e538b2a770acbb1a3d9c30edda68264", default-features = false, features = ["read"] }
+bigtools = { git = "https://github.com/biodatageeks/bigtools.git", rev = "90925ff5e4e274987d603e30def30506836ee2e7", default-features = false, features = ["read"] }
 futures-util.workspace = true
 
 [dev-dependencies]
-bigtools = { git = "https://github.com/biodatageeks/bigtools.git", rev = "7ce5f99e2e538b2a770acbb1a3d9c30edda68264", default-features = false, features = ["read", "write"] }
+bigtools = { git = "https://github.com/biodatageeks/bigtools.git", rev = "90925ff5e4e274987d603e30def30506836ee2e7", default-features = false, features = ["read", "write"] }
 tempfile = "3"
 tokio.workspace = true
