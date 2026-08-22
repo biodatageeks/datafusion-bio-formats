@@ -528,7 +528,7 @@ dependencies = [
 [[package]]
 name = "bigtools"
 version = "0.5.9-dev"
-source = "git+https://github.com/biodatageeks/bigtools.git?rev=9255813739071febe102384ce9d988a31cae0e14#9255813739071febe102384ce9d988a31cae0e14"
+source = "git+https://github.com/biodatageeks/bigtools.git?rev=0d7a5728eb39ee97fddef59cd3da469186bec90d#0d7a5728eb39ee97fddef59cd3da469186bec90d"
 dependencies = [
  "bincode",
  "byteorder",

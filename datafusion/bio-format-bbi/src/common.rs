@@ -25,7 +25,7 @@ pub(crate) const BBI_BATCH_ROWS: usize = 8192;
 /// Empty projections carry only a logical row count, so substantially larger
 /// batches reduce scheduler and bridge overhead without allocating Arrow value
 /// buffers. This is the common `count(*)` path.
-pub(crate) const BBI_EMPTY_PROJECTION_BATCH_ROWS: usize = 4_194_304;
+pub(crate) const BBI_EMPTY_PROJECTION_BATCH_ROWS: usize = 262_144;
 
 /// Native BBI interval query region in 0-based half-open coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -299,7 +299,9 @@ pub(crate) fn plan_bbi_partitions(
         .flat_map(|(region_index, region)| region_work_segments(region_index, region, block_index))
         .collect::<Vec<_>>();
     if segments.is_empty() {
-        return vec![Vec::new()];
+        // Treat the layout as an optimization hint: an unexpectedly empty
+        // mapping must not turn a non-empty logical scan into zero rows.
+        return vec![regions];
     }
     let ranges = weighted_segment_ranges(&segments, target_partitions);
 
@@ -656,10 +658,10 @@ mod partition_tests {
     }
 
     #[test]
-    fn blockless_parallel_scan_uses_one_empty_partition() {
+    fn blockless_layout_falls_back_to_serial_scan() {
         let partitions =
             plan_bbi_partitions(vec![region()], 8, true, Some(&BbiBlockIndex::default()));
-        assert_eq!(partitions, vec![Vec::new()]);
+        assert_eq!(partitions, vec![vec![region()]]);
     }
 
     #[test]

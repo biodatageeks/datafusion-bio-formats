@@ -76,6 +76,8 @@ batch construction.
 
 - **WHEN** DataFusion requests an empty BBI projection for `count(*)`
 - **THEN** batches represent logical row counts without allocating value arrays
+- **AND** batch row counts remain bounded independently of chromosome size so
+  consumers can cancel or satisfy a limit without decoding the entire region
 
 #### Scenario: Decoded projection
 

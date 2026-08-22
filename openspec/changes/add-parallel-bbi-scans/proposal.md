@@ -19,7 +19,7 @@ parallelize index traversal, decompression, or decoding at the source.
 
 ## Impact
 
-- Affected specs: `bbi-parallel-scan` (new)
+- Affected specs: `bbi-parallel-scan` (new), `dependencies` (modified)
 - Affected code: `datafusion/bio-format-bbi`
 - Dependency: a pinned BigTools revision exposes read-only primary cir-tree
   block layout metadata; replace the revision with a released version after

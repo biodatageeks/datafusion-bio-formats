@@ -32,7 +32,7 @@ fn chrom_sizes() -> HashMap<String, u32> {
 }
 
 fn skewed_chrom_sizes() -> HashMap<String, u32> {
-    HashMap::from([("chr1".to_string(), 900), ("chr2".to_string(), 100)])
+    HashMap::from([("chr1".to_string(), 900), ("chr2".to_string(), 300)])
 }
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -844,6 +844,56 @@ async fn bigwig_full_scan_uses_block_bounded_partitions_without_boundary_corrupt
             .partition_count(),
         1,
         "a single selected chromosome should not fan out"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_filtered_multiregion_split_preserves_boundary_overlap() -> TestResult<()> {
+    let fixture = write_partition_bigwig_fixture()?;
+    let path = fixture.path().to_string_lossy().to_string();
+    let filter = col("chrom")
+        .in_list(vec![lit("chr1"), lit("chr2")], false)
+        .and(col("start").gt_eq(lit(250u32)));
+
+    let serial = context_with_partitions(1);
+    let serial_table = BigWigTableProvider::new(path.clone(), true)?;
+    let serial_plan = serial_table
+        .scan(&serial.state(), None, std::slice::from_ref(&filter), None)
+        .await?;
+    let expected = collect(serial_plan.execute(0, serial.task_ctx())?).await?;
+    let starts = expected[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .expect("BigWig start column");
+    assert_eq!(
+        starts.value(0),
+        240,
+        "the source keeps the lower-bound overlap"
+    );
+
+    let parallel = context_with_partitions(4);
+    let parallel_table = BigWigTableProvider::new(path, true)?;
+    let parallel_plan = parallel_table
+        .scan(&parallel.state(), None, &[filter], None)
+        .await?;
+    let partition_count = parallel_plan
+        .properties()
+        .output_partitioning()
+        .partition_count();
+    assert_eq!(
+        partition_count, 3,
+        "the selected regions should split by blocks"
+    );
+    let mut actual = Vec::new();
+    for partition in 0..partition_count {
+        actual.extend(collect(parallel_plan.execute(partition, parallel.task_ctx())?).await?);
+    }
+
+    assert_eq!(
+        pretty_format_batches(&actual)?.to_string(),
+        pretty_format_batches(&expected)?.to_string()
     );
     Ok(())
 }
