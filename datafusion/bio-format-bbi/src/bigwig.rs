@@ -24,8 +24,10 @@ use datafusion_bio_format_core::genomic_filter::is_genomic_coordinate_filter;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 
 use crate::common::{
-    BBI_BATCH_ROWS, BbiScanRegion, build_batch, normalize_local_path, plan_bbi_scan_regions,
-    project_schema, projected_indices, projection_display, region_display, to_external_error,
+    BBI_BATCH_ROWS, BBI_EMPTY_PROJECTION_BATCH_ROWS, BbiBlockWork, BbiScanRegion, bbi_block_work,
+    build_batch, normalize_local_path, partition_estimated_bytes, plan_bbi_partitions,
+    plan_bbi_scan_regions, project_schema, projected_indices, projection_display, region_display,
+    to_external_error,
 };
 
 /// Table provider for local BigWig files.
@@ -34,6 +36,7 @@ pub struct BigWigTableProvider {
     file_path: String,
     schema: SchemaRef,
     chroms: Vec<(String, u32)>,
+    block_work: Vec<BbiBlockWork>,
     coordinate_system_zero_based: bool,
 }
 
@@ -41,11 +44,13 @@ impl BigWigTableProvider {
     /// Create a BigWig provider for a local file path.
     pub fn new(file_path: String, coordinate_system_zero_based: bool) -> Result<Self> {
         let file_path = normalize_local_path(&file_path, "BigWig")?;
-        let reader = BigWigRead::open_file(&file_path).map_err(|error| {
+        let mut reader = BigWigRead::open_file(&file_path).map_err(|error| {
             DataFusionError::External(Box::new(std::io::Error::other(format!(
                 "Failed to open BigWig file '{file_path}': {error}"
             ))))
         })?;
+        let blocks = reader.data_blocks().map_err(to_external_error)?;
+        let block_work = bbi_block_work(reader.chroms(), &blocks);
         let chroms = reader
             .chroms()
             .iter()
@@ -56,6 +61,7 @@ impl BigWigTableProvider {
             file_path,
             schema,
             chroms,
+            block_work,
             coordinate_system_zero_based,
         })
     }
@@ -95,7 +101,7 @@ impl TableProvider for BigWigTableProvider {
 
     async fn scan(
         &self,
-        _state: &dyn Session,
+        state: &dyn Session,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         // `_limit` is intentionally ignored: BBI scans have no cheap row cap, so
@@ -112,15 +118,25 @@ impl TableProvider for BigWigTableProvider {
             self.coordinate_system_zero_based,
             true,
         );
+        let partitions = plan_bbi_partitions(
+            regions,
+            state.config().target_partitions(),
+            !filters.iter().any(is_genomic_coordinate_filter),
+            true,
+            &self.block_work,
+        );
+        let partition_estimated_bytes = partition_estimated_bytes(&partitions, &self.block_work);
+        let partition_count = partitions.len();
         Ok(Arc::new(BigWigExec {
             file_path: self.file_path.clone(),
             schema: schema.clone(),
             projection: projection.cloned(),
-            regions,
+            partitions,
+            partition_estimated_bytes,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema),
-                Partitioning::UnknownPartitioning(1),
+                Partitioning::UnknownPartitioning(partition_count),
                 EmissionType::Incremental,
                 Boundedness::Bounded,
             )),
@@ -133,7 +149,8 @@ pub struct BigWigExec {
     file_path: String,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
-    regions: Vec<BbiScanRegion>,
+    partitions: Vec<Vec<BbiScanRegion>>,
+    partition_estimated_bytes: Vec<u64>,
     coordinate_system_zero_based: bool,
     cache: Arc<PlanProperties>,
 }
@@ -150,9 +167,15 @@ impl DisplayAs for BigWigExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "BigWigExec: projection=[{}], regions=[{}]",
+            "BigWigExec: projection=[{}], partitions={}, estimated_compressed_bytes={:?}, regions=[{}]",
             projection_display(&self.schema),
-            region_display(&self.regions)
+            self.partitions.len(),
+            self.partition_estimated_bytes,
+            self.partitions
+                .iter()
+                .map(|regions| region_display(regions))
+                .collect::<Vec<_>>()
+                .join(" | ")
         )
     }
 }
@@ -183,17 +206,28 @@ impl ExecutionPlan for BigWigExec {
 
     fn execute(
         &self,
-        _partition: usize,
+        partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
         // The stream opens a reader per region and pulls intervals in fixed-size
         // chunks, so peak memory stays bounded by one batch (never a whole
         // chromosome) and LIMIT/COUNT queries can stop early.
+        let regions = self.partitions.get(partition).ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "BigWigExec partition {partition} is out of range for {} partitions",
+                self.partitions.len()
+            ))
+        })?;
         let stream = futures_util::stream::iter(BigWigRegionStream {
             file_path: self.file_path.clone(),
             schema: self.schema.clone(),
             projection: self.projection.clone(),
-            regions: self.regions.clone().into_iter(),
+            batch_rows: if self.schema.fields().is_empty() {
+                BBI_EMPTY_PROJECTION_BATCH_ROWS
+            } else {
+                BBI_BATCH_ROWS
+            },
+            regions: regions.clone().into_iter(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             current: None,
         });
@@ -211,6 +245,8 @@ struct CurrentRegion {
     /// Exclusive upper bound on `start`; once an interval reaches it the
     /// (start-sorted) region is done and we stop reading further blocks.
     stop_at: Option<u32>,
+    ownership_start: Option<u32>,
+    ownership_end: Option<u32>,
 }
 
 /// Lazily yields fixed-size [`RecordBatch`]es across all scan regions, opening a
@@ -219,6 +255,7 @@ struct BigWigRegionStream {
     file_path: String,
     schema: SchemaRef,
     projection: Option<Vec<usize>>,
+    batch_rows: usize,
     regions: std::vec::IntoIter<BbiScanRegion>,
     coordinate_system_zero_based: bool,
     current: Option<CurrentRegion>,
@@ -245,6 +282,8 @@ impl BigWigRegionStream {
                 chrom: region.chrom,
                 iter,
                 stop_at: region.stop_at,
+                ownership_start: region.ownership_start,
+                ownership_end: region.ownership_end,
             })),
             Err(error) => Some(Err(to_external_error(error))),
         }
@@ -290,8 +329,16 @@ impl Iterator for BigWigRegionStream {
             // Copied out before the loop so the loop only borrows `current.iter`,
             // leaving `self.current` free to clear on early termination.
             let stop_at = current.stop_at;
+            let ownership_start = current.ownership_start;
+            let ownership_end = current.ownership_end;
             let chrom = current.chrom.clone();
-            let mut rows: Vec<(u32, u32, f32)> = Vec::with_capacity(BBI_BATCH_ROWS);
+            let empty_projection = self.schema.fields().is_empty();
+            let mut rows: Vec<(u32, u32, f32)> = if empty_projection {
+                Vec::new()
+            } else {
+                Vec::with_capacity(self.batch_rows)
+            };
+            let mut row_count = 0;
             let mut region_done = false;
             for value in current.iter.by_ref() {
                 let value = match value {
@@ -306,13 +353,27 @@ impl Iterator for BigWigRegionStream {
                     region_done = true;
                     break;
                 }
-                let start = if self.coordinate_system_zero_based {
-                    value.start
-                } else {
-                    value.start + 1
-                };
-                rows.push((start, value.end, value.value));
-                if rows.len() >= BBI_BATCH_ROWS {
+                if let Some(ownership_end) = ownership_end
+                    && value.start >= ownership_end
+                {
+                    region_done = true;
+                    break;
+                }
+                if let Some(ownership_start) = ownership_start
+                    && value.start < ownership_start
+                {
+                    continue;
+                }
+                row_count += 1;
+                if !empty_projection {
+                    let start = if self.coordinate_system_zero_based {
+                        value.start
+                    } else {
+                        value.start + 1
+                    };
+                    rows.push((start, value.end, value.value));
+                }
+                if row_count >= self.batch_rows {
                     break;
                 }
             }
@@ -322,13 +383,17 @@ impl Iterator for BigWigRegionStream {
                 self.current = None;
             }
 
-            if rows.is_empty() {
+            if row_count == 0 {
                 // Region drained (or stopped with nothing buffered); advance.
                 self.current = None;
                 continue;
             }
 
-            return Some(self.build_batch(&chrom, &rows));
+            return Some(if empty_projection {
+                build_batch(self.schema.clone(), Vec::new(), row_count)
+            } else {
+                self.build_batch(&chrom, &rows)
+            });
         }
     }
 }
