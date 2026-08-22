@@ -15,7 +15,7 @@ format-native estimate of actual scan work.
 - Goals:
   - expose up to the requested number of source partitions for whole-file BBI
     scans;
-  - balance compressed work, including files with one dominant chromosome;
+  - balance encoded on-disk work, including files with one dominant chromosome;
   - preserve identical rows and coordinates at every partition count;
   - retain streaming, bounded-memory execution and projection pushdown.
 - Non-Goals:

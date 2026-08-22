@@ -223,7 +223,7 @@ impl DisplayAs for BigBedExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "BigBedExec: projection=[{}], partitions={}, estimated_compressed_bytes={:?}, regions=[{}]",
+            "BigBedExec: projection=[{}], partitions={}, estimated_data_bytes={:?}, regions=[{}]",
             projection_display(&self.schema),
             self.partitions.len(),
             self.partition_estimated_bytes,

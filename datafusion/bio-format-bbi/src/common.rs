@@ -61,7 +61,7 @@ pub(crate) struct BbiBlockWork {
     chrom: String,
     start: u32,
     end: u32,
-    compressed_size: u64,
+    data_size: u64,
 }
 
 /// Convert BigTools' cir-tree leaf layout into chromosome-local work units.
@@ -87,7 +87,7 @@ pub(crate) fn bbi_block_work(chroms: &[ChromInfo], blocks: &[BBIDataBlock]) -> V
                     chrom: chrom.name.clone(),
                     start,
                     end,
-                    compressed_size: block.compressed_size,
+                    data_size: block.data_size,
                 });
             }
         }
@@ -297,10 +297,7 @@ pub(crate) fn plan_bbi_partitions(
                         && block.end > region.start
                 })
                 .collect::<Vec<_>>();
-            let estimated_bytes = overlapping_blocks
-                .iter()
-                .map(|block| block.compressed_size)
-                .sum();
+            let estimated_bytes = overlapping_blocks.iter().map(|block| block.data_size).sum();
             let nonempty_block_positions = overlapping_blocks
                 .iter()
                 .map(|block| u64::from(block.start.max(region.start)) + 1)
@@ -321,7 +318,7 @@ pub(crate) fn plan_bbi_partitions(
                 unmapped_count: 0,
                 // Cir-tree blocks are variable-width rather than fixed genomic
                 // bins. A span of one makes the generic balancer place cuts at
-                // observed block positions; compressed bytes supply the weight.
+                // observed block positions; encoded data bytes supply the weight.
                 nonempty_bin_positions: nonempty_block_positions,
                 leaf_bin_span: 1,
             }
@@ -389,7 +386,7 @@ pub(crate) fn plan_bbi_partitions(
         .collect()
 }
 
-/// Estimate compressed bytes read by each planned partition. Boundary blocks
+/// Estimate on-disk data bytes read by each planned partition. Boundary blocks
 /// can appear in two partitions because both independent index queries may
 /// legitimately read them; retaining that duplication makes the diagnostic
 /// closer to actual I/O than an ownership-only estimate.
@@ -415,7 +412,7 @@ pub(crate) fn partition_estimated_bytes(
                                 && block.start < effective_end
                                 && block.end > region.start
                         })
-                        .map(|block| block.compressed_size)
+                        .map(|block| block.data_size)
                         .sum::<u64>()
                 })
                 .sum()

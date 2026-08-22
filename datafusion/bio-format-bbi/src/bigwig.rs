@@ -167,7 +167,7 @@ impl DisplayAs for BigWigExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "BigWigExec: projection=[{}], partitions={}, estimated_compressed_bytes={:?}, regions=[{}]",
+            "BigWigExec: projection=[{}], partitions={}, estimated_data_bytes={:?}, regions=[{}]",
             projection_display(&self.schema),
             self.partitions.len(),
             self.partition_estimated_bytes,

@@ -804,7 +804,7 @@ async fn bigwig_full_scan_uses_target_partitions_without_boundary_corruption() -
         "BBI source partitions should make a round-robin repartition unnecessary:\n{count_plan_text}"
     );
     assert!(
-        count_plan_text.contains("estimated_compressed_bytes=["),
+        count_plan_text.contains("estimated_data_bytes=["),
         "BigWig plan should expose index-derived partition work:\n{count_plan_text}"
     );
 
@@ -877,7 +877,7 @@ async fn bigbed_full_scan_uses_target_partitions_without_duplicates() -> TestRes
         "BBI source partitions should make a round-robin repartition unnecessary:\n{count_plan_text}"
     );
     assert!(
-        count_plan_text.contains("estimated_compressed_bytes=["),
+        count_plan_text.contains("estimated_data_bytes=["),
         "BigBed plan should expose index-derived partition work:\n{count_plan_text}"
     );
 

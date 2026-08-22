@@ -18,7 +18,7 @@ cir-tree layout.
   dominates the other selected regions
 - **THEN** the planner MAY split that region at block-informed coordinate
   boundaries
-- **AND** assignments are balanced by estimated compressed bytes rather than by
+- **AND** assignments are balanced by estimated on-disk data bytes rather than by
   region count alone
 
 #### Scenario: Narrow filtered scan
@@ -70,4 +70,4 @@ without reading result batches.
 
 - **WHEN** a caller inspects a BigWig or BigBed execution plan
 - **THEN** the plan reports its source partition count
-- **AND** it reports the estimated compressed bytes assigned to each partition
+- **AND** it reports the estimated data bytes assigned to each partition
