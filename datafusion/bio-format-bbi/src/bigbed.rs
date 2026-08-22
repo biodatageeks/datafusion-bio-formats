@@ -27,7 +27,7 @@ use datafusion_bio_format_core::genomic_filter::is_genomic_coordinate_filter;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 
 use crate::common::{
-    BBI_BATCH_ROWS, BBI_EMPTY_PROJECTION_BATCH_ROWS, BbiBlockWork, BbiScanRegion, bbi_block_work,
+    BBI_BATCH_ROWS, BBI_EMPTY_PROJECTION_BATCH_ROWS, BbiBlockIndex, BbiScanRegion, bbi_block_index,
     build_batch, normalize_local_path, partition_estimated_bytes, plan_bbi_partitions,
     plan_bbi_scan_regions, project_schema, projected_indices, projection_display, region_display,
     to_external_error,
@@ -84,7 +84,7 @@ pub struct BigBedTableProvider {
     file_path: String,
     schema: SchemaRef,
     chroms: Vec<(String, u32)>,
-    block_work: Vec<BbiBlockWork>,
+    block_index: Option<BbiBlockIndex>,
     extra_columns: Vec<BigBedExtraColumn>,
     coordinate_system_zero_based: bool,
 }
@@ -102,8 +102,11 @@ impl BigBedTableProvider {
                 "Failed to open BigBed file '{file_path}': {error}"
             ))))
         })?;
-        let blocks = reader.data_blocks().map_err(to_external_error)?;
-        let block_work = bbi_block_work(reader.chroms(), &blocks);
+        let block_index = match reader.data_blocks() {
+            Ok(blocks) => Some(bbi_block_index(reader.chroms(), &blocks)),
+            Err(error) if error.is_data_block_traversal_limit_exceeded() => None,
+            Err(error) => return Err(to_external_error(error)),
+        };
         let chroms = reader
             .chroms()
             .iter()
@@ -115,7 +118,7 @@ impl BigBedTableProvider {
             file_path,
             schema,
             chroms,
-            block_work,
+            block_index,
             extra_columns,
             coordinate_system_zero_based,
         })
@@ -164,22 +167,16 @@ impl TableProvider for BigBedTableProvider {
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = project_schema(&self.schema, projection);
-        // `widen_to_chromosome = false`: BigBedRead returns full overlapping BED
-        // entries (coordinates are never clipped), so positional pruning is safe.
-        let scan_plan = plan_bbi_scan_regions(
-            filters,
-            &self.chroms,
-            self.coordinate_system_zero_based,
-            false,
-        );
+        let scan_plan =
+            plan_bbi_scan_regions(filters, &self.chroms, self.coordinate_system_zero_based);
         let partitions = plan_bbi_partitions(
             scan_plan.regions,
             state.config().target_partitions(),
             !scan_plan.has_explicit_region,
-            false,
-            &self.block_work,
+            self.block_index.as_ref(),
         );
-        let partition_estimated_bytes = partition_estimated_bytes(&partitions, &self.block_work);
+        let partition_estimated_bytes =
+            partition_estimated_bytes(&partitions, self.block_index.as_ref());
         let partition_count = partitions.len();
         Ok(Arc::new(BigBedExec {
             file_path: self.file_path.clone(),
@@ -187,6 +184,7 @@ impl TableProvider for BigBedTableProvider {
             projection: projection.cloned(),
             partitions,
             partition_estimated_bytes,
+            block_layout_available: self.block_index.is_some(),
             extra_columns: self.extra_columns.clone(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             cache: Arc::new(PlanProperties::new(
@@ -206,6 +204,7 @@ pub struct BigBedExec {
     projection: Option<Vec<usize>>,
     partitions: Vec<Vec<BbiScanRegion>>,
     partition_estimated_bytes: Vec<u64>,
+    block_layout_available: bool,
     extra_columns: Vec<BigBedExtraColumn>,
     coordinate_system_zero_based: bool,
     cache: Arc<PlanProperties>,
@@ -223,9 +222,10 @@ impl DisplayAs for BigBedExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "BigBedExec: projection=[{}], partitions={}, estimated_data_bytes={:?}, regions=[{}]",
+            "BigBedExec: projection=[{}], partitions={}, block_layout_available={}, estimated_data_bytes={:?}, regions=[{}]",
             projection_display(&self.schema),
             self.partitions.len(),
+            self.block_layout_available,
             self.partition_estimated_bytes,
             self.partitions
                 .iter()

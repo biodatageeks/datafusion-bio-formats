@@ -10,8 +10,8 @@ parallelize index traversal, decompression, or decoding at the source.
   DataFusion target partition count.
 - Weight and split scan regions using primary cir-tree block coordinates and
   encoded on-disk sizes rather than chromosome length alone.
-- Preserve exact row ownership across independently queried shard boundaries,
-  including BigWig's coordinate-clipping behavior.
+- Preserve exact row ownership and original coordinates across independently
+  queried shard boundaries with bounded, unclipped BigWig reads.
 - Keep narrow single-region queries serial while allowing unfiltered
   single-chromosome files to use multiple partitions.
 - Add plan diagnostics, correctness coverage, and a source-partition profiling

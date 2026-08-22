@@ -234,13 +234,12 @@ async fn pushes_bigwig_genomic_filter_into_scan_regions() -> TestResult<()> {
         plan_text.contains("BigWigExec"),
         "expected BigWigExec in plan:\n{plan_text}"
     );
-    // BigWig prunes by chromosome but scans it in full: BigWigRead clips interval
-    // values to the query window, so a positional sub-range (e.g. chr2:0-10)
-    // would emit truncated coordinates. The Inexact pushdown lets DataFusion
-    // re-apply `start < 10` after the unclipped scan.
+    // The bounded BigTools query preserves original coordinates for intervals
+    // overlapping the query edge, so BigWig can prune positionally as well as by
+    // chromosome without clipping emitted values.
     assert!(
-        plan_text.contains("regions=[chr2:0-100]"),
-        "expected chr2 to be scanned in full:\n{plan_text}"
+        plan_text.contains("regions=[chr2:0-10]"),
+        "expected chr2 to use the extracted upper bound:\n{plan_text}"
     );
 
     Ok(())
@@ -628,11 +627,9 @@ async fn bigwig_early_termination_spans_multiple_batches() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn bigwig_lower_bound_only_scans_whole_chromosome() -> TestResult<()> {
-    // A lower bound alone (`start > 100`) has no upper bound to stop at, and a
-    // safe left seek isn't possible (it would clip the straddling interval), so
-    // the scan must read the whole chromosome and let DataFusion filter. Guards
-    // against accidentally deriving a stop cursor from the lower bound.
+async fn bigwig_lower_bound_uses_bounded_unclipped_query() -> TestResult<()> {
+    // The unclipped query can seek to a lower bound without changing a
+    // boundary-overlapping interval's original coordinates.
     let intervals = 20_000u32;
     let fixture = write_large_bigwig_fixture(intervals)?;
     let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
@@ -648,8 +645,8 @@ async fn bigwig_lower_bound_only_scans_whole_chromosome() -> TestResult<()> {
 
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
-        total, intervals as usize,
-        "lower-bound-only filters must not early-terminate"
+        total, 19_949,
+        "the source should seek to the lower bound without scanning earlier rows"
     );
 
     Ok(())
@@ -786,7 +783,8 @@ async fn count_star_bigbed() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn bigwig_full_scan_uses_target_partitions_without_boundary_corruption() -> TestResult<()> {
+async fn bigwig_full_scan_uses_block_bounded_partitions_without_boundary_corruption()
+-> TestResult<()> {
     let fixture = write_partition_bigwig_fixture()?;
     let path = fixture.path().to_string_lossy().to_string();
 
@@ -807,14 +805,10 @@ async fn bigwig_full_scan_uses_target_partitions_without_boundary_corruption() -
     let count_plan = count.create_physical_plan().await?;
     let leaf = find_leaf_exec(&count_plan);
     assert_eq!(leaf.name(), "BigWigExec");
-    assert_eq!(leaf.properties().output_partitioning().partition_count(), 4);
+    assert_eq!(leaf.properties().output_partitioning().partition_count(), 2);
     let count_plan_text = DisplayableExecutionPlan::new(count_plan.as_ref())
         .indent(false)
         .to_string();
-    assert!(
-        !count_plan_text.contains("RepartitionExec"),
-        "BBI source partitions should make a round-robin repartition unnecessary:\n{count_plan_text}"
-    );
     assert!(
         count_plan_text.contains("estimated_data_bytes=["),
         "BigWig plan should expose index-derived partition work:\n{count_plan_text}"
@@ -848,7 +842,7 @@ async fn bigwig_full_scan_uses_target_partitions_without_boundary_corruption() -
 }
 
 #[tokio::test]
-async fn bigbed_full_scan_uses_target_partitions_without_duplicates() -> TestResult<()> {
+async fn bigbed_full_scan_uses_block_bounded_partitions_without_duplicates() -> TestResult<()> {
     let fixture = write_partition_bigbed_fixture()?;
     let path = fixture.path().to_string_lossy().to_string();
 
@@ -880,14 +874,10 @@ async fn bigbed_full_scan_uses_target_partitions_without_duplicates() -> TestRes
     let count_plan = count.create_physical_plan().await?;
     let leaf = find_leaf_exec(&count_plan);
     assert_eq!(leaf.name(), "BigBedExec");
-    assert_eq!(leaf.properties().output_partitioning().partition_count(), 4);
+    assert_eq!(leaf.properties().output_partitioning().partition_count(), 2);
     let count_plan_text = DisplayableExecutionPlan::new(count_plan.as_ref())
         .indent(false)
         .to_string();
-    assert!(
-        !count_plan_text.contains("RepartitionExec"),
-        "BBI source partitions should make a round-robin repartition unnecessary:\n{count_plan_text}"
-    );
     assert!(
         count_plan_text.contains("estimated_data_bytes=["),
         "BigBed plan should expose index-derived partition work:\n{count_plan_text}"
@@ -950,18 +940,24 @@ async fn bbi_full_scan_partition_count_tracks_every_target_from_one_to_eight() -
                 .create_physical_plan()
                 .await?;
             let leaf = find_leaf_exec(&plan);
-            assert_eq!(
-                leaf.properties().output_partitioning().partition_count(),
-                target,
-                "{table} did not honor target_partitions={target}"
-            );
+            let source_partitions = leaf.properties().output_partitioning().partition_count();
+            assert_eq!(source_partitions, target.min(2));
             let plan_text = DisplayableExecutionPlan::new(plan.as_ref())
                 .indent(false)
                 .to_string();
-            assert!(
-                !plan_text.contains("RepartitionExec"),
-                "{table} target_partitions={target} unexpectedly repartitioned:\n{plan_text}"
-            );
+            if source_partitions == target {
+                assert!(
+                    !plan_text.contains("RepartitionExec"),
+                    "{table} target_partitions={target} unexpectedly repartitioned:\n{plan_text}"
+                );
+            }
+
+            let batches = context
+                .sql(&format!("SELECT count(*) AS c FROM {table}"))
+                .await?
+                .collect()
+                .await?;
+            assert_eq!(count_star_value(&batches[0]), 4);
         }
     }
     Ok(())

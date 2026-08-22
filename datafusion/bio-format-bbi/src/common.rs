@@ -4,7 +4,8 @@
 //! genomic-region planning, path validation) and are reused by both
 //! [`crate::bigwig`] and [`crate::bigbed`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use bigtools::{BBIDataBlock, ChromInfo};
@@ -13,7 +14,6 @@ use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::logical_expr::Expr;
 use datafusion_bio_format_core::genomic_filter::{GenomicRegion, extract_genomic_regions};
-use datafusion_bio_format_core::partition_balancer::{RegionSizeEstimate, balance_partitions};
 
 /// Maximum number of rows emitted per [`RecordBatch`] while streaming a region.
 ///
@@ -33,14 +33,6 @@ pub(crate) struct BbiScanRegion {
     pub(crate) chrom: String,
     pub(crate) start: u32,
     pub(crate) end: u32,
-    /// Exclusive upper bound on interval `start` for early termination, in the
-    /// same 0-based coordinate space as the native interval `start`. `None`
-    /// means "no upper bound — drain the whole region".
-    ///
-    /// Used only by the BigWig provider: it scans whole chromosomes to avoid
-    /// coordinate clipping, but the streamed intervals are start-sorted, so it
-    /// can stop as soon as `start >= stop_at` rather than reading to the end.
-    pub(crate) stop_at: Option<u32>,
     /// Inclusive lower bound on the original interval start owned by this
     /// region. Partitioned queries can return an interval that overlaps the
     /// lower query boundary and is also returned by the preceding partition;
@@ -64,20 +56,35 @@ pub(crate) struct BbiScanPlan {
 /// reading the shared physical block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BbiBlockWork {
-    chrom: String,
     start: u32,
     end: u32,
     data_size: u64,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct BbiBlockIndex {
+    by_chrom: HashMap<String, BbiChromWork>,
+}
+
+#[derive(Clone, Debug)]
+struct BbiChromWork {
+    blocks: Vec<BbiBlockWork>,
+    prefix_max_end: Vec<u32>,
+}
+
 /// Convert BigTools' cir-tree leaf layout into chromosome-local work units.
-pub(crate) fn bbi_block_work(chroms: &[ChromInfo], blocks: &[BBIDataBlock]) -> Vec<BbiBlockWork> {
-    let mut work = Vec::new();
+pub(crate) fn bbi_block_index(chroms: &[ChromInfo], blocks: &[BBIDataBlock]) -> BbiBlockIndex {
+    let mut chroms_by_id = chroms.iter().collect::<Vec<_>>();
+    chroms_by_id.sort_unstable_by_key(|chrom| chrom.id());
+
+    let mut by_chrom: HashMap<String, Vec<BbiBlockWork>> = HashMap::new();
     for block in blocks {
-        for chrom in chroms
-            .iter()
-            .filter(|chrom| (block.start_chrom_id..=block.end_chrom_id).contains(&chrom.id()))
-        {
+        let first = chroms_by_id.partition_point(|chrom| chrom.id() < block.start_chrom_id);
+        let last = chroms_by_id.partition_point(|chrom| chrom.id() <= block.end_chrom_id);
+        if first >= last {
+            continue;
+        }
+        for chrom in &chroms_by_id[first..last] {
             let start = if chrom.id() == block.start_chrom_id {
                 block.start_base
             } else {
@@ -89,19 +96,40 @@ pub(crate) fn bbi_block_work(chroms: &[ChromInfo], blocks: &[BBIDataBlock]) -> V
                 chrom.length
             };
             if start < end {
-                work.push(BbiBlockWork {
-                    chrom: chrom.name.clone(),
-                    start,
-                    end,
-                    data_size: block.data_size,
-                });
+                by_chrom
+                    .entry(chrom.name.clone())
+                    .or_default()
+                    .push(BbiBlockWork {
+                        start,
+                        end,
+                        data_size: block.data_size,
+                    });
             }
         }
     }
-    work.sort_unstable_by(|left, right| {
-        (&left.chrom, left.start, left.end).cmp(&(&right.chrom, right.start, right.end))
-    });
-    work
+
+    let by_chrom = by_chrom
+        .into_iter()
+        .map(|(chrom, mut blocks)| {
+            blocks.sort_unstable_by_key(|block| (block.start, block.end));
+            let mut maximum_end = 0;
+            let prefix_max_end = blocks
+                .iter()
+                .map(|block| {
+                    maximum_end = maximum_end.max(block.end);
+                    maximum_end
+                })
+                .collect();
+            (
+                chrom,
+                BbiChromWork {
+                    blocks,
+                    prefix_max_end,
+                },
+            )
+        })
+        .collect();
+    BbiBlockIndex { by_chrom }
 }
 
 pub(crate) fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -154,23 +182,12 @@ pub(crate) fn projection_display(schema: &SchemaRef) -> String {
 
 /// Plan the native interval-query regions for a BBI scan.
 ///
-/// `widen_to_chromosome` controls how a positional coordinate filter is turned
-/// into a query window:
-///
-/// * `false` (BigBed) — honor the filter's start/end bounds. `BigBedRead`
-///   returns full BED entries that *overlap* the window, so narrowing the window
-///   prunes work without altering the emitted coordinates.
-/// * `true` (BigWig) — ignore the positional bounds and scan each matched
-///   chromosome in full. `BigWigRead` *clips* interval values to the query
-///   window, so a sub-range would emit truncated start/end coordinates. Because
-///   coordinate filters are pushed down as `Inexact` (DataFusion re-applies
-///   them), scanning the whole chromosome is still correct — it only trades
-///   within-chromosome seek pruning for unclipped intervals.
+/// Both providers preserve original record coordinates for overlapping values,
+/// so extracted positional bounds can be passed directly to their index query.
 pub(crate) fn plan_bbi_scan_regions(
     filters: &[Expr],
     chroms: &[(String, u32)],
     coordinate_system_zero_based: bool,
-    widen_to_chromosome: bool,
 ) -> BbiScanPlan {
     let analysis = extract_genomic_regions(filters, coordinate_system_zero_based);
     let has_explicit_region = !analysis.regions.is_empty();
@@ -202,37 +219,6 @@ pub(crate) fn plan_bbi_scan_regions(
         .map(|(chrom, len)| (chrom.as_str(), *len))
         .collect();
 
-    if widen_to_chromosome {
-        // De-duplicate by chromosome so overlapping or OR'd ranges never scan the
-        // same chromosome twice (which would duplicate rows).
-        let mut seen = HashSet::new();
-        let regions = source_regions
-            .into_iter()
-            .filter(|region| seen.insert(region.chrom.clone()))
-            .filter_map(|region| {
-                let length = *chrom_lengths.get(region.chrom.as_str())?;
-                // Scan the whole chromosome (so intervals are never clipped) but
-                // remember the filter's upper bound: `region.end` is 1-based
-                // inclusive, which equals the 0-based exclusive bound on `start`,
-                // letting the start-sorted stream stop early. `None` (no upper
-                // bound) means drain the whole chromosome.
-                let stop_at = region.end.map(|end| end.min(length as u64) as u32);
-                (length > 0).then_some(BbiScanRegion {
-                    chrom: region.chrom,
-                    start: 0,
-                    end: length,
-                    stop_at,
-                    ownership_start: None,
-                    ownership_end: None,
-                })
-            })
-            .collect();
-        return BbiScanPlan {
-            regions,
-            has_explicit_region,
-        };
-    }
-
     let regions = source_regions
         .into_iter()
         .filter_map(|region| convert_genomic_region_to_bbi(region, &chrom_lengths))
@@ -257,20 +243,25 @@ fn convert_genomic_region_to_bbi(
         .map(|end| end.min(length as u64) as u32)
         .unwrap_or(length);
 
-    // The narrow (BigBed) path bounds the scan with the query window itself, so
-    // it needs no separate early-termination cursor.
     (start < end).then_some(BbiScanRegion {
         chrom: region.chrom,
         start,
         end,
-        stop_at: None,
         ownership_start: None,
         ownership_end: None,
     })
 }
 
-/// Balance BBI regions across DataFusion partitions using primary-data
-/// cir-tree block sizes and positions as the workload estimate.
+#[derive(Clone, Copy, Debug)]
+struct BbiWorkSegment {
+    region_index: usize,
+    start: u32,
+    end: u32,
+    estimated_bytes: u64,
+}
+
+/// Balance BBI regions across DataFusion partitions at primary-data block
+/// boundaries, using each block's encoded byte size as its weight.
 ///
 /// A single selected region deliberately remains serial unless
 /// `allow_single_region_split` is true: a narrow chromosome-filtered lookup
@@ -279,129 +270,175 @@ fn convert_genomic_region_to_bbi(
 /// Multi-region scans may always split a dominant chromosome so it does not
 /// monopolize one partition.
 ///
-/// When `clips_query_boundaries` is true (BigWig), a split query starts one base
-/// before its ownership boundary and extends to the original region end. This
-/// prevents `bigtools` from clipping the coordinates of the first/last owned
-/// interval. BigBed returns original coordinates, so each shard can query only
-/// its own coordinate window.
+/// The number of partitions is capped at the number of useful block-start
+/// segments. This avoids opening multiple readers that all decode the same
+/// indivisible block. A missing layout means traversal hit its safety limit, so
+/// the optimization falls back to one serial partition.
 pub(crate) fn plan_bbi_partitions(
     regions: Vec<BbiScanRegion>,
     target_partitions: usize,
     allow_single_region_split: bool,
-    clips_query_boundaries: bool,
-    block_work: &[BbiBlockWork],
+    block_index: Option<&BbiBlockIndex>,
 ) -> Vec<Vec<BbiScanRegion>> {
     if regions.is_empty() {
         return vec![Vec::new()];
     }
+    let Some(block_index) = block_index else {
+        return vec![regions];
+    };
     if target_partitions <= 1 || (regions.len() == 1 && !allow_single_region_split) {
         return vec![regions];
     }
 
-    let effective_ends = regions
+    let segments = regions
         .iter()
-        .map(|region| region.stop_at.unwrap_or(region.end).min(region.end))
-        .collect::<Vec<_>>();
-    let estimates = regions
-        .iter()
-        .zip(&effective_ends)
         .enumerate()
-        .map(|(index, (region, &effective_end))| {
-            let overlapping_blocks = block_work
-                .iter()
-                .filter(|block| {
-                    block.chrom == region.chrom
-                        && block.start < effective_end
-                        && block.end > region.start
-                })
-                .collect::<Vec<_>>();
-            let estimated_bytes = overlapping_blocks.iter().map(|block| block.data_size).sum();
-            let nonempty_block_positions = overlapping_blocks
-                .iter()
-                .map(|block| u64::from(block.start.max(region.start)) + 1)
-                .collect();
+        .flat_map(|(region_index, region)| region_work_segments(region_index, region, block_index))
+        .collect::<Vec<_>>();
+    let ranges = weighted_segment_ranges(&segments, target_partitions);
 
-            RegionSizeEstimate {
-                // The balancer treats coordinates as 1-based inclusive. Use the
-                // source index as an opaque key so multiple ranges on one
-                // chromosome still map back to the correct original query.
-                region: GenomicRegion {
-                    chrom: index.to_string(),
-                    start: Some(u64::from(region.start) + 1),
-                    end: Some(u64::from(effective_end)),
-                    unmapped_tail: false,
-                },
-                estimated_bytes,
-                contig_length: Some(u64::from(effective_end)),
-                unmapped_count: 0,
-                // Cir-tree blocks are variable-width rather than fixed genomic
-                // bins. A span of one makes the generic balancer place cuts at
-                // observed block positions; encoded data bytes supply the weight.
-                nonempty_bin_positions: nonempty_block_positions,
-                leaf_bin_span: 1,
-            }
-        })
-        .collect();
-
-    balance_partitions(estimates, target_partitions)
+    ranges
         .into_iter()
-        .map(|assignment| {
-            assignment
-                .regions
-                .into_iter()
-                .map(|balanced| {
-                    let index = balanced
-                        .chrom
-                        .parse::<usize>()
-                        .expect("BBI partition planner generated a non-numeric region key");
-                    let original = &regions[index];
-                    let effective_end = effective_ends[index];
-                    let ownership_start = balanced
-                        .start
-                        .map(|start| start.saturating_sub(1) as u32)
-                        .unwrap_or(original.start);
-                    let ownership_end = balanced.end.map(|end| end as u32).unwrap_or(effective_end);
+        .map(|range| segments_to_regions(&segments[range], &regions))
+        .collect()
+}
 
-                    if ownership_start == original.start && ownership_end == effective_end {
-                        return original.clone();
-                    }
+fn candidate_blocks<'a>(
+    block_index: &'a BbiBlockIndex,
+    region: &BbiScanRegion,
+) -> &'a [BbiBlockWork] {
+    let Some(work) = block_index.by_chrom.get(&region.chrom) else {
+        return &[];
+    };
+    let upper = work
+        .blocks
+        .partition_point(|block| block.start < region.end);
+    let lower = work.prefix_max_end[..upper].partition_point(|&end| end <= region.start);
+    &work.blocks[lower..upper]
+}
 
-                    let first_shard = ownership_start == original.start;
-                    if clips_query_boundaries {
-                        BbiScanRegion {
-                            chrom: original.chrom.clone(),
-                            start: if first_shard {
-                                original.start
-                            } else {
-                                ownership_start.saturating_sub(1)
-                            },
-                            // BigWig clips values at the query end, so retain the
-                            // original end and stop after the last owned start.
-                            end: original.end,
-                            stop_at: Some(ownership_end),
-                            ownership_start: Some(ownership_start),
-                            ownership_end: Some(ownership_end),
-                        }
-                    } else {
-                        BbiScanRegion {
-                            chrom: original.chrom.clone(),
-                            start: if first_shard {
-                                original.start
-                            } else {
-                                ownership_start
-                            },
-                            end: ownership_end,
-                            stop_at: None,
-                            // The first shard owns records that start before a
-                            // filtered query window but overlap that window.
-                            ownership_start: (!first_shard).then_some(ownership_start),
-                            ownership_end: Some(ownership_end),
-                        }
-                    }
-                })
-                .collect()
+fn region_work_segments(
+    region_index: usize,
+    region: &BbiScanRegion,
+    block_index: &BbiBlockIndex,
+) -> Vec<BbiWorkSegment> {
+    let mut boundaries: Vec<(u32, u64)> = Vec::new();
+    for block in candidate_blocks(block_index, region)
+        .iter()
+        .filter(|block| block.end > region.start)
+    {
+        let boundary = block.start.max(region.start);
+        if let Some((last_boundary, bytes)) = boundaries.last_mut()
+            && *last_boundary == boundary
+        {
+            *bytes = bytes.saturating_add(block.data_size);
+        } else {
+            boundaries.push((boundary, block.data_size));
+        }
+    }
+
+    if boundaries.is_empty() {
+        boundaries.push((region.start, 0));
+    } else {
+        // Coordinates before the first block contain no independent work, so
+        // keep them with the first block instead of creating an empty shard.
+        boundaries[0].0 = region.start;
+    }
+
+    boundaries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &(start, estimated_bytes))| {
+            let end = boundaries
+                .get(index + 1)
+                .map_or(region.end, |&(next, _)| next);
+            (start < end).then_some(BbiWorkSegment {
+                region_index,
+                start,
+                end,
+                estimated_bytes,
+            })
         })
         .collect()
+}
+
+fn weighted_segment_ranges(
+    segments: &[BbiWorkSegment],
+    target_partitions: usize,
+) -> Vec<Range<usize>> {
+    let partition_count = target_partitions.max(1).min(segments.len());
+    let mut prefix_bytes = Vec::with_capacity(segments.len() + 1);
+    prefix_bytes.push(0u128);
+    for segment in segments {
+        let next = prefix_bytes.last().copied().unwrap_or(0) + u128::from(segment.estimated_bytes);
+        prefix_bytes.push(next);
+    }
+    let total_bytes = *prefix_bytes.last().unwrap_or(&0);
+
+    let mut ranges = Vec::with_capacity(partition_count);
+    let mut start = 0;
+    for partition in 0..partition_count {
+        let remaining_partitions = partition_count - partition - 1;
+        if remaining_partitions == 0 {
+            ranges.push(start..segments.len());
+            break;
+        }
+
+        let latest_end = segments.len() - remaining_partitions;
+        let target = if total_bytes == 0 {
+            (segments.len() * (partition + 1) / partition_count) as u128
+        } else {
+            total_bytes * (partition + 1) as u128 / partition_count as u128
+        };
+        let end = (start + 1..=latest_end)
+            .min_by_key(|&candidate| {
+                let cumulative = if total_bytes == 0 {
+                    candidate as u128
+                } else {
+                    prefix_bytes[candidate]
+                };
+                cumulative.abs_diff(target)
+            })
+            .expect("a BBI partition must contain at least one work segment");
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+fn segments_to_regions(
+    segments: &[BbiWorkSegment],
+    originals: &[BbiScanRegion],
+) -> Vec<BbiScanRegion> {
+    let mut regions = Vec::new();
+    let mut start = 0;
+    while start < segments.len() {
+        let region_index = segments[start].region_index;
+        let mut end = start + 1;
+        while end < segments.len() && segments[end].region_index == region_index {
+            end += 1;
+        }
+
+        let original = &originals[region_index];
+        let shard_start = segments[start].start;
+        let shard_end = segments[end - 1].end;
+        if shard_start == original.start && shard_end == original.end {
+            regions.push(original.clone());
+        } else {
+            regions.push(BbiScanRegion {
+                chrom: original.chrom.clone(),
+                start: shard_start,
+                end: shard_end,
+                // The first shard keeps records that begin before a filtered
+                // query window but overlap it. Later shards discard that overlap
+                // because the preceding shard owns those record starts.
+                ownership_start: (shard_start != original.start).then_some(shard_start),
+                ownership_end: Some(shard_end),
+            });
+        }
+        start = end;
+    }
+    regions
 }
 
 /// Estimate on-disk data bytes read by each planned partition. Boundary blocks
@@ -410,26 +447,20 @@ pub(crate) fn plan_bbi_partitions(
 /// closer to actual I/O than an ownership-only estimate.
 pub(crate) fn partition_estimated_bytes(
     partitions: &[Vec<BbiScanRegion>],
-    block_work: &[BbiBlockWork],
+    block_index: Option<&BbiBlockIndex>,
 ) -> Vec<u64> {
+    let Some(block_index) = block_index else {
+        return vec![0; partitions.len()];
+    };
     partitions
         .iter()
         .map(|regions| {
             regions
                 .iter()
                 .map(|region| {
-                    let effective_end = region
-                        .ownership_end
-                        .or(region.stop_at)
-                        .unwrap_or(region.end)
-                        .min(region.end);
-                    block_work
+                    candidate_blocks(block_index, region)
                         .iter()
-                        .filter(|block| {
-                            block.chrom == region.chrom
-                                && block.start < effective_end
-                                && block.end > region.start
-                        })
+                        .filter(|block| block.end > region.start)
                         .map(|block| block.data_size)
                         .sum::<u64>()
                 })
@@ -483,4 +514,81 @@ fn remote_host_error(format_name: &str) -> DataFusionError {
     DataFusionError::NotImplemented(format!(
         "{format_name} does not support remote file:// URIs with a host authority"
     ))
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+
+    fn region() -> BbiScanRegion {
+        BbiScanRegion {
+            chrom: "chr1".into(),
+            start: 0,
+            end: 400,
+            ownership_start: None,
+            ownership_end: None,
+        }
+    }
+
+    fn block_index(blocks: &[(u32, u32, u64)]) -> BbiBlockIndex {
+        let blocks = blocks
+            .iter()
+            .map(|&(start, end, data_size)| BbiBlockWork {
+                start,
+                end,
+                data_size,
+            })
+            .collect::<Vec<_>>();
+        let mut maximum_end = 0;
+        let prefix_max_end = blocks
+            .iter()
+            .map(|block| {
+                maximum_end = maximum_end.max(block.end);
+                maximum_end
+            })
+            .collect();
+        BbiBlockIndex {
+            by_chrom: HashMap::from([(
+                "chr1".into(),
+                BbiChromWork {
+                    blocks,
+                    prefix_max_end,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn weighted_split_uses_cumulative_encoded_bytes() {
+        let index = block_index(&[
+            (0, 100, 400),
+            (100, 200, 100),
+            (200, 300, 100),
+            (300, 400, 400),
+        ]);
+
+        let partitions = plan_bbi_partitions(vec![region()], 2, true, Some(&index));
+
+        assert_eq!(partitions.len(), 2);
+        assert_eq!((partitions[0][0].start, partitions[0][0].end), (0, 200));
+        assert_eq!((partitions[1][0].start, partitions[1][0].end), (200, 400));
+        assert_eq!(
+            partition_estimated_bytes(&partitions, Some(&index)),
+            vec![500, 500]
+        );
+    }
+
+    #[test]
+    fn partition_count_does_not_exceed_block_granularity() {
+        let index = block_index(&[(0, 400, 1_000)]);
+        let partitions = plan_bbi_partitions(vec![region()], 8, true, Some(&index));
+        assert_eq!(partitions, vec![vec![region()]]);
+    }
+
+    #[test]
+    fn unavailable_layout_falls_back_to_serial_scan() {
+        let partitions = plan_bbi_partitions(vec![region()], 8, true, None);
+        assert_eq!(partitions, vec![vec![region()]]);
+        assert_eq!(partition_estimated_bytes(&partitions, None), vec![0]);
+    }
 }

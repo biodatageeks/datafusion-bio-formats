@@ -24,7 +24,7 @@ use datafusion_bio_format_core::genomic_filter::is_genomic_coordinate_filter;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 
 use crate::common::{
-    BBI_BATCH_ROWS, BBI_EMPTY_PROJECTION_BATCH_ROWS, BbiBlockWork, BbiScanRegion, bbi_block_work,
+    BBI_BATCH_ROWS, BBI_EMPTY_PROJECTION_BATCH_ROWS, BbiBlockIndex, BbiScanRegion, bbi_block_index,
     build_batch, normalize_local_path, partition_estimated_bytes, plan_bbi_partitions,
     plan_bbi_scan_regions, project_schema, projected_indices, projection_display, region_display,
     to_external_error,
@@ -36,7 +36,7 @@ pub struct BigWigTableProvider {
     file_path: String,
     schema: SchemaRef,
     chroms: Vec<(String, u32)>,
-    block_work: Vec<BbiBlockWork>,
+    block_index: Option<BbiBlockIndex>,
     coordinate_system_zero_based: bool,
 }
 
@@ -49,8 +49,11 @@ impl BigWigTableProvider {
                 "Failed to open BigWig file '{file_path}': {error}"
             ))))
         })?;
-        let blocks = reader.data_blocks().map_err(to_external_error)?;
-        let block_work = bbi_block_work(reader.chroms(), &blocks);
+        let block_index = match reader.data_blocks() {
+            Ok(blocks) => Some(bbi_block_index(reader.chroms(), &blocks)),
+            Err(error) if error.is_data_block_traversal_limit_exceeded() => None,
+            Err(error) => return Err(to_external_error(error)),
+        };
         let chroms = reader
             .chroms()
             .iter()
@@ -61,7 +64,7 @@ impl BigWigTableProvider {
             file_path,
             schema,
             chroms,
-            block_work,
+            block_index,
             coordinate_system_zero_based,
         })
     }
@@ -109,23 +112,18 @@ impl TableProvider for BigWigTableProvider {
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = project_schema(&self.schema, projection);
-        // `widen_to_chromosome = true`: BigWigRead clips interval values to the
-        // query window, so we scan whole chromosomes and let DataFusion's Inexact
-        // re-filter drop surplus rows, rather than emitting clipped coordinates.
-        let scan_plan = plan_bbi_scan_regions(
-            filters,
-            &self.chroms,
-            self.coordinate_system_zero_based,
-            true,
-        );
+        // The unclipped BigTools interval path bounds index traversal while
+        // preserving original coordinates for values crossing query edges.
+        let scan_plan =
+            plan_bbi_scan_regions(filters, &self.chroms, self.coordinate_system_zero_based);
         let partitions = plan_bbi_partitions(
             scan_plan.regions,
             state.config().target_partitions(),
             !scan_plan.has_explicit_region,
-            true,
-            &self.block_work,
+            self.block_index.as_ref(),
         );
-        let partition_estimated_bytes = partition_estimated_bytes(&partitions, &self.block_work);
+        let partition_estimated_bytes =
+            partition_estimated_bytes(&partitions, self.block_index.as_ref());
         let partition_count = partitions.len();
         Ok(Arc::new(BigWigExec {
             file_path: self.file_path.clone(),
@@ -133,6 +131,7 @@ impl TableProvider for BigWigTableProvider {
             projection: projection.cloned(),
             partitions,
             partition_estimated_bytes,
+            block_layout_available: self.block_index.is_some(),
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema),
@@ -151,6 +150,7 @@ pub struct BigWigExec {
     projection: Option<Vec<usize>>,
     partitions: Vec<Vec<BbiScanRegion>>,
     partition_estimated_bytes: Vec<u64>,
+    block_layout_available: bool,
     coordinate_system_zero_based: bool,
     cache: Arc<PlanProperties>,
 }
@@ -167,9 +167,10 @@ impl DisplayAs for BigWigExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "BigWigExec: projection=[{}], partitions={}, estimated_data_bytes={:?}, regions=[{}]",
+            "BigWigExec: projection=[{}], partitions={}, block_layout_available={}, estimated_data_bytes={:?}, regions=[{}]",
             projection_display(&self.schema),
             self.partitions.len(),
+            self.block_layout_available,
             self.partition_estimated_bytes,
             self.partitions
                 .iter()
@@ -242,9 +243,6 @@ impl ExecutionPlan for BigWigExec {
 struct CurrentRegion {
     chrom: String,
     iter: BigWigIntervalIter<ReopenableFile, BigWigRead<ReopenableFile>>,
-    /// Exclusive upper bound on `start`; once an interval reaches it the
-    /// (start-sorted) region is done and we stop reading further blocks.
-    stop_at: Option<u32>,
     ownership_start: Option<u32>,
     ownership_end: Option<u32>,
 }
@@ -277,11 +275,10 @@ impl BigWigRegionStream {
                 ))));
             }
         };
-        match reader.get_interval_move(&region.chrom, region.start, region.end) {
+        match reader.get_interval_move_unclipped(&region.chrom, region.start, region.end) {
             Ok(iter) => Some(Ok(CurrentRegion {
                 chrom: region.chrom,
                 iter,
-                stop_at: region.stop_at,
                 ownership_start: region.ownership_start,
                 ownership_end: region.ownership_end,
             })),
@@ -328,7 +325,6 @@ impl Iterator for BigWigRegionStream {
             let current = self.current.as_mut().expect("current region is set");
             // Copied out before the loop so the loop only borrows `current.iter`,
             // leaving `self.current` free to clear on early termination.
-            let stop_at = current.stop_at;
             let ownership_start = current.ownership_start;
             let ownership_end = current.ownership_end;
             let chrom = current.chrom.clone();
@@ -345,14 +341,6 @@ impl Iterator for BigWigRegionStream {
                     Ok(value) => value,
                     Err(error) => return Some(Err(to_external_error(error))),
                 };
-                // Intervals stream in ascending `start`, so once one reaches the
-                // upper bound nothing further in this region can match: stop.
-                if let Some(stop_at) = stop_at
-                    && value.start >= stop_at
-                {
-                    region_done = true;
-                    break;
-                }
                 if let Some(ownership_end) = ownership_end
                     && value.start >= ownership_end
                 {

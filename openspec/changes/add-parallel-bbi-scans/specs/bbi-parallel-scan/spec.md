@@ -21,6 +21,21 @@ cir-tree layout.
 - **AND** assignments are balanced by estimated on-disk data bytes rather than by
   region count alone
 
+#### Scenario: Fewer useful blocks than requested partitions
+
+- **WHEN** a scan requests more partitions than there are distinct primary-data
+  block-start segments
+- **THEN** the source reports fewer than the requested partitions
+- **AND** no two partitions are created solely to decode the same indivisible
+  block
+
+#### Scenario: Layout traversal reaches its safety limit
+
+- **WHEN** a valid BBI file exceeds the configured complete-index traversal
+  safety limit
+- **THEN** provider construction succeeds
+- **AND** the scan falls back to one source partition
+
 #### Scenario: Narrow filtered scan
 
 - **WHEN** a scan explicitly selects one genomic region

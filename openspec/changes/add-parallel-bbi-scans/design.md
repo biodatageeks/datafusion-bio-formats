@@ -27,17 +27,18 @@ format-native estimate of actual scan work.
 
 ### Read block layout during provider construction
 
-The provider reads the primary cir-tree leaf layout once and stores normalized
-chromosome-local work units. This adds bounded index I/O to construction but no
-payload reads or decompression, and it avoids reparsing the layout for every
-scan.
+The provider reads the primary cir-tree leaf layout once and stores normalized,
+chromosome-indexed work units. This adds bounded index I/O to construction but
+no payload reads or decompression, and it avoids reparsing the layout for every
+scan. If a valid file exceeds BigTools' safety limits for complete traversal,
+provider construction succeeds and scanning falls back to one source partition.
 
 ### Balance using encoded block work
 
-The existing core partition balancer receives each selected region's encoded
-byte total plus observed block positions. It may split a dominant region at
-block-informed coordinate boundaries, then assigns the resulting regions to the
-requested partitions.
+A BBI-specific linear partitioner groups blocks by start coordinate and places
+cuts using cumulative encoded byte weights. It never cuts below an observed
+block boundary, so the useful source-partition count may be lower than the
+requested target when a file contains fewer independently readable blocks.
 
 ### Separate query windows from row ownership
 
@@ -45,11 +46,11 @@ Adjacent independent interval queries can both return a boundary-overlapping
 record. Each shard therefore carries an inclusive ownership start and exclusive
 ownership end for original record starts.
 
-BigBed returns original record coordinates, so shards query their coordinate
-window directly. BigWig clips intervals to query boundaries, so non-first
-shards query one base earlier and retain the original upper query bound while
-ownership filters remove overlap. This preserves original coordinates and
-prevents duplicates.
+BigBed returns original record coordinates. BigWig uses BigTools' bounded
+unclipped interval API. Both therefore query only their shard coordinate window;
+ownership filters remove overlap returned at a non-first shard's lower edge.
+This preserves original coordinates, prevents duplicates, and avoids building a
+suffix block list for every BigWig shard.
 
 ### Avoid fan-out for narrow lookups
 
@@ -73,8 +74,8 @@ overhead without allocating value buffers.
   Plan diagnostics retain this conservative duplication in per-partition byte
   estimates.
 - Provider construction performs extra cir-tree index I/O. The layout is cached
-  on the provider, and the benchmark records end-to-end construction separately
-  from source execution.
+  on the provider, the benchmark includes construction in end-to-end timing,
+  and limit exhaustion falls back to the pre-existing serial scan path.
 - Downstream consumers may still scale below the provider because Python batch
   conversion, aggregation, or full DataFrame materialization is outside this
   change.
