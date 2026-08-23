@@ -147,6 +147,33 @@ fn format_vcf_float(v: f64) -> String {
     }
 }
 
+/// Formats a QUAL score for VCF output as the shortest text that parses back to
+/// the same value, at the precision the value actually carries.
+///
+/// QUAL is deliberately not `format_vcf_float`: `%g` caps at six significant
+/// digits, so a precise score like `123456.78` would be rewritten as `123457`.
+///
+/// The precision question is not academic. VCF QUAL is `f32` on the wire —
+/// noodles returns `Option<f32>` and `physical_exec.rs` widens it with
+/// `v as f64` — so an input of `29.99` reaches this function as
+/// 29.989999771118164. Printing the f64 shortest form would write that binary
+/// noise back out. A value that survives a round trip through `f32` is rendered
+/// at `f32` precision, recovering the original text; anything needing more than
+/// `f32` can represent is a caller-supplied `f64` and keeps full precision.
+///
+/// `NaN` and `±Inf` have no VCF representation and render as `"."`.
+fn format_vcf_qual(qual: f64) -> String {
+    if !qual.is_finite() {
+        return ".".to_string();
+    }
+    let narrowed = qual as f32;
+    if narrowed as f64 == qual {
+        format!("{narrowed}")
+    } else {
+        format!("{qual}")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Batch-level resolved genotypes: eliminate per-row downcasts & array slices
 // ---------------------------------------------------------------------------
@@ -585,25 +612,11 @@ pub fn batch_to_vcf_lines(
             alt_value.replace('|', ",")
         };
 
-        // QUAL is rendered as the shortest text that parses back to the same
-        // f64, so the score survives a write/read round-trip unchanged.
-        //
-        // Neither alternative does. `{:.2}` rewrites `50` as `50.00` and
-        // truncates anything below 0.005 to `0.00`. `format_vcf_float` applies
-        // `%g` semantics, which is correct for INFO/FORMAT floats but caps QUAL
-        // at six significant digits (`123456.78` -> `123457`) and flips to
-        // scientific notation past 1e6.
-        //
-        // NaN and +/-Inf have no VCF representation, so they render as missing.
+        // QUAL
         let qual_str = if quals.is_null(row) {
             ".".to_string()
         } else {
-            let qual = quals.value(row);
-            if qual.is_finite() {
-                format!("{qual}")
-            } else {
-                ".".to_string()
-            }
+            format_vcf_qual(quals.value(row))
         };
 
         // FILTER
@@ -1695,6 +1708,33 @@ mod tests {
                 .unwrap_or_else(|e| panic!("QUAL {value} written as {written:?}: {e}"));
             assert_eq!(parsed, value, "QUAL {value} written as {written:?}");
         }
+    }
+
+    #[test]
+    fn qual_from_the_reader_renders_at_source_precision() {
+        // noodles parses QUAL as f32 and physical_exec.rs widens it with
+        // `v as f64`, so a VCF carrying `29.99` reaches the serializer as
+        // 29.989999771118164. Printing the f64 shortest form would write that
+        // binary noise straight back out.
+        for text in ["314.8", "29.99", "0.001", "99.9", "123456.78", "0.5", "50"] {
+            let widened = text.parse::<f32>().unwrap() as f64;
+            assert_eq!(
+                qual_line_for(Some(widened)),
+                text,
+                "QUAL {text} widened from f32"
+            );
+        }
+    }
+
+    #[test]
+    fn qual_keeps_f64_precision_when_it_exceeds_f32() {
+        // A caller-supplied value that f32 cannot hold must not be narrowed.
+        assert_eq!(
+            qual_line_for(Some(std::f64::consts::PI)),
+            "3.141592653589793"
+        );
+        assert_eq!(qual_line_for(Some(0.1)), "0.1");
+        assert_eq!(qual_line_for(Some(1e-5)), "0.00001");
     }
 
     #[test]
