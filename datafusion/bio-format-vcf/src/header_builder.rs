@@ -281,6 +281,20 @@ impl CurrentDeclaration {
     }
 }
 
+/// True when `raw`'s `ID=` attribute is present in `ids`.
+///
+/// A declaration that cannot be parsed, or that carries no `ID`, is treated as
+/// present so the conservative default stays "keep what the source said".
+fn declaration_id_is_in(raw: &str, ids: &HashSet<String>) -> bool {
+    let Some(attributes) = parse_structured_attributes(raw) else {
+        return true;
+    };
+    match attributes.iter().find(|(k, _)| k == "ID") {
+        Some((_, id)) => ids.contains(id),
+        None => true,
+    }
+}
+
 /// Re-emits a captured source header, reconciled against the current schema.
 ///
 /// Raw lines pass through untouched — including everything the typed model
@@ -305,6 +319,17 @@ fn passthrough_header_lines(
     let mut current: Vec<CurrentDeclaration> = Vec::new();
     let schema_metadata = schema.metadata();
 
+    // Kinds whose typed key, when present, is an authoritative statement of which
+    // declarations the header should carry. A raw declaration of such a kind
+    // whose ID is absent from the list was removed downstream and must not be
+    // re-emitted.
+    //
+    // INFO and FORMAT are deliberately excluded: `info_fields`/`format_fields`
+    // are a projection, not a statement about the header. Reading only DP must
+    // not strip AF's declaration — an unused declaration is valid VCF, and both
+    // bcftools and Ensembl VEP keep the whole input header.
+    let mut authoritative: Vec<(&'static str, HashSet<String>)> = Vec::new();
+
     // Schema-level declarations. Only the attributes the typed model carries are
     // compared: ContigMetadata holds id and length, so a contig whose length
     // still agrees keeps its raw line — and with it `assembly`, `md5` and
@@ -312,6 +337,7 @@ fn passthrough_header_lines(
     if let Some(json) = schema_metadata.get(VCF_FILTERS_KEY)
         && let Some(filters) = from_json_string::<Vec<FilterMetadata>>(json)
     {
+        authoritative.push(("##FILTER=", filters.iter().map(|f| f.id.clone()).collect()));
         for filter in filters {
             if !seen.insert(("FILTER", filter.id.clone())) {
                 continue;
@@ -331,6 +357,7 @@ fn passthrough_header_lines(
     if let Some(json) = schema_metadata.get(VCF_CONTIGS_KEY)
         && let Some(contigs) = from_json_string::<Vec<ContigMetadata>>(json)
     {
+        authoritative.push(("##contig=", contigs.iter().map(|c| c.id.clone()).collect()));
         for contig in contigs {
             if !seen.insert(("contig", contig.id.clone())) {
                 continue;
@@ -355,6 +382,7 @@ fn passthrough_header_lines(
     if let Some(json) = schema_metadata.get(VCF_ALTERNATIVE_ALLELES_KEY)
         && let Some(alts) = from_json_string::<Vec<AltAlleleMetadata>>(json)
     {
+        authoritative.push(("##ALT=", alts.iter().map(|a| a.id.clone()).collect()));
         for alt in alts {
             if !seen.insert(("ALT", alt.id.clone())) {
                 continue;
@@ -426,6 +454,12 @@ fn passthrough_header_lines(
             && let Some(current_line) = &file_format_line
         {
             lines.push(current_line.clone());
+            continue;
+        }
+        if authoritative
+            .iter()
+            .any(|(kind, ids)| raw.starts_with(kind) && !declaration_id_is_in(&raw, ids))
+        {
             continue;
         }
         match current.iter().position(|d| d.declares(&raw)) {
@@ -793,6 +827,79 @@ mod tests {
             "{lines:#?}"
         );
         assert_eq!(lines[0], "##fileformat=VCFv4.3");
+    }
+
+    #[test]
+    fn removing_a_typed_filter_drops_its_raw_declaration() {
+        // `bio.vcf.filters` is an authoritative list: when it is present, it says
+        // which FILTERs the header declares. A raw declaration whose ID is no
+        // longer listed was deliberately removed downstream.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##FILTER=<ID=PASS,Description=\"All filters passed\">",
+            "##FILTER=<ID=LowQual,Description=\"Low quality\">",
+        ];
+        let schema = with_typed(
+            schema_with_raw_header(&raw, &[]),
+            None,
+            &[("PASS", "All filters passed")],
+            &[],
+        );
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                "##fileformat=VCFv4.2".to_string(),
+                "##FILTER=<ID=PASS,Description=\"All filters passed\">".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn removing_a_typed_contig_drops_its_raw_declaration() {
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##contig=<ID=chr1,length=100>",
+            "##contig=<ID=chr2,length=200>",
+        ];
+        let schema = with_typed(
+            schema_with_raw_header(&raw, &[]),
+            None,
+            &[],
+            &[("chr1", Some(100))],
+        );
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert!(!lines.iter().any(|l| l.contains("ID=chr2")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l == "##contig=<ID=chr1,length=100>"));
+    }
+
+    #[test]
+    fn raw_declarations_survive_when_no_authoritative_list_exists() {
+        // Without the typed key there is no statement about which declarations
+        // should exist, so the source header stands.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##FILTER=<ID=LowQual,Description=\"Low quality\">",
+            "##contig=<ID=chr9,length=900>",
+        ];
+        let schema = schema_with_raw_header(&raw, &[]); // no filters/contigs keys
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert_eq!(lines, raw.to_vec());
+    }
+
+    #[test]
+    fn unprojected_info_declarations_are_not_dropped() {
+        // `info_fields` is a projection, not an authoritative list of what the
+        // header declares. Reading only DP must not strip AF from the header —
+        // an unused declaration is valid VCF, and VEP keeps the whole header.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">",
+            "##INFO=<ID=AF,Number=A,Type=Float,Description=\"Allele frequency\">",
+        ];
+        let schema = schema_with_raw_header(&raw, &[DP_INFO]);
+        let lines = build_vcf_header_lines(&schema, &["DP".to_string()], &[], &[]).unwrap();
+        assert_eq!(lines, raw.to_vec());
     }
 
     #[test]
