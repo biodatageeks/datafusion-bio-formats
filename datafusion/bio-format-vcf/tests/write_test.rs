@@ -197,6 +197,70 @@ async fn test_write_vcf_rejects_lossy_dosage_gt_before_creating_output() {
     );
 }
 
+/// A header carrying everything the typed metadata model cannot express.
+const LOSSY_HEADER_VCF: &str = r#"##fileformat=VCFv4.2
+##FILTER=<ID=PASS,Description="All filters passed">
+##fileDate=20160824
+##source=myCaller-1.2
+##reference=file:///GRCh38.fa
+##contig=<ID=chr1,length=248956422,assembly=GRCh38,md5=abc123>
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Read Depth">
+##bcftools_normVersion=1.21+htslib-1.21
+##bcftools_normCommand=norm -m -both; Date=Mon Jul 27 20:15:24 2026
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	.	A	G	50	PASS	DP=10
+"#;
+
+/// Every one of these lines is dropped by header reconstruction: the typed model
+/// has no slot for `##fileDate`/`##source`/`##reference`/`##bcftools_*`, it
+/// suppresses `##FILTER=<ID=PASS>` as implicit, and it rebuilds `##contig` from
+/// ID and length alone. Verbatim passthrough is the only way to keep them.
+#[tokio::test]
+async fn test_write_vcf_preserves_untyped_header_lines() {
+    let input_path = create_test_vcf("lossy_header_input", LOSSY_HEADER_VCF)
+        .await
+        .unwrap();
+    let output_path = "/tmp/test_write_lossy_header_output.vcf";
+
+    let ctx = SessionContext::new();
+    let source = create_read_provider(&input_path, Some(vec!["DP".to_string()]), None);
+    let source_schema = source.schema();
+    ctx.register_table("source", Arc::new(source)).unwrap();
+
+    let dest = VcfTableProvider::new_for_write(
+        output_path.to_string(),
+        source_schema,
+        vec!["DP".to_string()],
+        vec![],
+        vec![],
+        true,
+    );
+    ctx.register_table("dest", Arc::new(dest)).unwrap();
+    ctx.sql("INSERT OVERWRITE dest SELECT * FROM source")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+
+    let content = fs::read_to_string(output_path).await.unwrap();
+    let written: Vec<&str> = content
+        .lines()
+        .take_while(|l| !l.starts_with("#CHROM"))
+        .collect();
+    let expected: Vec<&str> = LOSSY_HEADER_VCF
+        .lines()
+        .take_while(|l| !l.starts_with("#CHROM"))
+        .collect();
+
+    assert_eq!(
+        written, expected,
+        "source header must be re-emitted verbatim and in order"
+    );
+
+    cleanup_files(&[&input_path, output_path]).await;
+}
+
 #[tokio::test]
 async fn test_write_vcf_preserves_info_description() {
     let input_path = create_test_vcf("desc_input", SIMPLE_VCF).await.unwrap();

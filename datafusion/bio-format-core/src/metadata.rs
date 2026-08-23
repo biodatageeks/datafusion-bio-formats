@@ -67,6 +67,18 @@ pub const VCF_CONTIGS_INDEXED_KEY: &str = "bio.vcf.contigs.indexed";
 /// VCF ALT allele definitions stored as JSON array of AltAlleleMetadata
 pub const VCF_ALTERNATIVE_ALLELES_KEY: &str = "bio.vcf.alternative_alleles";
 
+/// The source file's `##` header lines, verbatim and in file order, stored as a
+/// JSON array of strings (the `#CHROM` column line is not included).
+///
+/// Present only when the source was a text VCF whose header could be read as
+/// text. When set, the writer re-emits these lines unchanged instead of
+/// reconstructing them from the typed metadata above, which is the only way to
+/// preserve header content the typed model does not carry: `##fileDate`,
+/// `##source`, `##reference`, tool provenance such as `##bcftools_*`, contig
+/// attributes beyond ID and length (`assembly`, `md5`, `species`), the implicit
+/// `##FILTER=<ID=PASS>` line, and the original interleaving of all of them.
+pub const VCF_HEADER_RAW_LINES_KEY: &str = "bio.vcf.header.raw_lines";
+
 /// VCF sample names stored as JSON array of strings
 pub const VCF_SAMPLE_NAMES_KEY: &str = "bio.vcf.samples";
 
