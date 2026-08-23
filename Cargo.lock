@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-benchmarks-common"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-benchmarks-runner"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "anyhow",
  "datafusion",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-bam"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-bbi"
-version = "1.8.0"
+version = "1.9.0"
 dependencies = [
  "async-trait",
  "bigtools",
@@ -1338,7 +1338,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-bed"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1360,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-bgen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-core"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "bytes",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-cram"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-ensembl-cache"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-trait",
  "datafusion",
@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-fasta"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-fastq"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-gff"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-gtf"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1549,7 +1549,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-pairs"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-pgen"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1595,7 +1595,7 @@ dependencies = [
 
 [[package]]
 name = "datafusion-bio-format-vcf"
-version = "1.10.0"
+version = "1.11.0"
 dependencies = [
  "async-compression",
  "async-stream",
