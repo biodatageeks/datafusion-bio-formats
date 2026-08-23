@@ -166,45 +166,131 @@ pub fn build_vcf_header_lines(
     Ok(lines)
 }
 
-/// Renders the `##INFO` line the current schema would emit for `name`.
-fn info_declaration(schema: &SchemaRef, name: &str) -> Option<String> {
-    let idx = schema.index_of(name).ok()?;
-    let (vcf_type, number, description) = get_info_field_metadata(schema.field(idx), name);
-    Some(format!(
-        "##INFO=<ID={name},Number={number},Type={vcf_type},Description=\"{description}\">"
-    ))
+/// A structured header declaration the current schema would emit.
+struct CurrentDeclaration {
+    /// `"##INFO="` or `"##FORMAT="`.
+    kind: &'static str,
+    id: String,
+    number: String,
+    vcf_type: String,
+    description: String,
+    rendered: String,
 }
 
-/// Renders the `##FORMAT` line the current schema would emit for `name`.
-fn format_declaration(schema: &SchemaRef, name: &str, sample_names: &[String]) -> Option<String> {
-    let field = find_format_field(schema, name, sample_names)?;
-    let (vcf_type, number, description) = get_format_field_metadata(field, name);
-    Some(format!(
-        "##FORMAT=<ID={name},Number={number},Type={vcf_type},Description=\"{description}\">"
-    ))
+/// Parses the `key=value` attributes of a `##KEY=<...>` header line.
+///
+/// Quoted values may contain commas and `\\`-escaped characters, so this cannot
+/// be a plain `split(',')`. Returns `None` when the line is not a structured
+/// declaration, which callers treat as "leave it alone".
+fn parse_structured_attributes(line: &str) -> Option<Vec<(String, String)>> {
+    let body = line.split_once('<')?.1.strip_suffix('>')?;
+    let mut attributes = Vec::new();
+    let mut chars = body.chars().peekable();
+
+    loop {
+        let mut key = String::new();
+        for c in chars.by_ref() {
+            if c == '=' {
+                break;
+            }
+            key.push(c);
+        }
+        if key.is_empty() {
+            return None;
+        }
+
+        let mut value = String::new();
+        if chars.peek() == Some(&'"') {
+            chars.next();
+            let mut closed = false;
+            while let Some(c) = chars.next() {
+                match c {
+                    '\\' => value.push(chars.next()?),
+                    '"' => {
+                        closed = true;
+                        break;
+                    }
+                    _ => value.push(c),
+                }
+            }
+            if !closed {
+                return None;
+            }
+            // Consume the separator after a quoted value.
+            match chars.next() {
+                None => {
+                    attributes.push((key, value));
+                    break;
+                }
+                Some(',') => {}
+                Some(_) => return None,
+            }
+        } else {
+            let mut ended = false;
+            for c in chars.by_ref() {
+                if c == ',' {
+                    ended = true;
+                    break;
+                }
+                value.push(c);
+            }
+            if !ended {
+                attributes.push((key, value));
+                break;
+            }
+        }
+        attributes.push((key, value));
+    }
+
+    Some(attributes)
 }
 
-/// True when `line` is a `##INFO=`/`##FORMAT=` declaration for `id`.
-fn declares(line: &str, kind: &str, id: &str) -> bool {
-    line.strip_prefix(kind)
-        .and_then(|rest| rest.strip_prefix("<ID="))
-        .is_some_and(|rest| {
-            rest.strip_prefix(id)
-                .is_some_and(|tail| tail.starts_with(',') || tail.starts_with('>'))
-        })
+impl CurrentDeclaration {
+    /// True when `raw` declares this field with the same Number, Type and
+    /// Description — the only attributes the typed schema retains.
+    ///
+    /// Everything else on the line (the optional `Source`/`Version` attributes,
+    /// the exact escaping of the description, attribute order) is invisible to
+    /// the schema, so it must not count as evidence of a redefinition: comparing
+    /// the rendered line byte for byte would discard valid metadata this module
+    /// exists to preserve. A line that cannot be parsed is left alone.
+    fn matches_raw(&self, raw: &str) -> bool {
+        let Some(attributes) = parse_structured_attributes(raw) else {
+            return true;
+        };
+        let get = |key: &str| {
+            attributes
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        get("Number") == Some(self.number.as_str())
+            && get("Type") == Some(self.vcf_type.as_str())
+            && get("Description") == Some(self.description.as_str())
+    }
+
+    /// True when `raw` is a declaration of this same kind and ID.
+    fn declares(&self, raw: &str) -> bool {
+        raw.strip_prefix(self.kind)
+            .and_then(|rest| rest.strip_prefix("<ID="))
+            .is_some_and(|rest| {
+                rest.strip_prefix(self.id.as_str())
+                    .is_some_and(|tail| tail.starts_with(',') || tail.starts_with('>'))
+            })
+    }
 }
 
 /// Re-emits a captured source header, reconciled against the current schema.
 ///
 /// Raw lines pass through untouched — including everything the typed model
 /// cannot represent — with one exception: a raw `##INFO`/`##FORMAT` declaration
-/// whose text differs from what this schema would emit is stale (the field was
-/// redefined downstream, as an annotator does when it rewrites `CSQ`). Such a
+/// whose Number, Type or Description disagrees with the current schema was
+/// redefined downstream (as an annotator does when it rewrites `CSQ`). Such a
 /// line is dropped from its original position and the current definition is
 /// appended, alongside definitions for fields the source header never declared.
 ///
-/// A declaration that matches byte for byte is left exactly where it was, so an
-/// unmodified header round-trips unchanged.
+/// Agreement on those three attributes is enough to keep the source line exactly
+/// where it was, even if this module would have rendered it differently.
 fn passthrough_header_lines(
     raw_lines: Vec<String>,
     schema: &SchemaRef,
@@ -212,36 +298,59 @@ fn passthrough_header_lines(
     format_fields: &[String],
     sample_names: &[String],
 ) -> Vec<String> {
-    // Current declarations, deduplicated by name in first-occurrence order so
-    // output stays byte-reproducible run to run.
+    // Deduplicate by name in first-occurrence order so output stays
+    // byte-reproducible run to run.
     let mut seen = HashSet::new();
-    let mut current: Vec<(&'static str, String, String)> = Vec::new();
+    let mut current: Vec<CurrentDeclaration> = Vec::new();
+
     for name in info_fields {
-        if seen.insert(("INFO", name.as_str()))
-            && let Some(declaration) = info_declaration(schema, name)
-        {
-            current.push(("##INFO=", name.clone(), declaration));
+        if !seen.insert(("INFO", name.as_str())) {
+            continue;
         }
+        let Ok(idx) = schema.index_of(name) else {
+            continue;
+        };
+        let (vcf_type, number, description) = get_info_field_metadata(schema.field(idx), name);
+        current.push(CurrentDeclaration {
+            rendered: format!(
+                "##INFO=<ID={name},Number={number},Type={vcf_type},Description=\"{description}\">"
+            ),
+            kind: "##INFO=",
+            id: name.clone(),
+            number,
+            vcf_type,
+            description,
+        });
     }
+
     for name in format_fields {
-        if seen.insert(("FORMAT", name.as_str()))
-            && let Some(declaration) = format_declaration(schema, name, sample_names)
-        {
-            current.push(("##FORMAT=", name.clone(), declaration));
+        if !seen.insert(("FORMAT", name.as_str())) {
+            continue;
         }
+        let Some(field) = find_format_field(schema, name, sample_names) else {
+            continue;
+        };
+        let (vcf_type, number, description) = get_format_field_metadata(field, name);
+        current.push(CurrentDeclaration {
+            rendered: format!(
+                "##FORMAT=<ID={name},Number={number},Type={vcf_type},Description=\"{description}\">"
+            ),
+            kind: "##FORMAT=",
+            id: name.clone(),
+            number,
+            vcf_type,
+            description,
+        });
     }
 
     let mut lines: Vec<String> = Vec::with_capacity(raw_lines.len() + current.len());
     let mut satisfied: HashSet<usize> = HashSet::new();
 
     for raw in raw_lines {
-        match current
-            .iter()
-            .position(|(kind, id, _)| declares(&raw, kind, id))
-        {
+        match current.iter().position(|d| d.declares(&raw)) {
             // Redefined downstream: drop here, re-emit at the end.
-            Some(i) if current[i].2 != raw => continue,
-            // Unchanged: keep in place and do not append a duplicate.
+            Some(i) if !current[i].matches_raw(&raw) => continue,
+            // Semantically unchanged: keep the source line exactly as it was.
             Some(i) => {
                 satisfied.insert(i);
                 lines.push(raw);
@@ -250,9 +359,9 @@ fn passthrough_header_lines(
         }
     }
 
-    for (i, (_, _, declaration)) in current.iter().enumerate() {
+    for (i, declaration) in current.iter().enumerate() {
         if !satisfied.contains(&i) {
-            lines.push(declaration.clone());
+            lines.push(declaration.rendered.clone());
         }
     }
 
@@ -574,6 +683,45 @@ mod tests {
                     .to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn raw_declaration_with_extra_attributes_is_kept_in_place() {
+        // Source and Version are valid optional INFO attributes that the typed
+        // schema does not retain. Re-rendering would drop them, so a declaration
+        // whose Number/Type/Description still agree must be left untouched.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\",Source=\"caller\",Version=\"1.2\">",
+            "##contig=<ID=chr1,length=100>",
+        ];
+        let schema = schema_with_raw_header(&raw, &[DP_INFO]);
+        let lines = build_vcf_header_lines(&schema, &["DP".to_string()], &[], &[]).unwrap();
+        assert_eq!(lines, raw.to_vec());
+    }
+
+    #[test]
+    fn raw_declaration_with_escaped_description_is_kept_in_place() {
+        // The reader unescapes the description, so a naive re-render would not be
+        // byte-equal to the source line even though nothing changed.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##INFO=<ID=NOTE,Number=1,Type=String,Description=\"say \\\"hi\\\", ok\">",
+        ];
+        let schema = schema_with_raw_header(&raw, &[("NOTE", "1", "String", "say \"hi\", ok")]);
+        let lines = build_vcf_header_lines(&schema, &["NOTE".to_string()], &[], &[]).unwrap();
+        assert_eq!(lines, raw.to_vec());
+    }
+
+    #[test]
+    fn raw_declaration_that_cannot_be_parsed_is_kept_in_place() {
+        // Conservative default: without positive evidence of a redefinition, the
+        // source line wins.
+        let raw = ["##fileformat=VCFv4.2", "##INFO=<ID=DP,malformed"];
+        let schema = schema_with_raw_header(&raw, &[DP_INFO]);
+        let lines = build_vcf_header_lines(&schema, &["DP".to_string()], &[], &[]).unwrap();
+        assert_eq!(lines[0], "##fileformat=VCFv4.2");
+        assert_eq!(lines[1], "##INFO=<ID=DP,malformed");
     }
 
     #[test]
