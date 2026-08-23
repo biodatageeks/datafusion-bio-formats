@@ -577,11 +577,13 @@ pub fn batch_to_vcf_lines(
             alt_value.replace('|', ",")
         };
 
-        // QUAL
+        // QUAL. Rendered like every other VCF float (htslib `%g` semantics), not
+        // at a fixed 2 decimal places: `{:.2}` both rewrites `50` as `50.00` and
+        // silently truncates small values (`0.001` -> `0.00`).
         let qual_str = if quals.is_null(row) {
             ".".to_string()
         } else {
-            format!("{:.2}", quals.value(row))
+            format_vcf_float(quals.value(row))
         };
 
         // FILTER
@@ -1570,8 +1572,65 @@ mod tests {
         assert!(
             lines[0]
                 .line
-                .starts_with("chr1\t100\trs456\tC\tT\t45.00\tPASS")
+                .starts_with("chr1\t100\trs456\tC\tT\t45\tPASS")
         );
+    }
+
+    /// QUAL must render the way Ensembl VEP (and htslib) writes it: the shortest
+    /// faithful form, NOT a fixed 2-decimal rendering. VEP copies the input line
+    /// verbatim, so an input QUAL of `50` comes back out as `50`; emitting
+    /// `50.00` makes every record differ byte-for-byte from the reference.
+    fn qual_line_for(qual: Option<f64>) -> String {
+        let schema = create_test_schema();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![qual])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+            ],
+        )
+        .unwrap();
+        let lines = batch_to_vcf_lines(&batch, &[], &[], &[], true).unwrap();
+        assert_eq!(lines.len(), 1);
+        lines[0].line.split('\t').nth(5).unwrap().to_string()
+    }
+
+    #[test]
+    fn qual_integral_renders_without_decimal_places() {
+        assert_eq!(qual_line_for(Some(50.0)), "50");
+    }
+
+    #[test]
+    fn qual_zero_renders_as_bare_zero() {
+        assert_eq!(qual_line_for(Some(0.0)), "0");
+    }
+
+    #[test]
+    fn qual_fractional_keeps_its_digits() {
+        assert_eq!(qual_line_for(Some(50.5)), "50.5");
+        assert_eq!(qual_line_for(Some(29.99)), "29.99");
+    }
+
+    #[test]
+    fn qual_fractional_is_not_truncated_to_two_places() {
+        // `{:.2}` would round this to "0.00" and destroy the value.
+        assert_eq!(qual_line_for(Some(0.001)), "0.001");
+    }
+
+    #[test]
+    fn qual_missing_renders_as_dot() {
+        assert_eq!(qual_line_for(None), ".");
+    }
+
+    #[test]
+    fn qual_large_integral_stays_integral() {
+        assert_eq!(qual_line_for(Some(999999.0)), "999999");
     }
 
     #[test]
