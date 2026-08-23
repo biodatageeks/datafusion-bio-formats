@@ -8,13 +8,15 @@ use bigtools::beddata::BedParserStreamingIterator;
 use bigtools::{BigBedWrite, BigWigWrite};
 use datafusion::arrow::array::{Float32Array, Int64Array, StringArray, UInt32Array, UInt64Array};
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::util::pretty::pretty_format_batches;
 use datafusion::catalog::TableProvider;
+use datafusion::execution::context::SessionConfig;
 use datafusion::physical_plan::common::collect;
 use datafusion::physical_plan::display::DisplayableExecutionPlan;
 use datafusion::prelude::*;
 use datafusion_bio_format_bbi::bigbed::{BigBedSchemaMode, BigBedTableProvider};
 use datafusion_bio_format_bbi::bigwig::BigWigTableProvider;
-use datafusion_bio_format_core::test_utils::assert_plan_projection;
+use datafusion_bio_format_core::test_utils::{assert_plan_projection, find_leaf_exec};
 use tempfile::NamedTempFile;
 use tokio::runtime;
 
@@ -27,6 +29,10 @@ fn runtime() -> runtime::Runtime {
 
 fn chrom_sizes() -> HashMap<String, u32> {
     HashMap::from([("chr1".to_string(), 100), ("chr2".to_string(), 100)])
+}
+
+fn skewed_chrom_sizes() -> HashMap<String, u32> {
+    HashMap::from([("chr1".to_string(), 900), ("chr2".to_string(), 300)])
 }
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -79,6 +85,63 @@ fn write_bigbed_fixture_inner() -> TestResult<NamedTempFile> {
     let data = BedParserStreamingIterator::from_bed_file(input, false);
     out.write(data, runtime())?;
     Ok(bigbed)
+}
+
+fn write_partition_bigwig_fixture() -> TestResult<NamedTempFile> {
+    std::thread::spawn(|| -> TestResult<NamedTempFile> {
+        let mut bedgraph = NamedTempFile::new()?;
+        writeln!(bedgraph, "chr1\t240\t260\t1.0")?;
+        writeln!(bedgraph, "chr1\t490\t510\t2.0")?;
+        writeln!(bedgraph, "chr1\t740\t760\t3.0")?;
+        writeln!(bedgraph, "chr2\t10\t20\t4.0")?;
+        bedgraph.flush()?;
+
+        let bigwig = NamedTempFile::new()?;
+        let mut out = BigWigWrite::create_file(bigwig.path(), skewed_chrom_sizes())?;
+        // Force distinct same-chromosome primary blocks so tests exercise real
+        // index-derived cuts rather than inferred coordinate quartiles.
+        out.options.items_per_slot = 1;
+        let input = File::open(bedgraph.path())?;
+        let data = BedParserStreamingIterator::from_bedgraph_file(input, false);
+        out.write(data, runtime())?;
+        Ok(bigwig)
+    })
+    .join()
+    .unwrap()
+}
+
+fn write_partition_bigbed_fixture() -> TestResult<NamedTempFile> {
+    std::thread::spawn(|| -> TestResult<NamedTempFile> {
+        let mut bed = NamedTempFile::new()?;
+        writeln!(bed, "chr1\t240\t260\tfeature1\t1")?;
+        writeln!(bed, "chr1\t490\t490\tboundary\t0")?;
+        writeln!(bed, "chr1\t490\t510\tfeature2\t2")?;
+        writeln!(bed, "chr1\t740\t760\tfeature3\t3")?;
+        writeln!(bed, "chr2\t10\t20\tfeature4\t4")?;
+        bed.flush()?;
+
+        let bigbed = NamedTempFile::new()?;
+        let mut out = BigBedWrite::create_file(bigbed.path(), skewed_chrom_sizes())?;
+        let first_rest = {
+            use bigtools::bed::bedparser::StreamingBedValues;
+            let input = File::open(bed.path())?;
+            let mut vals = BedFileStream::from_bed_file(input);
+            vals.next().unwrap()?.1.rest
+        };
+        out.autosql = Some(bigtools::bed::autosql::bed_autosql(&first_rest));
+        out.options.compress = false;
+        out.options.items_per_slot = 1;
+        let input = File::open(bed.path())?;
+        let data = BedParserStreamingIterator::from_bed_file(input, false);
+        out.write(data, runtime())?;
+        Ok(bigbed)
+    })
+    .join()
+    .unwrap()
+}
+
+fn context_with_partitions(partitions: usize) -> SessionContext {
+    SessionContext::new_with_config(SessionConfig::new().with_target_partitions(partitions))
 }
 
 #[tokio::test]
@@ -174,13 +237,12 @@ async fn pushes_bigwig_genomic_filter_into_scan_regions() -> TestResult<()> {
         plan_text.contains("BigWigExec"),
         "expected BigWigExec in plan:\n{plan_text}"
     );
-    // BigWig prunes by chromosome but scans it in full: BigWigRead clips interval
-    // values to the query window, so a positional sub-range (e.g. chr2:0-10)
-    // would emit truncated coordinates. The Inexact pushdown lets DataFusion
-    // re-apply `start < 10` after the unclipped scan.
+    // The bounded BigTools query preserves original coordinates for intervals
+    // overlapping the query edge, so BigWig can prune positionally as well as by
+    // chromosome without clipping emitted values.
     assert!(
-        plan_text.contains("regions=[chr2:0-100]"),
-        "expected chr2 to be scanned in full:\n{plan_text}"
+        plan_text.contains("regions=[chr2:0-10]"),
+        "expected chr2 to use the extracted upper bound:\n{plan_text}"
     );
 
     Ok(())
@@ -411,7 +473,7 @@ async fn streams_large_region_in_fixed_size_batches() -> TestResult<()> {
     let fixture = write_large_bigwig_fixture(intervals)?;
     let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
 
-    let ctx = SessionContext::new();
+    let ctx = context_with_partitions(1);
     let state = ctx.state();
     let plan = table.scan(&state, None, &[], None).await?;
     let stream = plan.execute(0, ctx.task_ctx())?;
@@ -429,6 +491,74 @@ async fn streams_large_region_in_fixed_size_batches() -> TestResult<()> {
         "no batch should exceed the chunk size"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_projection_uses_large_logical_batches_without_arrays() -> TestResult<()> {
+    let intervals = 20_000u32;
+    let fixture = write_large_bigwig_fixture(intervals)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+
+    let ctx = context_with_partitions(1);
+    let projection = Vec::new();
+    let plan = table
+        .scan(&ctx.state(), Some(&projection), &[], None)
+        .await?;
+    let batches = collect(plan.execute(0, ctx.task_ctx())?).await?;
+
+    assert_eq!(batches.len(), 1, "empty projections use a larger batch cap");
+    assert_eq!(batches[0].num_rows(), intervals as usize);
+    assert_eq!(batches[0].num_columns(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unfiltered_single_chromosome_scan_can_split_but_filtered_scan_stays_serial()
+-> TestResult<()> {
+    let fixture = write_large_bigwig_fixture(20_000)?;
+    let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
+    let ctx = context_with_partitions(4);
+
+    let full_plan = table.scan(&ctx.state(), None, &[], None).await?;
+    assert_eq!(
+        full_plan
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        4,
+        "an unfiltered one-chromosome file should use target_partitions"
+    );
+    let mut total = 0;
+    for partition in 0..4 {
+        let batches = collect(full_plan.execute(partition, ctx.task_ctx())?).await?;
+        total += batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    }
+    assert_eq!(total, 20_000);
+
+    let filtered_plan = table
+        .scan(&ctx.state(), None, &[col("chrom").eq(lit("chr1"))], None)
+        .await?;
+    assert_eq!(
+        filtered_plan
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        1,
+        "an explicitly selected chromosome should not fan out"
+    );
+
+    let residual_plan = table
+        .scan(&ctx.state(), None, &[col("end").gt(lit(0u32))], None)
+        .await?;
+    assert_eq!(
+        residual_plan
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        4,
+        "a residual coordinate predicate should not disable full-file parallelism"
+    );
     Ok(())
 }
 
@@ -500,11 +630,9 @@ async fn bigwig_early_termination_spans_multiple_batches() -> TestResult<()> {
 }
 
 #[tokio::test]
-async fn bigwig_lower_bound_only_scans_whole_chromosome() -> TestResult<()> {
-    // A lower bound alone (`start > 100`) has no upper bound to stop at, and a
-    // safe left seek isn't possible (it would clip the straddling interval), so
-    // the scan must read the whole chromosome and let DataFusion filter. Guards
-    // against accidentally deriving a stop cursor from the lower bound.
+async fn bigwig_lower_bound_uses_bounded_unclipped_query() -> TestResult<()> {
+    // The unclipped query can seek to a lower bound without changing a
+    // boundary-overlapping interval's original coordinates.
     let intervals = 20_000u32;
     let fixture = write_large_bigwig_fixture(intervals)?;
     let table = BigWigTableProvider::new(fixture.path().to_string_lossy().to_string(), true)?;
@@ -520,8 +648,8 @@ async fn bigwig_lower_bound_only_scans_whole_chromosome() -> TestResult<()> {
 
     let total: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(
-        total, intervals as usize,
-        "lower-bound-only filters must not early-terminate"
+        total, 19_949,
+        "the source should seek to the lower bound without scanning earlier rows"
     );
 
     Ok(())
@@ -654,5 +782,251 @@ async fn count_star_bigbed() -> TestResult<()> {
         .await?;
     assert_eq!(batches.len(), 1);
     assert_eq!(count_star_value(&batches[0]), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_full_scan_uses_block_bounded_partitions_without_boundary_corruption()
+-> TestResult<()> {
+    let fixture = write_partition_bigwig_fixture()?;
+    let path = fixture.path().to_string_lossy().to_string();
+
+    let serial = context_with_partitions(1);
+    serial.register_table(
+        "bw",
+        Arc::new(BigWigTableProvider::new(path.clone(), true)?),
+    )?;
+    let expected = serial
+        .sql("SELECT chrom, start, \"end\", value FROM bw ORDER BY chrom, start")
+        .await?
+        .collect()
+        .await?;
+
+    let parallel = context_with_partitions(4);
+    parallel.register_table("bw", Arc::new(BigWigTableProvider::new(path, true)?))?;
+    let count = parallel.sql("SELECT count(*) FROM bw").await?;
+    let count_plan = count.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&count_plan);
+    assert_eq!(leaf.name(), "BigWigExec");
+    assert_eq!(leaf.properties().output_partitioning().partition_count(), 4);
+    let count_plan_text = DisplayableExecutionPlan::new(count_plan.as_ref())
+        .indent(false)
+        .to_string();
+    assert!(
+        count_plan_text.contains("estimated_data_bytes=["),
+        "BigWig plan should expose index-derived partition work:\n{count_plan_text}"
+    );
+    assert!(
+        count_plan_text.contains("chr1:0-490") && count_plan_text.contains("chr1:490-740"),
+        "BigWig plan should use observed same-chromosome block cuts:\n{count_plan_text}"
+    );
+
+    let actual = parallel
+        .sql("SELECT chrom, start, \"end\", value FROM bw ORDER BY chrom, start")
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        pretty_format_batches(&actual)?.to_string(),
+        pretty_format_batches(&expected)?.to_string()
+    );
+    assert_eq!(actual.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
+
+    let filtered_plan = parallel
+        .sql("SELECT count(*) FROM bw WHERE chrom = 'chr1'")
+        .await?
+        .create_physical_plan()
+        .await?;
+    assert_eq!(
+        find_leaf_exec(&filtered_plan)
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        1,
+        "a single selected chromosome should not fan out"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigwig_filtered_multiregion_split_preserves_boundary_overlap() -> TestResult<()> {
+    let fixture = write_partition_bigwig_fixture()?;
+    let path = fixture.path().to_string_lossy().to_string();
+    let filter = col("chrom")
+        .in_list(vec![lit("chr1"), lit("chr2")], false)
+        .and(col("start").gt_eq(lit(250u32)));
+
+    let serial = context_with_partitions(1);
+    let serial_table = BigWigTableProvider::new(path.clone(), true)?;
+    let serial_plan = serial_table
+        .scan(&serial.state(), None, std::slice::from_ref(&filter), None)
+        .await?;
+    let expected = collect(serial_plan.execute(0, serial.task_ctx())?).await?;
+    let starts = expected[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .expect("BigWig start column");
+    assert_eq!(
+        starts.value(0),
+        240,
+        "the source keeps the lower-bound overlap"
+    );
+
+    let parallel = context_with_partitions(4);
+    let parallel_table = BigWigTableProvider::new(path, true)?;
+    let parallel_plan = parallel_table
+        .scan(&parallel.state(), None, &[filter], None)
+        .await?;
+    let partition_count = parallel_plan
+        .properties()
+        .output_partitioning()
+        .partition_count();
+    assert_eq!(
+        partition_count, 3,
+        "the selected regions should split by blocks"
+    );
+    let mut actual = Vec::new();
+    for partition in 0..partition_count {
+        actual.extend(collect(parallel_plan.execute(partition, parallel.task_ctx())?).await?);
+    }
+
+    assert_eq!(
+        pretty_format_batches(&actual)?.to_string(),
+        pretty_format_batches(&expected)?.to_string()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bigbed_full_scan_uses_block_bounded_partitions_without_duplicates() -> TestResult<()> {
+    let fixture = write_partition_bigbed_fixture()?;
+    let path = fixture.path().to_string_lossy().to_string();
+
+    let serial = context_with_partitions(1);
+    serial.register_table(
+        "bb",
+        Arc::new(BigBedTableProvider::new(
+            path.clone(),
+            true,
+            BigBedSchemaMode::Auto,
+        )?),
+    )?;
+    let expected = serial
+        .sql(
+            "SELECT chrom, start, \"end\", name, score FROM bb \
+             ORDER BY chrom, start, \"end\", name",
+        )
+        .await?
+        .collect()
+        .await?;
+
+    let parallel = context_with_partitions(4);
+    parallel.register_table(
+        "bb",
+        Arc::new(BigBedTableProvider::new(
+            path,
+            true,
+            BigBedSchemaMode::Auto,
+        )?),
+    )?;
+    let count = parallel.sql("SELECT count(*) FROM bb").await?;
+    let count_plan = count.create_physical_plan().await?;
+    let leaf = find_leaf_exec(&count_plan);
+    assert_eq!(leaf.name(), "BigBedExec");
+    assert_eq!(leaf.properties().output_partitioning().partition_count(), 4);
+    let count_plan_text = DisplayableExecutionPlan::new(count_plan.as_ref())
+        .indent(false)
+        .to_string();
+    assert!(
+        count_plan_text.contains("estimated_data_bytes=["),
+        "BigBed plan should expose index-derived partition work:\n{count_plan_text}"
+    );
+    assert!(
+        count_plan_text.contains("chr1:0-490") && count_plan_text.contains("chr1:490-740"),
+        "BigBed plan should use observed same-chromosome block cuts:\n{count_plan_text}"
+    );
+
+    let actual = parallel
+        .sql(
+            "SELECT chrom, start, \"end\", name, score FROM bb \
+             ORDER BY chrom, start, \"end\", name",
+        )
+        .await?
+        .collect()
+        .await?;
+    assert_eq!(
+        pretty_format_batches(&actual)?.to_string(),
+        pretty_format_batches(&expected)?.to_string()
+    );
+    assert_eq!(actual.iter().map(RecordBatch::num_rows).sum::<usize>(), 5);
+
+    let filtered_plan = parallel
+        .sql("SELECT count(*) FROM bb WHERE chrom = 'chr1'")
+        .await?
+        .create_physical_plan()
+        .await?;
+    assert_eq!(
+        find_leaf_exec(&filtered_plan)
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        1,
+        "a single selected chromosome should not fan out"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn bbi_full_scan_partition_count_tracks_every_target_from_one_to_eight() -> TestResult<()> {
+    let bigwig = write_partition_bigwig_fixture()?;
+    let bigbed = write_partition_bigbed_fixture()?;
+
+    for target in 1..=8 {
+        let context = context_with_partitions(target);
+        context.register_table(
+            "bw",
+            Arc::new(BigWigTableProvider::new(
+                bigwig.path().to_string_lossy().to_string(),
+                true,
+            )?),
+        )?;
+        context.register_table(
+            "bb",
+            Arc::new(BigBedTableProvider::new(
+                bigbed.path().to_string_lossy().to_string(),
+                true,
+                BigBedSchemaMode::Auto,
+            )?),
+        )?;
+
+        for table in ["bw", "bb"] {
+            let plan = context
+                .sql(&format!("SELECT count(*) FROM {table}"))
+                .await?
+                .create_physical_plan()
+                .await?;
+            let leaf = find_leaf_exec(&plan);
+            let source_partitions = leaf.properties().output_partitioning().partition_count();
+            assert_eq!(source_partitions, target.min(4));
+            let plan_text = DisplayableExecutionPlan::new(plan.as_ref())
+                .indent(false)
+                .to_string();
+            if source_partitions == target {
+                assert!(
+                    !plan_text.contains("RepartitionExec"),
+                    "{table} target_partitions={target} unexpectedly repartitioned:\n{plan_text}"
+                );
+            }
+
+            let batches = context
+                .sql(&format!("SELECT count(*) AS c FROM {table}"))
+                .await?
+                .collect()
+                .await?;
+            let expected_rows = if table == "bb" { 5 } else { 4 };
+            assert_eq!(count_star_value(&batches[0]), expected_rows);
+        }
+    }
     Ok(())
 }
