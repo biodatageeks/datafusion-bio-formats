@@ -96,9 +96,14 @@ impl StringColumnRef<'_> {
 /// - Fixed notation when the exponent is in [-4, 6) (matching C `%g` rules)
 /// - Scientific notation otherwise
 /// - Trailing zeros and unnecessary decimal points removed
-/// - `NaN` → `"."` (VCF missing value)
+/// - Non-finite (`NaN`, `±Inf`) → `"."` (VCF missing value)
 fn format_vcf_float(v: f64) -> String {
-    if v.is_nan() {
+    // Every non-finite value renders as missing: VCF defines no textual form for
+    // an infinity, and the exponent parsing below cannot handle one. Guarding
+    // only NaN left `format!("{:.5e}", f64::INFINITY)` == "inf", which has no
+    // 'e' to split on, so the `split_once` unwrap panicked on real data — any
+    // INFO or FORMAT Float column carrying an infinity reached it.
+    if !v.is_finite() {
         return ".".to_string();
     }
     // Use Rust's {:.*e} to get scientific form, then decide notation
@@ -139,6 +144,33 @@ fn format_vcf_float(v: f64) -> String {
                 exp_abs = exp.unsigned_abs()
             )
         }
+    }
+}
+
+/// Formats a QUAL score for VCF output as the shortest text that parses back to
+/// the same value, at the precision the value actually carries.
+///
+/// QUAL is deliberately not `format_vcf_float`: `%g` caps at six significant
+/// digits, so a precise score like `123456.78` would be rewritten as `123457`.
+///
+/// The precision question is not academic. VCF QUAL is `f32` on the wire —
+/// noodles returns `Option<f32>` and `physical_exec.rs` widens it with
+/// `v as f64` — so an input of `29.99` reaches this function as
+/// 29.989999771118164. Printing the f64 shortest form would write that binary
+/// noise back out. A value that survives a round trip through `f32` is rendered
+/// at `f32` precision, recovering the original text; anything needing more than
+/// `f32` can represent is a caller-supplied `f64` and keeps full precision.
+///
+/// `NaN` and `±Inf` have no VCF representation and render as `"."`.
+fn format_vcf_qual(qual: f64) -> String {
+    if !qual.is_finite() {
+        return ".".to_string();
+    }
+    let narrowed = qual as f32;
+    if narrowed as f64 == qual {
+        format!("{narrowed}")
+    } else {
+        format!("{qual}")
     }
 }
 
@@ -252,8 +284,11 @@ fn resolve_batch_genotypes<'a>(
 fn is_value_missing(values: &TypedValues, flat_idx: usize) -> bool {
     match values {
         TypedValues::Int32(a) => a.is_null(flat_idx),
-        TypedValues::Float32(a) => a.is_null(flat_idx) || a.value(flat_idx).is_nan(),
-        TypedValues::Float64(a) => a.is_null(flat_idx) || a.value(flat_idx).is_nan(),
+        // Non-finite floats (NaN and ±Inf alike) serialize as ".", so the
+        // pruning predicate has to classify them as missing too — otherwise a
+        // field that renders as "." for every sample is still emitted.
+        TypedValues::Float32(a) => a.is_null(flat_idx) || !a.value(flat_idx).is_finite(),
+        TypedValues::Float64(a) => a.is_null(flat_idx) || !a.value(flat_idx).is_finite(),
         TypedValues::Utf8(a) => {
             a.is_null(flat_idx) || {
                 let s = a.value(flat_idx);
@@ -581,7 +616,7 @@ pub fn batch_to_vcf_lines(
         let qual_str = if quals.is_null(row) {
             ".".to_string()
         } else {
-            format!("{:.2}", quals.value(row))
+            format_vcf_qual(quals.value(row))
         };
 
         // FILTER
@@ -1131,7 +1166,9 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{Int32Builder, ListBuilder, StringBuilder, StructArray};
+    use datafusion::arrow::array::{
+        Float64Builder, Int32Builder, ListBuilder, StringBuilder, StructArray,
+    };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -1570,8 +1607,301 @@ mod tests {
         assert!(
             lines[0]
                 .line
-                .starts_with("chr1\t100\trs456\tC\tT\t45.00\tPASS")
+                .starts_with("chr1\t100\trs456\tC\tT\t45\tPASS")
         );
+    }
+
+    /// QUAL must render the way Ensembl VEP (and htslib) writes it: the shortest
+    /// faithful form, NOT a fixed 2-decimal rendering. VEP copies the input line
+    /// verbatim, so an input QUAL of `50` comes back out as `50`; emitting
+    /// `50.00` makes every record differ byte-for-byte from the reference.
+    fn qual_line_for(qual: Option<f64>) -> String {
+        let schema = create_test_schema();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![qual])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+            ],
+        )
+        .unwrap();
+        let lines = batch_to_vcf_lines(&batch, &[], &[], &[], true).unwrap();
+        assert_eq!(lines.len(), 1);
+        lines[0].line.split('\t').nth(5).unwrap().to_string()
+    }
+
+    #[test]
+    fn qual_integral_renders_without_decimal_places() {
+        assert_eq!(qual_line_for(Some(50.0)), "50");
+    }
+
+    #[test]
+    fn qual_zero_renders_as_bare_zero() {
+        assert_eq!(qual_line_for(Some(0.0)), "0");
+    }
+
+    #[test]
+    fn qual_fractional_keeps_its_digits() {
+        assert_eq!(qual_line_for(Some(50.5)), "50.5");
+        assert_eq!(qual_line_for(Some(29.99)), "29.99");
+    }
+
+    #[test]
+    fn qual_fractional_is_not_truncated_to_two_places() {
+        // `{:.2}` would round this to "0.00" and destroy the value.
+        assert_eq!(qual_line_for(Some(0.001)), "0.001");
+    }
+
+    #[test]
+    fn qual_missing_renders_as_dot() {
+        assert_eq!(qual_line_for(None), ".");
+    }
+
+    #[test]
+    fn qual_large_integral_stays_integral() {
+        assert_eq!(qual_line_for(Some(999999.0)), "999999");
+    }
+
+    #[test]
+    fn qual_preserves_more_than_six_significant_digits() {
+        // `format_vcf_float` rounds to 6 significant digits (%g semantics), which
+        // is right for INFO/FORMAT floats but silently rewrites a precise QUAL.
+        assert_eq!(qual_line_for(Some(123456.78)), "123456.78");
+        assert_eq!(
+            qual_line_for(Some(std::f64::consts::PI)),
+            "3.141592653589793"
+        );
+    }
+
+    #[test]
+    fn qual_never_uses_scientific_notation() {
+        // %g flips to scientific at 1e6; VCF QUAL in the wild is always plain.
+        assert_eq!(qual_line_for(Some(1_000_000.0)), "1000000");
+        assert_eq!(qual_line_for(Some(1_234_567.0)), "1234567");
+    }
+
+    #[test]
+    fn qual_round_trips_through_the_written_text() {
+        // The written QUAL must parse back to bit-identical f64. This is the
+        // property that both `{:.2}` and 6-significant-digit `%g` violate.
+        for value in [
+            50.0,
+            0.001,
+            29.99,
+            123456.78,
+            1_234_567.0,
+            std::f64::consts::PI,
+            0.000312305,
+            1e-5,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+        ] {
+            let written = qual_line_for(Some(value));
+            let parsed: f64 = written
+                .parse()
+                .unwrap_or_else(|e| panic!("QUAL {value} written as {written:?}: {e}"));
+            assert_eq!(parsed, value, "QUAL {value} written as {written:?}");
+        }
+    }
+
+    #[test]
+    fn qual_from_the_reader_renders_at_source_precision() {
+        // noodles parses QUAL as f32 and physical_exec.rs widens it with
+        // `v as f64`, so a VCF carrying `29.99` reaches the serializer as
+        // 29.989999771118164. Printing the f64 shortest form would write that
+        // binary noise straight back out.
+        for text in ["314.8", "29.99", "0.001", "99.9", "123456.78", "0.5", "50"] {
+            let widened = text.parse::<f32>().unwrap() as f64;
+            assert_eq!(
+                qual_line_for(Some(widened)),
+                text,
+                "QUAL {text} widened from f32"
+            );
+        }
+    }
+
+    #[test]
+    fn qual_keeps_f64_precision_when_it_exceeds_f32() {
+        // A caller-supplied value that f32 cannot hold must not be narrowed.
+        assert_eq!(
+            qual_line_for(Some(std::f64::consts::PI)),
+            "3.141592653589793"
+        );
+        assert_eq!(qual_line_for(Some(0.1)), "0.1");
+        assert_eq!(qual_line_for(Some(1e-5)), "0.00001");
+    }
+
+    #[test]
+    fn qual_non_finite_renders_as_missing() {
+        // VCF has no representation for NaN or +/-Inf; "." is the missing value.
+        // `format_vcf_float` panics outright on infinity.
+        assert_eq!(qual_line_for(Some(f64::NAN)), ".");
+        assert_eq!(qual_line_for(Some(f64::INFINITY)), ".");
+        assert_eq!(qual_line_for(Some(f64::NEG_INFINITY)), ".");
+    }
+
+    #[test]
+    fn format_vcf_float_renders_non_finite_as_missing() {
+        // `format!("{:.5e}", f64::INFINITY)` is "inf", which has no exponent to
+        // split on — the helper used to panic on `split_once('e').unwrap()`.
+        // VCF defines no textual form for +/-Inf, so it joins NaN as missing.
+        assert_eq!(format_vcf_float(f64::NAN), ".");
+        assert_eq!(format_vcf_float(f64::INFINITY), ".");
+        assert_eq!(format_vcf_float(f64::NEG_INFINITY), ".");
+    }
+
+    #[test]
+    fn format_vcf_float_handles_the_float_extremes() {
+        // Subnormal and maximal magnitudes take the scientific branch; neither
+        // may panic.
+        assert_eq!(format_vcf_float(f64::MIN_POSITIVE), "2.22507e-308");
+        assert_eq!(format_vcf_float(f64::MAX), "1.79769e+308");
+    }
+
+    /// The panic is reachable from real data, not just a direct helper call:
+    /// any INFO or FORMAT Float column carrying +/-Inf hits it (a Parquet or
+    /// Polars source can produce one). This drives the whole serializer.
+    #[test]
+    fn info_float_column_with_infinity_serializes_as_missing() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("AF", DataType::Float64, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(Float64Array::from(vec![Some(f64::INFINITY)])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &["AF".to_string()], &[], &[], true).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].line.split('\t').nth(7).unwrap(), "AF=.");
+    }
+
+    /// Builds a two-sample batch whose nested `AF` FORMAT field holds `af`, and
+    /// returns the FORMAT column of the single emitted line.
+    fn nested_format_keys_for(af: [f64; 2]) -> String {
+        let af_field = Field::new(
+            "AF",
+            DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+            true,
+        );
+        let gt_field = Field::new(
+            "GT",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(
+                "genotypes",
+                DataType::Struct(vec![gt_field.clone(), af_field.clone()].into()),
+                true,
+            ),
+        ]));
+
+        let mut gt = ListBuilder::new(StringBuilder::new());
+        gt.values().append_value("0/1");
+        gt.values().append_value("1/1");
+        gt.append(true);
+        let gt_array = Arc::new(gt.finish()) as Arc<dyn datafusion::arrow::array::Array>;
+
+        let mut af_b = ListBuilder::new(Float64Builder::new());
+        af_b.values().append_value(af[0]);
+        af_b.values().append_value(af[1]);
+        af_b.append(true);
+        let af_array = Arc::new(af_b.finish()) as Arc<dyn datafusion::arrow::array::Array>;
+
+        let genotypes = Arc::new(
+            StructArray::try_new(
+                vec![gt_field, af_field].into(),
+                vec![gt_array, af_array],
+                None,
+            )
+            .unwrap(),
+        );
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                genotypes,
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(
+            &batch,
+            &[],
+            &["GT".to_string(), "AF".to_string()],
+            &["S1".to_string(), "S2".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        lines[0].line.split('\t').nth(8).unwrap().to_string()
+    }
+
+    #[test]
+    fn nested_format_field_of_only_infinities_is_pruned() {
+        // Every value serializes as ".", so the key must be dropped — the same
+        // way an all-NaN field is. `is_value_missing` checked only is_nan, so
+        // the pruning predicate disagreed with the formatter.
+        assert_eq!(
+            nested_format_keys_for([f64::INFINITY, f64::NEG_INFINITY]),
+            "GT"
+        );
+    }
+
+    #[test]
+    fn nested_format_field_of_only_nans_is_pruned() {
+        // Reference behaviour the infinity case must match.
+        assert_eq!(nested_format_keys_for([f64::NAN, f64::NAN]), "GT");
+    }
+
+    #[test]
+    fn nested_format_field_with_one_finite_value_is_kept() {
+        // Pruning must not over-reach: one real value keeps the key.
+        assert_eq!(nested_format_keys_for([f64::INFINITY, 0.25]), "GT:AF");
     }
 
     #[test]
