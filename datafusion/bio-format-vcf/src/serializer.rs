@@ -484,8 +484,16 @@ fn write_resolved_format_and_samples(
 
     let emit: Vec<usize> = match carried_keys {
         Some(keys) => {
+            // A carried key needs a column, not just a name: `resolve_batch_genotypes`
+            // makes an entry for every requested field, `Missing` when the batch
+            // has no such child, and emitting one of those would invent a
+            // FORMAT key the writer cannot fill.
             let mut emit: Vec<usize> = split_format_keys(keys)
-                .filter_map(|key| resolved.fields.iter().position(|f| f.name == key))
+                .filter_map(|key| {
+                    resolved.fields.iter().position(|f| {
+                        f.name == key && !matches!(f.data, ResolvedFieldData::Missing)
+                    })
+                })
                 .collect();
             // A field the batch supplies that the record's own list does not
             // name is an addition made downstream of the read, so it follows
@@ -1134,6 +1142,35 @@ fn build_format_and_samples(
     // Multisample sources keep FORMAT data in nested `genotypes` even when
     // only a subset (including one sample) is selected for output.
     let has_nested_genotypes = batch.schema().column_with_name("genotypes").is_some();
+
+    // A carried key is only reproducible while the batch still supplies its
+    // column; a projection may drop one and keep the layout column. Where it
+    // does, the key falls back to the all-missing rule below, which drops it
+    // rather than emitting `.` for every sample.
+    let supplied = |name: &str| -> bool {
+        if has_nested_genotypes {
+            batch
+                .schema()
+                .index_of("genotypes")
+                .ok()
+                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<StructArray>())
+                .is_some_and(|genotypes| genotypes.column_by_name(name).is_some())
+        } else {
+            format_columns.is_some_and(|columns| {
+                sample_names
+                    .iter()
+                    .any(|sample| columns.contains_key(&(sample.clone(), name.to_string())))
+            })
+        }
+    };
+    // Keep a flag per position rather than a prefix length: an unsupplied
+    // carried key does not disqualify the supplied ones after it.
+    let must_keep: Vec<bool> = selected
+        .iter()
+        .enumerate()
+        .map(|(i, name)| i < carried_count && supplied(name))
+        .collect();
+
     let field_values = if has_nested_genotypes {
         collect_nested_multisample_values(batch, row, &selected, sample_names)?
     } else {
@@ -1169,7 +1206,7 @@ fn build_format_and_samples(
     let keep: Vec<bool> = field_values
         .iter()
         .enumerate()
-        .map(|(i, sample_vals)| i < carried_count || sample_vals.iter().any(|v| v != "."))
+        .map(|(i, sample_vals)| must_keep[i] || sample_vals.iter().any(|v| v != "."))
         .collect();
 
     Ok(join_format_fields(
@@ -2691,5 +2728,79 @@ mod tests {
             columns_of(&lines[0].line)[7],
             format!("{VCF_INFO_KEYS_COLUMN}=42")
         );
+    }
+
+    /// A projection can keep the layout column while dropping a FORMAT child.
+    /// The carried list still names that key, but the batch has no column for
+    /// it, so there is nothing to reproduce — emitting the key with `.` for
+    /// every sample would invent a field the writer cannot fill.
+    #[test]
+    fn a_carried_format_key_the_batch_does_not_supply_is_dropped() {
+        let mut gt = ListBuilder::new(StringBuilder::new());
+        gt.values().append_value("0/1");
+        gt.values().append_value("1/1");
+        gt.append(true);
+        let mut dp = ListBuilder::new(Int32Builder::new());
+        dp.values().append_value(25);
+        dp.values().append_value(30);
+        dp.append(true);
+
+        // `PS` is absent from the struct entirely — projected away upstream.
+        let genotypes = StructArray::from(vec![
+            (
+                Arc::new(Field::new(
+                    "GT",
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    true,
+                )),
+                Arc::new(gt.finish()) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new(
+                    "DP",
+                    DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                    true,
+                )),
+                Arc::new(dp.finish()) as ArrayRef,
+            ),
+        ]);
+
+        let mut fields = create_test_schema().fields().to_vec();
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["G"])),
+            Arc::new(Float64Array::from(vec![Some(50.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+        ];
+        fields.push(Arc::new(Field::new(
+            "genotypes",
+            genotypes.data_type().clone(),
+            true,
+        )));
+        columns.push(Arc::new(genotypes));
+        fields.push(Arc::new(layout_field(
+            VCF_INFO_KEYS_COLUMN,
+            VCF_RECORD_LAYOUT_INFO_KEYS,
+        )));
+        columns.push(Arc::new(StringArray::from(vec![None::<&str>])));
+        fields.push(Arc::new(layout_field(
+            VCF_FORMAT_KEYS_COLUMN,
+            VCF_RECORD_LAYOUT_FORMAT_KEYS,
+        )));
+        columns.push(Arc::new(StringArray::from(vec![Some("GT:PS:DP")])));
+
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let format_fields: Vec<String> = ["GT", "PS", "DP"].iter().map(|s| s.to_string()).collect();
+        let samples: Vec<String> = ["S1", "S2"].iter().map(|s| s.to_string()).collect();
+        let lines = batch_to_vcf_lines(&batch, &[], &format_fields, &samples, true).unwrap();
+
+        let cols = columns_of(&lines[0].line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+        assert_eq!(cols[10], "1/1:30");
     }
 }
