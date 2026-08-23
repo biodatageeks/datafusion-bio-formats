@@ -257,8 +257,11 @@ fn resolve_batch_genotypes<'a>(
 fn is_value_missing(values: &TypedValues, flat_idx: usize) -> bool {
     match values {
         TypedValues::Int32(a) => a.is_null(flat_idx),
-        TypedValues::Float32(a) => a.is_null(flat_idx) || a.value(flat_idx).is_nan(),
-        TypedValues::Float64(a) => a.is_null(flat_idx) || a.value(flat_idx).is_nan(),
+        // Non-finite floats (NaN and ±Inf alike) serialize as ".", so the
+        // pruning predicate has to classify them as missing too — otherwise a
+        // field that renders as "." for every sample is still emitted.
+        TypedValues::Float32(a) => a.is_null(flat_idx) || !a.value(flat_idx).is_finite(),
+        TypedValues::Float64(a) => a.is_null(flat_idx) || !a.value(flat_idx).is_finite(),
         TypedValues::Utf8(a) => {
             a.is_null(flat_idx) || {
                 let s = a.value(flat_idx);
@@ -1150,7 +1153,9 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use datafusion::arrow::array::{Int32Builder, ListBuilder, StringBuilder, StructArray};
+    use datafusion::arrow::array::{
+        Float64Builder, Int32Builder, ListBuilder, StringBuilder, StructArray,
+    };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -1756,6 +1761,107 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].line.split('\t').nth(7).unwrap(), "AF=.");
+    }
+
+    /// Builds a two-sample batch whose nested `AF` FORMAT field holds `af`, and
+    /// returns the FORMAT column of the single emitted line.
+    fn nested_format_keys_for(af: [f64; 2]) -> String {
+        let af_field = Field::new(
+            "AF",
+            DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+            true,
+        );
+        let gt_field = Field::new(
+            "GT",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(
+                "genotypes",
+                DataType::Struct(vec![gt_field.clone(), af_field.clone()].into()),
+                true,
+            ),
+        ]));
+
+        let mut gt = ListBuilder::new(StringBuilder::new());
+        gt.values().append_value("0/1");
+        gt.values().append_value("1/1");
+        gt.append(true);
+        let gt_array = Arc::new(gt.finish()) as Arc<dyn datafusion::arrow::array::Array>;
+
+        let mut af_b = ListBuilder::new(Float64Builder::new());
+        af_b.values().append_value(af[0]);
+        af_b.values().append_value(af[1]);
+        af_b.append(true);
+        let af_array = Arc::new(af_b.finish()) as Arc<dyn datafusion::arrow::array::Array>;
+
+        let genotypes = Arc::new(
+            StructArray::try_new(
+                vec![gt_field, af_field].into(),
+                vec![gt_array, af_array],
+                None,
+            )
+            .unwrap(),
+        );
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                genotypes,
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(
+            &batch,
+            &[],
+            &["GT".to_string(), "AF".to_string()],
+            &["S1".to_string(), "S2".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        lines[0].line.split('\t').nth(8).unwrap().to_string()
+    }
+
+    #[test]
+    fn nested_format_field_of_only_infinities_is_pruned() {
+        // Every value serializes as ".", so the key must be dropped — the same
+        // way an all-NaN field is. `is_value_missing` checked only is_nan, so
+        // the pruning predicate disagreed with the formatter.
+        assert_eq!(
+            nested_format_keys_for([f64::INFINITY, f64::NEG_INFINITY]),
+            "GT"
+        );
+    }
+
+    #[test]
+    fn nested_format_field_of_only_nans_is_pruned() {
+        // Reference behaviour the infinity case must match.
+        assert_eq!(nested_format_keys_for([f64::NAN, f64::NAN]), "GT");
+    }
+
+    #[test]
+    fn nested_format_field_with_one_finite_value_is_kept() {
+        // Pruning must not over-reach: one real value keeps the key.
+        assert_eq!(nested_format_keys_for([f64::INFINITY, 0.25]), "GT:AF");
     }
 
     #[test]
