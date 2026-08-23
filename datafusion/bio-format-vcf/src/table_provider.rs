@@ -577,6 +577,20 @@ impl VcfTableProvider {
                     .to_string(),
             ));
         }
+        // A source VCF may declare an INFO or FORMAT field with either
+        // reserved name. That column is data, not plumbing, and appending a
+        // second column with the same name would make every by-name lookup
+        // ambiguous — so refuse rather than corrupt the round trip.
+        let collisions = RecordLayoutColumns::source_collisions(&self.schema);
+        if !collisions.is_empty() {
+            return Err(datafusion::common::DataFusionError::Plan(format!(
+                "the source VCF declares {} as its own field, and carrying the \
+                 record layout needs that name; annotate the input with a \
+                 renamed field, or read it without the layout carry",
+                collisions.join(" and ")
+            )));
+        }
+
         // Locate by name so a schema that already carries them is a no-op
         // rather than a second, ambiguous pair of columns. One without the
         // other is a schema this provider did not build; appending to it would

@@ -572,8 +572,7 @@ pub fn batch_to_vcf_lines(
     // passes every batch column as an INFO field must not see them on the line.
     let info_fields: Vec<String> = info_fields
         .iter()
-        .filter(|name| name.as_str() != VCF_INFO_KEYS_COLUMN)
-        .filter(|name| name.as_str() != VCF_FORMAT_KEYS_COLUMN)
+        .filter(|name| !is_record_layout_column(name))
         .cloned()
         .collect();
     let info_fields = info_fields.as_slice();
@@ -729,6 +728,15 @@ pub fn batch_to_vcf_lines(
     }
 
     Ok(records)
+}
+
+/// True for the two carried record-layout columns.
+///
+/// They are engine plumbing: the writer reads them to order INFO and FORMAT and
+/// never puts them on a record, so they must not reach the record body *or* the
+/// header's `##INFO` declarations, whichever list a caller hands the writer.
+pub(crate) fn is_record_layout_column(name: &str) -> bool {
+    name == VCF_INFO_KEYS_COLUMN || name == VCF_FORMAT_KEYS_COLUMN
 }
 
 /// Resolves one of the carried record-layout columns, if the batch has it.

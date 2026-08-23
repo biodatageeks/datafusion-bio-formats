@@ -344,3 +344,65 @@ async fn a_bcf_source_is_refused_rather_than_carrying_nothing() {
         "unexpected error: {error}"
     );
 }
+
+/// A source VCF is free to declare an INFO field with any ID, including the
+/// names the carry reserves. Appending a second column with the same name would
+/// make every by-name lookup ambiguous — the reader would overwrite the source
+/// field with key lists, and the writer would read key lists out of source
+/// data. Refuse instead.
+#[tokio::test]
+async fn a_source_field_colliding_with_a_layout_column_is_refused() {
+    let colliding = LAYOUT_VCF.replace(
+        r#"##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">"#,
+        &format!(
+            r#"##INFO=<ID={VCF_INFO_KEYS_COLUMN},Number=1,Type=String,Description="collides">"#
+        ),
+    );
+    let colliding = colliding.replace(";DB;", ";");
+    let path = write_fixture("collision", &colliding).await;
+
+    let error = VcfTableProvider::new(path.clone(), None, None, None, true)
+        .unwrap()
+        .with_record_layout()
+        .expect_err("a colliding source field must be refused")
+        .to_string();
+    assert!(
+        error.contains(VCF_INFO_KEYS_COLUMN),
+        "unexpected error: {error}"
+    );
+    let _ = fs::remove_file(&path).await;
+}
+
+/// The dangerous shape of the same collision: a source declaring *both*
+/// reserved names looks exactly like a schema that already carries the layout,
+/// so the provider would report success and then hand the reader two source
+/// INFO columns to overwrite with key lists.
+#[tokio::test]
+async fn a_source_declaring_both_layout_names_is_refused_too() {
+    let colliding = LAYOUT_VCF
+        .replace(
+            r#"##INFO=<ID=DB,Number=0,Type=Flag,Description="dbSNP membership">"#,
+            &format!(
+                "{}\n{}",
+                format_args!(
+                    r#"##INFO=<ID={VCF_INFO_KEYS_COLUMN},Number=1,Type=String,Description="collides">"#
+                ),
+                format_args!(
+                    r#"##INFO=<ID={VCF_FORMAT_KEYS_COLUMN},Number=1,Type=String,Description="collides">"#
+                ),
+            ),
+        )
+        .replace(";DB;", ";");
+    let path = write_fixture("collision_both", &colliding).await;
+
+    let error = VcfTableProvider::new(path.clone(), None, None, None, true)
+        .unwrap()
+        .with_record_layout()
+        .expect_err("a colliding source must be refused, not silently accepted")
+        .to_string();
+    assert!(
+        error.contains(VCF_INFO_KEYS_COLUMN) || error.contains(VCF_FORMAT_KEYS_COLUMN),
+        "unexpected error: {error}"
+    );
+    let _ = fs::remove_file(&path).await;
+}

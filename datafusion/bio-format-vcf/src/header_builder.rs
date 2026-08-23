@@ -133,6 +133,9 @@ pub fn build_vcf_header_lines(
 
     // Add INFO field definitions
     for info_name in info_fields {
+        if crate::serializer::is_record_layout_column(info_name) {
+            continue;
+        }
         // Look up field by name to support any column order
         if let Ok(field_idx) = schema.index_of(info_name) {
             let field = schema.field(field_idx);
@@ -397,6 +400,9 @@ fn passthrough_header_lines(
     }
 
     for name in info_fields {
+        if crate::serializer::is_record_layout_column(name) {
+            continue;
+        }
         if !seen.insert(("INFO", name.clone())) {
             continue;
         }
@@ -1317,5 +1323,45 @@ mod tests {
                 .any(|l| l.contains("ID=GQ") && l.contains("Type=Integer")),
             "GQ should be Type=Integer. Lines: {lines:?}"
         );
+    }
+
+    /// The two carried record-layout columns are engine plumbing, not INFO
+    /// data. A caller that hands every non-core batch column to the writer as
+    /// an INFO field must not get `##INFO` declarations for them: the
+    /// serializer never writes them onto a record, so the header would declare
+    /// fields that appear nowhere in the file.
+    #[test]
+    fn the_record_layout_columns_are_never_declared_as_info() {
+        use datafusion_bio_format_core::metadata::{VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN};
+
+        let mut fields = vec![Arc::new(
+            Field::new("DP", DataType::Int32, true).with_metadata(HashMap::from([
+                (VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string()),
+                (VCF_FIELD_NUMBER_KEY.to_string(), "1".to_string()),
+                (VCF_FIELD_TYPE_KEY.to_string(), "Integer".to_string()),
+            ])),
+        )];
+        for name in [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN] {
+            fields.push(Arc::new(Field::new(name, DataType::Utf8, true)));
+        }
+        let schema: SchemaRef = Arc::new(Schema::new(fields));
+
+        let info_fields = vec![
+            "DP".to_string(),
+            VCF_INFO_KEYS_COLUMN.to_string(),
+            VCF_FORMAT_KEYS_COLUMN.to_string(),
+        ];
+        let lines = build_vcf_header_lines(&schema, &info_fields, &[], &[]).unwrap();
+
+        assert!(
+            lines.iter().any(|line| line.starts_with("##INFO=<ID=DP,")),
+            "the real INFO field must still be declared: {lines:?}"
+        );
+        for name in [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN] {
+            assert!(
+                !lines.iter().any(|line| line.contains(name)),
+                "{name} must not be declared in the header: {lines:?}"
+            );
+        }
     }
 }

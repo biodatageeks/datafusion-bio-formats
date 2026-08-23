@@ -315,6 +315,29 @@ impl RecordLayoutColumns {
         }
     }
 
+    /// Reserved names the *source file* declared as its own INFO or FORMAT
+    /// fields.
+    ///
+    /// A VCF may declare an INFO field with any ID, these two included. Such a
+    /// column is real data and is indistinguishable by name from the carry's
+    /// plumbing, so every by-name lookup downstream would be ambiguous: the
+    /// reader would overwrite the source field with key lists, and the writer
+    /// would read key lists out of source values. The provider's own columns
+    /// carry no field-type metadata, which is what tells the two apart.
+    pub(crate) fn source_collisions(schema: &Schema) -> Vec<&'static str> {
+        [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN]
+            .into_iter()
+            .filter(|name| {
+                schema.index_of(name).is_ok_and(|idx| {
+                    schema
+                        .field(idx)
+                        .metadata()
+                        .contains_key(VCF_FIELD_FIELD_TYPE_KEY)
+                })
+            })
+            .collect()
+    }
+
     fn holds(&self, index: usize) -> bool {
         self.info_keys == Some(index) || self.format_keys == Some(index)
     }
