@@ -133,7 +133,7 @@ pub fn build_vcf_header_lines(
 
     // Add INFO field definitions
     for info_name in info_fields {
-        if crate::serializer::is_record_layout_column(info_name) {
+        if crate::serializer::is_record_layout_field(schema, info_name) {
             continue;
         }
         // Look up field by name to support any column order
@@ -400,7 +400,7 @@ fn passthrough_header_lines(
     }
 
     for name in info_fields {
-        if crate::serializer::is_record_layout_column(name) {
+        if crate::serializer::is_record_layout_field(schema, name) {
             continue;
         }
         if !seen.insert(("INFO", name.clone())) {
@@ -1332,7 +1332,10 @@ mod tests {
     /// fields that appear nowhere in the file.
     #[test]
     fn the_record_layout_columns_are_never_declared_as_info() {
-        use datafusion_bio_format_core::metadata::{VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN};
+        use datafusion_bio_format_core::metadata::{
+            VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS,
+            VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+        };
 
         let mut fields = vec![Arc::new(
             Field::new("DP", DataType::Int32, true).with_metadata(HashMap::from([
@@ -1341,8 +1344,16 @@ mod tests {
                 (VCF_FIELD_TYPE_KEY.to_string(), "Integer".to_string()),
             ])),
         )];
-        for name in [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN] {
-            fields.push(Arc::new(Field::new(name, DataType::Utf8, true)));
+        for (name, role) in [
+            (VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
+            (VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+        ] {
+            fields.push(Arc::new(
+                Field::new(name, DataType::Utf8, true).with_metadata(HashMap::from([(
+                    VCF_RECORD_LAYOUT_KEY.to_string(),
+                    role.to_string(),
+                )])),
+            ));
         }
         let schema: SchemaRef = Arc::new(Schema::new(fields));
 

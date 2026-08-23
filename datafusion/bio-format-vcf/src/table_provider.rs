@@ -17,7 +17,8 @@ use datafusion_bio_format_core::metadata::{
     VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
     VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_FORMAT_KEYS_COLUMN,
     VCF_GENOTYPE_COUNTED_ALLELE_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY,
-    VCF_HEADER_RAW_LINES_KEY, VCF_INFO_KEYS_COLUMN, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
+    VCF_HEADER_RAW_LINES_KEY, VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS,
+    VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
     from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
@@ -609,16 +610,20 @@ impl VcfTableProvider {
         }
 
         let mut fields = self.schema.fields().to_vec();
-        fields.push(Arc::new(Field::new(
-            VCF_INFO_KEYS_COLUMN,
-            DataType::Utf8,
-            true,
-        )));
-        fields.push(Arc::new(Field::new(
-            VCF_FORMAT_KEYS_COLUMN,
-            DataType::Utf8,
-            true,
-        )));
+        for (name, role) in [
+            (VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
+            (VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+        ] {
+            // The marker, not the name, is what identifies these downstream: a
+            // source VCF may declare a field with either name, and that field
+            // is data.
+            fields.push(Arc::new(
+                Field::new(name, DataType::Utf8, true).with_metadata(HashMap::from([(
+                    VCF_RECORD_LAYOUT_KEY.to_string(),
+                    role.to_string(),
+                )])),
+            ));
+        }
         self.schema = Arc::new(Schema::new_with_metadata(
             fields,
             self.schema.metadata().clone(),

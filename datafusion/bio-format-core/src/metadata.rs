@@ -87,6 +87,22 @@ pub const VCF_INFO_KEYS_COLUMN: &str = "_vcf_info_keys";
 /// and silently drops the all-missing ones.
 pub const VCF_FORMAT_KEYS_COLUMN: &str = "_vcf_format_keys";
 
+/// Field-level marker on a carried record-layout column.
+///
+/// The value is the column's role: `"info_keys"` or `"format_keys"`. A reader
+/// asked to carry the layout sets it; nothing else does. Consumers must
+/// identify the columns by this marker rather than by name, because a VCF may
+/// legitimately declare an INFO or FORMAT field with either reserved name, and
+/// treating that field as plumbing would consume real data as ordering
+/// information and drop it from the output.
+pub const VCF_RECORD_LAYOUT_KEY: &str = "bio.vcf.record_layout";
+
+/// Value of [`VCF_RECORD_LAYOUT_KEY`] on the INFO key-order column.
+pub const VCF_RECORD_LAYOUT_INFO_KEYS: &str = "info_keys";
+
+/// Value of [`VCF_RECORD_LAYOUT_KEY`] on the FORMAT key-list column.
+pub const VCF_RECORD_LAYOUT_FORMAT_KEYS: &str = "format_keys";
+
 /// The source file's `##` header lines, verbatim and in file order, stored as a
 /// JSON array of strings (the `#CHROM` column line is not included).
 ///

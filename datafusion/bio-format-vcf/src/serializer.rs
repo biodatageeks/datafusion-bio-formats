@@ -7,13 +7,13 @@ use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
     ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
 };
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{
     GENOTYPE_OUTPUT_MODE_KEY,
     metadata::{
-        VCF_FIELD_FORMAT_ID_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_GENOTYPE_OUTPUT_MODE_KEY,
-        VCF_INFO_KEYS_COLUMN,
+        VCF_FIELD_FORMAT_ID_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_RECORD_LAYOUT_FORMAT_KEYS,
+        VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
     },
 };
 
@@ -586,14 +586,15 @@ pub fn batch_to_vcf_lines(
 
     // The layout columns are engine plumbing, not INFO data: a caller that
     // passes every batch column as an INFO field must not see them on the line.
+    let layout_schema = batch.schema();
     let info_fields: Vec<String> = info_fields
         .iter()
-        .filter(|name| !is_record_layout_column(name))
+        .filter(|name| !is_record_layout_field(&layout_schema, name))
         .cloned()
         .collect();
     let info_fields = info_fields.as_slice();
-    let carried_info_keys = carried_layout_column(batch, VCF_INFO_KEYS_COLUMN)?;
-    let carried_format_keys = carried_layout_column(batch, VCF_FORMAT_KEYS_COLUMN)?;
+    let carried_info_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_INFO_KEYS)?;
+    let carried_format_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_FORMAT_KEYS)?;
 
     // Look up core columns by name
     let chroms = get_string_column_by_name(batch, "chrom")?;
@@ -679,6 +680,7 @@ pub fn batch_to_vcf_lines(
         // not mention follow in schema order — that is where an annotator's
         // newly added CSQ lands.
         field_order.clear();
+        let mut carried_count = 0;
         match carried_info_keys
             .as_ref()
             .and_then(|col| value_at(col, row))
@@ -694,6 +696,7 @@ pub fn batch_to_vcf_lines(
                         field_order.push(info_fields[pos].as_str());
                     }
                 }
+                carried_count = field_order.len();
                 for (pos, name) in info_fields.iter().enumerate() {
                     if !ordered[pos] {
                         field_order.push(name.as_str());
@@ -702,7 +705,7 @@ pub fn batch_to_vcf_lines(
             }
             None => field_order.extend(info_fields.iter().map(String::as_str)),
         }
-        let info_str = build_info_string(batch, row, &field_order, &info_columns)?;
+        let info_str = build_info_string(batch, row, &field_order, carried_count, &info_columns)?;
 
         // Build the VCF line
         let mut line = format!(
@@ -746,24 +749,42 @@ pub fn batch_to_vcf_lines(
     Ok(records)
 }
 
-/// True for the two carried record-layout columns.
+/// True when `name` is a carried record-layout column of `schema`.
 ///
-/// They are engine plumbing: the writer reads them to order INFO and FORMAT and
-/// never puts them on a record, so they must not reach the record body *or* the
-/// header's `##INFO` declarations, whichever list a caller hands the writer.
-pub(crate) fn is_record_layout_column(name: &str) -> bool {
-    name == VCF_INFO_KEYS_COLUMN || name == VCF_FORMAT_KEYS_COLUMN
+/// Decided by the field's marker metadata, never by its name: a VCF may
+/// legitimately declare an INFO or FORMAT field called `_vcf_info_keys`, and
+/// treating that field as plumbing would consume real data as ordering
+/// information and drop it from the output.
+///
+/// A marked column is engine plumbing: the writer reads it to order INFO and
+/// FORMAT and never puts it on a record, so it must reach neither the record
+/// body nor the header's `##INFO` declarations, whichever list a caller hands
+/// the writer.
+pub(crate) fn is_record_layout_field(schema: &Schema, name: &str) -> bool {
+    schema.index_of(name).is_ok_and(|idx| {
+        schema
+            .field(idx)
+            .metadata()
+            .contains_key(VCF_RECORD_LAYOUT_KEY)
+    })
 }
 
-/// Resolves one of the carried record-layout columns, if the batch has it.
+/// Resolves the carried record-layout column playing `role`, if the batch has
+/// one.
 fn carried_layout_column<'a>(
     batch: &'a RecordBatch,
-    name: &str,
+    role: &str,
 ) -> Result<Option<StringColumnRef<'a>>> {
-    if batch.schema().index_of(name).is_err() {
+    let schema = batch.schema();
+    let Some(idx) = schema.fields().iter().position(|field| {
+        field
+            .metadata()
+            .get(VCF_RECORD_LAYOUT_KEY)
+            .is_some_and(|marker| marker == role)
+    }) else {
         return Ok(None);
-    }
-    get_string_column_by_name(batch, name).map(Some)
+    };
+    get_string_column(batch.column(idx), schema.field(idx).name()).map(Some)
 }
 
 /// Reads a carried layout value, treating null as "this record carries none".
@@ -783,8 +804,15 @@ fn get_string_column_by_name<'a>(
     let idx = batch.schema().index_of(name).map_err(|_| {
         DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
-    let column = batch.column(idx);
+    get_string_column(batch.column(idx), name)
+}
 
+/// Resolves an already-located column as a string column, whatever Arrow string
+/// flavour it holds.
+fn get_string_column<'a>(
+    column: &'a datafusion::arrow::array::ArrayRef,
+    name: &str,
+) -> Result<StringColumnRef<'a>> {
     // Try StringArray, LargeStringArray, then StringViewArray
     if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
         return Ok(StringColumnRef::Small(arr));
@@ -898,15 +926,21 @@ fn build_format_column_map(
 }
 
 /// Builds the INFO string from INFO columns, in `field_order`.
+///
+/// The first `carried_count` entries came from the record's own key list, so
+/// they are present by definition: a null there is `KEY=.` in the source, not an
+/// absent key, and dropping it would lose the field. Everything after them is
+/// dropped when null, which is what an absent key looks like once parsed.
 fn build_info_string(
     batch: &RecordBatch,
     row: usize,
     field_order: &[&str],
+    carried_count: usize,
     info_columns: &std::collections::HashMap<String, usize>,
 ) -> Result<String> {
     let mut info_parts = Vec::new();
 
-    for field_name in field_order {
+    for (position, field_name) in field_order.iter().enumerate() {
         let field_name = *field_name;
         let col_idx = match info_columns.get(field_name) {
             Some(&idx) => idx,
@@ -915,6 +949,14 @@ fn build_info_string(
 
         let column = batch.column(col_idx);
         if column.is_null(row) {
+            if position < carried_count {
+                // A Flag has no value to be missing; its key alone is the value.
+                if matches!(column.data_type(), DataType::Boolean) {
+                    info_parts.push(field_name.to_string());
+                } else {
+                    info_parts.push(format!("{field_name}=."));
+                }
+            }
             continue;
         }
 
@@ -1316,6 +1358,18 @@ mod tests {
         ArrayRef, Float64Builder, Int32Builder, ListBuilder, StringBuilder, StructArray,
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion_bio_format_core::metadata::{
+        VCF_FIELD_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
+    };
+
+    /// A layout column as the reader builds it: named for humans, marked for
+    /// machines. The marker is what the writer keys off.
+    fn layout_field(name: &str, role: &str) -> Field {
+        Field::new(name, DataType::Utf8, true).with_metadata(std::collections::HashMap::from([(
+            VCF_RECORD_LAYOUT_KEY.to_string(),
+            role.to_string(),
+        )]))
+    }
     use std::sync::Arc;
 
     fn create_test_schema() -> Arc<Schema> {
@@ -2205,6 +2259,7 @@ mod tests {
         format_keys: Option<&str>,
         csq: Option<&str>,
         ps: Option<i32>,
+        ac: Option<i32>,
     ) -> RecordBatch {
         let mut fields = vec![
             Field::new("chrom", DataType::Utf8, false),
@@ -2230,7 +2285,7 @@ mod tests {
             Arc::new(StringArray::from(vec!["G"])),
             Arc::new(Float64Array::from(vec![Some(50.0)])),
             Arc::new(StringArray::from(vec![Some("PASS")])),
-            Arc::new(Int32Array::from(vec![Some(1)])),
+            Arc::new(Int32Array::from(vec![ac])),
             Arc::new(Float64Array::from(vec![Some(0.5)])),
             Arc::new(StringArray::from(vec![Some("0/1")])),
             Arc::new(Int32Array::from(vec![ps])),
@@ -2241,9 +2296,15 @@ mod tests {
             columns.push(Arc::new(StringArray::from(vec![csq])));
         }
         if info_keys.is_some() || format_keys.is_some() {
-            fields.push(Field::new(VCF_INFO_KEYS_COLUMN, DataType::Utf8, true));
+            fields.push(layout_field(
+                VCF_INFO_KEYS_COLUMN,
+                VCF_RECORD_LAYOUT_INFO_KEYS,
+            ));
             columns.push(Arc::new(StringArray::from(vec![info_keys])));
-            fields.push(Field::new(VCF_FORMAT_KEYS_COLUMN, DataType::Utf8, true));
+            fields.push(layout_field(
+                VCF_FORMAT_KEYS_COLUMN,
+                VCF_RECORD_LAYOUT_FORMAT_KEYS,
+            ));
             columns.push(Arc::new(StringArray::from(vec![format_keys])));
         }
         RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
@@ -2274,7 +2335,7 @@ mod tests {
         info_fields: &[&str],
         format_fields: &[&str],
     ) -> String {
-        let batch = layout_batch(info_keys, format_keys, csq, ps);
+        let batch = layout_batch(info_keys, format_keys, csq, ps, Some(1));
         let info_fields: Vec<String> = info_fields.iter().map(|s| s.to_string()).collect();
         let format_fields: Vec<String> = format_fields.iter().map(|s| s.to_string()).collect();
         let lines = batch_to_vcf_lines(
@@ -2469,16 +2530,14 @@ mod tests {
         )));
         columns.push(Arc::new(genotypes));
         if format_keys.is_some() {
-            fields.push(Arc::new(Field::new(
+            fields.push(Arc::new(layout_field(
                 VCF_INFO_KEYS_COLUMN,
-                DataType::Utf8,
-                true,
+                VCF_RECORD_LAYOUT_INFO_KEYS,
             )));
             columns.push(Arc::new(StringArray::from(vec![None::<&str>])));
-            fields.push(Arc::new(Field::new(
+            fields.push(Arc::new(layout_field(
                 VCF_FORMAT_KEYS_COLUMN,
-                DataType::Utf8,
-                true,
+                VCF_RECORD_LAYOUT_FORMAT_KEYS,
             )));
             columns.push(Arc::new(StringArray::from(vec![format_keys])));
         }
@@ -2555,5 +2614,82 @@ mod tests {
         assert_eq!(cols[8], "GT:DP");
         assert_eq!(cols[9], "0/1:25");
         assert_eq!(cols[10], "1/1:30");
+    }
+
+    /// `DP=.` in a source record is a key that is present with a missing value.
+    /// The parser turns it into the same null as a key the record never had, so
+    /// only the carried list can tell them apart — the INFO twin of the `PS`
+    /// case, and the reason the carry exists.
+    #[test]
+    fn a_carried_info_key_with_a_missing_value_keeps_its_place() {
+        let batch = layout_batch(Some("AC;AF"), Some("GT:DP"), None, None, None);
+        let lines = batch_to_vcf_lines(
+            &batch,
+            &["AC".to_string(), "AF".to_string()],
+            &["GT".to_string(), "PS".to_string(), "DP".to_string()],
+            &["SAMPLE1".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(columns_of(&lines[0].line)[7], "AC=.;AF=0.5");
+    }
+
+    /// The same column with no carried list stays absent: without the record's
+    /// own key list, a null is indistinguishable from a key it never had.
+    #[test]
+    fn an_uncarried_info_key_with_a_null_value_stays_absent() {
+        let batch = layout_batch(None, None, None, None, None);
+        let lines = batch_to_vcf_lines(
+            &batch,
+            &["AC".to_string(), "AF".to_string()],
+            &["GT".to_string(), "PS".to_string(), "DP".to_string()],
+            &["SAMPLE1".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(columns_of(&lines[0].line)[7], "AF=0.5");
+    }
+
+    /// A VCF may declare an INFO field with either reserved name. Without the
+    /// carry, such a column is ordinary data: identifying plumbing by name
+    /// alone would consume it as ordering information, drop it from the record,
+    /// and — if it were not a string — fail serialization outright.
+    #[test]
+    fn a_source_field_named_like_a_layout_column_is_still_data() {
+        let mut source_metadata = std::collections::HashMap::new();
+        source_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(VCF_INFO_KEYS_COLUMN, DataType::Int32, true).with_metadata(source_metadata),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(50.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(Int32Array::from(vec![Some(42)])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &[VCF_INFO_KEYS_COLUMN.to_string()], &[], &[], true)
+            .unwrap();
+        assert_eq!(
+            columns_of(&lines[0].line)[7],
+            format!("{VCF_INFO_KEYS_COLUMN}=42")
+        );
     }
 }

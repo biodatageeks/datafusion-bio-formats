@@ -26,6 +26,7 @@ use datafusion_bio_format_core::{
     metadata::{
         VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
         VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
+        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
     },
     object_storage::{
         CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_storage_type,
@@ -309,30 +310,37 @@ pub(crate) struct RecordLayoutColumns {
 
 impl RecordLayoutColumns {
     pub(crate) fn locate(schema: &Schema) -> Self {
+        let marked = |role: &str| {
+            schema.fields().iter().position(|field| {
+                field
+                    .metadata()
+                    .get(VCF_RECORD_LAYOUT_KEY)
+                    .is_some_and(|marker| marker == role)
+            })
+        };
         Self {
-            info_keys: schema.index_of(VCF_INFO_KEYS_COLUMN).ok(),
-            format_keys: schema.index_of(VCF_FORMAT_KEYS_COLUMN).ok(),
+            info_keys: marked(VCF_RECORD_LAYOUT_INFO_KEYS),
+            format_keys: marked(VCF_RECORD_LAYOUT_FORMAT_KEYS),
         }
     }
 
-    /// Reserved names the *source file* declared as its own INFO or FORMAT
-    /// fields.
+    /// Reserved names the *source file* already uses for a field of its own.
     ///
-    /// A VCF may declare an INFO field with any ID, these two included. Such a
-    /// column is real data and is indistinguishable by name from the carry's
-    /// plumbing, so every by-name lookup downstream would be ambiguous: the
-    /// reader would overwrite the source field with key lists, and the writer
-    /// would read key lists out of source values. The provider's own columns
-    /// carry no field-type metadata, which is what tells the two apart.
+    /// A VCF may declare an INFO or FORMAT field with any ID, these two names
+    /// included. Such a column is data, and the marker metadata keeps the
+    /// writer from mistaking it for plumbing — but appending a carried column
+    /// beside it would put two fields with one name in the schema, which makes
+    /// every by-name reference to either of them ambiguous. An unmarked field
+    /// holding a reserved name is therefore a collision.
     pub(crate) fn source_collisions(schema: &Schema) -> Vec<&'static str> {
         [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN]
             .into_iter()
             .filter(|name| {
                 schema.index_of(name).is_ok_and(|idx| {
-                    schema
+                    !schema
                         .field(idx)
                         .metadata()
-                        .contains_key(VCF_FIELD_FIELD_TYPE_KEY)
+                        .contains_key(VCF_RECORD_LAYOUT_KEY)
                 })
             })
             .collect()
