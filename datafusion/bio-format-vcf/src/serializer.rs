@@ -96,9 +96,14 @@ impl StringColumnRef<'_> {
 /// - Fixed notation when the exponent is in [-4, 6) (matching C `%g` rules)
 /// - Scientific notation otherwise
 /// - Trailing zeros and unnecessary decimal points removed
-/// - `NaN` → `"."` (VCF missing value)
+/// - Non-finite (`NaN`, `±Inf`) → `"."` (VCF missing value)
 fn format_vcf_float(v: f64) -> String {
-    if v.is_nan() {
+    // Every non-finite value renders as missing: VCF defines no textual form for
+    // an infinity, and the exponent parsing below cannot handle one. Guarding
+    // only NaN left `format!("{:.5e}", f64::INFINITY)` == "inf", which has no
+    // 'e' to split on, so the `split_once` unwrap panicked on real data — any
+    // INFO or FORMAT Float column carrying an infinity reached it.
+    if !v.is_finite() {
         return ".".to_string();
     }
     // Use Rust's {:.*e} to get scientific form, then decide notation
@@ -1694,6 +1699,63 @@ mod tests {
         assert_eq!(qual_line_for(Some(f64::NAN)), ".");
         assert_eq!(qual_line_for(Some(f64::INFINITY)), ".");
         assert_eq!(qual_line_for(Some(f64::NEG_INFINITY)), ".");
+    }
+
+    #[test]
+    fn format_vcf_float_renders_non_finite_as_missing() {
+        // `format!("{:.5e}", f64::INFINITY)` is "inf", which has no exponent to
+        // split on — the helper used to panic on `split_once('e').unwrap()`.
+        // VCF defines no textual form for +/-Inf, so it joins NaN as missing.
+        assert_eq!(format_vcf_float(f64::NAN), ".");
+        assert_eq!(format_vcf_float(f64::INFINITY), ".");
+        assert_eq!(format_vcf_float(f64::NEG_INFINITY), ".");
+    }
+
+    #[test]
+    fn format_vcf_float_handles_the_float_extremes() {
+        // Subnormal and maximal magnitudes take the scientific branch; neither
+        // may panic.
+        assert_eq!(format_vcf_float(f64::MIN_POSITIVE), "2.22507e-308");
+        assert_eq!(format_vcf_float(f64::MAX), "1.79769e+308");
+    }
+
+    /// The panic is reachable from real data, not just a direct helper call:
+    /// any INFO or FORMAT Float column carrying +/-Inf hits it (a Parquet or
+    /// Polars source can produce one). This drives the whole serializer.
+    #[test]
+    fn info_float_column_with_infinity_serializes_as_missing() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("AF", DataType::Float64, true),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(30.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(Float64Array::from(vec![Some(f64::INFINITY)])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &["AF".to_string()], &[], &[], true).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].line.split('\t').nth(7).unwrap(), "AF=.");
     }
 
     #[test]
