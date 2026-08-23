@@ -38,7 +38,7 @@ use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
 
 use crate::physical_exec::{
-    CoreBatchBuilders, FormatMode, ProjectionFlags,
+    CoreBatchBuilders, FormatMode, ProjectionFlags, RecordLayoutColumns,
     adjust_effective_batch_size_by_observed_format_bytes, build_noodles_region,
     build_record_batch_from_builders, choose_dosage_effective_batch_size,
     choose_effective_batch_size, choose_initial_builder_batch_size, init_format_mode,
@@ -2525,7 +2525,11 @@ impl BcfBatchDecoder {
             header.infos(),
             &mut info_builders,
         );
-        let flags = ProjectionFlags::new(&projection, info_builders.0.len());
+        let flags = ProjectionFlags::new(
+            &projection,
+            info_builders.0.len(),
+            RecordLayoutColumns::default(),
+        );
         let effective_batch_size =
             if genotype_output_mode == GenotypeOutputMode::Dosage && flags.any_format {
                 let selected_sample_count =
@@ -2875,6 +2879,8 @@ impl BcfBatchDecoder {
             format_arrays.as_ref(),
             self.info_builders.0.len(),
             &self.projection,
+            // BCF records carry no source text, so there is no layout to carry.
+            RecordLayoutColumns::default(),
             row_count,
         )
     }

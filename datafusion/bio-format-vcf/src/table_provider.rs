@@ -1,5 +1,5 @@
 use crate::bcf::BcfExec;
-use crate::physical_exec::VcfExec;
+use crate::physical_exec::{RecordLayoutColumns, VcfExec};
 use crate::serializer::validate_vcf_serializable_genotypes;
 use crate::storage::{get_header, resolve_single_sample_format_column_name};
 use crate::write_exec::VcfWriteExec;
@@ -15,9 +15,11 @@ use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_INDEXED_KEY, VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY,
     VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
-    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPE_COUNTED_ALLELE_KEY,
-    VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_HEADER_RAW_LINES_KEY,
-    VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string, to_json_string,
+    VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_FORMAT_KEYS_COLUMN,
+    VCF_GENOTYPE_COUNTED_ALLELE_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY,
+    VCF_HEADER_RAW_LINES_KEY, VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS,
+    VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY, VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata,
+    from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -552,6 +554,83 @@ pub struct VcfTableProvider {
 }
 
 impl VcfTableProvider {
+    /// Carries each record's own INFO key order and FORMAT key list in two
+    /// extra `Utf8` columns, `_vcf_info_keys` and `_vcf_format_keys`.
+    ///
+    /// Both are per record and neither is recoverable from the typed columns:
+    /// every record carries every key the header declares, in schema order, and
+    /// a FORMAT key whose value is missing in every sample parses to null
+    /// exactly like a key the record never had. A writer that sees these
+    /// columns re-emits the source's order instead of the schema's, which is
+    /// what a VCF-in / VCF-out pipeline needs to leave records byte-identical.
+    ///
+    /// Off by default: a read that will not be written back as VCF pays
+    /// nothing. Keys only — values already round-trip through the typed
+    /// columns, so the two columns dictionary-encode to almost nothing.
+    ///
+    /// The columns are appended last; the provider hands that position to the
+    /// scan, which is what tells the reader to populate them.
+    pub fn with_record_layout(mut self) -> datafusion::common::Result<Self> {
+        if self.input_format == VcfInputFormat::Bcf {
+            return Err(datafusion::common::DataFusionError::Plan(
+                "carrying the record layout is supported only for text VCF input; \
+                 a BCF record has no source text to preserve"
+                    .to_string(),
+            ));
+        }
+        // A source VCF may declare an INFO or FORMAT field with either
+        // reserved name. That column is data, not plumbing, and appending a
+        // second column with the same name would make every by-name lookup
+        // ambiguous — so refuse rather than corrupt the round trip.
+        let collisions = RecordLayoutColumns::source_collisions(&self.schema);
+        if !collisions.is_empty() {
+            return Err(datafusion::common::DataFusionError::Plan(format!(
+                "the source VCF declares {} as its own field, and carrying the \
+                 record layout needs that name; annotate the input with a \
+                 renamed field, or read it without the layout carry",
+                collisions.join(" and ")
+            )));
+        }
+
+        // Locate by name so a schema that already carries them is a no-op
+        // rather than a second, ambiguous pair of columns. One without the
+        // other is a schema this provider did not build; appending to it would
+        // duplicate a name and make the reader's lookup ambiguous.
+        let existing = RecordLayoutColumns::locate(&self.schema);
+        match (existing.info_keys, existing.format_keys) {
+            (Some(_), Some(_)) => return Ok(self),
+            (None, None) => {}
+            _ => {
+                return Err(datafusion::common::DataFusionError::Plan(format!(
+                    "schema already carries one of `{VCF_INFO_KEYS_COLUMN}` / \
+                     `{VCF_FORMAT_KEYS_COLUMN}` but not the other; \
+                     the record layout needs both or neither"
+                )));
+            }
+        }
+
+        let mut fields = self.schema.fields().to_vec();
+        for (name, role) in [
+            (VCF_INFO_KEYS_COLUMN, VCF_RECORD_LAYOUT_INFO_KEYS),
+            (VCF_FORMAT_KEYS_COLUMN, VCF_RECORD_LAYOUT_FORMAT_KEYS),
+        ] {
+            // The marker, not the name, is what identifies these downstream: a
+            // source VCF may declare a field with either name, and that field
+            // is data.
+            fields.push(Arc::new(
+                Field::new(name, DataType::Utf8, true).with_metadata(HashMap::from([(
+                    VCF_RECORD_LAYOUT_KEY.to_string(),
+                    role.to_string(),
+                )])),
+            ));
+        }
+        self.schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            self.schema.metadata().clone(),
+        ));
+        Ok(self)
+    }
+
     /// Selects the physical representation of the BCF `GT` FORMAT field.
     ///
     /// Dosage mode is deliberately explicit and additive: existing providers
@@ -1429,6 +1508,7 @@ impl TableProvider for VcfTableProvider {
                         partition_assignments: Some(assignments),
                         index_path: Some(index_path.clone()),
                         residual_filters: record_filters,
+                        layout: RecordLayoutColumns::locate(&self.schema),
                     }),
                     VcfInputFormat::Auto => unreachable!("input format is resolved"),
                 };
@@ -1485,6 +1565,7 @@ impl TableProvider for VcfTableProvider {
                 partition_assignments: None,
                 index_path: None,
                 residual_filters: Vec::new(),
+                layout: RecordLayoutColumns::locate(&self.schema),
             })),
             VcfInputFormat::Auto => unreachable!("input format is resolved"),
         }

@@ -13,7 +13,7 @@ use datafusion::arrow::array::{
     Array, ArrayBuilder, BooleanBuilder, Float32Builder, Float64Builder, Int32Builder, ListBuilder,
     StringBuilder, StructArray, UInt32Builder,
 };
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::logical_expr::Expr;
@@ -25,7 +25,8 @@ use datafusion_bio_format_core::record_filter::evaluate_record_filters;
 use datafusion_bio_format_core::{
     metadata::{
         VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY, VCF_FIELD_FORMAT_ID_KEY,
-        VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY,
+        VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
+        VCF_RECORD_LAYOUT_FORMAT_KEYS, VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
     },
     object_storage::{
         CompressionType, ObjectStorageOptions, StorageType, get_compression_type, get_storage_type,
@@ -243,6 +244,10 @@ pub(crate) struct ProjectionFlags {
     pub(crate) filter: bool,
     pub(crate) any_info: bool,
     pub(crate) any_format: bool,
+    /// The carried INFO key order column (`_vcf_info_keys`).
+    pub(crate) info_keys: bool,
+    /// The carried FORMAT key list column (`_vcf_format_keys`).
+    pub(crate) format_keys: bool,
 }
 
 pub(crate) fn filters_reference_column(filters: &[Expr], name: &str) -> bool {
@@ -255,12 +260,20 @@ pub(crate) fn filters_reference_column(filters: &[Expr], name: &str) -> bool {
 }
 
 impl ProjectionFlags {
-    pub(crate) fn new(projection: &Option<Vec<usize>>, num_info_fields: usize) -> Self {
+    /// `layout` locates the carried record-layout columns in the unprojected
+    /// schema. They sit past the FORMAT columns, so the FORMAT range has to
+    /// exclude them.
+    pub(crate) fn new(
+        projection: &Option<Vec<usize>>,
+        num_info_fields: usize,
+        layout: RecordLayoutColumns,
+    ) -> Self {
         let contains = |idx: usize| {
             projection
                 .as_ref()
                 .is_none_or(|p: &Vec<usize>| p.contains(&idx))
         };
+        let is_format = |i: usize| i >= 8 + num_info_fields && !layout.holds(i);
         Self {
             chrom: contains(0),
             start: contains(1),
@@ -275,8 +288,66 @@ impl ProjectionFlags {
                 .is_none_or(|p| p.iter().any(|&i| i >= 8 && i < 8 + num_info_fields)),
             any_format: projection
                 .as_ref()
-                .is_none_or(|p| p.iter().any(|&i| i >= 8 + num_info_fields)),
+                .is_none_or(|p| p.iter().any(|&i| is_format(i))),
+            info_keys: layout.info_keys.is_some_and(&contains),
+            format_keys: layout.format_keys.is_some_and(&contains),
         }
+    }
+}
+
+/// Where the carried record-layout columns sit in an unprojected schema.
+///
+/// Located by name, not by position: `VcfTableProvider::with_record_layout`
+/// appends them last, but nothing downstream depends on that, so a schema that
+/// gains another column later still carries the layout instead of silently
+/// dropping it. A schema without them leaves both `None` and reads exactly as
+/// before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RecordLayoutColumns {
+    pub(crate) info_keys: Option<usize>,
+    pub(crate) format_keys: Option<usize>,
+}
+
+impl RecordLayoutColumns {
+    pub(crate) fn locate(schema: &Schema) -> Self {
+        let marked = |role: &str| {
+            schema.fields().iter().position(|field| {
+                field
+                    .metadata()
+                    .get(VCF_RECORD_LAYOUT_KEY)
+                    .is_some_and(|marker| marker == role)
+            })
+        };
+        Self {
+            info_keys: marked(VCF_RECORD_LAYOUT_INFO_KEYS),
+            format_keys: marked(VCF_RECORD_LAYOUT_FORMAT_KEYS),
+        }
+    }
+
+    /// Reserved names the *source file* already uses for a field of its own.
+    ///
+    /// A VCF may declare an INFO or FORMAT field with any ID, these two names
+    /// included. Such a column is data, and the marker metadata keeps the
+    /// writer from mistaking it for plumbing — but appending a carried column
+    /// beside it would put two fields with one name in the schema, which makes
+    /// every by-name reference to either of them ambiguous. An unmarked field
+    /// holding a reserved name is therefore a collision.
+    pub(crate) fn source_collisions(schema: &Schema) -> Vec<&'static str> {
+        [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN]
+            .into_iter()
+            .filter(|name| {
+                schema.index_of(name).is_ok_and(|idx| {
+                    !schema
+                        .field(idx)
+                        .metadata()
+                        .contains_key(VCF_RECORD_LAYOUT_KEY)
+                })
+            })
+            .collect()
+    }
+
+    fn holds(&self, index: usize) -> bool {
+        self.info_keys == Some(index) || self.format_keys == Some(index)
     }
 }
 
@@ -291,6 +362,10 @@ pub(crate) struct CoreBatchBuilders {
     alt: Option<StringBuilder>,
     qual: Option<Float64Builder>,
     filter: Option<StringBuilder>,
+    info_keys: Option<StringBuilder>,
+    format_keys: Option<StringBuilder>,
+    /// Scratch for building a key list without allocating per record.
+    keys_buf: String,
 }
 
 impl CoreBatchBuilders {
@@ -335,6 +410,23 @@ impl CoreBatchBuilders {
                 Some(StringBuilder::with_capacity(batch_size, batch_size * 8))
             } else {
                 None
+            },
+            info_keys: if flags.info_keys {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 32))
+            } else {
+                None
+            },
+            format_keys: if flags.format_keys {
+                Some(StringBuilder::with_capacity(batch_size, batch_size * 16))
+            } else {
+                None
+            },
+            // A read that carries no layout allocates nothing here; the
+            // capacity hint only pays off when the buffer is actually used.
+            keys_buf: if flags.info_keys || flags.format_keys {
+                String::with_capacity(64)
+            } else {
+                String::new()
             },
         }
     }
@@ -398,8 +490,57 @@ impl CoreBatchBuilders {
         }
     }
 
-    /// Finishes all active builders and returns the 8 core arrays.
-    pub(crate) fn finish(&mut self) -> [Option<Arc<dyn Array>>; 8] {
+    /// Records the key order this record was written with.
+    ///
+    /// The INFO keys are split out of the raw INFO column rather than taken
+    /// from `info.iter(header)`, which is how the *values* are decoded. Two
+    /// reasons: the typed iterator parses every value, which this does not
+    /// need, and it drops keys the header never declared — but the writer's job
+    /// is to reproduce the source's order, so an undeclared key still has to
+    /// hold its place. The split matches noodles' own: `;` between fields, the
+    /// first `=` between key and value, neither of which may appear inside a
+    /// key.
+    ///
+    /// The FORMAT keys are that column verbatim. Values are not carried — they
+    /// round-trip through the typed columns. A record with no INFO (`.`) or no
+    /// FORMAT column stores an empty list, which is distinct from the null a
+    /// reader that carries nothing leaves behind.
+    ///
+    /// Guarded here rather than at the four call sites: the guard is one flag
+    /// check either way, and keeping it inside means a record loop cannot
+    /// append a row to the core builders and skip this one.
+    #[inline]
+    pub(crate) fn append_record_layout(&mut self, record: &noodles_vcf::Record) {
+        if let Some(b) = &mut self.info_keys {
+            self.keys_buf.clear();
+            let info = record.info();
+            let raw = info.as_ref();
+            if raw != "." {
+                for entry in raw.split(';').filter(|entry| !entry.is_empty()) {
+                    if !self.keys_buf.is_empty() {
+                        self.keys_buf.push(';');
+                    }
+                    self.keys_buf
+                        .push_str(entry.split('=').next().unwrap_or(entry));
+                }
+            }
+            b.append_value(&self.keys_buf);
+        }
+        if let Some(b) = &mut self.format_keys {
+            self.keys_buf.clear();
+            for key in record.samples().keys().iter() {
+                if !self.keys_buf.is_empty() {
+                    self.keys_buf.push(':');
+                }
+                self.keys_buf.push_str(key);
+            }
+            b.append_value(&self.keys_buf);
+        }
+    }
+
+    /// Finishes all active builders: the 8 core arrays, then the two carried
+    /// record-layout arrays.
+    pub(crate) fn finish(&mut self) -> [Option<Arc<dyn Array>>; 10] {
         [
             self.chrom
                 .as_mut()
@@ -425,6 +566,12 @@ impl CoreBatchBuilders {
             self.filter
                 .as_mut()
                 .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.info_keys
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
+            self.format_keys
+                .as_mut()
+                .map(|b| Arc::new(b.finish()) as Arc<dyn Array>),
         ]
     }
 }
@@ -433,21 +580,34 @@ impl CoreBatchBuilders {
 ///
 /// Unlike `build_record_batch` which copies from Vec<T> into Arrow arrays, this function
 /// takes pre-built Arrow arrays from `CoreBatchBuilders::finish()`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_record_batch_from_builders(
     schema: SchemaRef,
-    core_arrays: [Option<Arc<dyn Array>>; 8],
+    core_arrays: [Option<Arc<dyn Array>>; 10],
     infos: Option<&Vec<Arc<dyn Array>>>,
     formats: Option<&Vec<Arc<dyn Array>>>,
     num_info_fields: usize,
     projection: &Option<Vec<usize>>,
+    layout: RecordLayoutColumns,
     record_count: usize,
 ) -> datafusion::error::Result<RecordBatch> {
     let format_start_idx = 8 + num_info_fields;
+    // Index of a carried record-layout column in `core_arrays`, which holds
+    // them after the 8 core ones.
+    let layout_slot = |i: usize| {
+        if layout.info_keys == Some(i) {
+            Some(8)
+        } else if layout.format_keys == Some(i) {
+            Some(9)
+        } else {
+            None
+        }
+    };
 
     let arrays = match projection {
         None => {
-            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(8 + num_info_fields);
-            for a in core_arrays.iter().flatten() {
+            let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(10 + num_info_fields);
+            for a in core_arrays[..8].iter().flatten() {
                 arrays.push(a.clone());
             }
             if let Some(info_arrays) = infos {
@@ -456,11 +616,20 @@ pub(crate) fn build_record_batch_from_builders(
             if let Some(format_arrays) = formats {
                 arrays.extend_from_slice(format_arrays);
             }
+            for a in core_arrays[8..].iter().flatten() {
+                arrays.push(a.clone());
+            }
             arrays
         }
         Some(proj_ids) => {
             let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(proj_ids.len());
             for &i in proj_ids {
+                if let Some(slot) = layout_slot(i) {
+                    if let Some(a) = &core_arrays[slot] {
+                        arrays.push(a.clone());
+                    }
+                    continue;
+                }
                 match i {
                     0..=7 => {
                         if let Some(a) = &core_arrays[i] {
@@ -676,6 +845,7 @@ async fn get_local_vcf(
     sample_names: Vec<String>,
     source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
+    layout: RecordLayoutColumns,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
@@ -700,7 +870,7 @@ async fn get_local_vcf(
         (Vec::new(), Vec::new(), Vec::new());
     set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
     let mut num_info_fields = info_builders.0.len();
-    let flags = ProjectionFlags::new(&projection, num_info_fields);
+    let flags = ProjectionFlags::new(&projection, num_info_fields, layout);
     let mut effective_batch_size = choose_effective_batch_size(
         batch_size,
         flags.any_format,
@@ -824,6 +994,7 @@ async fn get_local_vcf(
             if has_format_fields && flags.any_format {
                 format_mode.append_record(&record, &header)?;
             }
+            builders.append_record_layout(&record);
             record_num += 1;
             batch_row_count += 1;
 
@@ -863,6 +1034,7 @@ async fn get_local_vcf(
                     format_arrays.as_ref(),
                     num_info_fields,
                     &projection,
+                    layout,
                     batch_row_count,
                 )?;
                 batch_num += 1;
@@ -894,6 +1066,7 @@ async fn get_local_vcf(
                 format_arrays.as_ref(),
                 num_info_fields,
                 &projection,
+                layout,
                 batch_row_count,
             )?;
             yield batch;
@@ -918,6 +1091,7 @@ async fn get_local_vcf_sync(
     sample_names: Vec<String>,
     source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
+    layout: RecordLayoutColumns,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
     compression_type: CompressionType,
@@ -937,7 +1111,7 @@ async fn get_local_vcf_sync(
             (Vec::new(), Vec::new(), Vec::new());
         set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
         let mut num_info_fields = info_builders.0.len();
-        let flags = ProjectionFlags::new(&projection, num_info_fields);
+        let flags = ProjectionFlags::new(&projection, num_info_fields, layout);
         let mut effective_batch_size = choose_effective_batch_size(
             batch_size,
             flags.any_format,
@@ -1107,6 +1281,7 @@ async fn get_local_vcf_sync(
                             .append_record(&record, &header)
                             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                     }
+                    builders.append_record_layout(&record);
 
                     record_num += 1;
                     batch_row_count += 1;
@@ -1147,6 +1322,7 @@ async fn get_local_vcf_sync(
                             format_arrays.as_ref(),
                             num_info_fields,
                             &projection,
+                            layout,
                             batch_row_count,
                         )?;
 
@@ -1187,6 +1363,7 @@ async fn get_local_vcf_sync(
                 format_arrays.as_ref(),
                 num_info_fields,
                 &projection,
+                layout,
                 batch_row_count,
             )?;
             yield batch;
@@ -1207,6 +1384,7 @@ async fn get_remote_vcf_stream(
     sample_names: Vec<String>,
     source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
+    layout: RecordLayoutColumns,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
@@ -1226,7 +1404,7 @@ async fn get_remote_vcf_stream(
         (Vec::new(), Vec::new(), Vec::new());
     set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
     let mut num_info_fields = info_builders.0.len();
-    let flags = ProjectionFlags::new(&projection, num_info_fields);
+    let flags = ProjectionFlags::new(&projection, num_info_fields, layout);
     let mut effective_batch_size = choose_effective_batch_size(
         batch_size,
         flags.any_format,
@@ -1355,6 +1533,7 @@ async fn get_remote_vcf_stream(
             if has_format_fields && flags.any_format {
                 format_mode.append_record(&record, &header)?;
             }
+            builders.append_record_layout(&record);
             record_num += 1;
             batch_row_count += 1;
 
@@ -1394,6 +1573,7 @@ async fn get_remote_vcf_stream(
                     format_arrays.as_ref(),
                     num_info_fields,
                     &projection,
+                    layout,
                     batch_row_count,
                 )?;
                 batch_num += 1;
@@ -1425,6 +1605,7 @@ async fn get_remote_vcf_stream(
                 format_arrays.as_ref(),
                 num_info_fields,
                 &projection,
+                layout,
                 batch_row_count,
             )?;
             yield batch;
@@ -2452,6 +2633,7 @@ async fn get_stream(
     sample_names: Vec<String>,
     source_sample_names: Vec<String>,
     projection: Option<Vec<usize>>,
+    layout: RecordLayoutColumns,
     object_storage_options: Option<ObjectStorageOptions>,
     coordinate_system_zero_based: bool,
     residual_filters: Vec<Expr>,
@@ -2487,6 +2669,7 @@ async fn get_stream(
                     sample_names,
                     source_sample_names,
                     projection,
+                    layout,
                     object_storage_options,
                     coordinate_system_zero_based,
                     residual_filters,
@@ -2505,6 +2688,7 @@ async fn get_stream(
                     sample_names,
                     source_sample_names,
                     projection,
+                    layout,
                     coordinate_system_zero_based,
                     residual_filters,
                     compression_type,
@@ -2523,6 +2707,7 @@ async fn get_stream(
                 sample_names,
                 source_sample_names,
                 projection,
+                layout,
                 object_storage_options,
                 coordinate_system_zero_based,
                 residual_filters,
@@ -2557,6 +2742,10 @@ pub struct VcfExec {
     pub(crate) index_path: Option<String>,
     /// Residual filters for record-level evaluation
     pub(crate) residual_filters: Vec<Expr>,
+    /// Where the carried record-layout columns sit in the table's unprojected
+    /// schema. The exec's own schema is already projected, so it cannot locate
+    /// them itself.
+    pub(crate) layout: RecordLayoutColumns,
 }
 
 impl Debug for VcfExec {
@@ -2632,6 +2821,7 @@ impl ExecutionPlan for VcfExec {
         );
         let batch_size = context.session_config().batch_size();
         let schema = self.schema.clone();
+        let layout = self.layout;
 
         // Use indexed reading when partition assignments and index are available
         if let (Some(assignments), Some(index_path)) =
@@ -2657,6 +2847,7 @@ impl ExecutionPlan for VcfExec {
                 schema.clone(),
                 batch_size,
                 projection,
+                layout,
                 coord_zero_based,
                 info_fields,
                 format_fields,
@@ -2679,6 +2870,7 @@ impl ExecutionPlan for VcfExec {
             self.sample_names.clone(),
             self.source_sample_names.clone(),
             self.projection.clone(),
+            layout,
             self.object_storage_options.clone(),
             self.coordinate_system_zero_based,
             self.residual_filters.clone(),
@@ -2751,6 +2943,7 @@ async fn get_indexed_vcf_stream(
     schema_ref: SchemaRef,
     batch_size: usize,
     projection: Option<Vec<usize>>,
+    layout: RecordLayoutColumns,
     coordinate_system_zero_based: bool,
     info_fields: Option<Vec<String>>,
     format_fields: Option<Vec<String>>,
@@ -2776,7 +2969,7 @@ async fn get_indexed_vcf_stream(
             (Vec::new(), Vec::new(), Vec::new());
         set_info_builders(batch_size, info_fields.clone(), infos, &mut info_builders);
         let mut num_info_fields = info_builders.0.len();
-        let flags = ProjectionFlags::new(&projection, num_info_fields);
+        let flags = ProjectionFlags::new(&projection, num_info_fields, layout);
         let mut effective_batch_size = choose_effective_batch_size(
             batch_size,
             flags.any_format,
@@ -2990,6 +3183,7 @@ async fn get_indexed_vcf_stream(
                         .append_record(&record, &header)
                         .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
                 }
+                builders.append_record_layout(&record);
 
                 total_records += 1;
                 batch_record_count += 1;
@@ -3029,6 +3223,7 @@ async fn get_indexed_vcf_stream(
                         format_arrays.as_ref(),
                         num_info_fields,
                         &projection,
+                        layout,
                         batch_record_count,
                     )?;
 
@@ -3063,6 +3258,7 @@ async fn get_indexed_vcf_stream(
                 format_arrays.as_ref(),
                 num_info_fields,
                 &projection,
+                layout,
                 batch_record_count,
             )?;
             yield batch;

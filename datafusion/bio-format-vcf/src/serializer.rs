@@ -7,11 +7,14 @@ use datafusion::arrow::array::{
     Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
     ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
 };
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::{
     GENOTYPE_OUTPUT_MODE_KEY,
-    metadata::{VCF_FIELD_FORMAT_ID_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY},
+    metadata::{
+        VCF_FIELD_FORMAT_ID_KEY, VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_RECORD_LAYOUT_FORMAT_KEYS,
+        VCF_RECORD_LAYOUT_INFO_KEYS, VCF_RECORD_LAYOUT_KEY,
+    },
 };
 
 const DOSAGE_MODE: &str = "dosage";
@@ -462,58 +465,91 @@ impl ResolvedFieldData<'_> {
 }
 
 /// Writes FORMAT and sample columns directly to the line buffer using pre-resolved genotypes.
+///
+/// `carried_keys` is the record's own FORMAT key list when the reader carried
+/// it. It is authoritative: those keys are emitted in that order, including a
+/// key whose value is missing in every sample. Without it the keys come from
+/// the schema and an all-missing one is dropped, because nothing distinguishes
+/// it from a key the record never had.
 fn write_resolved_format_and_samples(
     resolved: &ResolvedGenotypes,
     row: usize,
     num_samples: usize,
+    carried_keys: Option<&str>,
     line: &mut String,
 ) -> Result<()> {
     if resolved.struct_array.is_null(row) {
         return Ok(());
     }
 
-    // Compute which fields to keep (drop all-missing fields, matching bcftools behavior)
-    let keep: Vec<bool> = resolved
-        .fields
-        .iter()
-        .map(|f| !f.data.is_all_missing(row, num_samples))
-        .collect();
+    let emit: Vec<usize> = match carried_keys {
+        Some(keys) => {
+            // A carried key needs a column, not just a name: `resolve_batch_genotypes`
+            // makes an entry for every requested field, `Missing` when the batch
+            // has no such child, and emitting one of those would invent a
+            // FORMAT key the writer cannot fill.
+            let mut emit: Vec<usize> = split_format_keys(keys)
+                .filter_map(|key| {
+                    resolved.fields.iter().position(|f| {
+                        f.name == key && !matches!(f.data, ResolvedFieldData::Missing)
+                    })
+                })
+                .collect();
+            // A field the batch supplies that the record's own list does not
+            // name is an addition made downstream of the read, so it follows
+            // the carried keys — the same rule INFO uses. The all-missing test
+            // still applies to it: the schema gives every record every key the
+            // header declares, so a key this record never carried is present
+            // and missing in every sample, and appending it would put a key on
+            // the line that the source did not have.
+            let carried = emit.len();
+            let appended: Vec<usize> = (0..resolved.fields.len())
+                .filter(|i| !emit[..carried].contains(i))
+                .filter(|&i| !resolved.fields[i].data.is_all_missing(row, num_samples))
+                .collect();
+            emit.extend(appended);
+            emit
+        }
+        None => (0..resolved.fields.len())
+            .filter(|&i| !resolved.fields[i].data.is_all_missing(row, num_samples))
+            .collect(),
+    };
 
-    if !keep.iter().any(|&k| k) {
+    if emit.is_empty() {
         return Ok(());
     }
 
     // Write FORMAT column
     line.push('\t');
-    let mut first = true;
-    for (field, &k) in resolved.fields.iter().zip(keep.iter()) {
-        if !k {
-            continue;
-        }
-        if !first {
+    for (n, &i) in emit.iter().enumerate() {
+        if n > 0 {
             line.push(':');
         }
-        line.push_str(field.name);
-        first = false;
+        line.push_str(resolved.fields[i].name);
     }
 
     // Write each sample's values
     for sample_idx in 0..num_samples {
         line.push('\t');
-        first = true;
-        for (field, &k) in resolved.fields.iter().zip(keep.iter()) {
-            if !k {
-                continue;
-            }
-            if !first {
+        for (n, &i) in emit.iter().enumerate() {
+            if n > 0 {
                 line.push(':');
             }
-            field.data.write_value(row, sample_idx, line)?;
-            first = false;
+            resolved.fields[i].data.write_value(row, sample_idx, line)?;
         }
     }
 
     Ok(())
+}
+
+/// Splits a carried FORMAT key list, dropping empty tokens.
+fn split_format_keys(keys: &str) -> impl Iterator<Item = &str> {
+    keys.split(':').filter(|key| !key.is_empty())
+}
+
+/// Splits a carried INFO key list, dropping empty tokens.
+fn split_info_keys(keys: &str) -> impl Iterator<Item = &str> {
+    keys.split(';').filter(|key| !key.is_empty())
 }
 
 /// A serialized VCF record as a string line
@@ -556,6 +592,18 @@ pub fn batch_to_vcf_lines(
         return Ok(Vec::new());
     }
 
+    // The layout columns are engine plumbing, not INFO data: a caller that
+    // passes every batch column as an INFO field must not see them on the line.
+    let layout_schema = batch.schema();
+    let info_fields: Vec<String> = info_fields
+        .iter()
+        .filter(|name| !is_record_layout_field(&layout_schema, name))
+        .cloned()
+        .collect();
+    let info_fields = info_fields.as_slice();
+    let carried_info_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_INFO_KEYS)?;
+    let carried_format_keys = carried_layout_column(batch, VCF_RECORD_LAYOUT_FORMAT_KEYS)?;
+
     // Look up core columns by name
     let chroms = get_string_column_by_name(batch, "chrom")?;
     let starts = get_u32_column_by_name(batch, "start")?;
@@ -580,6 +628,16 @@ pub fn batch_to_vcf_lines(
     } else {
         None
     };
+
+    // Position of each INFO field in `info_fields`, so a carried key list can be
+    // resolved to schema order in one pass per record.
+    let info_positions: std::collections::HashMap<&str, usize> = info_fields
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+    let mut field_order: Vec<&str> = Vec::with_capacity(info_fields.len());
+    let mut ordered: Vec<bool> = Vec::with_capacity(info_fields.len());
 
     let mut records = Vec::with_capacity(num_rows);
 
@@ -626,8 +684,36 @@ pub fn batch_to_vcf_lines(
             filters.value(row).to_string()
         };
 
-        // INFO
-        let info_str = build_info_string(batch, row, info_fields, &info_columns)?;
+        // INFO: a carried key list gives the source's own order. Keys it does
+        // not mention follow in schema order — that is where an annotator's
+        // newly added CSQ lands.
+        field_order.clear();
+        let mut carried_count = 0;
+        match carried_info_keys
+            .as_ref()
+            .and_then(|col| value_at(col, row))
+        {
+            Some(keys) => {
+                ordered.clear();
+                ordered.resize(info_fields.len(), false);
+                for key in split_info_keys(keys) {
+                    if let Some(&pos) = info_positions.get(key)
+                        && !ordered[pos]
+                    {
+                        ordered[pos] = true;
+                        field_order.push(info_fields[pos].as_str());
+                    }
+                }
+                carried_count = field_order.len();
+                for (pos, name) in info_fields.iter().enumerate() {
+                    if !ordered[pos] {
+                        field_order.push(name.as_str());
+                    }
+                }
+            }
+            None => field_order.extend(info_fields.iter().map(String::as_str)),
+        }
+        let info_str = build_info_string(batch, row, &field_order, carried_count, &info_columns)?;
 
         // Build the VCF line
         let mut line = format!(
@@ -635,8 +721,17 @@ pub fn batch_to_vcf_lines(
         );
 
         // FORMAT and samples
+        let row_format_keys = carried_format_keys
+            .as_ref()
+            .and_then(|col| value_at(col, row));
         if let Some(ref resolved) = resolved_genotypes {
-            write_resolved_format_and_samples(resolved, row, num_samples, &mut line)?;
+            write_resolved_format_and_samples(
+                resolved,
+                row,
+                num_samples,
+                row_format_keys,
+                &mut line,
+            )?;
         } else if !sample_names.is_empty() && !format_fields.is_empty() {
             let (format_str, samples_str) = build_format_and_samples(
                 batch,
@@ -644,6 +739,7 @@ pub fn batch_to_vcf_lines(
                 format_fields,
                 sample_names,
                 format_columns.as_ref(),
+                row_format_keys,
             )?;
             if !format_str.is_empty() {
                 line.push('\t');
@@ -661,6 +757,53 @@ pub fn batch_to_vcf_lines(
     Ok(records)
 }
 
+/// True when `name` is a carried record-layout column of `schema`.
+///
+/// Decided by the field's marker metadata, never by its name: a VCF may
+/// legitimately declare an INFO or FORMAT field called `_vcf_info_keys`, and
+/// treating that field as plumbing would consume real data as ordering
+/// information and drop it from the output.
+///
+/// A marked column is engine plumbing: the writer reads it to order INFO and
+/// FORMAT and never puts it on a record, so it must reach neither the record
+/// body nor the header's `##INFO` declarations, whichever list a caller hands
+/// the writer.
+pub(crate) fn is_record_layout_field(schema: &Schema, name: &str) -> bool {
+    schema.index_of(name).is_ok_and(|idx| {
+        schema
+            .field(idx)
+            .metadata()
+            .contains_key(VCF_RECORD_LAYOUT_KEY)
+    })
+}
+
+/// Resolves the carried record-layout column playing `role`, if the batch has
+/// one.
+fn carried_layout_column<'a>(
+    batch: &'a RecordBatch,
+    role: &str,
+) -> Result<Option<StringColumnRef<'a>>> {
+    let schema = batch.schema();
+    let Some(idx) = schema.fields().iter().position(|field| {
+        field
+            .metadata()
+            .get(VCF_RECORD_LAYOUT_KEY)
+            .is_some_and(|marker| marker == role)
+    }) else {
+        return Ok(None);
+    };
+    get_string_column(batch.column(idx), schema.field(idx).name()).map(Some)
+}
+
+/// Reads a carried layout value, treating null as "this record carries none".
+fn value_at<'a>(column: &'a StringColumnRef<'a>, row: usize) -> Option<&'a str> {
+    if column.is_null(row) {
+        None
+    } else {
+        Some(column.value(row))
+    }
+}
+
 /// Gets a string column from the batch by name (supports both Utf8 and LargeUtf8)
 fn get_string_column_by_name<'a>(
     batch: &'a RecordBatch,
@@ -669,8 +812,15 @@ fn get_string_column_by_name<'a>(
     let idx = batch.schema().index_of(name).map_err(|_| {
         DataFusionError::Execution(format!("Required column '{name}' not found in batch"))
     })?;
-    let column = batch.column(idx);
+    get_string_column(batch.column(idx), name)
+}
 
+/// Resolves an already-located column as a string column, whatever Arrow string
+/// flavour it holds.
+fn get_string_column<'a>(
+    column: &'a datafusion::arrow::array::ArrayRef,
+    name: &str,
+) -> Result<StringColumnRef<'a>> {
     // Try StringArray, LargeStringArray, then StringViewArray
     if let Some(arr) = column.as_any().downcast_ref::<StringArray>() {
         return Ok(StringColumnRef::Small(arr));
@@ -783,16 +933,23 @@ fn build_format_column_map(
     map
 }
 
-/// Builds the INFO string from INFO columns
+/// Builds the INFO string from INFO columns, in `field_order`.
+///
+/// The first `carried_count` entries came from the record's own key list, so
+/// they are present by definition: a null there is `KEY=.` in the source, not an
+/// absent key, and dropping it would lose the field. Everything after them is
+/// dropped when null, which is what an absent key looks like once parsed.
 fn build_info_string(
     batch: &RecordBatch,
     row: usize,
-    info_fields: &[String],
+    field_order: &[&str],
+    carried_count: usize,
     info_columns: &std::collections::HashMap<String, usize>,
 ) -> Result<String> {
     let mut info_parts = Vec::new();
 
-    for field_name in info_fields {
+    for (position, field_name) in field_order.iter().enumerate() {
+        let field_name = *field_name;
         let col_idx = match info_columns.get(field_name) {
             Some(&idx) => idx,
             None => continue, // Column not in batch, skip
@@ -800,13 +957,21 @@ fn build_info_string(
 
         let column = batch.column(col_idx);
         if column.is_null(row) {
+            if position < carried_count {
+                // A Flag has no value to be missing; its key alone is the value.
+                if matches!(column.data_type(), DataType::Boolean) {
+                    info_parts.push(field_name.to_string());
+                } else {
+                    info_parts.push(format!("{field_name}=."));
+                }
+            }
             continue;
         }
 
         if let Some(value_str) = extract_info_value_string(column.as_ref(), row)? {
             if value_str == "true" {
                 // Flag type - just include the name
-                info_parts.push(field_name.clone());
+                info_parts.push(field_name.to_string());
             } else if value_str != "false" {
                 info_parts.push(format!("{field_name}={value_str}"));
             }
@@ -943,47 +1108,113 @@ fn build_format_and_samples(
     format_fields: &[String],
     sample_names: &[String],
     format_columns: Option<&std::collections::HashMap<(String, String), usize>>,
+    carried_keys: Option<&str>,
 ) -> Result<(String, Vec<String>)> {
     if sample_names.is_empty() || format_fields.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+
+    // A carried key list is the record's own, so it decides which keys are
+    // emitted first and in what order. Keys it names that were not selected for
+    // output have no column to render and are dropped. Keys the batch supplies
+    // that the list does not name are additions made downstream of the read;
+    // they follow, exactly as an added INFO key does.
+    let (selected, carried_count): (Vec<&str>, usize) = match carried_keys {
+        Some(keys) => {
+            let mut selected: Vec<&str> = split_format_keys(keys)
+                .filter(|key| format_fields.iter().any(|field| field == key))
+                .collect();
+            let carried_count = selected.len();
+            selected.extend(
+                format_fields
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|field| !split_format_keys(keys).any(|key| key == *field)),
+            );
+            (selected, carried_count)
+        }
+        None => (format_fields.iter().map(String::as_str).collect(), 0),
+    };
+    if selected.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
 
     // Multisample sources keep FORMAT data in nested `genotypes` even when
     // only a subset (including one sample) is selected for output.
     let has_nested_genotypes = batch.schema().column_with_name("genotypes").is_some();
-    if has_nested_genotypes {
-        let field_values =
-            collect_nested_multisample_values(batch, row, format_fields, sample_names)?;
-        let (format_str, samples) =
-            filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
-        return Ok((format_str, samples));
-    }
 
-    let format_columns = format_columns.ok_or_else(|| {
-        DataFusionError::Execution("Missing single-sample FORMAT column mapping".to_string())
-    })?;
-
-    // Collect values in field × sample order for filtering
-    let mut field_values: Vec<Vec<String>> = Vec::with_capacity(format_fields.len());
-    for format_field in format_fields {
-        let mut sample_vals = Vec::with_capacity(sample_names.len());
-        for sample_name in sample_names {
-            let key = (sample_name.clone(), format_field.clone());
-            let value = match format_columns.get(&key) {
-                Some(&col_idx) => {
-                    let column = batch.column(col_idx);
-                    extract_sample_value_string(column.as_ref(), row)?
-                }
-                None => ".".to_string(),
-            };
-            sample_vals.push(value);
+    // A carried key is only reproducible while the batch still supplies its
+    // column; a projection may drop one and keep the layout column. Where it
+    // does, the key falls back to the all-missing rule below, which drops it
+    // rather than emitting `.` for every sample.
+    let supplied = |name: &str| -> bool {
+        if has_nested_genotypes {
+            batch
+                .schema()
+                .index_of("genotypes")
+                .ok()
+                .and_then(|idx| batch.column(idx).as_any().downcast_ref::<StructArray>())
+                .is_some_and(|genotypes| genotypes.column_by_name(name).is_some())
+        } else {
+            format_columns.is_some_and(|columns| {
+                sample_names
+                    .iter()
+                    .any(|sample| columns.contains_key(&(sample.clone(), name.to_string())))
+            })
         }
-        field_values.push(sample_vals);
-    }
+    };
+    // Keep a flag per position rather than a prefix length: an unsupplied
+    // carried key does not disqualify the supplied ones after it.
+    let must_keep: Vec<bool> = selected
+        .iter()
+        .enumerate()
+        .map(|(i, name)| i < carried_count && supplied(name))
+        .collect();
 
-    let (format_str, samples) =
-        filter_all_missing_format_fields(format_fields, &field_values, sample_names.len());
-    Ok((format_str, samples))
+    let field_values = if has_nested_genotypes {
+        collect_nested_multisample_values(batch, row, &selected, sample_names)?
+    } else {
+        let format_columns = format_columns.ok_or_else(|| {
+            DataFusionError::Execution("Missing single-sample FORMAT column mapping".to_string())
+        })?;
+
+        // Collect values in field × sample order for filtering
+        let mut field_values: Vec<Vec<String>> = Vec::with_capacity(selected.len());
+        for format_field in &selected {
+            let mut sample_vals = Vec::with_capacity(sample_names.len());
+            for sample_name in sample_names {
+                let key = (sample_name.clone(), (*format_field).to_string());
+                let value = match format_columns.get(&key) {
+                    Some(&col_idx) => {
+                        let column = batch.column(col_idx);
+                        extract_sample_value_string(column.as_ref(), row)?
+                    }
+                    None => ".".to_string(),
+                };
+                sample_vals.push(value);
+            }
+            field_values.push(sample_vals);
+        }
+        field_values
+    };
+
+    // A carried key is kept even when every sample is missing — that is the
+    // whole point, since a `.` in the source parses to the same null as an
+    // absent key. Everything after the carried ones is dropped when missing in
+    // every sample: without the record's own list, that is indistinguishable
+    // from a key it never carried.
+    let keep: Vec<bool> = field_values
+        .iter()
+        .enumerate()
+        .map(|(i, sample_vals)| must_keep[i] || sample_vals.iter().any(|v| v != "."))
+        .collect();
+
+    Ok(join_format_fields(
+        &selected,
+        &field_values,
+        &keep,
+        sample_names.len(),
+    ))
 }
 
 /// Collects per-field, per-sample values from the nested genotypes column.
@@ -991,7 +1222,7 @@ fn build_format_and_samples(
 fn collect_nested_multisample_values(
     batch: &RecordBatch,
     row: usize,
-    format_fields: &[String],
+    format_fields: &[&str],
     sample_names: &[String],
 ) -> Result<Vec<Vec<String>>> {
     let genotypes_idx = batch.schema().index_of("genotypes").map_err(|_| {
@@ -1035,24 +1266,18 @@ fn collect_nested_multisample_values(
     Ok(field_values)
 }
 
-/// Filters out FORMAT fields where ALL samples have missing values for this row.
-/// Returns the filtered FORMAT string and filtered sample value strings.
-/// This matches bcftools behavior of omitting per-row all-missing FORMAT fields.
-fn filter_all_missing_format_fields(
-    format_fields: &[String],
+/// Joins the kept FORMAT fields into the FORMAT column and one string per sample.
+fn join_format_fields(
+    format_fields: &[&str],
     field_values: &[Vec<String>],
+    keep: &[bool],
     num_samples: usize,
 ) -> (String, Vec<String>) {
-    let keep: Vec<bool> = field_values
-        .iter()
-        .map(|sample_vals| sample_vals.iter().any(|v| v != "."))
-        .collect();
-
     let filtered_fields: Vec<&str> = format_fields
         .iter()
         .zip(keep.iter())
         .filter(|&(_, &k)| k)
-        .map(|(f, _)| f.as_str())
+        .map(|(f, _)| *f)
         .collect();
     let format_str = filtered_fields.join(":");
 
@@ -1167,9 +1392,21 @@ fn extract_sample_value_string(array: &dyn Array, row: usize) -> Result<String> 
 mod tests {
     use super::*;
     use datafusion::arrow::array::{
-        Float64Builder, Int32Builder, ListBuilder, StringBuilder, StructArray,
+        ArrayRef, Float64Builder, Int32Builder, ListBuilder, StringBuilder, StructArray,
     };
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion_bio_format_core::metadata::{
+        VCF_FIELD_FIELD_TYPE_KEY, VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN,
+    };
+
+    /// A layout column as the reader builds it: named for humans, marked for
+    /// machines. The marker is what the writer keys off.
+    fn layout_field(name: &str, role: &str) -> Field {
+        Field::new(name, DataType::Utf8, true).with_metadata(std::collections::HashMap::from([(
+            VCF_RECORD_LAYOUT_KEY.to_string(),
+            role.to_string(),
+        )]))
+    }
     use std::sync::Arc;
 
     fn create_test_schema() -> Arc<Schema> {
@@ -2040,5 +2277,530 @@ mod tests {
         // Sample values should have 2 components (PL omitted)
         assert_eq!(parts[9], "0/1:30");
         assert_eq!(parts[10], "1/1:40");
+    }
+
+    // ---- carried record layout ------------------------------------------
+    //
+    // A VCF's INFO key order and FORMAT key list are per record, and neither
+    // survives the typed columns: every record carries every key the header
+    // declares, and a key whose value is missing in every sample is null in the
+    // column exactly like an absent key. A reader asked to carry the layout
+    // supplies both as `;`- and `:`-separated key lists.
+
+    /// One record, one sample. INFO holds `AC` then `AF` in schema order;
+    /// FORMAT holds `GT`, `PS` and `DP`, with `PS` null (missing in the only
+    /// sample). `csq` stands in for a key an annotator added, which no source
+    /// layout mentions.
+    fn layout_batch(
+        info_keys: Option<&str>,
+        format_keys: Option<&str>,
+        csq: Option<&str>,
+        ps: Option<i32>,
+        ac: Option<i32>,
+    ) -> RecordBatch {
+        let mut fields = vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new("AC", DataType::Int32, true),
+            Field::new("AF", DataType::Float64, true),
+            Field::new("GT", DataType::Utf8, true),
+            Field::new("PS", DataType::Int32, true),
+            Field::new("DP", DataType::Int32, true),
+        ];
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["G"])),
+            Arc::new(Float64Array::from(vec![Some(50.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+            Arc::new(Int32Array::from(vec![ac])),
+            Arc::new(Float64Array::from(vec![Some(0.5)])),
+            Arc::new(StringArray::from(vec![Some("0/1")])),
+            Arc::new(Int32Array::from(vec![ps])),
+            Arc::new(Int32Array::from(vec![Some(25)])),
+        ];
+        if csq.is_some() {
+            fields.push(Field::new("CSQ", DataType::Utf8, true));
+            columns.push(Arc::new(StringArray::from(vec![csq])));
+        }
+        if info_keys.is_some() || format_keys.is_some() {
+            fields.push(layout_field(
+                VCF_INFO_KEYS_COLUMN,
+                VCF_RECORD_LAYOUT_INFO_KEYS,
+            ));
+            columns.push(Arc::new(StringArray::from(vec![info_keys])));
+            fields.push(layout_field(
+                VCF_FORMAT_KEYS_COLUMN,
+                VCF_RECORD_LAYOUT_FORMAT_KEYS,
+            ));
+            columns.push(Arc::new(StringArray::from(vec![format_keys])));
+        }
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    }
+
+    fn layout_line(
+        info_keys: Option<&str>,
+        format_keys: Option<&str>,
+        csq: Option<&str>,
+        info_fields: &[&str],
+        format_fields: &[&str],
+    ) -> String {
+        layout_line_with_ps(
+            info_keys,
+            format_keys,
+            csq,
+            None,
+            info_fields,
+            format_fields,
+        )
+    }
+
+    fn layout_line_with_ps(
+        info_keys: Option<&str>,
+        format_keys: Option<&str>,
+        csq: Option<&str>,
+        ps: Option<i32>,
+        info_fields: &[&str],
+        format_fields: &[&str],
+    ) -> String {
+        let batch = layout_batch(info_keys, format_keys, csq, ps, Some(1));
+        let info_fields: Vec<String> = info_fields.iter().map(|s| s.to_string()).collect();
+        let format_fields: Vec<String> = format_fields.iter().map(|s| s.to_string()).collect();
+        let lines = batch_to_vcf_lines(
+            &batch,
+            &info_fields,
+            &format_fields,
+            &["SAMPLE1".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        lines[0].line.clone()
+    }
+
+    fn columns_of(line: &str) -> Vec<&str> {
+        line.split('\t').collect()
+    }
+
+    #[test]
+    fn without_a_carried_layout_info_follows_schema_order() {
+        let line = layout_line(None, None, None, &["AC", "AF"], &["GT", "PS", "DP"]);
+        let cols = columns_of(&line);
+        assert_eq!(cols[7], "AC=1;AF=0.5");
+        // PS is null in the only sample, so it cannot be told from an absent key.
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+    }
+
+    #[test]
+    fn carried_info_keys_order_the_info_column() {
+        let line = layout_line(
+            Some("AF;AC"),
+            Some("GT:DP"),
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        assert_eq!(columns_of(&line)[7], "AF=0.5;AC=1");
+    }
+
+    #[test]
+    fn a_key_the_carried_order_omits_is_appended() {
+        // An annotator's CSQ is not in the source's INFO, so it goes last.
+        let line = layout_line(
+            Some("AF;AC"),
+            Some("GT:DP"),
+            Some("T|missense"),
+            &["AC", "AF", "CSQ"],
+            &["GT", "PS", "DP"],
+        );
+        assert_eq!(columns_of(&line)[7], "AF=0.5;AC=1;CSQ=T|missense");
+    }
+
+    #[test]
+    fn a_carried_key_the_batch_does_not_supply_is_skipped() {
+        // The layout lists a key that was projected away; it cannot be rendered.
+        let line = layout_line(Some("AF;AC"), Some("GT:DP"), None, &["AF"], &["GT", "DP"]);
+        assert_eq!(columns_of(&line)[7], "AF=0.5");
+    }
+
+    #[test]
+    fn carried_format_keys_restore_a_key_missing_in_every_sample() {
+        // PS is Type=Integer, so a source "." parses to null — identical to the
+        // key being absent. Only the carried list can tell them apart.
+        let line = layout_line(
+            Some("AC;AF"),
+            Some("GT:PS:DP"),
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:PS:DP");
+        assert_eq!(cols[9], "0/1:.:25");
+    }
+
+    #[test]
+    fn carried_format_keys_are_emitted_in_their_own_order() {
+        let line = layout_line(
+            Some("AC;AF"),
+            Some("DP:GT"),
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "DP:GT");
+        assert_eq!(cols[9], "25:0/1");
+    }
+
+    #[test]
+    fn a_carried_format_key_that_was_not_selected_is_dropped() {
+        // Selecting a subset of FORMAT fields must not resurrect the others as
+        // all-missing columns.
+        let line = layout_line(
+            Some("AC;AF"),
+            Some("GT:PS:DP"),
+            None,
+            &["AC", "AF"],
+            &["GT", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+    }
+
+    #[test]
+    fn a_null_layout_row_falls_back_to_reconstruction() {
+        let line = layout_line(None, None, None, &["AC", "AF"], &["GT", "PS", "DP"]);
+        let with_null_layout = layout_line(
+            None::<&str>,
+            None::<&str>,
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        assert_eq!(line, with_null_layout);
+    }
+
+    #[test]
+    fn the_layout_columns_are_not_emitted_as_info_fields() {
+        // They are engine plumbing, not data. A caller that passes every batch
+        // column as an INFO field must not see them on the line.
+        let line = layout_line(
+            Some("AC;AF"),
+            Some("GT:PS:DP"),
+            None,
+            &["AC", "AF", VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN],
+            &["GT", "PS", "DP"],
+        );
+        assert_eq!(columns_of(&line)[7], "AC=1;AF=0.5");
+    }
+
+    /// Multisample sources keep FORMAT data in a nested `genotypes` struct and
+    /// take a different serializer path, which must honour the layout too.
+    fn nested_layout_line(format_keys: Option<&str>) -> String {
+        let mut gt = ListBuilder::new(StringBuilder::new());
+        gt.values().append_value("0/1");
+        gt.values().append_value("1/1");
+        gt.append(true);
+        let mut ps = ListBuilder::new(Int32Builder::new());
+        ps.values().append_null();
+        ps.values().append_null();
+        ps.append(true);
+        let mut dp = ListBuilder::new(Int32Builder::new());
+        dp.values().append_value(25);
+        dp.values().append_value(30);
+        dp.append(true);
+
+        let genotypes = StructArray::from(vec![
+            (
+                Arc::new(Field::new(
+                    "GT",
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    true,
+                )),
+                Arc::new(gt.finish()) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new(
+                    "PS",
+                    DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                    true,
+                )),
+                Arc::new(ps.finish()) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new(
+                    "DP",
+                    DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                    true,
+                )),
+                Arc::new(dp.finish()) as ArrayRef,
+            ),
+        ]);
+
+        let mut fields = create_test_schema().fields().to_vec();
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["G"])),
+            Arc::new(Float64Array::from(vec![Some(50.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+        ];
+        fields.push(Arc::new(Field::new(
+            "genotypes",
+            genotypes.data_type().clone(),
+            true,
+        )));
+        columns.push(Arc::new(genotypes));
+        if format_keys.is_some() {
+            fields.push(Arc::new(layout_field(
+                VCF_INFO_KEYS_COLUMN,
+                VCF_RECORD_LAYOUT_INFO_KEYS,
+            )));
+            columns.push(Arc::new(StringArray::from(vec![None::<&str>])));
+            fields.push(Arc::new(layout_field(
+                VCF_FORMAT_KEYS_COLUMN,
+                VCF_RECORD_LAYOUT_FORMAT_KEYS,
+            )));
+            columns.push(Arc::new(StringArray::from(vec![format_keys])));
+        }
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let format_fields: Vec<String> = ["GT", "PS", "DP"].iter().map(|s| s.to_string()).collect();
+        let samples: Vec<String> = ["S1", "S2"].iter().map(|s| s.to_string()).collect();
+        let lines = batch_to_vcf_lines(&batch, &[], &format_fields, &samples, true).unwrap();
+        assert_eq!(lines.len(), 1);
+        lines[0].line.clone()
+    }
+
+    #[test]
+    fn nested_genotypes_drop_an_all_missing_key_without_a_layout() {
+        let line = nested_layout_line(None);
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+        assert_eq!(cols[10], "1/1:30");
+    }
+
+    #[test]
+    fn nested_genotypes_honour_the_carried_format_keys() {
+        let line = nested_layout_line(Some("GT:PS:DP"));
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:PS:DP");
+        assert_eq!(cols[9], "0/1:.:25");
+        assert_eq!(cols[10], "1/1:.:30");
+    }
+
+    /// A pipeline that adds a FORMAT field supplies a column the source record
+    /// never had, so no carried key list can mention it. Dropping it silently
+    /// would lose annotation output; INFO already appends such keys.
+    #[test]
+    fn a_supplied_format_key_the_carried_list_omits_is_appended() {
+        let line = layout_line_with_ps(
+            Some("AC;AF"),
+            Some("GT:DP"),
+            None,
+            Some(7),
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP:PS");
+        assert_eq!(cols[9], "0/1:25:7");
+    }
+
+    /// The other half of that rule, and the one byte parity depends on: the
+    /// schema gives every record every FORMAT key the header declares, so a key
+    /// the record never carried is present but missing in every sample.
+    /// Appending those would add keys the source line did not have.
+    #[test]
+    fn a_format_key_missing_in_every_sample_is_not_appended() {
+        let line = layout_line_with_ps(
+            Some("AC;AF"),
+            Some("GT:DP"),
+            None,
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+    }
+
+    #[test]
+    fn nested_genotypes_append_a_supplied_key_the_carried_list_omits() {
+        // The nested fixture's PS is missing in every sample, so carrying
+        // "GT:DP" must not resurrect it, while DP — supplied and carried —
+        // stays put.
+        let line = nested_layout_line(Some("GT:DP"));
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+        assert_eq!(cols[10], "1/1:30");
+    }
+
+    /// `DP=.` in a source record is a key that is present with a missing value.
+    /// The parser turns it into the same null as a key the record never had, so
+    /// only the carried list can tell them apart — the INFO twin of the `PS`
+    /// case, and the reason the carry exists.
+    #[test]
+    fn a_carried_info_key_with_a_missing_value_keeps_its_place() {
+        let batch = layout_batch(Some("AC;AF"), Some("GT:DP"), None, None, None);
+        let lines = batch_to_vcf_lines(
+            &batch,
+            &["AC".to_string(), "AF".to_string()],
+            &["GT".to_string(), "PS".to_string(), "DP".to_string()],
+            &["SAMPLE1".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(columns_of(&lines[0].line)[7], "AC=.;AF=0.5");
+    }
+
+    /// The same column with no carried list stays absent: without the record's
+    /// own key list, a null is indistinguishable from a key it never had.
+    #[test]
+    fn an_uncarried_info_key_with_a_null_value_stays_absent() {
+        let batch = layout_batch(None, None, None, None, None);
+        let lines = batch_to_vcf_lines(
+            &batch,
+            &["AC".to_string(), "AF".to_string()],
+            &["GT".to_string(), "PS".to_string(), "DP".to_string()],
+            &["SAMPLE1".to_string()],
+            true,
+        )
+        .unwrap();
+        assert_eq!(columns_of(&lines[0].line)[7], "AF=0.5");
+    }
+
+    /// A VCF may declare an INFO field with either reserved name. Without the
+    /// carry, such a column is ordinary data: identifying plumbing by name
+    /// alone would consume it as ordering information, drop it from the record,
+    /// and — if it were not a string — fail serialization outright.
+    #[test]
+    fn a_source_field_named_like_a_layout_column_is_still_data() {
+        let mut source_metadata = std::collections::HashMap::new();
+        source_metadata.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+            Field::new("end", DataType::UInt32, false),
+            Field::new("id", DataType::Utf8, true),
+            Field::new("ref", DataType::Utf8, false),
+            Field::new("alt", DataType::Utf8, false),
+            Field::new("qual", DataType::Float64, true),
+            Field::new("filter", DataType::Utf8, true),
+            Field::new(VCF_INFO_KEYS_COLUMN, DataType::Int32, true).with_metadata(source_metadata),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["G"])),
+                Arc::new(Float64Array::from(vec![Some(50.0)])),
+                Arc::new(StringArray::from(vec![Some("PASS")])),
+                Arc::new(Int32Array::from(vec![Some(42)])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &[VCF_INFO_KEYS_COLUMN.to_string()], &[], &[], true)
+            .unwrap();
+        assert_eq!(
+            columns_of(&lines[0].line)[7],
+            format!("{VCF_INFO_KEYS_COLUMN}=42")
+        );
+    }
+
+    /// A projection can keep the layout column while dropping a FORMAT child.
+    /// The carried list still names that key, but the batch has no column for
+    /// it, so there is nothing to reproduce — emitting the key with `.` for
+    /// every sample would invent a field the writer cannot fill.
+    #[test]
+    fn a_carried_format_key_the_batch_does_not_supply_is_dropped() {
+        let mut gt = ListBuilder::new(StringBuilder::new());
+        gt.values().append_value("0/1");
+        gt.values().append_value("1/1");
+        gt.append(true);
+        let mut dp = ListBuilder::new(Int32Builder::new());
+        dp.values().append_value(25);
+        dp.values().append_value(30);
+        dp.append(true);
+
+        // `PS` is absent from the struct entirely — projected away upstream.
+        let genotypes = StructArray::from(vec![
+            (
+                Arc::new(Field::new(
+                    "GT",
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    true,
+                )),
+                Arc::new(gt.finish()) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new(
+                    "DP",
+                    DataType::List(Arc::new(Field::new("item", DataType::Int32, true))),
+                    true,
+                )),
+                Arc::new(dp.finish()) as ArrayRef,
+            ),
+        ]);
+
+        let mut fields = create_test_schema().fields().to_vec();
+        let mut columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec!["chr1"])),
+            Arc::new(UInt32Array::from(vec![99u32])),
+            Arc::new(UInt32Array::from(vec![100u32])),
+            Arc::new(StringArray::from(vec![None::<&str>])),
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(StringArray::from(vec!["G"])),
+            Arc::new(Float64Array::from(vec![Some(50.0)])),
+            Arc::new(StringArray::from(vec![Some("PASS")])),
+        ];
+        fields.push(Arc::new(Field::new(
+            "genotypes",
+            genotypes.data_type().clone(),
+            true,
+        )));
+        columns.push(Arc::new(genotypes));
+        fields.push(Arc::new(layout_field(
+            VCF_INFO_KEYS_COLUMN,
+            VCF_RECORD_LAYOUT_INFO_KEYS,
+        )));
+        columns.push(Arc::new(StringArray::from(vec![None::<&str>])));
+        fields.push(Arc::new(layout_field(
+            VCF_FORMAT_KEYS_COLUMN,
+            VCF_RECORD_LAYOUT_FORMAT_KEYS,
+        )));
+        columns.push(Arc::new(StringArray::from(vec![Some("GT:PS:DP")])));
+
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let format_fields: Vec<String> = ["GT", "PS", "DP"].iter().map(|s| s.to_string()).collect();
+        let samples: Vec<String> = ["S1", "S2"].iter().map(|s| s.to_string()).collect();
+        let lines = batch_to_vcf_lines(&batch, &[], &format_fields, &samples, true).unwrap();
+
+        let cols = columns_of(&lines[0].line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+        assert_eq!(cols[10], "1/1:30");
     }
 }

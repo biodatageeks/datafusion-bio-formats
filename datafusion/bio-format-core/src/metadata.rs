@@ -67,6 +67,42 @@ pub const VCF_CONTIGS_INDEXED_KEY: &str = "bio.vcf.contigs.indexed";
 /// VCF ALT allele definitions stored as JSON array of AltAlleleMetadata
 pub const VCF_ALTERNATIVE_ALLELES_KEY: &str = "bio.vcf.alternative_alleles";
 
+/// Column holding a record's INFO keys in source order, `;`-separated.
+///
+/// Present only when a reader was asked to carry the record layout. A VCF's
+/// INFO keys are ordered per record, and that order is not recoverable from the
+/// typed columns: every record carries every key the header declares, in schema
+/// order. When this column is present the writer emits the listed keys first,
+/// in the listed order, then any remaining key the batch supplies — which is
+/// how an annotator's newly added `CSQ` lands at the end.
+pub const VCF_INFO_KEYS_COLUMN: &str = "_vcf_info_keys";
+
+/// Column holding a record's FORMAT keys in source order, `:`-separated.
+///
+/// Present only when a reader was asked to carry the record layout. The key
+/// list is per record — one file can hold both `GT:PS:DP` and `GT:DP:PS` — and
+/// a key whose value is missing in every sample is indistinguishable from an
+/// absent key once parsed, because both are null in the typed column. Without
+/// this list the writer has to infer the keys from which values are non-missing
+/// and silently drops the all-missing ones.
+pub const VCF_FORMAT_KEYS_COLUMN: &str = "_vcf_format_keys";
+
+/// Field-level marker on a carried record-layout column.
+///
+/// The value is the column's role: `"info_keys"` or `"format_keys"`. A reader
+/// asked to carry the layout sets it; nothing else does. Consumers must
+/// identify the columns by this marker rather than by name, because a VCF may
+/// legitimately declare an INFO or FORMAT field with either reserved name, and
+/// treating that field as plumbing would consume real data as ordering
+/// information and drop it from the output.
+pub const VCF_RECORD_LAYOUT_KEY: &str = "bio.vcf.record_layout";
+
+/// Value of [`VCF_RECORD_LAYOUT_KEY`] on the INFO key-order column.
+pub const VCF_RECORD_LAYOUT_INFO_KEYS: &str = "info_keys";
+
+/// Value of [`VCF_RECORD_LAYOUT_KEY`] on the FORMAT key-list column.
+pub const VCF_RECORD_LAYOUT_FORMAT_KEYS: &str = "format_keys";
+
 /// The source file's `##` header lines, verbatim and in file order, stored as a
 /// JSON array of strings (the `#CHROM` column line is not included).
 ///
