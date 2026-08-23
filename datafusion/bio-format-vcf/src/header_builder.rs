@@ -172,9 +172,11 @@ struct CurrentDeclaration {
     kind: &'static str,
     id: String,
     /// The attributes the typed schema can represent, compared against a raw
-    /// line to decide whether it was redefined. Everything else on the line is
-    /// invisible to the schema and must not count as evidence of a change.
-    compare: Vec<(&'static str, String)>,
+    /// line to decide whether it was redefined. `None` means the schema
+    /// expects the attribute to be absent, which is a real expectation and not
+    /// "skip this check". Attributes not listed here are invisible to the
+    /// schema and must not count as evidence of a change.
+    compare: Vec<(&'static str, Option<String>)>,
     rendered: String,
 }
 
@@ -260,10 +262,11 @@ impl CurrentDeclaration {
             return true;
         };
         self.compare.iter().all(|(key, expected)| {
-            attributes
+            let actual = attributes
                 .iter()
                 .find(|(k, _)| k == key)
-                .is_some_and(|(_, v)| v == expected)
+                .map(|(_, v)| v.as_str());
+            actual == expected.as_deref()
         })
     }
 
@@ -319,7 +322,7 @@ fn passthrough_header_lines(
                     filter.id, filter.description
                 ),
                 kind: "##FILTER=",
-                compare: vec![("Description", filter.description)],
+                compare: vec![("Description", Some(filter.description))],
                 id: filter.id,
             });
         }
@@ -333,12 +336,13 @@ fn passthrough_header_lines(
                 continue;
             }
             let mut rendered = format!("##contig=<ID={}", contig.id);
-            let mut compare = Vec::new();
             if let Some(length) = contig.length {
                 rendered.push_str(&format!(",length={length}"));
-                compare.push(("length", length.to_string()));
             }
             rendered.push('>');
+            // `None` here means "the schema declares no length", so a raw line
+            // that still carries one has been superseded.
+            let compare = vec![("length", contig.length.map(|l| l.to_string()))];
             current.push(CurrentDeclaration {
                 kind: "##contig=",
                 id: contig.id,
@@ -358,7 +362,7 @@ fn passthrough_header_lines(
             current.push(CurrentDeclaration {
                 rendered: format!("##ALT=<ID={},Description=\"{}\">", alt.id, alt.description),
                 kind: "##ALT=",
-                compare: vec![("Description", alt.description)],
+                compare: vec![("Description", Some(alt.description))],
                 id: alt.id,
             });
         }
@@ -379,9 +383,9 @@ fn passthrough_header_lines(
             kind: "##INFO=",
             id: name.clone(),
             compare: vec![
-                ("Number", number),
-                ("Type", vcf_type),
-                ("Description", description),
+                ("Number", Some(number)),
+                ("Type", Some(vcf_type)),
+                ("Description", Some(description)),
             ],
         });
     }
@@ -401,9 +405,9 @@ fn passthrough_header_lines(
             kind: "##FORMAT=",
             id: name.clone(),
             compare: vec![
-                ("Number", number),
-                ("Type", vcf_type),
-                ("Description", description),
+                ("Number", Some(number)),
+                ("Type", Some(vcf_type)),
+                ("Description", Some(description)),
             ],
         });
     }
@@ -789,6 +793,28 @@ mod tests {
             "{lines:#?}"
         );
         assert_eq!(lines[0], "##fileformat=VCFv4.3");
+    }
+
+    #[test]
+    fn dropping_a_contig_length_replaces_the_raw_declaration() {
+        // A typed contig with no length renders as `##contig=<ID=chr1>`. Absence
+        // is a real expectation, not "nothing to compare": keeping the raw line
+        // would re-emit a length the schema no longer declares.
+        let raw = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100>"];
+        let schema = with_typed(
+            schema_with_raw_header(&raw, &[]),
+            None,
+            &[],
+            &[("chr1", None)],
+        );
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                "##fileformat=VCFv4.2".to_string(),
+                "##contig=<ID=chr1>".to_string(),
+            ]
+        );
     }
 
     #[test]
