@@ -168,12 +168,13 @@ pub fn build_vcf_header_lines(
 
 /// A structured header declaration the current schema would emit.
 struct CurrentDeclaration {
-    /// `"##INFO="` or `"##FORMAT="`.
+    /// `"##INFO="`, `"##FORMAT="`, `"##FILTER="`, `"##contig="` or `"##ALT="`.
     kind: &'static str,
     id: String,
-    number: String,
-    vcf_type: String,
-    description: String,
+    /// The attributes the typed schema can represent, compared against a raw
+    /// line to decide whether it was redefined. Everything else on the line is
+    /// invisible to the schema and must not count as evidence of a change.
+    compare: Vec<(&'static str, String)>,
     rendered: String,
 }
 
@@ -258,15 +259,12 @@ impl CurrentDeclaration {
         let Some(attributes) = parse_structured_attributes(raw) else {
             return true;
         };
-        let get = |key: &str| {
+        self.compare.iter().all(|(key, expected)| {
             attributes
                 .iter()
                 .find(|(k, _)| k == key)
-                .map(|(_, v)| v.as_str())
-        };
-        get("Number") == Some(self.number.as_str())
-            && get("Type") == Some(self.vcf_type.as_str())
-            && get("Description") == Some(self.description.as_str())
+                .is_some_and(|(_, v)| v == expected)
+        })
     }
 
     /// True when `raw` is a declaration of this same kind and ID.
@@ -302,9 +300,72 @@ fn passthrough_header_lines(
     // byte-reproducible run to run.
     let mut seen = HashSet::new();
     let mut current: Vec<CurrentDeclaration> = Vec::new();
+    let schema_metadata = schema.metadata();
+
+    // Schema-level declarations. Only the attributes the typed model carries are
+    // compared: ContigMetadata holds id and length, so a contig whose length
+    // still agrees keeps its raw line — and with it `assembly`, `md5` and
+    // anything else the model cannot represent.
+    if let Some(json) = schema_metadata.get(VCF_FILTERS_KEY)
+        && let Some(filters) = from_json_string::<Vec<FilterMetadata>>(json)
+    {
+        for filter in filters {
+            if !seen.insert(("FILTER", filter.id.clone())) {
+                continue;
+            }
+            current.push(CurrentDeclaration {
+                rendered: format!(
+                    "##FILTER=<ID={},Description=\"{}\">",
+                    filter.id, filter.description
+                ),
+                kind: "##FILTER=",
+                compare: vec![("Description", filter.description)],
+                id: filter.id,
+            });
+        }
+    }
+
+    if let Some(json) = schema_metadata.get(VCF_CONTIGS_KEY)
+        && let Some(contigs) = from_json_string::<Vec<ContigMetadata>>(json)
+    {
+        for contig in contigs {
+            if !seen.insert(("contig", contig.id.clone())) {
+                continue;
+            }
+            let mut rendered = format!("##contig=<ID={}", contig.id);
+            let mut compare = Vec::new();
+            if let Some(length) = contig.length {
+                rendered.push_str(&format!(",length={length}"));
+                compare.push(("length", length.to_string()));
+            }
+            rendered.push('>');
+            current.push(CurrentDeclaration {
+                kind: "##contig=",
+                id: contig.id,
+                compare,
+                rendered,
+            });
+        }
+    }
+
+    if let Some(json) = schema_metadata.get(VCF_ALTERNATIVE_ALLELES_KEY)
+        && let Some(alts) = from_json_string::<Vec<AltAlleleMetadata>>(json)
+    {
+        for alt in alts {
+            if !seen.insert(("ALT", alt.id.clone())) {
+                continue;
+            }
+            current.push(CurrentDeclaration {
+                rendered: format!("##ALT=<ID={},Description=\"{}\">", alt.id, alt.description),
+                kind: "##ALT=",
+                compare: vec![("Description", alt.description)],
+                id: alt.id,
+            });
+        }
+    }
 
     for name in info_fields {
-        if !seen.insert(("INFO", name.as_str())) {
+        if !seen.insert(("INFO", name.clone())) {
             continue;
         }
         let Ok(idx) = schema.index_of(name) else {
@@ -317,14 +378,16 @@ fn passthrough_header_lines(
             ),
             kind: "##INFO=",
             id: name.clone(),
-            number,
-            vcf_type,
-            description,
+            compare: vec![
+                ("Number", number),
+                ("Type", vcf_type),
+                ("Description", description),
+            ],
         });
     }
 
     for name in format_fields {
-        if !seen.insert(("FORMAT", name.as_str())) {
+        if !seen.insert(("FORMAT", name.clone())) {
             continue;
         }
         let Some(field) = find_format_field(schema, name, sample_names) else {
@@ -337,16 +400,30 @@ fn passthrough_header_lines(
             ),
             kind: "##FORMAT=",
             id: name.clone(),
-            number,
-            vcf_type,
-            description,
+            compare: vec![
+                ("Number", number),
+                ("Type", vcf_type),
+                ("Description", description),
+            ],
         });
     }
+
+    // `##fileformat` is unstructured and must stay the first line, so a change is
+    // substituted in place rather than dropped and re-appended.
+    let file_format_line = schema_metadata
+        .get(VCF_FILE_FORMAT_KEY)
+        .map(|ff| format!("##fileformat={ff}"));
 
     let mut lines: Vec<String> = Vec::with_capacity(raw_lines.len() + current.len());
     let mut satisfied: HashSet<usize> = HashSet::new();
 
     for raw in raw_lines {
+        if raw.starts_with("##fileformat=")
+            && let Some(current_line) = &file_format_line
+        {
+            lines.push(current_line.clone());
+            continue;
+        }
         match current.iter().position(|d| d.declares(&raw)) {
             // Redefined downstream: drop here, re-emit at the end.
             Some(i) if !current[i].matches_raw(&raw) => continue,
@@ -622,6 +699,116 @@ mod tests {
         "String",
         "Consequence annotations from Ensembl VEP",
     );
+
+    /// Adds typed schema-level metadata on top of a raw-header schema.
+    fn with_typed(
+        schema: Arc<Schema>,
+        file_format: Option<&str>,
+        filters: &[(&str, &str)],
+        contigs: &[(&str, Option<u64>)],
+    ) -> Arc<Schema> {
+        let mut md = schema.metadata().clone();
+        if let Some(ff) = file_format {
+            md.insert(VCF_FILE_FORMAT_KEY.to_string(), ff.to_string());
+        }
+        let filters: Vec<FilterMetadata> = filters
+            .iter()
+            .map(|(id, description)| FilterMetadata {
+                id: id.to_string(),
+                description: description.to_string(),
+            })
+            .collect();
+        md.insert(
+            VCF_FILTERS_KEY.to_string(),
+            serde_json::to_string(&filters).unwrap(),
+        );
+        let contigs: Vec<ContigMetadata> = contigs
+            .iter()
+            .map(|(id, length)| ContigMetadata {
+                id: id.to_string(),
+                length: *length,
+                metadata: HashMap::new(),
+            })
+            .collect();
+        md.insert(
+            VCF_CONTIGS_KEY.to_string(),
+            serde_json::to_string(&contigs).unwrap(),
+        );
+        Arc::new(Schema::new(schema.fields().clone()).with_metadata(md))
+    }
+
+    #[test]
+    fn typed_filter_absent_from_the_raw_header_is_declared() {
+        // A FILTER carried on records must be declared, or the output is invalid
+        // VCF. Passthrough must not silently omit one the schema knows about.
+        let raw = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100>"];
+        let schema = with_typed(
+            schema_with_raw_header(&raw, &[]),
+            None,
+            &[("LowQual", "Low quality")],
+            &[("chr1", Some(100))],
+        );
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "##FILTER=<ID=LowQual,Description=\"Low quality\">"),
+            "{lines:#?}"
+        );
+        assert_eq!(&lines[..2], &raw[..], "raw lines must keep their position");
+    }
+
+    #[test]
+    fn typed_contig_absent_from_the_raw_header_is_declared() {
+        let raw = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100>"];
+        let schema = with_typed(
+            schema_with_raw_header(&raw, &[]),
+            None,
+            &[],
+            &[("chr1", Some(100)), ("chr2", Some(200))],
+        );
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert!(
+            lines.iter().any(|l| l == "##contig=<ID=chr2,length=200>"),
+            "{lines:#?}"
+        );
+    }
+
+    #[test]
+    fn typed_file_format_change_supersedes_the_raw_line() {
+        let raw = ["##fileformat=VCFv4.2", "##contig=<ID=chr1,length=100>"];
+        let schema = with_typed(
+            schema_with_raw_header(&raw, &[]),
+            Some("VCFv4.3"),
+            &[],
+            &[("chr1", Some(100))],
+        );
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert!(
+            !lines.iter().any(|l| l == "##fileformat=VCFv4.2"),
+            "{lines:#?}"
+        );
+        assert_eq!(lines[0], "##fileformat=VCFv4.3");
+    }
+
+    #[test]
+    fn raw_contig_attributes_survive_when_id_and_length_agree() {
+        // Regression guard: ContigMetadata holds only id and length, so a
+        // reconciliation that compared rendered lines would strip assembly= and
+        // md5= from every contig — the exact loss this module exists to prevent.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##contig=<ID=chr1,length=100,assembly=GRCh38,md5=abc>",
+        ];
+        let schema = with_typed(
+            schema_with_raw_header(&raw, &[]),
+            None,
+            &[],
+            &[("chr1", Some(100))],
+        );
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert_eq!(lines, raw.to_vec());
+    }
 
     #[test]
     fn raw_header_lines_are_emitted_verbatim_and_in_order() {
