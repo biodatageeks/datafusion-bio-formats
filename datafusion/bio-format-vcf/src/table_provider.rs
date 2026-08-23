@@ -16,8 +16,8 @@ use datafusion_bio_format_core::metadata::{
     VCF_CONTIGS_INDEXED_KEY, VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FIELD_TYPE_KEY,
     VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY, VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY,
     VCF_FILTERS_KEY, VCF_FORMAT_FIELDS_KEY, VCF_GENOTYPE_COUNTED_ALLELE_KEY,
-    VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_SAMPLE_NAMES_KEY,
-    VcfFieldMetadata, from_json_string, to_json_string,
+    VCF_GENOTYPE_OUTPUT_MODE_KEY, VCF_GENOTYPES_SAMPLE_NAMES_KEY, VCF_HEADER_RAW_LINES_KEY,
+    VCF_SAMPLE_NAMES_KEY, VcfFieldMetadata, from_json_string, to_json_string,
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
@@ -327,6 +327,35 @@ async fn determine_schema_from_header(
         VCF_FORMAT_FIELDS_KEY.to_string(),
         to_json_string(&format_field_metadata),
     );
+
+    // Capture the source header verbatim so a write can re-emit it unchanged.
+    // Best-effort: only local text VCFs can be read as text here, and a failure
+    // to read must not fail schema inference — without this key the writer falls
+    // back to reconstructing the header from the typed metadata above.
+    if input_format == VcfInputFormat::Vcf
+        && matches!(
+            datafusion_bio_format_core::object_storage::get_storage_type(file_path.to_string()),
+            datafusion_bio_format_core::object_storage::StorageType::LOCAL
+        )
+    {
+        match crate::storage::get_local_raw_header_lines(
+            file_path.to_string(),
+            object_storage_options.clone().unwrap_or_default(),
+        )
+        .await
+        {
+            Ok(Some(raw_lines)) => {
+                metadata.insert(
+                    VCF_HEADER_RAW_LINES_KEY.to_string(),
+                    to_json_string(&raw_lines),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                debug!("could not capture raw VCF header from {file_path}: {e}");
+            }
+        }
+    }
 
     let schema = Schema::new_with_metadata(fields, metadata);
     Ok((

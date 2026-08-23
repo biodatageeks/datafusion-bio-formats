@@ -12,7 +12,8 @@ use datafusion::common::Result;
 use datafusion_bio_format_core::metadata::{
     AltAlleleMetadata, ContigMetadata, FilterMetadata, VCF_ALTERNATIVE_ALLELES_KEY,
     VCF_CONTIGS_KEY, VCF_FIELD_DESCRIPTION_KEY, VCF_FIELD_FORMAT_ID_KEY, VCF_FIELD_NUMBER_KEY,
-    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, from_json_string,
+    VCF_FIELD_TYPE_KEY, VCF_FILE_FORMAT_KEY, VCF_FILTERS_KEY, VCF_HEADER_RAW_LINES_KEY,
+    from_json_string,
 };
 use std::collections::HashSet;
 
@@ -63,9 +64,26 @@ pub fn build_vcf_header_lines(
     sample_names: &[String],
 ) -> Result<Vec<String>> {
     let mut lines = Vec::new();
+    let schema_metadata = schema.metadata();
+
+    // Verbatim passthrough: when the source header was captured as text, re-emit
+    // it unchanged. Reconstruction below can only express what the typed metadata
+    // carries, which silently drops ##fileDate, ##source, tool provenance such as
+    // ##bcftools_*, contig attributes beyond ID and length, the implicit PASS
+    // filter, and the original ordering of all of them.
+    if let Some(raw_json) = schema_metadata.get(VCF_HEADER_RAW_LINES_KEY)
+        && let Some(raw_lines) = from_json_string::<Vec<String>>(raw_json)
+    {
+        return Ok(passthrough_header_lines(
+            raw_lines,
+            schema,
+            info_fields,
+            format_fields,
+            sample_names,
+        ));
+    }
 
     // Get file format from schema metadata (default to VCFv4.3)
-    let schema_metadata = schema.metadata();
     let file_format = schema_metadata
         .get(VCF_FILE_FORMAT_KEY)
         .map(|s| s.as_str())
@@ -146,6 +164,99 @@ pub fn build_vcf_header_lines(
     }
 
     Ok(lines)
+}
+
+/// Renders the `##INFO` line the current schema would emit for `name`.
+fn info_declaration(schema: &SchemaRef, name: &str) -> Option<String> {
+    let idx = schema.index_of(name).ok()?;
+    let (vcf_type, number, description) = get_info_field_metadata(schema.field(idx), name);
+    Some(format!(
+        "##INFO=<ID={name},Number={number},Type={vcf_type},Description=\"{description}\">"
+    ))
+}
+
+/// Renders the `##FORMAT` line the current schema would emit for `name`.
+fn format_declaration(schema: &SchemaRef, name: &str, sample_names: &[String]) -> Option<String> {
+    let field = find_format_field(schema, name, sample_names)?;
+    let (vcf_type, number, description) = get_format_field_metadata(field, name);
+    Some(format!(
+        "##FORMAT=<ID={name},Number={number},Type={vcf_type},Description=\"{description}\">"
+    ))
+}
+
+/// True when `line` is a `##INFO=`/`##FORMAT=` declaration for `id`.
+fn declares(line: &str, kind: &str, id: &str) -> bool {
+    line.strip_prefix(kind)
+        .and_then(|rest| rest.strip_prefix("<ID="))
+        .is_some_and(|rest| {
+            rest.strip_prefix(id)
+                .is_some_and(|tail| tail.starts_with(',') || tail.starts_with('>'))
+        })
+}
+
+/// Re-emits a captured source header, reconciled against the current schema.
+///
+/// Raw lines pass through untouched — including everything the typed model
+/// cannot represent — with one exception: a raw `##INFO`/`##FORMAT` declaration
+/// whose text differs from what this schema would emit is stale (the field was
+/// redefined downstream, as an annotator does when it rewrites `CSQ`). Such a
+/// line is dropped from its original position and the current definition is
+/// appended, alongside definitions for fields the source header never declared.
+///
+/// A declaration that matches byte for byte is left exactly where it was, so an
+/// unmodified header round-trips unchanged.
+fn passthrough_header_lines(
+    raw_lines: Vec<String>,
+    schema: &SchemaRef,
+    info_fields: &[String],
+    format_fields: &[String],
+    sample_names: &[String],
+) -> Vec<String> {
+    // Current declarations, deduplicated by name in first-occurrence order so
+    // output stays byte-reproducible run to run.
+    let mut seen = HashSet::new();
+    let mut current: Vec<(&'static str, String, String)> = Vec::new();
+    for name in info_fields {
+        if seen.insert(("INFO", name.as_str()))
+            && let Some(declaration) = info_declaration(schema, name)
+        {
+            current.push(("##INFO=", name.clone(), declaration));
+        }
+    }
+    for name in format_fields {
+        if seen.insert(("FORMAT", name.as_str()))
+            && let Some(declaration) = format_declaration(schema, name, sample_names)
+        {
+            current.push(("##FORMAT=", name.clone(), declaration));
+        }
+    }
+
+    let mut lines: Vec<String> = Vec::with_capacity(raw_lines.len() + current.len());
+    let mut satisfied: HashSet<usize> = HashSet::new();
+
+    for raw in raw_lines {
+        match current
+            .iter()
+            .position(|(kind, id, _)| declares(&raw, kind, id))
+        {
+            // Redefined downstream: drop here, re-emit at the end.
+            Some(i) if current[i].2 != raw => continue,
+            // Unchanged: keep in place and do not append a duplicate.
+            Some(i) => {
+                satisfied.insert(i);
+                lines.push(raw);
+            }
+            None => lines.push(raw),
+        }
+    }
+
+    for (i, (_, _, declaration)) in current.iter().enumerate() {
+        if !satisfied.contains(&i) {
+            lines.push(declaration.clone());
+        }
+    }
+
+    lines
 }
 
 /// Extracts VCF metadata from an INFO field, using stored metadata if available
@@ -325,6 +436,7 @@ fn arrow_type_to_vcf_number(data_type: &DataType) -> &'static str {
 mod tests {
     use super::*;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion_bio_format_core::metadata::VCF_FIELD_FIELD_TYPE_KEY;
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -356,6 +468,141 @@ mod tests {
             .map(|l| l.split(',').next().unwrap())
             .collect();
         assert_eq!(got, expected);
+    }
+
+    /// Builds a schema carrying `raw` as the verbatim source header, plus one
+    /// INFO field per `(name, number, type, description)` tuple.
+    fn schema_with_raw_header(raw: &[&str], info: &[(&str, &str, &str, &str)]) -> Arc<Schema> {
+        let mut fields = vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("start", DataType::UInt32, false),
+        ];
+        for (name, number, ty, description) in info {
+            let mut md = HashMap::new();
+            md.insert(VCF_FIELD_FIELD_TYPE_KEY.to_string(), "INFO".to_string());
+            md.insert(VCF_FIELD_NUMBER_KEY.to_string(), number.to_string());
+            md.insert(VCF_FIELD_TYPE_KEY.to_string(), ty.to_string());
+            md.insert(
+                VCF_FIELD_DESCRIPTION_KEY.to_string(),
+                description.to_string(),
+            );
+            fields.push(Field::new(*name, DataType::Utf8, true).with_metadata(md));
+        }
+        let mut schema_md = HashMap::new();
+        schema_md.insert(
+            VCF_HEADER_RAW_LINES_KEY.to_string(),
+            serde_json::to_string(raw).unwrap(),
+        );
+        Arc::new(Schema::new(fields).with_metadata(schema_md))
+    }
+
+    const SAMPLE_RAW: [&str; 6] = [
+        "##fileformat=VCFv4.2",
+        "##FILTER=<ID=PASS,Description=\"All filters passed\">",
+        "##fileDate=20160824",
+        "##contig=<ID=chr1,length=248956422,assembly=GRCh38>",
+        "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">",
+        "##bcftools_normVersion=1.21+htslib-1.21",
+    ];
+
+    /// Matches SAMPLE_RAW's DP declaration exactly.
+    const DP_INFO: (&str, &str, &str, &str) = ("DP", "1", "Integer", "Depth");
+    const CSQ_INFO: (&str, &str, &str, &str) = (
+        "CSQ",
+        ".",
+        "String",
+        "Consequence annotations from Ensembl VEP",
+    );
+
+    #[test]
+    fn raw_header_lines_are_emitted_verbatim_and_in_order() {
+        // The typed model cannot represent ##fileDate, ##bcftools_*, the implicit
+        // PASS filter, or a contig's assembly= attribute. Reconstruction drops all
+        // of them; passthrough is the only way to keep a header byte-identical.
+        let schema = schema_with_raw_header(&SAMPLE_RAW, &[DP_INFO]);
+        let lines = build_vcf_header_lines(&schema, &["DP".to_string()], &[], &[]).unwrap();
+        assert_eq!(lines, SAMPLE_RAW.to_vec());
+    }
+
+    #[test]
+    fn raw_header_passthrough_appends_only_undeclared_fields() {
+        // CSQ is added by the annotator and is not in the source header, so it is
+        // appended after the raw block. DP is already declared and must not be
+        // emitted twice.
+        let schema = schema_with_raw_header(&SAMPLE_RAW, &[DP_INFO, CSQ_INFO]);
+        let lines =
+            build_vcf_header_lines(&schema, &["DP".to_string(), "CSQ".to_string()], &[], &[])
+                .unwrap();
+
+        let dp_count = lines.iter().filter(|l| l.contains("<ID=DP,")).count();
+        assert_eq!(dp_count, 1, "DP declared twice: {lines:#?}");
+
+        assert_eq!(&lines[..SAMPLE_RAW.len()], &SAMPLE_RAW[..]);
+        assert_eq!(
+            lines.last().unwrap(),
+            "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP\">"
+        );
+    }
+
+    #[test]
+    fn raw_declaration_is_superseded_only_when_the_schema_differs() {
+        // Re-annotating a file that already carries CSQ must not keep the stale
+        // definition. The rule is generic: a raw declaration is kept in place
+        // when it matches what the schema would emit, and replaced (dropped from
+        // its original position, re-emitted at the end) when it differs.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"stale\">",
+            "##contig=<ID=chr1,length=248956422>",
+            "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">",
+        ];
+        let schema = schema_with_raw_header(&raw, &[CSQ_INFO, DP_INFO]);
+        let lines =
+            build_vcf_header_lines(&schema, &["CSQ".to_string(), "DP".to_string()], &[], &[])
+                .unwrap();
+
+        assert_eq!(
+            lines,
+            vec![
+                // stale CSQ dropped from position 1
+                "##fileformat=VCFv4.2".to_string(),
+                "##contig=<ID=chr1,length=248956422>".to_string(),
+                // DP matches what the schema would emit, so it stays put
+                "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Depth\">".to_string(),
+                // the current CSQ definition is appended
+                "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from Ensembl VEP\">"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_passthrough_keeps_lines_the_typed_model_cannot_represent() {
+        // bio-formats is format-generic: it has no opinion about ##VEP or any
+        // other tool's provenance, and must not silently drop it. Suppressing
+        // tool-specific lines is the caller's business.
+        let raw = [
+            "##fileformat=VCFv4.2",
+            "##VEP=\"v115\" time=\"old\"",
+            "##VEP-command-line='vep --old'",
+            "##source=myCaller",
+            "##reference=file:///GRCh38.fa",
+        ];
+        let schema = schema_with_raw_header(&raw, &[]);
+        let lines = build_vcf_header_lines(&schema, &[], &[], &[]).unwrap();
+        assert_eq!(lines, raw.to_vec());
+    }
+
+    #[test]
+    fn without_raw_header_lines_reconstruction_still_applies() {
+        // Parquet and Polars sources have no raw header; that path is unchanged.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("chrom", DataType::Utf8, false),
+            Field::new("DP", DataType::Int32, true),
+        ]));
+        let lines = build_vcf_header_lines(&schema, &["DP".to_string()], &[], &[]).unwrap();
+        assert!(lines.iter().any(|l| l.starts_with("##fileformat=")));
+        assert!(lines.iter().any(|l| l.contains("##INFO=<ID=DP")));
     }
 
     #[test]

@@ -393,7 +393,31 @@ async fn bcf_matches_vcf_for_projected_multisample_values() -> Result<(), Box<dy
         None,
     )?;
 
-    assert_eq!(vcf_provider.schema(), bcf_provider.schema());
+    // VCF and BCF must infer the same schema, with one deliberate exception: a
+    // text VCF also carries its `##` header verbatim under
+    // `bio.vcf.header.raw_lines`, so a write can re-emit it unchanged. BCF stores
+    // its header as text too, but noodles' BCF reader exposes only the parsed
+    // form, so that capture is not implemented yet. Compare with the key
+    // removed, then assert the asymmetry explicitly so it cannot drift silently.
+    const RAW_LINES: &str = "bio.vcf.header.raw_lines";
+    let strip_raw = |schema: std::sync::Arc<datafusion::arrow::datatypes::Schema>| {
+        let mut metadata = schema.metadata().clone();
+        metadata.remove(RAW_LINES);
+        datafusion::arrow::datatypes::Schema::new_with_metadata(schema.fields().clone(), metadata)
+    };
+    assert_eq!(
+        strip_raw(vcf_provider.schema()),
+        strip_raw(bcf_provider.schema())
+    );
+    assert!(
+        vcf_provider.schema().metadata().contains_key(RAW_LINES),
+        "a text VCF source must capture its header verbatim"
+    );
+    assert!(
+        !bcf_provider.schema().metadata().contains_key(RAW_LINES),
+        "BCF raw-header capture is unimplemented; update this test when it lands"
+    );
+
     let bcf_schema = bcf_provider.schema();
     let genotypes = bcf_schema.field_with_name("genotypes")?;
     let shared_sample_names_json = genotypes

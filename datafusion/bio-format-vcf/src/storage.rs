@@ -217,6 +217,67 @@ pub async fn get_local_vcf_header(
     Ok(header)
 }
 
+/// Reads a local text VCF's `##` header lines verbatim, in file order.
+///
+/// The `#CHROM` column line is not included, and reading stops there.
+///
+/// This exists because the typed header metadata is lossy: it cannot express
+/// `##fileDate`, `##source`, tool provenance such as `##bcftools_*`, contig
+/// attributes beyond ID and length, the implicit `##FILTER=<ID=PASS>` line, or
+/// the original interleaving of all of them. Callers that need a header to
+/// survive a read/write round trip unchanged store these lines under
+/// [`VCF_HEADER_RAW_LINES_KEY`](datafusion_bio_format_core::metadata::VCF_HEADER_RAW_LINES_KEY).
+///
+/// Returns `Ok(None)` when the header cannot be read as text — an unsupported
+/// compression, or a file with no header at all — and the caller should fall
+/// back to reconstructing it from typed metadata.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or read.
+pub async fn get_local_raw_header_lines(
+    file_path: String,
+    object_storage_options: ObjectStorageOptions,
+) -> Result<Option<Vec<String>>, Error> {
+    use std::io::BufRead;
+
+    let compression_type = get_compression_type(
+        file_path.clone(),
+        object_storage_options.compression_type.clone(),
+        object_storage_options.clone(),
+    )
+    .await
+    .map_err(std::io::Error::other)?;
+
+    let reader: Box<dyn BufRead> = match compression_type {
+        CompressionType::BGZF => Box::new(std::io::BufReader::new(BgzfReader::new(File::open(
+            &file_path,
+        )?))),
+        CompressionType::GZIP => Box::new(std::io::BufReader::new(
+            flate2::read::MultiGzDecoder::new(File::open(&file_path)?),
+        )),
+        CompressionType::NONE => Box::new(std::io::BufReader::new(File::open(&file_path)?)),
+        _ => return Ok(None),
+    };
+
+    let mut lines = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if let Some(rest) = line.strip_prefix("##") {
+            let _ = rest;
+            lines.push(line);
+        } else {
+            // `#CHROM` ends the header; anything else means there was none.
+            break;
+        }
+    }
+
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(lines))
+}
+
 /// Gets the VCF header from a remote file, auto-detecting compression.
 ///
 /// # Arguments
