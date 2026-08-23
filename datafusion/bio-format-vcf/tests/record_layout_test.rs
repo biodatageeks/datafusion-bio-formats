@@ -8,6 +8,10 @@ use datafusion::catalog::TableProvider;
 use datafusion::prelude::*;
 use datafusion_bio_format_core::metadata::{VCF_FORMAT_KEYS_COLUMN, VCF_INFO_KEYS_COLUMN};
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
+use noodles_bcf as bcf;
+use noodles_vcf as vcf;
+use noodles_vcf::variant::io::Write as _;
+use std::fs::File;
 use std::sync::Arc;
 use tokio::fs;
 
@@ -272,5 +276,71 @@ async fn an_indexed_scan_carries_the_layout() {
     assert_eq!(
         carried_keys("tests/data/record_layout.vcf.gz", "WHERE chrom = 'chr1'").await,
         expected_keys()
+    );
+}
+
+/// Asking twice must not append the columns twice: the reader locates them by
+/// name, and a duplicate name makes that lookup ambiguous.
+#[tokio::test]
+async fn asking_for_the_layout_twice_is_a_no_op() {
+    let path = write_fixture("idempotent", LAYOUT_VCF).await;
+    let once = VcfTableProvider::new(path.clone(), None, None, None, true)
+        .unwrap()
+        .with_record_layout()
+        .unwrap();
+    let once_fields = once.schema().fields().len();
+    let twice = once.with_record_layout().unwrap();
+
+    assert_eq!(twice.schema().fields().len(), once_fields);
+    for column in [VCF_INFO_KEYS_COLUMN, VCF_FORMAT_KEYS_COLUMN] {
+        let matches = twice
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| field.name() == column)
+            .count();
+        assert_eq!(matches, 1, "{column} must appear exactly once");
+    }
+    let _ = fs::remove_file(&path).await;
+}
+
+/// A BCF record has no source text, so there is no layout to carry. Refusing is
+/// the point: silently carrying nothing would hand the writer empty key lists
+/// and drop every INFO field from the output.
+#[tokio::test]
+async fn a_bcf_source_is_refused_rather_than_carrying_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let vcf_path = dir.path().join("source.vcf");
+    let bcf_path = dir.path().join("source.bcf");
+    std::fs::write(&vcf_path, LAYOUT_VCF).unwrap();
+
+    let mut reader = vcf::io::reader::Builder::default()
+        .build_from_path(&vcf_path)
+        .unwrap();
+    let header = reader.read_header().unwrap();
+    let mut writer = bcf::io::Writer::new(File::create(&bcf_path).unwrap());
+    writer.write_header(&header).unwrap();
+    for result in reader.records() {
+        writer
+            .write_variant_record(&header, &result.unwrap())
+            .unwrap();
+    }
+    writer.try_finish().unwrap();
+
+    let provider = VcfTableProvider::new(
+        bcf_path.to_string_lossy().into_owned(),
+        None,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+    let error = provider
+        .with_record_layout()
+        .expect_err("BCF input must be refused")
+        .to_string();
+    assert!(
+        error.contains("only for text VCF input"),
+        "unexpected error: {error}"
     );
 }

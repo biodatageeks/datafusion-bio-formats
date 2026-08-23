@@ -1,5 +1,5 @@
 use crate::bcf::BcfExec;
-use crate::physical_exec::{VcfExec, record_layout_start};
+use crate::physical_exec::{RecordLayoutColumns, VcfExec};
 use crate::serializer::validate_vcf_serializable_genotypes;
 use crate::storage::{get_header, resolve_single_sample_format_column_name};
 use crate::write_exec::VcfWriteExec;
@@ -577,8 +577,21 @@ impl VcfTableProvider {
                     .to_string(),
             ));
         }
-        if record_layout_start(&self.schema).is_some() {
-            return Ok(self);
+        // Locate by name so a schema that already carries them is a no-op
+        // rather than a second, ambiguous pair of columns. One without the
+        // other is a schema this provider did not build; appending to it would
+        // duplicate a name and make the reader's lookup ambiguous.
+        let existing = RecordLayoutColumns::locate(&self.schema);
+        match (existing.info_keys, existing.format_keys) {
+            (Some(_), Some(_)) => return Ok(self),
+            (None, None) => {}
+            _ => {
+                return Err(datafusion::common::DataFusionError::Plan(format!(
+                    "schema already carries one of `{VCF_INFO_KEYS_COLUMN}` / \
+                     `{VCF_FORMAT_KEYS_COLUMN}` but not the other; \
+                     the record layout needs both or neither"
+                )));
+            }
         }
 
         let mut fields = self.schema.fields().to_vec();
@@ -1476,7 +1489,7 @@ impl TableProvider for VcfTableProvider {
                         partition_assignments: Some(assignments),
                         index_path: Some(index_path.clone()),
                         residual_filters: record_filters,
-                        layout_start: record_layout_start(&self.schema),
+                        layout: RecordLayoutColumns::locate(&self.schema),
                     }),
                     VcfInputFormat::Auto => unreachable!("input format is resolved"),
                 };
@@ -1533,7 +1546,7 @@ impl TableProvider for VcfTableProvider {
                 partition_assignments: None,
                 index_path: None,
                 residual_filters: Vec::new(),
-                layout_start: record_layout_start(&self.schema),
+                layout: RecordLayoutColumns::locate(&self.schema),
             })),
             VcfInputFormat::Auto => unreachable!("input format is resolved"),
         }
