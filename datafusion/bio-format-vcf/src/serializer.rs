@@ -4,9 +4,8 @@
 //! to VCF format for writing to files.
 
 use datafusion::arrow::array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray,
-    LargeStringArray, ListArray, RecordBatch, StringArray, StringViewArray, StructArray,
-    UInt32Array,
+    Array, BooleanArray, Float32Array, Float64Array, Int32Array, LargeListArray, LargeStringArray,
+    ListArray, RecordBatch, StringArray, StringViewArray, StructArray, UInt32Array,
 };
 use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 use datafusion::common::{DataFusionError, Result};
