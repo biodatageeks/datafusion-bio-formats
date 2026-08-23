@@ -483,9 +483,25 @@ fn write_resolved_format_and_samples(
     }
 
     let emit: Vec<usize> = match carried_keys {
-        Some(keys) => split_format_keys(keys)
-            .filter_map(|key| resolved.fields.iter().position(|f| f.name == key))
-            .collect(),
+        Some(keys) => {
+            let mut emit: Vec<usize> = split_format_keys(keys)
+                .filter_map(|key| resolved.fields.iter().position(|f| f.name == key))
+                .collect();
+            // A field the batch supplies that the record's own list does not
+            // name is an addition made downstream of the read, so it follows
+            // the carried keys — the same rule INFO uses. The all-missing test
+            // still applies to it: the schema gives every record every key the
+            // header declares, so a key this record never carried is present
+            // and missing in every sample, and appending it would put a key on
+            // the line that the source did not have.
+            let carried = emit.len();
+            let appended: Vec<usize> = (0..resolved.fields.len())
+                .filter(|i| !emit[..carried].contains(i))
+                .filter(|&i| !resolved.fields[i].data.is_all_missing(row, num_samples))
+                .collect();
+            emit.extend(appended);
+            emit
+        }
         None => (0..resolved.fields.len())
             .filter(|&i| !resolved.fields[i].data.is_all_missing(row, num_samples))
             .collect(),
@@ -1048,14 +1064,26 @@ fn build_format_and_samples(
         return Ok((String::new(), Vec::new()));
     }
 
-    // A carried key list is the record's own, so it decides both which keys are
-    // emitted and in what order. Keys it names that were not selected for
-    // output have no column to render and are dropped.
-    let selected: Vec<&str> = match carried_keys {
-        Some(keys) => split_format_keys(keys)
-            .filter(|key| format_fields.iter().any(|field| field == key))
-            .collect(),
-        None => format_fields.iter().map(String::as_str).collect(),
+    // A carried key list is the record's own, so it decides which keys are
+    // emitted first and in what order. Keys it names that were not selected for
+    // output have no column to render and are dropped. Keys the batch supplies
+    // that the list does not name are additions made downstream of the read;
+    // they follow, exactly as an added INFO key does.
+    let (selected, carried_count): (Vec<&str>, usize) = match carried_keys {
+        Some(keys) => {
+            let mut selected: Vec<&str> = split_format_keys(keys)
+                .filter(|key| format_fields.iter().any(|field| field == key))
+                .collect();
+            let carried_count = selected.len();
+            selected.extend(
+                format_fields
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|field| !split_format_keys(keys).any(|key| key == *field)),
+            );
+            (selected, carried_count)
+        }
+        None => (format_fields.iter().map(String::as_str).collect(), 0),
     };
     if selected.is_empty() {
         return Ok((String::new(), Vec::new()));
@@ -1091,16 +1119,16 @@ fn build_format_and_samples(
         field_values
     };
 
-    // Without a carried list, a field missing in every sample is dropped: it is
-    // indistinguishable from one the record never carried.
-    let keep: Vec<bool> = if carried_keys.is_some() {
-        vec![true; selected.len()]
-    } else {
-        field_values
-            .iter()
-            .map(|sample_vals| sample_vals.iter().any(|v| v != "."))
-            .collect()
-    };
+    // A carried key is kept even when every sample is missing — that is the
+    // whole point, since a `.` in the source parses to the same null as an
+    // absent key. Everything after the carried ones is dropped when missing in
+    // every sample: without the record's own list, that is indistinguishable
+    // from a key it never carried.
+    let keep: Vec<bool> = field_values
+        .iter()
+        .enumerate()
+        .map(|(i, sample_vals)| i < carried_count || sample_vals.iter().any(|v| v != "."))
+        .collect();
 
     Ok(join_format_fields(
         &selected,
@@ -2176,6 +2204,7 @@ mod tests {
         info_keys: Option<&str>,
         format_keys: Option<&str>,
         csq: Option<&str>,
+        ps: Option<i32>,
     ) -> RecordBatch {
         let mut fields = vec![
             Field::new("chrom", DataType::Utf8, false),
@@ -2204,7 +2233,7 @@ mod tests {
             Arc::new(Int32Array::from(vec![Some(1)])),
             Arc::new(Float64Array::from(vec![Some(0.5)])),
             Arc::new(StringArray::from(vec![Some("0/1")])),
-            Arc::new(Int32Array::from(vec![None])),
+            Arc::new(Int32Array::from(vec![ps])),
             Arc::new(Int32Array::from(vec![Some(25)])),
         ];
         if csq.is_some() {
@@ -2227,7 +2256,25 @@ mod tests {
         info_fields: &[&str],
         format_fields: &[&str],
     ) -> String {
-        let batch = layout_batch(info_keys, format_keys, csq);
+        layout_line_with_ps(
+            info_keys,
+            format_keys,
+            csq,
+            None,
+            info_fields,
+            format_fields,
+        )
+    }
+
+    fn layout_line_with_ps(
+        info_keys: Option<&str>,
+        format_keys: Option<&str>,
+        csq: Option<&str>,
+        ps: Option<i32>,
+        info_fields: &[&str],
+        format_fields: &[&str],
+    ) -> String {
+        let batch = layout_batch(info_keys, format_keys, csq, ps);
         let info_fields: Vec<String> = info_fields.iter().map(|s| s.to_string()).collect();
         let format_fields: Vec<String> = format_fields.iter().map(|s| s.to_string()).collect();
         let lines = batch_to_vcf_lines(
@@ -2459,5 +2506,54 @@ mod tests {
         assert_eq!(cols[8], "GT:PS:DP");
         assert_eq!(cols[9], "0/1:.:25");
         assert_eq!(cols[10], "1/1:.:30");
+    }
+
+    /// A pipeline that adds a FORMAT field supplies a column the source record
+    /// never had, so no carried key list can mention it. Dropping it silently
+    /// would lose annotation output; INFO already appends such keys.
+    #[test]
+    fn a_supplied_format_key_the_carried_list_omits_is_appended() {
+        let line = layout_line_with_ps(
+            Some("AC;AF"),
+            Some("GT:DP"),
+            None,
+            Some(7),
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP:PS");
+        assert_eq!(cols[9], "0/1:25:7");
+    }
+
+    /// The other half of that rule, and the one byte parity depends on: the
+    /// schema gives every record every FORMAT key the header declares, so a key
+    /// the record never carried is present but missing in every sample.
+    /// Appending those would add keys the source line did not have.
+    #[test]
+    fn a_format_key_missing_in_every_sample_is_not_appended() {
+        let line = layout_line_with_ps(
+            Some("AC;AF"),
+            Some("GT:DP"),
+            None,
+            None,
+            &["AC", "AF"],
+            &["GT", "PS", "DP"],
+        );
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+    }
+
+    #[test]
+    fn nested_genotypes_append_a_supplied_key_the_carried_list_omits() {
+        // The nested fixture's PS is missing in every sample, so carrying
+        // "GT:DP" must not resurrect it, while DP — supplied and carried —
+        // stays put.
+        let line = nested_layout_line(Some("GT:DP"));
+        let cols = columns_of(&line);
+        assert_eq!(cols[8], "GT:DP");
+        assert_eq!(cols[9], "0/1:25");
+        assert_eq!(cols[10], "1/1:30");
     }
 }
