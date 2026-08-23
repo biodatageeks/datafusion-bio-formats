@@ -577,13 +577,25 @@ pub fn batch_to_vcf_lines(
             alt_value.replace('|', ",")
         };
 
-        // QUAL. Rendered like every other VCF float (htslib `%g` semantics), not
-        // at a fixed 2 decimal places: `{:.2}` both rewrites `50` as `50.00` and
-        // silently truncates small values (`0.001` -> `0.00`).
+        // QUAL is rendered as the shortest text that parses back to the same
+        // f64, so the score survives a write/read round-trip unchanged.
+        //
+        // Neither alternative does. `{:.2}` rewrites `50` as `50.00` and
+        // truncates anything below 0.005 to `0.00`. `format_vcf_float` applies
+        // `%g` semantics, which is correct for INFO/FORMAT floats but caps QUAL
+        // at six significant digits (`123456.78` -> `123457`) and flips to
+        // scientific notation past 1e6.
+        //
+        // NaN and +/-Inf have no VCF representation, so they render as missing.
         let qual_str = if quals.is_null(row) {
             ".".to_string()
         } else {
-            format_vcf_float(quals.value(row))
+            let qual = quals.value(row);
+            if qual.is_finite() {
+                format!("{qual}")
+            } else {
+                ".".to_string()
+            }
         };
 
         // FILTER
@@ -1631,6 +1643,57 @@ mod tests {
     #[test]
     fn qual_large_integral_stays_integral() {
         assert_eq!(qual_line_for(Some(999999.0)), "999999");
+    }
+
+    #[test]
+    fn qual_preserves_more_than_six_significant_digits() {
+        // `format_vcf_float` rounds to 6 significant digits (%g semantics), which
+        // is right for INFO/FORMAT floats but silently rewrites a precise QUAL.
+        assert_eq!(qual_line_for(Some(123456.78)), "123456.78");
+        assert_eq!(
+            qual_line_for(Some(std::f64::consts::PI)),
+            "3.141592653589793"
+        );
+    }
+
+    #[test]
+    fn qual_never_uses_scientific_notation() {
+        // %g flips to scientific at 1e6; VCF QUAL in the wild is always plain.
+        assert_eq!(qual_line_for(Some(1_000_000.0)), "1000000");
+        assert_eq!(qual_line_for(Some(1_234_567.0)), "1234567");
+    }
+
+    #[test]
+    fn qual_round_trips_through_the_written_text() {
+        // The written QUAL must parse back to bit-identical f64. This is the
+        // property that both `{:.2}` and 6-significant-digit `%g` violate.
+        for value in [
+            50.0,
+            0.001,
+            29.99,
+            123456.78,
+            1_234_567.0,
+            std::f64::consts::PI,
+            0.000312305,
+            1e-5,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+        ] {
+            let written = qual_line_for(Some(value));
+            let parsed: f64 = written
+                .parse()
+                .unwrap_or_else(|e| panic!("QUAL {value} written as {written:?}: {e}"));
+            assert_eq!(parsed, value, "QUAL {value} written as {written:?}");
+        }
+    }
+
+    #[test]
+    fn qual_non_finite_renders_as_missing() {
+        // VCF has no representation for NaN or +/-Inf; "." is the missing value.
+        // `format_vcf_float` panics outright on infinity.
+        assert_eq!(qual_line_for(Some(f64::NAN)), ".");
+        assert_eq!(qual_line_for(Some(f64::INFINITY)), ".");
+        assert_eq!(qual_line_for(Some(f64::NEG_INFINITY)), ".");
     }
 
     #[test]
