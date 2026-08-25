@@ -109,10 +109,10 @@ precedes an unsatisfiable coordinate predicate's empty-scan return.
 ### Partitions and HDF5 locking
 
 Partition planning divides the pruned row space into contiguous ranges aligned
-to `bin1` boundaries when pixel output is projected or pruning requires the
-validated index. An empty
-projection instead splits the full row range arithmetically so `count(*)` does
-not scan the pixel table merely to choose boundaries. HDF5 calls remain short
+to `bin1` boundaries when first-axis output or pruning requires the validated
+index. Count-only, empty, and second-axis-only projections instead split the
+full row range arithmetically so they do not scan an unprojected `bin1_id`
+column merely to choose boundaries. HDF5 calls remain short
 and coarse because the library
 serializes access; decompression, joining, and Arrow construction happen
 outside that critical section where possible. Every partition produces a

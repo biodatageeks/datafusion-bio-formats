@@ -238,12 +238,7 @@ impl CoolerTableProvider {
     /// projection. Each per-column result is cached independently, so later
     /// queries can add a newly needed column without revisiting the others.
     fn fast_pixels(&self, schema: &SchemaRef) -> Arc<FastPixels> {
-        let needs_bin1 = schema.fields().iter().any(|field| {
-            matches!(
-                field.name().as_str(),
-                "chrom1" | "start1" | "end1" | "weight1" | "bin1_id"
-            )
-        });
+        let needs_bin1 = schema_needs_bin1(schema);
         let needs_bin2 = schema.fields().iter().any(|field| {
             matches!(
                 field.name().as_str(),
@@ -460,7 +455,7 @@ impl TableProvider for CoolerTableProvider {
             None
         };
         let bin1_offset =
-            if target_partitions > 1 && (!schema.fields().is_empty() || has_first_axis_filter) {
+            if target_partitions > 1 && (schema_needs_bin1(&schema) || has_first_axis_filter) {
                 self.index_data().ok()
             } else {
                 None
@@ -540,6 +535,15 @@ fn bin_projection(schema: &SchemaRef) -> BinDataProjection {
         }
     }
     projection
+}
+
+fn schema_needs_bin1(schema: &SchemaRef) -> bool {
+    schema.fields().iter().any(|field| {
+        matches!(
+            field.name().as_str(),
+            "chrom1" | "start1" | "end1" | "weight1" | "bin1_id"
+        )
+    })
 }
 
 fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -648,7 +652,7 @@ mod tests {
         let path = format!("{}/tests/data/test.cool", env!("CARGO_MANIFEST_DIR"));
         let provider = CoolerTableProvider::new(path, None, true, false, true).unwrap();
         let projection = Vec::new();
-        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
 
         provider
             .scan(
@@ -670,7 +674,7 @@ mod tests {
         let path = format!("{}/tests/data/test.cool", env!("CARGO_MANIFEST_DIR"));
         let count_provider =
             CoolerTableProvider::new(path.clone(), None, true, false, true).unwrap();
-        let ctx = SessionContext::new();
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
         count_provider
             .scan(&ctx.state(), Some(&vec![6]), &[], None)
             .await
@@ -678,6 +682,18 @@ mod tests {
         assert!(count_provider.fast_bin1_cache.get().is_none());
         assert!(count_provider.fast_bin2_cache.get().is_none());
         assert!(count_provider.fast_count_cache.get().is_some());
+        assert!(count_provider.index_cache.get().is_none());
+
+        let chrom2_provider =
+            CoolerTableProvider::new(path.clone(), None, true, false, true).unwrap();
+        chrom2_provider
+            .scan(&ctx.state(), Some(&vec![3]), &[], None)
+            .await
+            .unwrap();
+        assert!(chrom2_provider.fast_bin1_cache.get().is_none());
+        assert!(chrom2_provider.fast_bin2_cache.get().is_some());
+        assert!(chrom2_provider.fast_count_cache.get().is_none());
+        assert!(chrom2_provider.index_cache.get().is_none());
 
         let chrom1_provider = CoolerTableProvider::new(path, None, true, false, true).unwrap();
         chrom1_provider
@@ -687,6 +703,7 @@ mod tests {
         assert!(chrom1_provider.fast_bin1_cache.get().is_some());
         assert!(chrom1_provider.fast_bin2_cache.get().is_none());
         assert!(chrom1_provider.fast_count_cache.get().is_none());
+        assert!(chrom1_provider.index_cache.get().is_some());
     }
 
     #[tokio::test]

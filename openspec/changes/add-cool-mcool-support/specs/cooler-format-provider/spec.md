@@ -74,6 +74,12 @@ The provider SHALL read and materialize only the datasets required by the projec
 - **WHEN** a scan projects only first-axis coordinates and `count`
 - **THEN** the second-axis ID dataset is neither indexed nor read and second-axis coordinate materialization is skipped
 
+#### Scenario: Project count only
+
+- **WHEN** a scan projects only `count`, including with multiple target
+  partitions
+- **THEN** neither pixel ID dataset is indexed or read for planning
+
 #### Scenario: Project one bin metadata field
 
 - **WHEN** a scan projects a chromosome, start, end, or weight field
@@ -132,9 +138,9 @@ The provider SHALL map supported first-axis chromosome and coordinate filters th
 ### Requirement: Bounded and partitioned execution
 
 The provider SHALL stream bounded Arrow batches and SHALL partition the row
-space into disjoint ranges aligned to `bin1` boundaries when pixel data or
-predicate pruning already requires the validated index. Empty-projection row
-counts MAY split ranges without loading that index.
+space into disjoint ranges aligned to `bin1` boundaries when first-axis pixel
+data or predicate pruning requires the validated index. Other projections MAY
+split ranges arithmetically without loading that index.
 
 #### Scenario: Partition equivalence
 
