@@ -12,7 +12,7 @@ use datafusion::common::{Result, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator};
 use datafusion_bio_format_core::genomic_filter::extract_genomic_regions;
 
-use crate::collection::{BinData, IndexData};
+use crate::collection::{BinData, BinDataProjection, IndexData};
 
 /// True when every column the expression references belongs to the first
 /// (row) axis, making the filter a candidate for row-range pruning.
@@ -22,6 +22,25 @@ pub(crate) fn is_first_axis_filter(expr: &Expr) -> bool {
         && columns
             .iter()
             .all(|column| matches!(column.name.as_str(), "chrom1" | "start1" | "end1"))
+}
+
+/// Bin metadata needed to prune the supplied first-axis filters. Chromosome
+/// names are always required to map regions; coordinate arrays are only
+/// needed when a candidate expression actually references a coordinate.
+pub(crate) fn first_axis_pruning_projection(filters: &[Expr]) -> BinDataProjection {
+    let mut projection = BinDataProjection::default();
+    for filter in filters.iter().filter(|filter| is_first_axis_filter(filter)) {
+        projection.chrom = true;
+        if filter
+            .column_refs()
+            .iter()
+            .any(|column| matches!(column.name.as_str(), "start1" | "end1"))
+        {
+            projection.start = true;
+            projection.end = true;
+        }
+    }
+    projection
 }
 
 /// Rewrite `chrom1`/`start1`/`end1` column references to the `chrom`/`start`/
@@ -155,12 +174,16 @@ pub(crate) fn plan_first_axis_ranges(
         let chrom_bin_hi = index.chrom_offset[chrom_index + 1] as usize;
         // Region bounds are 1-based inclusive; bins are stored 0-based
         // half-open. Keep every bin overlapping [query_start0, query_end0).
-        let query_start0 = region.start.map_or(0, |start| start.saturating_sub(1));
-        let query_end0 = region.end.unwrap_or(u64::MAX);
-        let chrom_starts = &bins.start[chrom_bin_lo..chrom_bin_hi];
-        let chrom_ends = &bins.end[chrom_bin_lo..chrom_bin_hi];
-        let bin_lo = chrom_bin_lo + chrom_ends.partition_point(|&end| end <= query_start0);
-        let bin_hi = chrom_bin_lo + chrom_starts.partition_point(|&start| start < query_end0);
+        let bin_lo = region.start.map_or(chrom_bin_lo, |start| {
+            let query_start0 = start.saturating_sub(1);
+            chrom_bin_lo
+                + bins.end[chrom_bin_lo..chrom_bin_hi].partition_point(|&end| end <= query_start0)
+        });
+        let bin_hi = region.end.map_or(chrom_bin_hi, |query_end0| {
+            chrom_bin_lo
+                + bins.start[chrom_bin_lo..chrom_bin_hi]
+                    .partition_point(|&start| start < query_end0)
+        });
         if bin_lo >= bin_hi {
             continue;
         }
@@ -290,6 +313,22 @@ mod tests {
             high: Box::new(lit(u64::MAX)),
         });
         assert!(start_bound_conversion_would_overflow(&between, true));
+    }
+
+    #[test]
+    fn chromosome_only_pruning_does_not_load_coordinate_arrays() {
+        let projection = first_axis_pruning_projection(&[col("chrom1").eq(lit("chr1"))]);
+        assert!(projection.chrom);
+        assert!(!projection.start);
+        assert!(!projection.end);
+
+        let projection = first_axis_pruning_projection(&[
+            col("chrom1").eq(lit("chr1")),
+            col("start1").gt_eq(lit(10_u64)),
+        ]);
+        assert!(projection.chrom);
+        assert!(projection.start);
+        assert!(projection.end);
     }
 
     #[test]

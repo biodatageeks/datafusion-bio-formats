@@ -26,7 +26,9 @@ use crate::collection::{
 use crate::fast_chunk::{ChunkedColumn, FastPixels, index_column, validate_against_reference};
 use crate::hdf5_utils::{h5_err, read_numeric_slice};
 use crate::physical_exec::CoolerExec;
-use crate::pruning::{is_first_axis_filter, plan_first_axis_ranges, plan_partitions};
+use crate::pruning::{
+    first_axis_pruning_projection, is_first_axis_filter, plan_first_axis_ranges, plan_partitions,
+};
 
 /// Table provider for local `.cool`/`.mcool` cooler files.
 ///
@@ -420,12 +422,17 @@ impl TableProvider for CoolerTableProvider {
         // chrom_offset/bin1_offset CSR indexes; filters are Inexact, so
         // DataFusion re-applies them and pruning only needs to be a superset.
         let target_partitions = state.config().target_partitions();
-        let has_first_axis_filter = self.join_bins && filters.iter().any(is_first_axis_filter);
+        let pruning_projection = if self.join_bins {
+            first_axis_pruning_projection(filters)
+        } else {
+            BinDataProjection::default()
+        };
+        let has_first_axis_filter = pruning_projection.any();
         let mut bin_projection = bin_projection(&schema);
         if has_first_axis_filter {
-            bin_projection.chrom = true;
-            bin_projection.start = true;
-            bin_projection.end = true;
+            bin_projection.chrom |= pruning_projection.chrom;
+            bin_projection.start |= pruning_projection.start;
+            bin_projection.end |= pruning_projection.end;
         }
         let bin_data = if self.join_bins && bin_projection.any() {
             Some(self.bin_data(bin_projection)?)

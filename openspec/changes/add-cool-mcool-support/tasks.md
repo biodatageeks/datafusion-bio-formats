@@ -51,6 +51,8 @@
   dataset extents.
 - [x] 4.8 Cross-validate chromosome offsets with the stored bin chromosome
   assignments before predicate pruning.
+- [x] 4.9 Cross-validate bin offsets with pixel bin assignments in bounded
+  batches and keep chromosome-only pruning free of coordinate-array loads.
 
 ## 5. Verification
 

@@ -80,6 +80,12 @@ The provider SHALL read and materialize only the datasets required by the projec
 - **THEN** only the bin metadata arrays required to materialize that field are
   loaded, except for additional arrays required by predicate pruning
 
+#### Scenario: Chromosome-only predicate projection
+
+- **WHEN** pruning uses only a `chrom1` predicate and the output projects no
+  coordinates
+- **THEN** chromosome metadata is loaded without `bins/start` or `bins/end`
+
 #### Scenario: Empty projection
 
 - **WHEN** a row-count query supplies an empty projection
@@ -185,6 +191,12 @@ scan sizing or joined array indexing.
 
 - **WHEN** `indexes/chrom_offset` is structurally valid but its chromosome
   spans disagree with the corresponding `bins/chrom` assignments
+- **THEN** the provider returns a contextual invalid-file error before pruning
+
+#### Scenario: Bin offsets disagree with pixels
+
+- **WHEN** `indexes/bin1_offset` is structurally valid but any span disagrees
+  with the corresponding `pixels/bin1_id` assignments
 - **THEN** the provider returns a contextual invalid-file error before pruning
 
 ### Requirement: Local-file scope

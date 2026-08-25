@@ -7,8 +7,10 @@ use hdf5_metno::{File, Group};
 
 use crate::hdf5_utils::{
     CoolerCollectionSum, attr_i64, attr_string, attr_sum, h5_err, read_numeric_1d,
-    read_string_dataset,
+    read_numeric_slice, read_string_dataset,
 };
+
+const INDEX_VALIDATION_BATCH_ROWS: usize = 65_536;
 
 /// A parsed cooler URI: `path` or `path::/group/path`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -441,6 +443,13 @@ pub(crate) fn load_index_data(group: &Group) -> Result<IndexData> {
     )?;
     let bin_chrom = validate_bin_chrom(nchroms, stored_bin_chrom, nbins)?;
     validate_chrom_offsets_match_bins(&chrom_offset, &bin_chrom)?;
+    let pixels = group
+        .group("pixels")
+        .map_err(|error| h5_err("Failed to open pixels group", error))?;
+    let bin1_dataset = pixels
+        .dataset("bin1_id")
+        .map_err(|error| h5_err("Failed to open pixels/bin1_id", error))?;
+    validate_bin1_offsets_match_pixels(&bin1_dataset, &bin1_offset, nnz)?;
     Ok(IndexData {
         chrom_offset,
         bin1_offset,
@@ -516,11 +525,48 @@ fn validate_chrom_offsets_match_bins(offsets: &[i64], bin_chrom: &[usize]) -> Re
     Ok(())
 }
 
+fn validate_bin1_offsets_match_pixels(
+    dataset: &hdf5_metno::Dataset,
+    offsets: &[i64],
+    nnz: usize,
+) -> Result<()> {
+    let mut expected_bin = 0;
+    for lo in (0..nnz).step_by(INDEX_VALIDATION_BATCH_ROWS) {
+        let hi = (lo + INDEX_VALIDATION_BATCH_ROWS).min(nnz);
+        let values = read_numeric_slice::<i64>(dataset, lo, hi, "pixels/bin1_id")?;
+        validate_bin1_assignment_block(offsets, lo, &values, &mut expected_bin)?;
+    }
+    Ok(())
+}
+
+fn validate_bin1_assignment_block(
+    offsets: &[i64],
+    row_start: usize,
+    values: &[i64],
+    expected_bin: &mut usize,
+) -> Result<()> {
+    for (index, &actual_bin) in values.iter().enumerate() {
+        let row = row_start + index;
+        while *expected_bin + 1 < offsets.len()
+            && usize::try_from(offsets[*expected_bin + 1]).is_ok_and(|offset| offset <= row)
+        {
+            *expected_bin += 1;
+        }
+        if *expected_bin + 1 >= offsets.len() || actual_bin != *expected_bin as i64 {
+            return Err(DataFusionError::Plan(format!(
+                "indexes/bin1_offset assigns pixels/bin1_id[{row}]={actual_bin} to bin {}",
+                *expected_bin
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod validation_tests {
     use super::{
-        validate_bin_array_len, validate_bin_chrom, validate_chrom_offsets_match_bins,
-        validate_offsets,
+        validate_bin_array_len, validate_bin_chrom, validate_bin1_assignment_block,
+        validate_chrom_offsets_match_bins, validate_offsets,
     };
 
     #[test]
@@ -565,5 +611,20 @@ mod validation_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("bins/chrom[0]=0"), "{error}");
+    }
+
+    #[test]
+    fn rejects_bin1_offsets_that_disagree_with_pixel_assignments() {
+        let mut expected_bin = 0;
+        validate_bin1_assignment_block(&[0, 1, 2], 0, &[0, 1], &mut expected_bin).unwrap();
+
+        let mut expected_bin = 0;
+        let error = validate_bin1_assignment_block(&[0, 2, 2], 0, &[0, 1], &mut expected_bin)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pixels/bin1_id[1]=1"), "{error}");
+
+        let mut expected_bin = 0;
+        validate_bin1_assignment_block(&[0, 1, 1, 3], 0, &[0, 2, 2], &mut expected_bin).unwrap();
     }
 }

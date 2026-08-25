@@ -85,6 +85,8 @@ the direct pixel cache or decoding any pixel column. The execution plan
 reports the projection for inspection. Direct-chunk indexes are also built and
 cached independently per projected pixel column, so projecting `count` does
 not visit either ID dataset and projecting one axis does not index the other.
+Predicate-only bin metadata follows the same rule: chromosome-only pruning
+loads chromosome metadata without materializing start/end coordinate arrays.
 
 ### Predicate pruning
 
@@ -133,8 +135,9 @@ are required to match `bins/chrom`,
 `bins/chrom` must reference `chroms/name`, and decoded pixel bin IDs must fall
 within the bins table. CSR offsets are validated whenever pruning or aligned
 partition planning consumes them; every `chrom_offset` span must also agree
-with the corresponding `bins/chrom` assignments. Malformed references return
-contextual DataFusion errors rather than panics or incorrect pruning.
+with the corresponding `bins/chrom` assignments, and every `bin1_offset` span
+is checked against `pixels/bin1_id` in bounded batches. Malformed references
+return contextual DataFusion errors rather than panics or incorrect pruning.
 
 ## Risks / Trade-offs
 
