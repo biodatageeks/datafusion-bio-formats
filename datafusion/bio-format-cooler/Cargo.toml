@@ -25,4 +25,5 @@ log.workspace = true
 ndarray = "0.16"
 
 [dev-dependencies]
+tempfile = "3"
 tokio.workspace = true

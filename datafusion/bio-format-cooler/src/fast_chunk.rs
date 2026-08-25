@@ -223,7 +223,16 @@ impl ChunkReader {
 
             let decoded: &[u8] = if deflate {
                 self.inflated.clear();
+                let inflation_limit = u64::try_from(chunk_bytes)
+                    .ok()
+                    .and_then(|size| size.checked_add(1))
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(format!(
+                            "cooler fast path: chunk {chunk_index} size limit overflow"
+                        ))
+                    })?;
                 ZlibDecoder::new(self.compressed.as_slice())
+                    .take(inflation_limit)
                     .read_to_end(&mut self.inflated)
                     .map_err(|error| {
                         h5_err(&format!("Failed to inflate chunk {chunk_index}"), error)
@@ -314,4 +323,52 @@ pub(crate) struct FastPixels {
     pub bin1: Option<Arc<ChunkedColumn>>,
     pub bin2: Option<Arc<ChunkedColumn>>,
     pub count: Option<Arc<ChunkedColumn>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use tempfile::NamedTempFile;
+
+    use super::*;
+
+    #[test]
+    fn oversized_inflated_chunk_is_bounded_and_rejected() {
+        let chunk_bytes = 64;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&vec![7_u8; 4_096]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&compressed).unwrap();
+        file.flush().unwrap();
+
+        let column = ChunkedColumn {
+            elem_size: 1,
+            chunk_elems: chunk_bytes,
+            n_elems: chunk_bytes,
+            shuffle: false,
+            deflate: true,
+            chunks: vec![ChunkLoc {
+                addr: 0,
+                size: compressed.len() as u32,
+                filter_mask: 0,
+            }],
+        };
+        let mut reader = ChunkReader::open(file.path().to_str().unwrap()).unwrap();
+        let mut out = Vec::new();
+
+        let error = reader
+            .read_range(&column, 0, chunk_bytes, &mut out)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("decoded to 65 bytes, expected 64")
+        );
+        assert_eq!(reader.inflated.len(), chunk_bytes + 1);
+        assert!(out.is_empty());
+    }
 }

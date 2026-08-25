@@ -43,6 +43,8 @@
   direct-chunk fallback cases.
 - [x] 4.4 Document the public provider API, schema, addressing forms,
   coordinate behavior, weights, and local-file limitation.
+- [x] 4.5 Cover partially extractable chromosome lists and bounded rejection
+  of oversized deflate streams.
 
 ## 5. Verification
 

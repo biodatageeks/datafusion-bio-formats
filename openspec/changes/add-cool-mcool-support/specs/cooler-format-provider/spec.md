@@ -101,6 +101,12 @@ The provider SHALL map supported first-axis chromosome and coordinate filters th
 - **WHEN** a predicate cannot be mapped safely to a first-axis row range
 - **THEN** the provider leaves the scan range unpruned
 
+#### Scenario: Partially extractable chromosome list
+
+- **WHEN** a chromosome `IN` list contains any non-literal or unsupported member
+- **THEN** the provider leaves the scan range unpruned and the consumer
+  evaluates the original list exactly
+
 #### Scenario: Unrepresentable converted bound
 
 - **WHEN** a UInt64 start bound would overflow while converting a zero-based
@@ -133,6 +139,12 @@ The provider MAY decode supported HDF5 chunks directly, but SHALL select the lib
 - **WHEN** any indexed chunk reports a skipped filter in its mask
 - **THEN** the whole column uses libhdf5 rather than failing after partial
   direct execution
+
+#### Scenario: Oversized inflated chunk
+
+- **WHEN** a stored deflate stream expands beyond the dataset's declared chunk size
+- **THEN** direct decoding stops after at most one excess byte and rejects the
+  malformed chunk without unbounded memory growth
 
 ### Requirement: Validated joined references
 

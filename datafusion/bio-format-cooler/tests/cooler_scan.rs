@@ -440,6 +440,11 @@ async fn pushdown_chrom_in_list_matches_oracle() {
 }
 
 #[tokio::test]
+async fn pushdown_mixed_chrom_in_list_matches_oracle() {
+    assert_pushdown_matches_oracle(false, 1, "chrom1 IN ('missing', chrom1)").await;
+}
+
+#[tokio::test]
 async fn pushdown_with_parallel_partitions_matches_oracle() {
     assert_pushdown_matches_oracle(
         false,

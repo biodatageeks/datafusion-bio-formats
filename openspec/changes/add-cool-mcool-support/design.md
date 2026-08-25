@@ -94,7 +94,9 @@ to bin ranges, then to pixel row ranges through `chrom_offset` and
 them and preserve exact semantics. Unsupported or second-axis predicates do
 not alter the row range. UInt64 start bounds that cannot be converted to the
 shared 1-based region representation without overflow also leave the scan
-unpruned and are evaluated exactly by DataFusion.
+unpruned and are evaluated exactly by DataFusion. An `IN` list is pruned only
+when every member is a supported literal; partially extractable lists remain
+unpruned so an inexact pushdown can never discard valid rows.
 
 ### Partitions and HDF5 locking
 
@@ -110,7 +112,9 @@ For contiguous logical rows in chunked numeric datasets, the optimized path
 reads raw chunks, validates filter metadata and byte order, inflates deflate,
 undoes byte shuffle, and slices values directly. It is enabled only for
 unfiltered chunks or the supported shuffle-plus-deflate pipeline with no
-skipped filter masks.
+skipped filter masks. Inflation is bounded to the declared decoded chunk size
+plus one byte, allowing oversized malformed streams to be rejected without
+unbounded memory growth.
 
 Dataset indexing validates all recorded chunks before scan execution. Any
 unsupported layout, filter, per-chunk mask, byte order, reference-probe

@@ -1398,6 +1398,7 @@ dependencies = [
  "hdf5-metno",
  "log",
  "ndarray 0.16.1",
+ "tempfile",
  "tokio",
 ]
 

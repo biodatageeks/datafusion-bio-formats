@@ -291,4 +291,26 @@ mod tests {
         });
         assert!(start_bound_conversion_would_overflow(&between, true));
     }
+
+    #[test]
+    fn mixed_in_list_member_leaves_scan_unpruned() {
+        let filters = vec![col("chrom1").in_list(vec![lit("missing"), col("chrom1")], false)];
+        let bins = BinData {
+            nbins: 1,
+            chrom_names: vec!["chr1".to_string()],
+            chrom_idx: vec![0],
+            start: vec![0],
+            end: vec![100],
+            weight: None,
+        };
+        let index = IndexData {
+            chrom_offset: vec![0, 1],
+            bin1_offset: vec![0, 7],
+        };
+
+        assert_eq!(
+            plan_first_axis_ranges(&filters, false, &bins, &index, 7).unwrap(),
+            vec![(0, 7)]
+        );
+    }
 }
