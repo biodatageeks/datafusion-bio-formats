@@ -62,6 +62,7 @@
 - [x] 4.13 Keep count-only and second-axis-only parallel projections free of
   first-axis index scans.
 - [x] 4.14 Bound decoded direct-read chunk storage before indexing or probing.
+- [x] 4.15 Reject pixel ID dtypes that cannot convert losslessly to Int64.
 
 ## 5. Verification
 

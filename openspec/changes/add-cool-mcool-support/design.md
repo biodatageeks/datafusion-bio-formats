@@ -141,8 +141,9 @@ the entire column then uses libhdf5. This avoids mid-stream failures and keeps
 the optimization observationally equivalent to the compatibility reader.
 
 At provider construction, the three parallel pixel arrays are required to be
-one-dimensional and equal-length. Before joined indexing, projected bin arrays
-are required to match `bins/chrom`,
+one-dimensional and equal-length. Pixel ID storage must also use an integer
+dtype that converts losslessly to the exposed Int64 values. Before joined
+indexing, projected bin arrays are required to match `bins/chrom`,
 `bins/chrom` must reference `chroms/name`, and decoded pixel bin IDs must fall
 within the bins table. CSR offsets are validated whenever pruning or aligned
 partition planning consumes them; every `chrom_offset` span must also agree

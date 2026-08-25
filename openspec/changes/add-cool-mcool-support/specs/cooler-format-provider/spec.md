@@ -207,6 +207,13 @@ scan sizing or joined array indexing.
   one-dimensional arrays of identical length
 - **THEN** provider construction returns a contextual invalid-file error
 
+#### Scenario: Unsupported pixel ID storage
+
+- **WHEN** `pixels/bin1_id` or `pixels/bin2_id` uses a non-integer dtype or an
+  integer dtype that cannot convert losslessly to the exposed Int64 IDs
+- **THEN** provider construction returns a contextual invalid-file error
+  instead of relying on libhdf5 soft conversion
+
 #### Scenario: Malformed bin reference
 
 - **WHEN** `bins/chrom` or `pixels/bin1_id`/`pixels/bin2_id` contains a negative or out-of-range reference

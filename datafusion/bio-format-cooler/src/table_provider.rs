@@ -120,6 +120,13 @@ impl CoolerTableProvider {
             &bin2_ds.shape(),
             &count_ds.shape(),
         )?;
+        for (name, dataset) in [("bin1_id", &bin1_ds), ("bin2_id", &bin2_ds)] {
+            let descriptor = dataset
+                .dtype()
+                .and_then(|dtype| dtype.to_descriptor())
+                .map_err(|error| h5_err(&format!("Failed to read pixels/{name} dtype"), error))?;
+            validate_pixel_id_descriptor(name, &descriptor)?;
+        }
         let count_descriptor = count_ds
             .dtype()
             .and_then(|dtype| dtype.to_descriptor())
@@ -523,6 +530,19 @@ fn validate_pixel_shapes(
     Ok(nnz)
 }
 
+fn validate_pixel_id_descriptor(name: &str, descriptor: &TypeDescriptor) -> Result<()> {
+    if matches!(
+        descriptor,
+        TypeDescriptor::Integer(_)
+            | TypeDescriptor::Unsigned(IntSize::U1 | IntSize::U2 | IntSize::U4)
+    ) {
+        return Ok(());
+    }
+    Err(DataFusionError::Plan(format!(
+        "Unsupported pixels/{name} dtype: {descriptor}; expected a signed integer or an unsigned integer no wider than 32 bits"
+    )))
+}
+
 fn bin_projection(schema: &SchemaRef) -> BinDataProjection {
     let mut projection = BinDataProjection::default();
     for field in schema.fields() {
@@ -610,8 +630,9 @@ fn cooler_schema(
 mod tests {
     use datafusion::catalog::TableProvider;
     use datafusion::prelude::{SessionConfig, SessionContext};
+    use hdf5_metno::types::{FloatSize, IntSize, TypeDescriptor};
 
-    use super::{CoolerTableProvider, validate_pixel_shapes};
+    use super::{CoolerTableProvider, validate_pixel_id_descriptor, validate_pixel_shapes};
     use crate::physical_exec::CoolerExec;
 
     #[test]
@@ -627,6 +648,23 @@ mod tests {
             .to_string();
         assert!(matrix.contains("pixels/bin1_id"), "{matrix}");
         assert!(matrix.contains("not a 1-D dataset"), "{matrix}");
+    }
+
+    #[test]
+    fn rejects_pixel_id_types_that_do_not_convert_losslessly_to_i64() {
+        validate_pixel_id_descriptor("bin1_id", &TypeDescriptor::Integer(IntSize::U8)).unwrap();
+        validate_pixel_id_descriptor("bin2_id", &TypeDescriptor::Unsigned(IntSize::U4)).unwrap();
+
+        let error = validate_pixel_id_descriptor("bin1_id", &TypeDescriptor::Float(FloatSize::U8))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pixels/bin1_id dtype"), "{error}");
+        assert!(error.contains("float64"), "{error}");
+
+        let error = validate_pixel_id_descriptor("bin2_id", &TypeDescriptor::Unsigned(IntSize::U8))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("pixels/bin2_id dtype"), "{error}");
     }
 
     #[tokio::test]
