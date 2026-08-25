@@ -77,7 +77,8 @@ class rather than through a floating intermediate.
 ### Projection and statistics
 
 Only datasets required by the projected fields are loaded. Joined-coordinate
-projections load bin metadata once and skip unused axis/count work. An empty
+projections load only the required chromosome, start, end, or weight bin
+metadata once per scan and skip unused bin/axis/count work. An empty
 projection constructs row counts from metadata/index ranges without building
 the direct pixel cache or decoding any pixel column. The execution plan
 reports the projection for inspection. Direct-chunk indexes are also built and
@@ -114,7 +115,9 @@ mismatch, or decode precondition disables the optimized path for that column;
 the entire column then uses libhdf5. This avoids mid-stream failures and keeps
 the optimization observationally equivalent to the compatibility reader.
 
-Before joined indexing, bin arrays are required to have equal lengths,
+At provider construction, the three parallel pixel arrays are required to be
+one-dimensional and equal-length. Before joined indexing, projected bin arrays
+are required to match `bins/chrom`,
 `bins/chrom` must reference `chroms/name`, and decoded pixel bin IDs must fall
 within the bins table. CSR offsets are validated whenever pruning or aligned
 partition planning consumes them. Malformed references return contextual

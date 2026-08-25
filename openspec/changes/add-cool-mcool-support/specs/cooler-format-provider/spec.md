@@ -74,6 +74,12 @@ The provider SHALL read and materialize only the datasets required by the projec
 - **WHEN** a scan projects only first-axis coordinates and `count`
 - **THEN** the second-axis ID dataset is neither indexed nor read and second-axis coordinate materialization is skipped
 
+#### Scenario: Project one bin metadata field
+
+- **WHEN** a scan projects a chromosome, start, end, or weight field
+- **THEN** only the bin metadata arrays required to materialize that field are
+  loaded, except for additional arrays required by predicate pruning
+
 #### Scenario: Empty projection
 
 - **WHEN** a row-count query supplies an empty projection
@@ -123,7 +129,15 @@ The provider MAY decode supported HDF5 chunks directly, but SHALL select the lib
 
 ### Requirement: Validated joined references
 
-The provider SHALL validate bin-array shapes, chromosome references, and decoded pixel bin references before using them for joined array indexing.
+The provider SHALL validate parallel pixel-array shapes, bin-array shapes,
+chromosome references, and decoded pixel bin references before using them for
+scan sizing or joined array indexing.
+
+#### Scenario: Malformed parallel pixel arrays
+
+- **WHEN** `pixels/bin1_id`, `pixels/bin2_id`, and `pixels/count` are not all
+  one-dimensional arrays of identical length
+- **THEN** provider construction returns a contextual invalid-file error
 
 #### Scenario: Malformed bin reference
 

@@ -307,10 +307,10 @@ impl CoolerPixelStream {
         };
         let bins = self.bins.as_deref();
         let bin1_indexes = bins
-            .map(|bins| validate_bin_references(&bin1, bins.start.len(), "pixels/bin1_id", lo))
+            .map(|bins| validate_bin_references(&bin1, bins.nbins, "pixels/bin1_id", lo))
             .transpose()?;
         let bin2_indexes = bins
-            .map(|bins| validate_bin_references(&bin2, bins.start.len(), "pixels/bin2_id", lo))
+            .map(|bins| validate_bin_references(&bin2, bins.nbins, "pixels/bin2_id", lo))
             .transpose()?;
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
         for field in self.schema.fields() {

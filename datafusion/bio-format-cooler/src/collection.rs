@@ -235,6 +235,7 @@ pub(crate) enum CountType {
 /// shared across partitions for the pixel → coordinate join.
 #[derive(Debug)]
 pub(crate) struct BinData {
+    pub nbins: usize,
     pub chrom_names: Vec<String>,
     pub chrom_idx: Vec<usize>,
     pub start: Vec<u32>,
@@ -242,16 +243,28 @@ pub(crate) struct BinData {
     pub weight: Option<Vec<f64>>,
 }
 
-pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinData> {
-    let chroms = group
-        .group("chroms")
-        .map_err(|error| h5_err("Failed to open chroms group", error))?;
-    let chrom_names = read_string_dataset(
-        &chroms
-            .dataset("name")
-            .map_err(|error| h5_err("Failed to open chroms/name", error))?,
-        "chroms/name",
-    )?;
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BinDataProjection {
+    pub chrom: bool,
+    pub start: bool,
+    pub end: bool,
+    pub weight: bool,
+}
+
+impl BinDataProjection {
+    pub fn any(self) -> bool {
+        self.chrom || self.start || self.end || self.weight
+    }
+
+    pub fn cache_key(self) -> u8 {
+        u8::from(self.chrom)
+            | (u8::from(self.start) << 1)
+            | (u8::from(self.end) << 2)
+            | (u8::from(self.weight) << 3)
+    }
+}
+
+pub(crate) fn load_bin_data(group: &Group, projection: BinDataProjection) -> Result<BinData> {
     let bins = group
         .group("bins")
         .map_err(|error| h5_err("Failed to open bins group", error))?;
@@ -259,8 +272,32 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
         bins.dataset(name)
             .map_err(|error| h5_err(&format!("Failed to open bins/{name}"), error))
     };
-    // bins/chrom is enum-typed (h5py categorical); soft conversion reads it as i32.
-    let stored_chrom_idx = read_numeric_1d::<i32>(&open("chrom")?, "bins/chrom")?;
+    let chrom_dataset = open("chrom")?;
+    let chrom_shape = chrom_dataset.shape();
+    if chrom_shape.len() != 1 {
+        return Err(DataFusionError::Plan(
+            "bins/chrom is not a 1-D dataset".to_string(),
+        ));
+    }
+    let nbins = chrom_shape[0];
+
+    let (chrom_names, chrom_idx) = if projection.chrom {
+        let chroms = group
+            .group("chroms")
+            .map_err(|error| h5_err("Failed to open chroms group", error))?;
+        let chrom_names = read_string_dataset(
+            &chroms
+                .dataset("name")
+                .map_err(|error| h5_err("Failed to open chroms/name", error))?,
+            "chroms/name",
+        )?;
+        // bins/chrom is enum-typed (h5py categorical); soft conversion reads it as i32.
+        let stored_chrom_idx = read_numeric_1d::<i32>(&chrom_dataset, "bins/chrom")?;
+        let chrom_idx = validate_bin_chrom(chrom_names.len(), stored_chrom_idx, nbins)?;
+        (chrom_names, chrom_idx)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let read_coordinate = |name: &str| -> Result<Vec<u32>> {
         read_numeric_1d::<i64>(&open(name)?, &format!("bins/{name}"))?
             .into_iter()
@@ -274,27 +311,35 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
             })
             .collect()
     };
-    let start = read_coordinate("start")?;
-    let end = read_coordinate("end")?;
-    let weight = if include_weights {
+    let start = if projection.start {
+        let values = read_coordinate("start")?;
+        validate_bin_array_len("bins/start", values.len(), nbins)?;
+        values
+    } else {
+        Vec::new()
+    };
+    let end = if projection.end {
+        let values = read_coordinate("end")?;
+        validate_bin_array_len("bins/end", values.len(), nbins)?;
+        values
+    } else {
+        Vec::new()
+    };
+    let weight = if projection.weight {
         if !bins.link_exists("weight") {
             return Err(DataFusionError::Plan(
                 "include_weights requested but this cooler has no bins/weight column (run `cooler balance` first)"
                     .to_string(),
             ));
         }
-        Some(read_numeric_1d::<f64>(&open("weight")?, "bins/weight")?)
+        let values = read_numeric_1d::<f64>(&open("weight")?, "bins/weight")?;
+        validate_bin_array_len("bins/weight", values.len(), nbins)?;
+        Some(values)
     } else {
         None
     };
-    let chrom_idx = validate_bin_arrays(
-        chrom_names.len(),
-        stored_chrom_idx,
-        start.len(),
-        end.len(),
-        weight.as_ref().map(Vec::len),
-    )?;
     Ok(BinData {
+        nbins,
         chrom_names,
         chrom_idx,
         start,
@@ -303,25 +348,21 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
     })
 }
 
-fn validate_bin_arrays(
+fn validate_bin_array_len(name: &str, length: usize, nbins: usize) -> Result<()> {
+    if length != nbins {
+        return Err(DataFusionError::Plan(format!(
+            "{name} has {length} rows but bins/chrom has {nbins}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bin_chrom(
     nchroms: usize,
     stored_chrom_idx: Vec<i32>,
-    start_len: usize,
-    end_len: usize,
-    weight_len: Option<usize>,
+    nbins: usize,
 ) -> Result<Vec<usize>> {
-    let nbins = stored_chrom_idx.len();
-    for (name, length) in [
-        ("bins/start", start_len),
-        ("bins/end", end_len),
-        ("bins/weight", weight_len.unwrap_or(nbins)),
-    ] {
-        if length != nbins {
-            return Err(DataFusionError::Plan(format!(
-                "{name} has {length} rows but bins/chrom has {nbins}"
-            )));
-        }
-    }
+    validate_bin_array_len("bins/chrom", stored_chrom_idx.len(), nbins)?;
     stored_chrom_idx
         .into_iter()
         .enumerate()
@@ -421,16 +462,16 @@ fn validate_offsets(
 
 #[cfg(test)]
 mod validation_tests {
-    use super::{validate_bin_arrays, validate_offsets};
+    use super::{validate_bin_array_len, validate_bin_chrom, validate_offsets};
 
     #[test]
     fn rejects_invalid_bin_chromosome_references() {
-        let error = validate_bin_arrays(2, vec![0, -1], 2, 2, None)
+        let error = validate_bin_chrom(2, vec![0, -1], 2)
             .unwrap_err()
             .to_string();
         assert!(error.contains("bins/chrom[1]=-1"), "{error}");
 
-        let error = validate_bin_arrays(2, vec![0, 2], 2, 2, None)
+        let error = validate_bin_chrom(2, vec![0, 2], 2)
             .unwrap_err()
             .to_string();
         assert!(error.contains("bins/chrom[1]=2"), "{error}");
@@ -438,7 +479,7 @@ mod validation_tests {
 
     #[test]
     fn rejects_mismatched_bin_array_lengths() {
-        let error = validate_bin_arrays(2, vec![0, 1], 1, 2, None)
+        let error = validate_bin_array_len("bins/start", 1, 2)
             .unwrap_err()
             .to_string();
         assert!(error.contains("bins/start has 1 rows"), "{error}");

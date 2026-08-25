@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -20,8 +20,8 @@ use hdf5_metno::File;
 use hdf5_metno::types::{FloatSize, IntSize, TypeDescriptor};
 
 use crate::collection::{
-    BinData, CoolerUri, CountType, IndexData, ensure_local_path, load_bin_data, load_index_data,
-    resolve_collection_group,
+    BinData, BinDataProjection, CoolerUri, CountType, IndexData, ensure_local_path, load_bin_data,
+    load_index_data, resolve_collection_group,
 };
 use crate::fast_chunk::{ChunkedColumn, FastPixels, index_column, validate_against_reference};
 use crate::hdf5_utils::{h5_err, read_numeric_slice};
@@ -42,7 +42,7 @@ pub struct CoolerTableProvider {
     count_type: CountType,
     nnz: usize,
     coordinate_system_zero_based: bool,
-    bin_cache: OnceLock<Arc<BinData>>,
+    bin_cache: Mutex<HashMap<u8, Arc<BinData>>>,
     index_cache: OnceLock<Arc<IndexData>>,
     fast_bin1_cache: OnceLock<Option<Arc<ChunkedColumn>>>,
     fast_bin2_cache: OnceLock<Option<Arc<ChunkedColumn>>>,
@@ -100,10 +100,24 @@ impl CoolerTableProvider {
             }
         }
 
-        let count_ds = group
+        let pixels = group
             .group("pixels")
-            .and_then(|pixels| pixels.dataset("count"))
+            .map_err(|error| h5_err("Failed to open pixels group", error))?;
+        let bin1_ds = pixels
+            .dataset("bin1_id")
+            .map_err(|error| h5_err("Failed to open pixels/bin1_id", error))?;
+        let bin2_ds = pixels
+            .dataset("bin2_id")
+            .map_err(|error| h5_err("Failed to open pixels/bin2_id", error))?;
+        let count_ds = pixels
+            .dataset("count")
             .map_err(|error| h5_err("Failed to open pixels/count", error))?;
+        let nnz = validate_pixel_shapes(
+            &group_path,
+            &bin1_ds.shape(),
+            &bin2_ds.shape(),
+            &count_ds.shape(),
+        )?;
         let count_descriptor = count_ds
             .dtype()
             .and_then(|dtype| dtype.to_descriptor())
@@ -121,14 +135,6 @@ impl CoolerTableProvider {
                 )));
             }
         };
-        let count_shape = count_ds.shape();
-        if count_shape.len() != 1 {
-            return Err(DataFusionError::Plan(format!(
-                "pixels/count in '{group_path}' is not a 1-D dataset"
-            )));
-        }
-        let nnz = count_shape[0];
-
         // Collection attributes surfaced as bio.cool.* schema metadata so the
         // Python layer can expose resolution/assembly without extra file reads.
         let mut extra_metadata: Vec<(String, String)> =
@@ -159,7 +165,7 @@ impl CoolerTableProvider {
             count_type,
             nnz,
             coordinate_system_zero_based,
-            bin_cache: OnceLock::new(),
+            bin_cache: Mutex::new(HashMap::new()),
             index_cache: OnceLock::new(),
             fast_bin1_cache: OnceLock::new(),
             fast_bin2_cache: OnceLock::new(),
@@ -172,12 +178,14 @@ impl CoolerTableProvider {
         self.nnz
     }
 
-    fn bin_data(&self) -> Result<Arc<BinData>> {
-        // Concurrent first scans may both load and one result wins the cache —
-        // accepted trade-off: scan() runs once per query (partitions share the
-        // Arc), so the duplicated load is bounded by concurrent queries, and
-        // OnceLock keeps the fallible load out of get_or_init.
-        if let Some(bins) = self.bin_cache.get() {
+    fn bin_data(&self, projection: BinDataProjection) -> Result<Arc<BinData>> {
+        let cache_key = projection.cache_key();
+        if let Some(bins) = self
+            .bin_cache
+            .lock()
+            .map_err(|_| DataFusionError::Internal("Cooler bin cache is poisoned".to_string()))?
+            .get(&cache_key)
+        {
             return Ok(bins.clone());
         }
         let file = File::open(&self.file_path).map_err(|error| {
@@ -192,8 +200,14 @@ impl CoolerTableProvider {
                 error,
             )
         })?;
-        let bins = Arc::new(load_bin_data(&group, self.include_weights)?);
-        Ok(self.bin_cache.get_or_init(|| bins).clone())
+        let bins = Arc::new(load_bin_data(&group, projection)?);
+        Ok(self
+            .bin_cache
+            .lock()
+            .map_err(|_| DataFusionError::Internal("Cooler bin cache is poisoned".to_string()))?
+            .entry(cache_key)
+            .or_insert_with(|| bins.clone())
+            .clone())
     }
 
     fn index_data(&self) -> Result<Arc<IndexData>> {
@@ -409,11 +423,22 @@ impl TableProvider for CoolerTableProvider {
         // DataFusion re-applies them and pruning only needs to be a superset.
         let target_partitions = state.config().target_partitions();
         let has_first_axis_filter = self.join_bins && filters.iter().any(is_first_axis_filter);
+        let mut bin_projection = bin_projection(&schema);
+        if has_first_axis_filter {
+            bin_projection.chrom = true;
+            bin_projection.start = true;
+            bin_projection.end = true;
+        }
+        let bin_data = if self.join_bins && bin_projection.any() {
+            Some(self.bin_data(bin_projection)?)
+        } else {
+            None
+        };
         let ranges = if has_first_axis_filter {
             plan_first_axis_ranges(
                 filters,
                 self.coordinate_system_zero_based,
-                self.bin_data()?.as_ref(),
+                bin_data.as_deref().expect("pruning bin data loaded"),
                 self.index_data()?.as_ref(),
                 self.nnz,
             )?
@@ -425,7 +450,7 @@ impl TableProvider for CoolerTableProvider {
         let needs_bins =
             self.join_bins && schema.fields().iter().any(|field| field.name() != "count");
         let bins = if needs_bins {
-            Some(self.bin_data()?)
+            Some(bin_data.expect("projected bin data loaded"))
         } else {
             None
         };
@@ -466,6 +491,49 @@ impl TableProvider for CoolerTableProvider {
             )),
         }))
     }
+}
+
+fn validate_pixel_shapes(
+    group_path: &str,
+    bin1_shape: &[usize],
+    bin2_shape: &[usize],
+    count_shape: &[usize],
+) -> Result<usize> {
+    for (name, shape) in [
+        ("bin1_id", bin1_shape),
+        ("bin2_id", bin2_shape),
+        ("count", count_shape),
+    ] {
+        if shape.len() != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "pixels/{name} in '{group_path}' is not a 1-D dataset"
+            )));
+        }
+    }
+    let nnz = count_shape[0];
+    for (name, shape) in [("bin1_id", bin1_shape), ("bin2_id", bin2_shape)] {
+        if shape[0] != nnz {
+            return Err(DataFusionError::Plan(format!(
+                "pixels/{name} in '{group_path}' has {} rows but pixels/count has {nnz}",
+                shape[0]
+            )));
+        }
+    }
+    Ok(nnz)
+}
+
+fn bin_projection(schema: &SchemaRef) -> BinDataProjection {
+    let mut projection = BinDataProjection::default();
+    for field in schema.fields() {
+        match field.name().as_str() {
+            "chrom1" | "chrom2" => projection.chrom = true,
+            "start1" | "start2" => projection.start = true,
+            "end1" | "end2" => projection.end = true,
+            "weight1" | "weight2" => projection.weight = true,
+            _ => {}
+        }
+    }
+    projection
 }
 
 fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
@@ -533,7 +601,23 @@ mod tests {
     use datafusion::catalog::TableProvider;
     use datafusion::prelude::SessionContext;
 
-    use super::CoolerTableProvider;
+    use super::{CoolerTableProvider, validate_pixel_shapes};
+    use crate::physical_exec::CoolerExec;
+
+    #[test]
+    fn rejects_mismatched_or_non_vector_pixel_arrays() {
+        let mismatch = validate_pixel_shapes("/", &[2], &[3], &[2])
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("pixels/bin2_id"), "{mismatch}");
+        assert!(mismatch.contains("3 rows"), "{mismatch}");
+
+        let matrix = validate_pixel_shapes("/", &[1, 2], &[2], &[2])
+            .unwrap_err()
+            .to_string();
+        assert!(matrix.contains("pixels/bin1_id"), "{matrix}");
+        assert!(matrix.contains("not a 1-D dataset"), "{matrix}");
+    }
 
     #[tokio::test]
     async fn empty_projection_does_not_build_pixel_indexes() {
@@ -574,5 +658,48 @@ mod tests {
         assert!(chrom1_provider.fast_bin1_cache.get().is_some());
         assert!(chrom1_provider.fast_bin2_cache.get().is_none());
         assert!(chrom1_provider.fast_count_cache.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn projected_scan_only_loads_needed_bin_metadata() {
+        let path = format!("{}/tests/data/test.cool", env!("CARGO_MANIFEST_DIR"));
+        let ctx = SessionContext::new();
+
+        let chrom_provider =
+            CoolerTableProvider::new(path.clone(), None, true, false, true).unwrap();
+        let chrom_plan = chrom_provider
+            .scan(&ctx.state(), Some(&vec![0]), &[], None)
+            .await
+            .unwrap();
+        let chrom_bins = chrom_plan
+            .as_any()
+            .downcast_ref::<CoolerExec>()
+            .unwrap()
+            .bins
+            .as_ref()
+            .unwrap();
+        assert!(!chrom_bins.chrom_names.is_empty());
+        assert!(!chrom_bins.chrom_idx.is_empty());
+        assert!(chrom_bins.start.is_empty());
+        assert!(chrom_bins.end.is_empty());
+        assert!(chrom_bins.weight.is_none());
+
+        let start_provider = CoolerTableProvider::new(path, None, true, false, true).unwrap();
+        let start_plan = start_provider
+            .scan(&ctx.state(), Some(&vec![1]), &[], None)
+            .await
+            .unwrap();
+        let start_bins = start_plan
+            .as_any()
+            .downcast_ref::<CoolerExec>()
+            .unwrap()
+            .bins
+            .as_ref()
+            .unwrap();
+        assert!(start_bins.chrom_names.is_empty());
+        assert!(start_bins.chrom_idx.is_empty());
+        assert!(!start_bins.start.is_empty());
+        assert!(start_bins.end.is_empty());
+        assert!(start_bins.weight.is_none());
     }
 }
