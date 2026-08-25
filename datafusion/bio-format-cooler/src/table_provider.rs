@@ -10,7 +10,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{DataFusionError, Result};
 use datafusion::datasource::TableType;
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::PlanProperties;
@@ -20,10 +20,12 @@ use hdf5_metno::File;
 use hdf5_metno::types::TypeDescriptor;
 
 use crate::collection::{
-    BinData, CoolerUri, ensure_local_path, load_bin_data, resolve_collection_group,
+    BinData, CoolerUri, IndexData, ensure_local_path, load_bin_data, load_index_data,
+    resolve_collection_group,
 };
-use crate::hdf5_utils::{h5_err, read_numeric_1d};
+use crate::hdf5_utils::h5_err;
 use crate::physical_exec::CoolerExec;
+use crate::pruning::{is_first_axis_filter, plan_first_axis_ranges, plan_partitions};
 
 /// Table provider for local `.cool`/`.mcool` cooler files.
 ///
@@ -40,6 +42,7 @@ pub struct CoolerTableProvider {
     nnz: usize,
     coordinate_system_zero_based: bool,
     bin_cache: OnceLock<Arc<BinData>>,
+    index_cache: OnceLock<Arc<IndexData>>,
 }
 
 impl Debug for CoolerTableProvider {
@@ -122,6 +125,7 @@ impl CoolerTableProvider {
             nnz,
             coordinate_system_zero_based,
             bin_cache: OnceLock::new(),
+            index_cache: OnceLock::new(),
         })
     }
 
@@ -150,38 +154,24 @@ impl CoolerTableProvider {
         Ok(self.bin_cache.get_or_init(|| bins).clone())
     }
 
-    /// Split `0..nnz` into up to `target` contiguous row ranges aligned to
-    /// bin1 boundaries (so future first-axis pruning composes with partitions).
-    fn plan_partitions(&self, target: usize) -> Vec<(usize, usize)> {
-        if self.nnz == 0 || target <= 1 {
-            return vec![(0, self.nnz)];
+    fn index_data(&self) -> Result<Arc<IndexData>> {
+        if let Some(index) = self.index_cache.get() {
+            return Ok(index.clone());
         }
-        let bin1_offset: Option<Vec<i64>> = File::open(&self.file_path)
-            .and_then(|file| {
-                file.group(&self.group_path)
-                    .and_then(|group| group.group("indexes"))
-                    .and_then(|indexes| indexes.dataset("bin1_offset"))
-            })
-            .ok()
-            .and_then(|ds| read_numeric_1d::<i64>(&ds, "indexes/bin1_offset").ok());
-        let mut boundaries = vec![0usize];
-        for part in 1..target {
-            let ideal = part * self.nnz / target;
-            let aligned = match &bin1_offset {
-                Some(offsets) => {
-                    let index = offsets.partition_point(|&offset| (offset as usize) < ideal);
-                    offsets
-                        .get(index)
-                        .map_or(self.nnz, |&offset| offset as usize)
-                }
-                None => ideal,
-            };
-            if aligned > *boundaries.last().expect("non-empty") && aligned < self.nnz {
-                boundaries.push(aligned);
-            }
-        }
-        boundaries.push(self.nnz);
-        boundaries.windows(2).map(|w| (w[0], w[1])).collect()
+        let file = File::open(&self.file_path).map_err(|error| {
+            h5_err(
+                &format!("Failed to open cooler file '{}'", self.file_path),
+                error,
+            )
+        })?;
+        let group = file.group(&self.group_path).map_err(|error| {
+            h5_err(
+                &format!("Failed to open group '{}'", self.group_path),
+                error,
+            )
+        })?;
+        let index = Arc::new(load_index_data(&group)?);
+        Ok(self.index_cache.get_or_init(|| index).clone())
     }
 }
 
@@ -199,15 +189,48 @@ impl TableProvider for CoolerTableProvider {
         TableType::Base
     }
 
+    fn supports_filters_pushdown(
+        &self,
+        filters: &[&Expr],
+    ) -> Result<Vec<TableProviderFilterPushDown>> {
+        Ok(filters
+            .iter()
+            .map(|expr| {
+                // Raw COO mode has no first-axis coordinate columns to prune on.
+                if self.join_bins && is_first_axis_filter(expr) {
+                    TableProviderFilterPushDown::Inexact
+                } else {
+                    TableProviderFilterPushDown::Unsupported
+                }
+            })
+            .collect())
+    }
+
     async fn scan(
         &self,
         state: &dyn Session,
         projection: Option<&Vec<usize>>,
-        _filters: &[Expr],
+        filters: &[Expr],
         // LIMIT is applied by DataFusion above this node.
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let schema = project_schema(&self.schema, projection);
+        // First-axis genomic filters prune the pixel row space through the
+        // chrom_offset/bin1_offset CSR indexes; filters are Inexact, so
+        // DataFusion re-applies them and pruning only needs to be a superset.
+        let target_partitions = state.config().target_partitions();
+        let has_first_axis_filter = self.join_bins && filters.iter().any(is_first_axis_filter);
+        let ranges = if has_first_axis_filter {
+            plan_first_axis_ranges(
+                filters,
+                self.coordinate_system_zero_based,
+                self.bin_data()?.as_ref(),
+                self.index_data()?.as_ref(),
+                self.nnz,
+            )?
+        } else {
+            vec![(0, self.nnz)]
+        };
         // The bins/chroms join tables are only needed when a joined column is
         // actually projected; a bare `count` projection or `count(*)` skips them.
         let needs_bins =
@@ -217,7 +240,18 @@ impl TableProvider for CoolerTableProvider {
         } else {
             None
         };
-        let partitions = self.plan_partitions(state.config().target_partitions());
+        let bin1_offset = if target_partitions > 1 {
+            self.index_data().ok()
+        } else {
+            None
+        };
+        let partitions = plan_partitions(
+            &ranges,
+            target_partitions,
+            bin1_offset
+                .as_ref()
+                .map(|index| index.bin1_offset.as_slice()),
+        );
         let partition_count = partitions.len();
         Ok(Arc::new(CoolerExec {
             file_path: self.file_path.clone(),

@@ -342,3 +342,173 @@ fn list_collections_cool_and_mcool() {
         vec![1000, 2000, 5000]
     );
 }
+
+/// Register the provider as `c` and a MemTable of its full scan as `oracle`,
+/// so pruned queries can be compared against unpruned ground truth.
+async fn ctx_with_oracle(zero_based: bool, partitions: usize) -> SessionContext {
+    let config = SessionConfig::new().with_target_partitions(partitions);
+    let ctx = SessionContext::new_with_config(config);
+    let scan_provider = provider(&fixture("test.cool"), None, true, false, zero_based);
+    let oracle_provider = provider(&fixture("test.cool"), None, true, false, zero_based);
+    let schema = datafusion::catalog::TableProvider::schema(&oracle_provider);
+    ctx.register_table("c", Arc::new(scan_provider)).unwrap();
+    let oracle_ctx = SessionContext::new();
+    oracle_ctx
+        .register_table("full", Arc::new(oracle_provider))
+        .unwrap();
+    let batches = oracle_ctx
+        .sql("SELECT * FROM full")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let mem = datafusion::datasource::MemTable::try_new(schema, vec![batches]).unwrap();
+    ctx.register_table("oracle", Arc::new(mem)).unwrap();
+    ctx
+}
+
+async fn count_and_sum(ctx: &SessionContext, table: &str, predicate: &str) -> (i64, i64) {
+    let batches = ctx
+        .sql(&format!(
+            "SELECT count(*), coalesce(sum(count), 0) FROM {table} WHERE {predicate}"
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let n = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    let s = batches[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap()
+        .value(0);
+    (n, s)
+}
+
+async fn assert_pushdown_matches_oracle(zero_based: bool, partitions: usize, predicate: &str) {
+    let ctx = ctx_with_oracle(zero_based, partitions).await;
+    let pruned = count_and_sum(&ctx, "c", predicate).await;
+    let oracle = count_and_sum(&ctx, "oracle", predicate).await;
+    assert_eq!(
+        pruned, oracle,
+        "predicate `{predicate}` diverged from oracle"
+    );
+    assert!(
+        oracle.0 > 0,
+        "predicate `{predicate}` matched no rows in the oracle — weak test"
+    );
+}
+
+#[tokio::test]
+async fn pushdown_chrom_eq_matches_oracle() {
+    assert_pushdown_matches_oracle(false, 1, "chrom1 = 'chr2'").await;
+}
+
+#[tokio::test]
+async fn pushdown_region_matches_oracle_one_based() {
+    assert_pushdown_matches_oracle(
+        false,
+        1,
+        "chrom1 = 'chr1' AND start1 >= 20001 AND end1 <= 40000",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn pushdown_region_matches_oracle_zero_based() {
+    assert_pushdown_matches_oracle(
+        true,
+        1,
+        "chrom1 = 'chr1' AND start1 >= 20000 AND start1 < 40000",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn pushdown_chrom_in_list_matches_oracle() {
+    assert_pushdown_matches_oracle(false, 1, "chrom1 IN ('chr2')").await;
+}
+
+#[tokio::test]
+async fn pushdown_with_parallel_partitions_matches_oracle() {
+    assert_pushdown_matches_oracle(
+        false,
+        4,
+        "chrom1 = 'chr1' AND start1 >= 10001 AND end1 <= 60000",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn second_axis_filter_stays_client_side_and_correct() {
+    assert_pushdown_matches_oracle(false, 1, "chrom2 = 'chr2' AND count > 50").await;
+}
+
+#[tokio::test]
+async fn mixed_axis_filter_matches_oracle() {
+    assert_pushdown_matches_oracle(false, 1, "chrom1 = 'chr1' AND chrom2 = 'chr2'").await;
+}
+
+#[tokio::test]
+async fn unknown_chrom_returns_zero_rows() {
+    let ctx = ctx_with_oracle(false, 1).await;
+    let (n, _) = count_and_sum(&ctx, "c", "chrom1 = 'chrX'").await;
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn unsatisfiable_filter_returns_zero_rows() {
+    let ctx = ctx_with_oracle(false, 1).await;
+    let (n, _) = count_and_sum(
+        &ctx,
+        "c",
+        "chrom1 = 'chr1' AND start1 >= 90000 AND end1 <= 100",
+    )
+    .await;
+    assert_eq!(n, 0);
+}
+
+#[tokio::test]
+async fn explain_shows_pruned_row_count() {
+    let ctx = ctx_with_oracle(false, 1).await;
+    let batches = ctx
+        .sql("EXPLAIN SELECT * FROM c WHERE chrom1 = 'chr2'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let plan_text = batches
+        .iter()
+        .flat_map(|batch| {
+            let column = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            (0..column.len())
+                .map(|i| column.value(i).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(plan_text.contains("CoolerExec"), "{plan_text}");
+    let rows: usize = plan_text
+        .split("rows=")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|digits| digits.parse().ok())
+        .expect("CoolerExec display contains rows=");
+    assert!(
+        rows > 0 && rows < 4210,
+        "expected pruned row count, got {rows}"
+    );
+}

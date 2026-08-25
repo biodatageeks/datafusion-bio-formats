@@ -259,3 +259,26 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
         weight,
     })
 }
+
+/// The CSR-style pixel indexes of a collection: `chrom_offset` maps chrom →
+/// first bin id, `bin1_offset` maps bin1 id → first pixel row.
+#[derive(Debug)]
+pub(crate) struct IndexData {
+    pub chrom_offset: Vec<i64>,
+    pub bin1_offset: Vec<i64>,
+}
+
+pub(crate) fn load_index_data(group: &Group) -> Result<IndexData> {
+    let indexes = group
+        .group("indexes")
+        .map_err(|error| h5_err("Failed to open indexes group", error))?;
+    let open = |name: &str| {
+        indexes
+            .dataset(name)
+            .map_err(|error| h5_err(&format!("Failed to open indexes/{name}"), error))
+    };
+    Ok(IndexData {
+        chrom_offset: read_numeric_1d::<i64>(&open("chrom_offset")?, "indexes/chrom_offset")?,
+        bin1_offset: read_numeric_1d::<i64>(&open("bin1_offset")?, "indexes/bin1_offset")?,
+    })
+}

@@ -9,6 +9,7 @@
 pub mod collection;
 mod hdf5_utils;
 pub mod physical_exec;
+mod pruning;
 pub mod table_provider;
 
 pub use collection::{CoolerCollectionInfo, CoolerUri, list_data_collections};

@@ -20,12 +20,14 @@ use crate::hdf5_utils::{h5_err, read_numeric_slice};
 
 pub(crate) const COOLER_BATCH_ROWS: usize = 8192;
 
-/// Physical plan streaming pixel row ranges as record batches.
+/// Physical plan streaming pixel row ranges as record batches. Each partition
+/// owns a list of disjoint row ranges (pruning can produce several per
+/// partition).
 pub struct CoolerExec {
     pub(crate) file_path: String,
     pub(crate) group_path: String,
     pub(crate) schema: SchemaRef,
-    pub(crate) partitions: Vec<(usize, usize)>,
+    pub(crate) partitions: Vec<Vec<(usize, usize)>>,
     pub(crate) count_is_float: bool,
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) bins: Option<Arc<BinData>>,
@@ -57,6 +59,7 @@ impl DisplayAs for CoolerExec {
             self.partitions.len(),
             self.partitions
                 .iter()
+                .flatten()
                 .map(|(lo, hi)| hi - lo)
                 .sum::<usize>()
         )
@@ -92,7 +95,7 @@ impl ExecutionPlan for CoolerExec {
         partition: usize,
         _context: Arc<TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
-        let &(row_lo, row_hi) = self.partitions.get(partition).ok_or_else(|| {
+        let ranges = self.partitions.get(partition).ok_or_else(|| {
             DataFusionError::Internal(format!(
                 "CoolerExec partition {partition} is out of range for {} partitions",
                 self.partitions.len()
@@ -102,8 +105,9 @@ impl ExecutionPlan for CoolerExec {
             file_path: self.file_path.clone(),
             group_path: self.group_path.clone(),
             schema: self.schema.clone(),
-            cursor: row_lo,
-            row_hi,
+            ranges: ranges.clone().into_iter(),
+            cursor: 0,
+            row_hi: 0,
             count_is_float: self.count_is_float,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             bins: self.bins.clone(),
@@ -123,13 +127,14 @@ struct PixelDatasets {
     count: Option<Dataset>,
 }
 
-/// Synchronous iterator yielding fixed-size record batches for one contiguous
-/// pixel row range. HDF5 reads happen per batch; nothing larger than one batch
-/// (plus the shared bins table) is ever materialized.
+/// Synchronous iterator yielding fixed-size record batches across a
+/// partition's disjoint pixel row ranges. HDF5 reads happen per batch; nothing
+/// larger than one batch (plus the shared bins table) is ever materialized.
 struct CoolerPixelStream {
     file_path: String,
     group_path: String,
     schema: SchemaRef,
+    ranges: std::vec::IntoIter<(usize, usize)>,
     cursor: usize,
     row_hi: usize,
     count_is_float: bool,
@@ -290,8 +295,10 @@ impl Iterator for CoolerPixelStream {
     type Item = Result<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cursor >= self.row_hi {
-            return None;
+        while self.cursor >= self.row_hi {
+            let (lo, hi) = self.ranges.next()?;
+            self.cursor = lo;
+            self.row_hi = hi;
         }
         let lo = self.cursor;
         let hi = (lo + COOLER_BATCH_ROWS).min(self.row_hi);
