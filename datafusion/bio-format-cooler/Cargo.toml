@@ -1,0 +1,25 @@
+[package]
+name = "datafusion-bio-format-cooler"
+version = "1.11.0"
+description = "Cooler (.cool/.mcool) Hi-C contact matrix support for Apache DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+readme = "README.md"
+
+[dependencies]
+datafusion.workspace = true
+async-trait.workspace = true
+datafusion-bio-format-core = { path = "../bio-format-core" }
+futures-util.workspace = true
+# static: libhdf5 built from source and statically linked (no system HDF5 at
+# runtime); zlib is mandatory or gzip-compressed cooler datasets fail at read
+# time with a filter-plugin error. Validated by the polars-bio wheel-CI spike
+# (openspec change add-cool-mcool-support, task 1.2).
+hdf5-metno = { version = "0.10", features = ["static", "zlib"] }
+ndarray = "0.16"
+
+[dev-dependencies]
+tokio.workspace = true
