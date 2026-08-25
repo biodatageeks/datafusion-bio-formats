@@ -23,7 +23,7 @@ use crate::collection::{
     BinData, CoolerUri, CountType, IndexData, ensure_local_path, load_bin_data, load_index_data,
     resolve_collection_group,
 };
-use crate::fast_chunk::{FastPixels, index_column, validate_against_reference};
+use crate::fast_chunk::{ChunkedColumn, FastPixels, index_column, validate_against_reference};
 use crate::hdf5_utils::{h5_err, read_numeric_slice};
 use crate::physical_exec::CoolerExec;
 use crate::pruning::{is_first_axis_filter, plan_first_axis_ranges, plan_partitions};
@@ -44,7 +44,9 @@ pub struct CoolerTableProvider {
     coordinate_system_zero_based: bool,
     bin_cache: OnceLock<Arc<BinData>>,
     index_cache: OnceLock<Arc<IndexData>>,
-    fast_cache: OnceLock<Arc<FastPixels>>,
+    fast_bin1_cache: OnceLock<Option<Arc<ChunkedColumn>>>,
+    fast_bin2_cache: OnceLock<Option<Arc<ChunkedColumn>>>,
+    fast_count_cache: OnceLock<Option<Arc<ChunkedColumn>>>,
 }
 
 impl Debug for CoolerTableProvider {
@@ -159,7 +161,9 @@ impl CoolerTableProvider {
             coordinate_system_zero_based,
             bin_cache: OnceLock::new(),
             index_cache: OnceLock::new(),
-            fast_cache: OnceLock::new(),
+            fast_bin1_cache: OnceLock::new(),
+            fast_bin2_cache: OnceLock::new(),
+            fast_count_cache: OnceLock::new(),
         })
     }
 
@@ -214,101 +218,149 @@ impl CoolerTableProvider {
 }
 
 impl CoolerTableProvider {
-    /// Build (once) the direct-chunk indexes for the pixel columns. Each
-    /// column is validated against a libhdf5 reference read of its leading
-    /// elements; any disagreement or unsupported layout falls back to the
-    /// ordinary hdf5 read path for that column.
-    fn fast_pixels(&self) -> Arc<FastPixels> {
-        self.fast_cache
-            .get_or_init(|| {
-                if std::env::var_os("DATAFUSION_BIO_COOLER_DISABLE_FAST_PATH").is_some() {
-                    return Arc::new(FastPixels::default());
-                }
-                // Fallback reasons are logged at debug level: a user seeing
-                // lock-bound scan speeds can enable logging to learn why the
-                // fast path is inactive.
-                let build = || -> Result<FastPixels> {
-                    let file = File::open(&self.file_path)
-                        .map_err(|error| h5_err("Failed to open cooler file", error))?;
-                    let pixels = file
-                        .group(&self.group_path)
-                        .and_then(|group| group.group("pixels"))
-                        .map_err(|error| h5_err("Failed to open pixels group", error))?;
-                    let indexed = |name: &str, expected: TypeDescriptor| -> Result<Option<_>> {
-                        let ds = pixels.dataset(name).map_err(|error| {
-                            h5_err(&format!("Failed to open pixels/{name}"), error)
-                        })?;
-                        let td = ds
-                            .dtype()
-                            .and_then(|dtype| dtype.to_descriptor())
-                            .map_err(|error| h5_err("Failed to read dtype", error))?;
-                        if td != expected {
-                            return Ok(None);
-                        }
-                        let Some(column) = index_column(&ds) else {
-                            return Ok(None);
-                        };
-                        let probe = column.chunk_elems.min(column.n_elems).min(8192);
-                        let reference: Vec<u8> = match expected {
-                            TypeDescriptor::Integer(IntSize::U8) => {
-                                read_numeric_slice::<i64>(&ds, 0, probe, name)?
-                                    .iter()
-                                    .flat_map(|value| value.to_le_bytes())
-                                    .collect()
-                            }
-                            TypeDescriptor::Integer(IntSize::U4) => {
-                                read_numeric_slice::<i32>(&ds, 0, probe, name)?
-                                    .iter()
-                                    .flat_map(|value| value.to_le_bytes())
-                                    .collect()
-                            }
-                            TypeDescriptor::Unsigned(IntSize::U8) => {
-                                read_numeric_slice::<u64>(&ds, 0, probe, name)?
-                                    .iter()
-                                    .flat_map(|value| value.to_le_bytes())
-                                    .collect()
-                            }
-                            TypeDescriptor::Unsigned(IntSize::U4) => {
-                                read_numeric_slice::<u32>(&ds, 0, probe, name)?
-                                    .iter()
-                                    .flat_map(|value| value.to_le_bytes())
-                                    .collect()
-                            }
-                            _ => read_numeric_slice::<f64>(&ds, 0, probe, name)?
-                                .iter()
-                                .flat_map(|value| value.to_le_bytes())
-                                .collect(),
-                        };
-                        if !validate_against_reference(&column, &self.file_path, &reference) {
-                            // Also covers byte order: the reference bytes are
-                            // little-endian by construction, so a big-endian
-                            // dataset fails the probe and stays on hdf5 reads.
-                            log::debug!(
-                                "cooler fast path disabled for pixels/{name}: reference probe mismatch"
-                            );
-                            return Ok(None);
-                        }
-                        Ok(Some(column))
-                    };
-                    let count_type = match self.count_type {
-                        CountType::Float64 => TypeDescriptor::Float(FloatSize::U8),
-                        CountType::Int64 => TypeDescriptor::Integer(IntSize::U8),
-                        CountType::Int32 => TypeDescriptor::Integer(IntSize::U4),
-                        CountType::UInt64 => TypeDescriptor::Unsigned(IntSize::U8),
-                        CountType::UInt32 => TypeDescriptor::Unsigned(IntSize::U4),
-                    };
-                    Ok(FastPixels {
-                        bin1: indexed("bin1_id", TypeDescriptor::Integer(IntSize::U8))?,
-                        bin2: indexed("bin2_id", TypeDescriptor::Integer(IntSize::U8))?,
-                        count: indexed("count", count_type)?,
-                    })
-                };
-                Arc::new(build().unwrap_or_else(|error| {
+    /// Build direct-chunk indexes only for pixel columns required by this
+    /// projection. Each per-column result is cached independently, so later
+    /// queries can add a newly needed column without revisiting the others.
+    fn fast_pixels(&self, schema: &SchemaRef) -> Arc<FastPixels> {
+        let needs_bin1 = schema.fields().iter().any(|field| {
+            matches!(
+                field.name().as_str(),
+                "chrom1" | "start1" | "end1" | "weight1" | "bin1_id"
+            )
+        });
+        let needs_bin2 = schema.fields().iter().any(|field| {
+            matches!(
+                field.name().as_str(),
+                "chrom2" | "start2" | "end2" | "weight2" | "bin2_id"
+            )
+        });
+        let needs_count = schema.fields().iter().any(|field| field.name() == "count");
+        if std::env::var_os("DATAFUSION_BIO_COOLER_DISABLE_FAST_PATH").is_some() {
+            return Arc::new(FastPixels::default());
+        }
+
+        let build_bin1 = needs_bin1 && self.fast_bin1_cache.get().is_none();
+        let build_bin2 = needs_bin2 && self.fast_bin2_cache.get().is_none();
+        let build_count = needs_count && self.fast_count_cache.get().is_none();
+        if build_bin1 || build_bin2 || build_count {
+            let built = self
+                .build_fast_pixels(build_bin1, build_bin2, build_count)
+                .unwrap_or_else(|error| {
                     log::debug!("cooler fast path disabled: {error}");
                     FastPixels::default()
-                }))
-            })
-            .clone()
+                });
+            if build_bin1 {
+                let _ = self.fast_bin1_cache.set(built.bin1);
+            }
+            if build_bin2 {
+                let _ = self.fast_bin2_cache.set(built.bin2);
+            }
+            if build_count {
+                let _ = self.fast_count_cache.set(built.count);
+            }
+        }
+
+        Arc::new(FastPixels {
+            bin1: needs_bin1
+                .then(|| self.fast_bin1_cache.get().cloned().flatten())
+                .flatten(),
+            bin2: needs_bin2
+                .then(|| self.fast_bin2_cache.get().cloned().flatten())
+                .flatten(),
+            count: needs_count
+                .then(|| self.fast_count_cache.get().cloned().flatten())
+                .flatten(),
+        })
+    }
+
+    fn build_fast_pixels(
+        &self,
+        needs_bin1: bool,
+        needs_bin2: bool,
+        needs_count: bool,
+    ) -> Result<FastPixels> {
+        let file = File::open(&self.file_path)
+            .map_err(|error| h5_err("Failed to open cooler file", error))?;
+        let pixels = file
+            .group(&self.group_path)
+            .and_then(|group| group.group("pixels"))
+            .map_err(|error| h5_err("Failed to open pixels group", error))?;
+        let indexed = |name: &str, expected: TypeDescriptor| -> Result<Option<_>> {
+            let ds = pixels
+                .dataset(name)
+                .map_err(|error| h5_err(&format!("Failed to open pixels/{name}"), error))?;
+            let td = ds
+                .dtype()
+                .and_then(|dtype| dtype.to_descriptor())
+                .map_err(|error| h5_err("Failed to read dtype", error))?;
+            if td != expected {
+                return Ok(None);
+            }
+            let Some(column) = index_column(&ds) else {
+                return Ok(None);
+            };
+            let probe = column.chunk_elems.min(column.n_elems).min(8192);
+            let reference: Vec<u8> = match expected {
+                TypeDescriptor::Integer(IntSize::U8) => {
+                    read_numeric_slice::<i64>(&ds, 0, probe, name)?
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect()
+                }
+                TypeDescriptor::Integer(IntSize::U4) => {
+                    read_numeric_slice::<i32>(&ds, 0, probe, name)?
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect()
+                }
+                TypeDescriptor::Unsigned(IntSize::U8) => {
+                    read_numeric_slice::<u64>(&ds, 0, probe, name)?
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect()
+                }
+                TypeDescriptor::Unsigned(IntSize::U4) => {
+                    read_numeric_slice::<u32>(&ds, 0, probe, name)?
+                        .iter()
+                        .flat_map(|value| value.to_le_bytes())
+                        .collect()
+                }
+                _ => read_numeric_slice::<f64>(&ds, 0, probe, name)?
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect(),
+            };
+            if !validate_against_reference(&column, &self.file_path, &reference) {
+                // Also covers byte order: the reference bytes are little-endian
+                // by construction, so a big-endian dataset fails the probe.
+                log::debug!(
+                    "cooler fast path disabled for pixels/{name}: reference probe mismatch"
+                );
+                return Ok(None);
+            }
+            Ok(Some(column))
+        };
+        let count_type = match self.count_type {
+            CountType::Float64 => TypeDescriptor::Float(FloatSize::U8),
+            CountType::Int64 => TypeDescriptor::Integer(IntSize::U8),
+            CountType::Int32 => TypeDescriptor::Integer(IntSize::U4),
+            CountType::UInt64 => TypeDescriptor::Unsigned(IntSize::U8),
+            CountType::UInt32 => TypeDescriptor::Unsigned(IntSize::U4),
+        };
+        Ok(FastPixels {
+            bin1: needs_bin1
+                .then(|| indexed("bin1_id", TypeDescriptor::Integer(IntSize::U8)))
+                .transpose()?
+                .flatten(),
+            bin2: needs_bin2
+                .then(|| indexed("bin2_id", TypeDescriptor::Integer(IntSize::U8)))
+                .transpose()?
+                .flatten(),
+            count: needs_count
+                .then(|| indexed("count", count_type))
+                .transpose()?
+                .flatten(),
+        })
     }
 }
 
@@ -404,7 +456,7 @@ impl TableProvider for CoolerTableProvider {
                 // execution plan will never open.
                 Arc::new(FastPixels::default())
             } else {
-                self.fast_pixels()
+                self.fast_pixels(&schema)
             },
             cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema),
@@ -495,6 +547,32 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(provider.fast_cache.get().is_none());
+        assert!(provider.fast_bin1_cache.get().is_none());
+        assert!(provider.fast_bin2_cache.get().is_none());
+        assert!(provider.fast_count_cache.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn projected_scan_only_builds_needed_pixel_indexes() {
+        let path = format!("{}/tests/data/test.cool", env!("CARGO_MANIFEST_DIR"));
+        let count_provider =
+            CoolerTableProvider::new(path.clone(), None, true, false, true).unwrap();
+        let ctx = SessionContext::new();
+        count_provider
+            .scan(&ctx.state(), Some(&vec![6]), &[], None)
+            .await
+            .unwrap();
+        assert!(count_provider.fast_bin1_cache.get().is_none());
+        assert!(count_provider.fast_bin2_cache.get().is_none());
+        assert!(count_provider.fast_count_cache.get().is_some());
+
+        let chrom1_provider = CoolerTableProvider::new(path, None, true, false, true).unwrap();
+        chrom1_provider
+            .scan(&ctx.state(), Some(&vec![0]), &[], None)
+            .await
+            .unwrap();
+        assert!(chrom1_provider.fast_bin1_cache.get().is_some());
+        assert!(chrom1_provider.fast_bin2_cache.get().is_none());
+        assert!(chrom1_provider.fast_count_cache.get().is_none());
     }
 }

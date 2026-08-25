@@ -80,7 +80,9 @@ Only datasets required by the projected fields are loaded. Joined-coordinate
 projections load bin metadata once and skip unused axis/count work. An empty
 projection constructs row counts from metadata/index ranges without building
 the direct pixel cache or decoding any pixel column. The execution plan
-reports the projection for inspection.
+reports the projection for inspection. Direct-chunk indexes are also built and
+cached independently per projected pixel column, so projecting `count` does
+not visit either ID dataset and projecting one axis does not index the other.
 
 ### Predicate pruning
 
@@ -111,6 +113,12 @@ unsupported layout, filter, per-chunk mask, byte order, reference-probe
 mismatch, or decode precondition disables the optimized path for that column;
 the entire column then uses libhdf5. This avoids mid-stream failures and keeps
 the optimization observationally equivalent to the compatibility reader.
+
+Before joined indexing, bin arrays are required to have equal lengths,
+`bins/chrom` must reference `chroms/name`, and decoded pixel bin IDs must fall
+within the bins table. CSR offsets are validated whenever pruning or aligned
+partition planning consumes them. Malformed references return contextual
+DataFusion errors rather than panics.
 
 ## Risks / Trade-offs
 

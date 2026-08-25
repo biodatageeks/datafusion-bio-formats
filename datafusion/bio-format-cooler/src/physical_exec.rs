@@ -306,6 +306,12 @@ impl CoolerPixelStream {
             1
         };
         let bins = self.bins.as_deref();
+        let bin1_indexes = bins
+            .map(|bins| validate_bin_references(&bin1, bins.start.len(), "pixels/bin1_id", lo))
+            .transpose()?;
+        let bin2_indexes = bins
+            .map(|bins| validate_bin_references(&bin2, bins.start.len(), "pixels/bin2_id", lo))
+            .transpose()?;
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
         for field in self.schema.fields() {
             let array: ArrayRef = match field.name().as_str() {
@@ -334,8 +340,17 @@ impl CoolerPixelStream {
                             "CoolerExec column {name} requires the bins table, which was not loaded"
                         ))
                     })?;
-                    let ids = if name.ends_with('1') { &bin1 } else { &bin2 };
-                    joined_column(name, ids, bins, start_offset)?
+                    let indexes = if name.ends_with('1') {
+                        bin1_indexes.as_deref()
+                    } else {
+                        bin2_indexes.as_deref()
+                    }
+                    .ok_or_else(|| {
+                        DataFusionError::Internal(format!(
+                            "CoolerExec column {name} requires validated bin references"
+                        ))
+                    })?;
+                    joined_column(name, indexes, bins, start_offset)?
                 }
             };
             arrays.push(array);
@@ -382,16 +397,44 @@ fn read_id_column(
     }
 }
 
-fn joined_column(name: &str, ids: &[i64], bins: &BinData, start_offset: u32) -> Result<ArrayRef> {
-    let lookup = |id: &i64, table: &[u32]| -> u32 { table[*id as usize] };
+fn validate_bin_references(
+    ids: &[i64],
+    nbins: usize,
+    name: &str,
+    row_offset: usize,
+) -> Result<Vec<usize>> {
+    ids.iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            usize::try_from(value)
+                .ok()
+                .filter(|&value| value < nbins)
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!(
+                        "{name}[{}]={value} does not reference one of the {nbins} bins",
+                        row_offset + index
+                    ))
+                })
+        })
+        .collect()
+}
+
+fn joined_column(
+    name: &str,
+    indexes: &[usize],
+    bins: &BinData,
+    start_offset: u32,
+) -> Result<ArrayRef> {
+    let lookup = |&index: &usize, table: &[u32]| -> u32 { table[index] };
     let array: ArrayRef = match name {
-        "chrom1" | "chrom2" => {
-            Arc::new(StringArray::from_iter_values(ids.iter().map(|id| {
-                bins.chrom_names[bins.chrom_idx[*id as usize] as usize].as_str()
-            })))
-        }
+        "chrom1" | "chrom2" => Arc::new(StringArray::from_iter_values(
+            indexes
+                .iter()
+                .map(|&index| bins.chrom_names[bins.chrom_idx[index]].as_str()),
+        )),
         "start1" | "start2" => Arc::new(UInt32Array::from_iter_values(
-            ids.iter()
+            indexes
+                .iter()
                 .map(|id| {
                     lookup(id, &bins.start)
                         .checked_add(start_offset)
@@ -405,7 +448,7 @@ fn joined_column(name: &str, ids: &[i64], bins: &BinData, start_offset: u32) -> 
                 .collect::<Result<Vec<_>>>()?,
         )),
         "end1" | "end2" => Arc::new(UInt32Array::from_iter_values(
-            ids.iter().map(|id| lookup(id, &bins.end)),
+            indexes.iter().map(|index| lookup(index, &bins.end)),
         )),
         "weight1" | "weight2" => {
             let weights = bins.weight.as_ref().ok_or_else(|| {
@@ -415,7 +458,7 @@ fn joined_column(name: &str, ids: &[i64], bins: &BinData, start_offset: u32) -> 
                 )
             })?;
             Arc::new(Float64Array::from_iter_values(
-                ids.iter().map(|id| weights[*id as usize]),
+                indexes.iter().map(|&index| weights[index]),
             ))
         }
         other => {
@@ -449,5 +492,26 @@ impl Iterator for CoolerPixelStream {
             );
         }
         Some(self.build_batch(lo, hi))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_bin_references;
+
+    #[test]
+    fn invalid_pixel_bin_references_return_contextual_errors() {
+        let negative = validate_bin_references(&[-1], 2, "pixels/bin1_id", 41)
+            .unwrap_err()
+            .to_string();
+        assert!(negative.contains("pixels/bin1_id[41]=-1"), "{negative}");
+
+        let out_of_range = validate_bin_references(&[2], 2, "pixels/bin2_id", 7)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            out_of_range.contains("pixels/bin2_id[7]=2"),
+            "{out_of_range}"
+        );
     }
 }

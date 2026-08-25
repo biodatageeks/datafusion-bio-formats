@@ -236,7 +236,7 @@ pub(crate) enum CountType {
 #[derive(Debug)]
 pub(crate) struct BinData {
     pub chrom_names: Vec<String>,
-    pub chrom_idx: Vec<i32>,
+    pub chrom_idx: Vec<usize>,
     pub start: Vec<u32>,
     pub end: Vec<u32>,
     pub weight: Option<Vec<f64>>,
@@ -260,7 +260,7 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
             .map_err(|error| h5_err(&format!("Failed to open bins/{name}"), error))
     };
     // bins/chrom is enum-typed (h5py categorical); soft conversion reads it as i32.
-    let chrom_idx = read_numeric_1d::<i32>(&open("chrom")?, "bins/chrom")?;
+    let stored_chrom_idx = read_numeric_1d::<i32>(&open("chrom")?, "bins/chrom")?;
     let read_coordinate = |name: &str| -> Result<Vec<u32>> {
         read_numeric_1d::<i64>(&open(name)?, &format!("bins/{name}"))?
             .into_iter()
@@ -287,6 +287,13 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
     } else {
         None
     };
+    let chrom_idx = validate_bin_arrays(
+        chrom_names.len(),
+        stored_chrom_idx,
+        start.len(),
+        end.len(),
+        weight.as_ref().map(Vec::len),
+    )?;
     Ok(BinData {
         chrom_names,
         chrom_idx,
@@ -294,6 +301,41 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
         end,
         weight,
     })
+}
+
+fn validate_bin_arrays(
+    nchroms: usize,
+    stored_chrom_idx: Vec<i32>,
+    start_len: usize,
+    end_len: usize,
+    weight_len: Option<usize>,
+) -> Result<Vec<usize>> {
+    let nbins = stored_chrom_idx.len();
+    for (name, length) in [
+        ("bins/start", start_len),
+        ("bins/end", end_len),
+        ("bins/weight", weight_len.unwrap_or(nbins)),
+    ] {
+        if length != nbins {
+            return Err(DataFusionError::Plan(format!(
+                "{name} has {length} rows but bins/chrom has {nbins}"
+            )));
+        }
+    }
+    stored_chrom_idx
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            usize::try_from(value)
+                .ok()
+                .filter(|&value| value < nchroms)
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!(
+                        "bins/chrom[{index}]={value} does not reference one of the {nchroms} chromosomes"
+                    ))
+                })
+        })
+        .collect()
 }
 
 /// The CSR-style pixel indexes of a collection: `chrom_offset` maps chrom →
@@ -313,8 +355,99 @@ pub(crate) fn load_index_data(group: &Group) -> Result<IndexData> {
             .dataset(name)
             .map_err(|error| h5_err(&format!("Failed to open indexes/{name}"), error))
     };
+    let chrom_offset = read_numeric_1d::<i64>(&open("chrom_offset")?, "indexes/chrom_offset")?;
+    let bin1_offset = read_numeric_1d::<i64>(&open("bin1_offset")?, "indexes/bin1_offset")?;
+    let dataset_len = |group_name: &str, dataset_name: &str| -> Result<usize> {
+        let path = format!("{group_name}/{dataset_name}");
+        let dataset = group
+            .group(group_name)
+            .and_then(|group| group.dataset(dataset_name))
+            .map_err(|error| h5_err(&format!("Failed to open {path}"), error))?;
+        let shape = dataset.shape();
+        if shape.len() != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "{path} is not a 1-D dataset"
+            )));
+        }
+        Ok(shape[0])
+    };
+    let nchroms = dataset_len("chroms", "name")?;
+    let nbins = dataset_len("bins", "chrom")?;
+    let nnz = dataset_len("pixels", "count")?;
+    validate_offsets("indexes/chrom_offset", &chrom_offset, nchroms + 1, nbins)?;
+    validate_offsets("indexes/bin1_offset", &bin1_offset, nbins + 1, nnz)?;
     Ok(IndexData {
-        chrom_offset: read_numeric_1d::<i64>(&open("chrom_offset")?, "indexes/chrom_offset")?,
-        bin1_offset: read_numeric_1d::<i64>(&open("bin1_offset")?, "indexes/bin1_offset")?,
+        chrom_offset,
+        bin1_offset,
     })
+}
+
+fn validate_offsets(
+    name: &str,
+    offsets: &[i64],
+    expected_len: usize,
+    expected_last: usize,
+) -> Result<()> {
+    if offsets.len() != expected_len {
+        return Err(DataFusionError::Plan(format!(
+            "{name} has {} entries, expected {expected_len}",
+            offsets.len()
+        )));
+    }
+    if offsets.first() != Some(&0) {
+        return Err(DataFusionError::Plan(format!("{name} must begin with 0")));
+    }
+    for (index, pair) in offsets.windows(2).enumerate() {
+        if pair[0] < 0 || pair[1] < pair[0] {
+            return Err(DataFusionError::Plan(format!(
+                "{name} is invalid at entries {index} and {}: {} then {}",
+                index + 1,
+                pair[0],
+                pair[1]
+            )));
+        }
+    }
+    if offsets
+        .last()
+        .and_then(|&value| usize::try_from(value).ok())
+        != Some(expected_last)
+    {
+        return Err(DataFusionError::Plan(format!(
+            "{name} must end at {expected_last}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::{validate_bin_arrays, validate_offsets};
+
+    #[test]
+    fn rejects_invalid_bin_chromosome_references() {
+        let error = validate_bin_arrays(2, vec![0, -1], 2, 2, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bins/chrom[1]=-1"), "{error}");
+
+        let error = validate_bin_arrays(2, vec![0, 2], 2, 2, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bins/chrom[1]=2"), "{error}");
+    }
+
+    #[test]
+    fn rejects_mismatched_bin_array_lengths() {
+        let error = validate_bin_arrays(2, vec![0, 1], 1, 2, None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bins/start has 1 rows"), "{error}");
+    }
+
+    #[test]
+    fn rejects_malformed_csr_offsets() {
+        assert!(validate_offsets("index", &[0, 2, 1], 3, 1).is_err());
+        assert!(validate_offsets("index", &[0, 1], 3, 1).is_err());
+        assert!(validate_offsets("index", &[0, 1, 2], 3, 1).is_err());
+    }
 }

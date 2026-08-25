@@ -72,7 +72,7 @@ The provider SHALL read and materialize only the datasets required by the projec
 #### Scenario: Project one axis and count
 
 - **WHEN** a scan projects only first-axis coordinates and `count`
-- **THEN** second-axis coordinate materialization is skipped
+- **THEN** the second-axis ID dataset is neither indexed nor read and second-axis coordinate materialization is skipped
 
 #### Scenario: Empty projection
 
@@ -120,6 +120,15 @@ The provider MAY decode supported HDF5 chunks directly, but SHALL select the lib
 - **WHEN** any indexed chunk reports a skipped filter in its mask
 - **THEN** the whole column uses libhdf5 rather than failing after partial
   direct execution
+
+### Requirement: Validated joined references
+
+The provider SHALL validate bin-array shapes, chromosome references, and decoded pixel bin references before using them for joined array indexing.
+
+#### Scenario: Malformed bin reference
+
+- **WHEN** `bins/chrom` or `pixels/bin1_id`/`pixels/bin2_id` contains a negative or out-of-range reference
+- **THEN** the joined scan returns a contextual invalid-file error instead of panicking
 
 ### Requirement: Local-file scope
 
