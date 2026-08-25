@@ -181,6 +181,12 @@ scan sizing or joined array indexing.
 - **WHEN** `bins/chrom` or `pixels/bin1_id`/`pixels/bin2_id` contains a negative or out-of-range reference
 - **THEN** the joined scan returns a contextual invalid-file error instead of panicking
 
+#### Scenario: Chromosome offsets disagree with bins
+
+- **WHEN** `indexes/chrom_offset` is structurally valid but its chromosome
+  spans disagree with the corresponding `bins/chrom` assignments
+- **THEN** the provider returns a contextual invalid-file error before pruning
+
 ### Requirement: Local-file scope
 
 The provider SHALL accept local seekable Cooler files and SHALL reject remote object-store URLs with a clear not-supported error.

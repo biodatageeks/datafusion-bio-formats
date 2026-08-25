@@ -132,8 +132,9 @@ one-dimensional and equal-length. Before joined indexing, projected bin arrays
 are required to match `bins/chrom`,
 `bins/chrom` must reference `chroms/name`, and decoded pixel bin IDs must fall
 within the bins table. CSR offsets are validated whenever pruning or aligned
-partition planning consumes them. Malformed references return contextual
-DataFusion errors rather than panics.
+partition planning consumes them; every `chrom_offset` span must also agree
+with the corresponding `bins/chrom` assignments. Malformed references return
+contextual DataFusion errors rather than panics or incorrect pruning.
 
 ## Risks / Trade-offs
 

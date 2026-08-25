@@ -49,6 +49,8 @@
   out-of-file or implausibly large stored chunk extents during indexing.
 - [x] 4.7 Bound dense direct-chunk index allocation before trusting logical
   dataset extents.
+- [x] 4.8 Cross-validate chromosome offsets with the stored bin chromosome
+  assignments before predicate pruning.
 
 ## 5. Verification
 

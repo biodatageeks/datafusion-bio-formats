@@ -430,6 +430,17 @@ pub(crate) fn load_index_data(group: &Group) -> Result<IndexData> {
     let nnz = dataset_len("pixels", "count")?;
     validate_offsets("indexes/chrom_offset", &chrom_offset, nchroms + 1, nbins)?;
     validate_offsets("indexes/bin1_offset", &bin1_offset, nbins + 1, nnz)?;
+    let bins = group
+        .group("bins")
+        .map_err(|error| h5_err("Failed to open bins group", error))?;
+    let stored_bin_chrom = read_numeric_1d::<i32>(
+        &bins
+            .dataset("chrom")
+            .map_err(|error| h5_err("Failed to open bins/chrom", error))?,
+        "bins/chrom",
+    )?;
+    let bin_chrom = validate_bin_chrom(nchroms, stored_bin_chrom, nbins)?;
+    validate_chrom_offsets_match_bins(&chrom_offset, &bin_chrom)?;
     Ok(IndexData {
         chrom_offset,
         bin1_offset,
@@ -473,9 +484,44 @@ fn validate_offsets(
     Ok(())
 }
 
+fn validate_chrom_offsets_match_bins(offsets: &[i64], bin_chrom: &[usize]) -> Result<()> {
+    for (chrom_index, pair) in offsets.windows(2).enumerate() {
+        let lo = usize::try_from(pair[0]).map_err(|_| {
+            DataFusionError::Plan(format!(
+                "indexes/chrom_offset[{chrom_index}]={} is not a valid bin boundary",
+                pair[0]
+            ))
+        })?;
+        let hi = usize::try_from(pair[1]).map_err(|_| {
+            DataFusionError::Plan(format!(
+                "indexes/chrom_offset[{}]={} is not a valid bin boundary",
+                chrom_index + 1,
+                pair[1]
+            ))
+        })?;
+        for bin_index in lo..hi {
+            let actual = bin_chrom.get(bin_index).ok_or_else(|| {
+                DataFusionError::Plan(format!(
+                    "indexes/chrom_offset boundary {hi} exceeds the {} bins/chrom rows",
+                    bin_chrom.len()
+                ))
+            })?;
+            if *actual != chrom_index {
+                return Err(DataFusionError::Plan(format!(
+                    "indexes/chrom_offset assigns bins/chrom[{bin_index}]={actual} to chromosome {chrom_index}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod validation_tests {
-    use super::{validate_bin_array_len, validate_bin_chrom, validate_offsets};
+    use super::{
+        validate_bin_array_len, validate_bin_chrom, validate_chrom_offsets_match_bins,
+        validate_offsets,
+    };
 
     #[test]
     fn rejects_invalid_bin_chromosome_references() {
@@ -503,5 +549,21 @@ mod validation_tests {
         assert!(validate_offsets("index", &[0, 2, 1], 3, 1).is_err());
         assert!(validate_offsets("index", &[0, 1], 3, 1).is_err());
         assert!(validate_offsets("index", &[0, 1, 2], 3, 1).is_err());
+    }
+
+    #[test]
+    fn rejects_chromosome_offsets_that_disagree_with_bin_assignments() {
+        validate_chrom_offsets_match_bins(&[0, 1, 2], &[0, 1]).unwrap();
+        validate_chrom_offsets_match_bins(&[0, 1, 1, 3], &[0, 2, 2]).unwrap();
+
+        let error = validate_chrom_offsets_match_bins(&[0, 2, 2], &[0, 1])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bins/chrom[1]=1"), "{error}");
+
+        let error = validate_chrom_offsets_match_bins(&[0, 0, 2], &[0, 1])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bins/chrom[0]=0"), "{error}");
     }
 }
