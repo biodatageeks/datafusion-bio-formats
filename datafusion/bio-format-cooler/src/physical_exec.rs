@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{
     ArrayRef, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray, UInt32Array,
+    UInt64Array,
 };
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatchOptions;
@@ -17,7 +18,8 @@ use hdf5_metno::{Dataset, File};
 
 use crate::collection::{BinData, CountType};
 use crate::fast_chunk::{
-    ChunkReader, ChunkedColumn, FastPixels, bytes_to_f64, bytes_to_i32, bytes_to_i64,
+    ChunkReader, ChunkedColumn, FastPixels, bytes_to_f64, bytes_to_i32, bytes_to_i64, bytes_to_u32,
+    bytes_to_u64,
 };
 use crate::hdf5_utils::{h5_err, read_numeric_slice};
 
@@ -139,6 +141,8 @@ enum ColumnSource {
 enum CountValues {
     Int32(Vec<i32>),
     Int64(Vec<i64>),
+    UInt32(Vec<u32>),
+    UInt64(Vec<u64>),
     Float64(Vec<f64>),
 }
 
@@ -272,6 +276,8 @@ impl CoolerPixelStream {
                     CountType::Float64 => CountValues::Float64(bytes_to_f64(bytes)),
                     CountType::Int64 => CountValues::Int64(bytes_to_i64(bytes)),
                     CountType::Int32 => CountValues::Int32(bytes_to_i32(bytes)),
+                    CountType::UInt64 => CountValues::UInt64(bytes_to_u64(bytes)),
+                    CountType::UInt32 => CountValues::UInt32(bytes_to_u32(bytes)),
                 }
             }
             Some(ColumnSource::H5(ds)) => match self.count_type {
@@ -283,6 +289,12 @@ impl CoolerPixelStream {
                 }
                 CountType::Int32 => {
                     CountValues::Int32(read_numeric_slice::<i32>(ds, lo, hi, "pixels/count")?)
+                }
+                CountType::UInt64 => {
+                    CountValues::UInt64(read_numeric_slice::<u64>(ds, lo, hi, "pixels/count")?)
+                }
+                CountType::UInt32 => {
+                    CountValues::UInt32(read_numeric_slice::<u32>(ds, lo, hi, "pixels/count")?)
                 }
             },
             None => CountValues::Int32(Vec::new()),
@@ -308,6 +320,12 @@ impl CoolerPixelStream {
                     }
                     CountValues::Int32(values) => {
                         Arc::new(Int32Array::from_iter_values(values.iter().copied()))
+                    }
+                    CountValues::UInt64(values) => {
+                        Arc::new(UInt64Array::from_iter_values(values.iter().copied()))
+                    }
+                    CountValues::UInt32(values) => {
+                        Arc::new(UInt32Array::from_iter_values(values.iter().copied()))
                     }
                 },
                 name => {
@@ -365,7 +383,7 @@ fn read_id_column(
 }
 
 fn joined_column(name: &str, ids: &[i64], bins: &BinData, start_offset: u32) -> Result<ArrayRef> {
-    let lookup = |id: &i64, table: &[i32]| -> i32 { table[*id as usize] };
+    let lookup = |id: &i64, table: &[u32]| -> u32 { table[*id as usize] };
     let array: ArrayRef = match name {
         "chrom1" | "chrom2" => {
             Arc::new(StringArray::from_iter_values(ids.iter().map(|id| {
@@ -374,10 +392,20 @@ fn joined_column(name: &str, ids: &[i64], bins: &BinData, start_offset: u32) -> 
         }
         "start1" | "start2" => Arc::new(UInt32Array::from_iter_values(
             ids.iter()
-                .map(|id| lookup(id, &bins.start) as u32 + start_offset),
+                .map(|id| {
+                    lookup(id, &bins.start)
+                        .checked_add(start_offset)
+                        .ok_or_else(|| {
+                            DataFusionError::Plan(
+                                "A 1-based cooler start coordinate exceeds the UInt32 range"
+                                    .to_string(),
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?,
         )),
         "end1" | "end2" => Arc::new(UInt32Array::from_iter_values(
-            ids.iter().map(|id| lookup(id, &bins.end) as u32),
+            ids.iter().map(|id| lookup(id, &bins.end)),
         )),
         "weight1" | "weight2" => {
             let weights = bins.weight.as_ref().ok_or_else(|| {

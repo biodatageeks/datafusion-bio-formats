@@ -14,5 +14,6 @@ mod pruning;
 pub mod table_provider;
 
 pub use collection::{CoolerCollectionInfo, CoolerUri, list_data_collections};
+pub use hdf5_utils::CoolerCollectionSum;
 pub use physical_exec::CoolerExec;
 pub use table_provider::CoolerTableProvider;

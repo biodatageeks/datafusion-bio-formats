@@ -117,6 +117,16 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
     {
         return None;
     }
+    // With both filters present, this decoder only supports chunks to which
+    // the complete shuffle+deflate pipeline was applied. Reject the column up
+    // front if any optional filter was skipped so execution uses libhdf5 for
+    // every chunk instead of failing only when it reaches a later masked one.
+    if positions.shuffle.is_some()
+        && positions.deflate.is_some()
+        && chunks.iter().any(|chunk| chunk.filter_mask != 0)
+    {
+        return None;
+    }
 
     let column = Arc::new(ChunkedColumn {
         elem_size,
@@ -273,6 +283,20 @@ pub(crate) fn bytes_to_i32(bytes: &[u8]) -> Vec<i32> {
     bytes
         .chunks_exact(4)
         .map(|b| i32::from_le_bytes(b.try_into().expect("4-byte chunk")))
+        .collect()
+}
+
+pub(crate) fn bytes_to_u64(bytes: &[u8]) -> Vec<u64> {
+    bytes
+        .chunks_exact(8)
+        .map(|b| u64::from_le_bytes(b.try_into().expect("8-byte chunk")))
+        .collect()
+}
+
+pub(crate) fn bytes_to_u32(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|b| u32::from_le_bytes(b.try_into().expect("4-byte chunk")))
         .collect()
 }
 

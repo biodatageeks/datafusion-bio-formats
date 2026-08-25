@@ -5,7 +5,8 @@ use datafusion::common::{DataFusionError, Result};
 use hdf5_metno::{File, Group};
 
 use crate::hdf5_utils::{
-    attr_f64, attr_i64, attr_string, h5_err, read_numeric_1d, read_string_dataset,
+    CoolerCollectionSum, attr_i64, attr_string, attr_sum, h5_err, read_numeric_1d,
+    read_string_dataset,
 };
 
 /// A parsed cooler URI: `path` or `path::/group/path`.
@@ -155,8 +156,8 @@ pub struct CoolerCollectionInfo {
     pub assembly: Option<String>,
     pub nbins: Option<i64>,
     pub nnz: Option<i64>,
-    /// Float because float-count coolers store a float sum.
-    pub sum: Option<f64>,
+    /// Preserves integer totals exactly and fractional totals as floating point.
+    pub sum: Option<CoolerCollectionSum>,
     pub nchroms: i64,
 }
 
@@ -185,7 +186,7 @@ fn collection_info(file: &File, group_path: &str) -> Result<CoolerCollectionInfo
         assembly: attr_string(&group, "genome-assembly")?,
         nbins: attr_i64(&group, "nbins")?,
         nnz: attr_i64(&group, "nnz")?,
-        sum: attr_f64(&group, "sum")?,
+        sum: attr_sum(&group, "sum")?,
         nchroms,
     })
 }
@@ -217,13 +218,16 @@ pub fn list_data_collections(path: &str) -> Result<Vec<CoolerCollectionInfo>> {
     )))
 }
 
-/// Storage type of `pixels/count`: cooler defaults to int32 but permits
-/// int64 and float counts; each maps to its own Arrow type so wide counts
-/// are never truncated.
+/// Arrow representation selected from the storage type of `pixels/count`.
+/// Narrow signed/unsigned values safely widen to Int32; wider signed,
+/// unsigned, and floating values retain a representation that cannot narrow
+/// their stored range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CountType {
     Int32,
     Int64,
+    UInt32,
+    UInt64,
     Float64,
 }
 
@@ -233,8 +237,8 @@ pub(crate) enum CountType {
 pub(crate) struct BinData {
     pub chrom_names: Vec<String>,
     pub chrom_idx: Vec<i32>,
-    pub start: Vec<i32>,
-    pub end: Vec<i32>,
+    pub start: Vec<u32>,
+    pub end: Vec<u32>,
     pub weight: Option<Vec<f64>>,
 }
 
@@ -257,8 +261,21 @@ pub(crate) fn load_bin_data(group: &Group, include_weights: bool) -> Result<BinD
     };
     // bins/chrom is enum-typed (h5py categorical); soft conversion reads it as i32.
     let chrom_idx = read_numeric_1d::<i32>(&open("chrom")?, "bins/chrom")?;
-    let start = read_numeric_1d::<i32>(&open("start")?, "bins/start")?;
-    let end = read_numeric_1d::<i32>(&open("end")?, "bins/end")?;
+    let read_coordinate = |name: &str| -> Result<Vec<u32>> {
+        read_numeric_1d::<i64>(&open(name)?, &format!("bins/{name}"))?
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                u32::try_from(value).map_err(|_| {
+                    DataFusionError::Plan(format!(
+                        "bins/{name}[{index}]={value} is outside the supported UInt32 coordinate range"
+                    ))
+                })
+            })
+            .collect()
+    };
+    let start = read_coordinate("start")?;
+    let end = read_coordinate("end")?;
     let weight = if include_weights {
         if !bins.link_exists("weight") {
             return Err(DataFusionError::Plan(

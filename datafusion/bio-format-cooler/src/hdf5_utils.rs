@@ -4,6 +4,18 @@ use datafusion::common::{DataFusionError, Result};
 use hdf5_metno::types::{FixedAscii, TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5_metno::{Attribute, Conversion, Dataset, Group};
 
+/// Exact numeric representation of a cooler collection's `sum` attribute.
+///
+/// Integer-count coolers can carry totals above f64's exact-integer range,
+/// while float-count coolers can carry fractional totals. Keeping the storage
+/// class here avoids narrowing either case while metadata is passed to callers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CoolerCollectionSum {
+    Int64(i64),
+    UInt64(u64),
+    Float64(f64),
+}
+
 /// Map any hdf5 error into an external DataFusion error with context.
 pub(crate) fn h5_err(context: &str, error: impl std::fmt::Display) -> DataFusionError {
     DataFusionError::External(Box::new(std::io::Error::other(format!(
@@ -139,10 +151,12 @@ pub(crate) fn attr_i64(group: &Group, name: &str) -> Result<Option<i64>> {
     Ok(Some(value))
 }
 
-/// Read an optional float attribute from a group. Integer-typed attributes
-/// convert losslessly for the magnitudes cooler stores; `sum` in particular
-/// is a float for float-count coolers and must not be truncated.
-pub(crate) fn attr_f64(group: &Group, name: &str) -> Result<Option<f64>> {
+/// Read an optional numeric attribute without changing its integer/float class.
+///
+/// cooler <=0.8.x string-typed numeric attributes are parsed as the narrowest
+/// exact class that represents them: signed integer, unsigned integer, then
+/// float.
+pub(crate) fn attr_sum(group: &Group, name: &str) -> Result<Option<CoolerCollectionSum>> {
     if !group
         .attr_names()
         .is_ok_and(|names| names.iter().any(|n| n == name))
@@ -156,28 +170,49 @@ pub(crate) fn attr_f64(group: &Group, name: &str) -> Result<Option<f64>> {
         .dtype()
         .and_then(|dtype| dtype.to_descriptor())
         .map_err(|error| h5_err(&format!("Failed to read dtype of attribute {name}"), error))?;
-    if matches!(
-        td,
+    let value = match td {
+        TypeDescriptor::Integer(_) => CoolerCollectionSum::Int64(
+            attr.as_reader()
+                .conversion(Conversion::Soft)
+                .read_scalar::<i64>()
+                .map_err(|error| h5_err(&format!("Failed to read attribute {name}"), error))?,
+        ),
+        TypeDescriptor::Unsigned(_) => CoolerCollectionSum::UInt64(
+            attr.as_reader()
+                .conversion(Conversion::Soft)
+                .read_scalar::<u64>()
+                .map_err(|error| h5_err(&format!("Failed to read attribute {name}"), error))?,
+        ),
+        TypeDescriptor::Float(_) => CoolerCollectionSum::Float64(
+            attr.as_reader()
+                .conversion(Conversion::Soft)
+                .read_scalar::<f64>()
+                .map_err(|error| h5_err(&format!("Failed to read attribute {name}"), error))?,
+        ),
         TypeDescriptor::FixedAscii(_)
-            | TypeDescriptor::FixedUnicode(_)
-            | TypeDescriptor::VarLenAscii
-            | TypeDescriptor::VarLenUnicode
-    ) {
-        // cooler <=0.8.x string-typed numeric attrs, same as attr_i64.
-        let text = read_attr_string_value(&attr, name)?;
-        let value = text.trim().parse::<f64>().map_err(|error| {
-            h5_err(
-                &format!("Failed to parse string attribute {name} ({text:?}) as float"),
-                error,
-            )
-        })?;
-        return Ok(Some(value));
-    }
-    let value = attr
-        .as_reader()
-        .conversion(Conversion::Soft)
-        .read_scalar::<f64>()
-        .map_err(|error| h5_err(&format!("Failed to read attribute {name}"), error))?;
+        | TypeDescriptor::FixedUnicode(_)
+        | TypeDescriptor::VarLenAscii
+        | TypeDescriptor::VarLenUnicode => {
+            let text = read_attr_string_value(&attr, name)?;
+            let text = text.trim();
+            if let Ok(value) = text.parse::<i64>() {
+                CoolerCollectionSum::Int64(value)
+            } else if let Ok(value) = text.parse::<u64>() {
+                CoolerCollectionSum::UInt64(value)
+            } else if let Ok(value) = text.parse::<f64>() {
+                CoolerCollectionSum::Float64(value)
+            } else {
+                return Err(DataFusionError::Plan(format!(
+                    "Failed to parse string attribute {name} ({text:?}) as a number"
+                )));
+            }
+        }
+        other => {
+            return Err(DataFusionError::Plan(format!(
+                "Unsupported dtype for numeric attribute {name}: {other}"
+            )));
+        }
+    };
     Ok(Some(value))
 }
 

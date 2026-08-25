@@ -1396,6 +1396,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "hdf5-metno",
+ "log",
  "ndarray 0.16.1",
  "tokio",
 ]

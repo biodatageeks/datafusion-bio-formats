@@ -10,11 +10,13 @@
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
-    Array, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray, UInt32Array,
+    Array, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray, UInt32Array, UInt64Array,
 };
 use datafusion::arrow::datatypes::DataType;
 use datafusion::prelude::{SessionConfig, SessionContext};
-use datafusion_bio_format_cooler::{CoolerTableProvider, list_data_collections};
+use datafusion_bio_format_cooler::{
+    CoolerCollectionSum, CoolerTableProvider, list_data_collections,
+};
 
 fn fixture(name: &str) -> String {
     format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -531,4 +533,69 @@ async fn int64_count_dtype_not_truncated() {
     // first pixel's count exceeds i32::MAX; truncation would corrupt it
     assert_eq!(count.value(0), 5_000_000_000);
     assert_eq!(count.value(1), 6);
+}
+
+#[tokio::test]
+async fn unsigned_count_dtypes_not_truncated() {
+    let u32_batches = collect(
+        provider(&fixture("test_uint32.cool"), None, true, false, false),
+        "SELECT count FROM c",
+        1,
+    )
+    .await;
+    let u32_batch = &u32_batches[0];
+    assert_eq!(u32_batch.schema().field(0).data_type(), &DataType::UInt32);
+    let u32_count = u32_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert_eq!(u32_count.value(0), 3_000_000_000);
+
+    let u64_batches = collect(
+        provider(&fixture("test_uint64.cool"), None, true, false, false),
+        "SELECT count FROM c",
+        1,
+    )
+    .await;
+    let u64_batch = &u64_batches[0];
+    assert_eq!(u64_batch.schema().field(0).data_type(), &DataType::UInt64);
+    let u64_count = u64_batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    assert_eq!(u64_count.value(0), 10_000_000_000_000_000_000);
+}
+
+#[tokio::test]
+async fn coordinates_above_i32_max_are_preserved() {
+    let batches = collect(
+        provider(&fixture("test_wide_coords.cool"), None, true, false, true),
+        "SELECT start1, end1 FROM c",
+        1,
+    )
+    .await;
+    let batch = &batches[0];
+    let start = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    let end = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert_eq!(start.value(0), 3_000_000_000);
+    assert_eq!(end.value(0), 4_000_000_000);
+}
+
+#[test]
+fn integer_collection_sum_above_f64_exact_range_is_preserved() {
+    let collections = list_data_collections(&fixture("test_exact_sum.cool")).unwrap();
+    assert_eq!(
+        collections[0].sum,
+        Some(CoolerCollectionSum::Int64(9_007_199_254_740_993))
+    );
 }

@@ -17,7 +17,7 @@ use datafusion::physical_plan::PlanProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use hdf5_metno::File;
-use hdf5_metno::types::TypeDescriptor;
+use hdf5_metno::types::{FloatSize, IntSize, TypeDescriptor};
 
 use crate::collection::{
     BinData, CoolerUri, CountType, IndexData, ensure_local_path, load_bin_data, load_index_data,
@@ -102,15 +102,22 @@ impl CoolerTableProvider {
             .group("pixels")
             .and_then(|pixels| pixels.dataset("count"))
             .map_err(|error| h5_err("Failed to open pixels/count", error))?;
-        let count_type = match count_ds
+        let count_descriptor = count_ds
             .dtype()
             .and_then(|dtype| dtype.to_descriptor())
-            .map_err(|error| h5_err("Failed to read pixels/count dtype", error))?
-        {
+            .map_err(|error| h5_err("Failed to read pixels/count dtype", error))?;
+        let count_type = match count_descriptor {
             TypeDescriptor::Float(_) => CountType::Float64,
-            TypeDescriptor::Integer(hdf5_metno::types::IntSize::U8)
-            | TypeDescriptor::Unsigned(hdf5_metno::types::IntSize::U8) => CountType::Int64,
-            _ => CountType::Int32,
+            TypeDescriptor::Integer(IntSize::U8) => CountType::Int64,
+            TypeDescriptor::Unsigned(IntSize::U8) => CountType::UInt64,
+            TypeDescriptor::Unsigned(IntSize::U4) => CountType::UInt32,
+            TypeDescriptor::Integer(IntSize::U1 | IntSize::U2 | IntSize::U4)
+            | TypeDescriptor::Unsigned(IntSize::U1 | IntSize::U2) => CountType::Int32,
+            other => {
+                return Err(DataFusionError::Plan(format!(
+                    "Unsupported pixels/count dtype: {other}"
+                )));
+            }
         };
         let count_shape = count_ds.shape();
         if count_shape.len() != 1 {
@@ -243,14 +250,26 @@ impl CoolerTableProvider {
                         };
                         let probe = column.chunk_elems.min(column.n_elems).min(8192);
                         let reference: Vec<u8> = match expected {
-                            TypeDescriptor::Integer(hdf5_metno::types::IntSize::U8) => {
+                            TypeDescriptor::Integer(IntSize::U8) => {
                                 read_numeric_slice::<i64>(&ds, 0, probe, name)?
                                     .iter()
                                     .flat_map(|value| value.to_le_bytes())
                                     .collect()
                             }
-                            TypeDescriptor::Integer(hdf5_metno::types::IntSize::U4) => {
+                            TypeDescriptor::Integer(IntSize::U4) => {
                                 read_numeric_slice::<i32>(&ds, 0, probe, name)?
+                                    .iter()
+                                    .flat_map(|value| value.to_le_bytes())
+                                    .collect()
+                            }
+                            TypeDescriptor::Unsigned(IntSize::U8) => {
+                                read_numeric_slice::<u64>(&ds, 0, probe, name)?
+                                    .iter()
+                                    .flat_map(|value| value.to_le_bytes())
+                                    .collect()
+                            }
+                            TypeDescriptor::Unsigned(IntSize::U4) => {
+                                read_numeric_slice::<u32>(&ds, 0, probe, name)?
                                     .iter()
                                     .flat_map(|value| value.to_le_bytes())
                                     .collect()
@@ -271,11 +290,12 @@ impl CoolerTableProvider {
                         }
                         Ok(Some(column))
                     };
-                    use hdf5_metno::types::{FloatSize, IntSize};
                     let count_type = match self.count_type {
                         CountType::Float64 => TypeDescriptor::Float(FloatSize::U8),
                         CountType::Int64 => TypeDescriptor::Integer(IntSize::U8),
                         CountType::Int32 => TypeDescriptor::Integer(IntSize::U4),
+                        CountType::UInt64 => TypeDescriptor::Unsigned(IntSize::U8),
+                        CountType::UInt32 => TypeDescriptor::Unsigned(IntSize::U4),
                     };
                     Ok(FastPixels {
                         bin1: indexed("bin1_id", TypeDescriptor::Integer(IntSize::U8))?,
@@ -378,7 +398,14 @@ impl TableProvider for CoolerTableProvider {
             count_type: self.count_type,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             bins,
-            fast: self.fast_pixels(),
+            fast: if schema.fields().is_empty() {
+                // count(*) needs only the row ranges/nnz. Avoid visiting every
+                // pixel chunk to build direct-read indexes for columns that the
+                // execution plan will never open.
+                Arc::new(FastPixels::default())
+            } else {
+                self.fast_pixels()
+            },
             cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema),
                 Partitioning::UnknownPartitioning(partition_count),
@@ -413,6 +440,8 @@ fn cooler_schema(
         CountType::Float64 => DataType::Float64,
         CountType::Int64 => DataType::Int64,
         CountType::Int32 => DataType::Int32,
+        CountType::UInt64 => DataType::UInt64,
+        CountType::UInt32 => DataType::UInt32,
     };
     let mut fields = if join_bins {
         vec![
@@ -445,4 +474,27 @@ fn cooler_schema(
         metadata.insert(key.clone(), value.clone());
     }
     Arc::new(Schema::new_with_metadata(fields, metadata))
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::catalog::TableProvider;
+    use datafusion::prelude::SessionContext;
+
+    use super::CoolerTableProvider;
+
+    #[tokio::test]
+    async fn empty_projection_does_not_build_pixel_indexes() {
+        let path = format!("{}/tests/data/test.cool", env!("CARGO_MANIFEST_DIR"));
+        let provider = CoolerTableProvider::new(path, None, true, false, true).unwrap();
+        let projection = Vec::new();
+        let ctx = SessionContext::new();
+
+        provider
+            .scan(&ctx.state(), Some(&projection), &[], None)
+            .await
+            .unwrap();
+
+        assert!(provider.fast_cache.get().is_none());
+    }
 }
