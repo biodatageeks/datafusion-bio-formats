@@ -91,6 +91,10 @@ pub(crate) fn attr_string(group: &Group, name: &str) -> Result<Option<String>> {
 }
 
 /// Read an optional integer attribute from a group (any integer width).
+///
+/// cooler <=0.8.x wrote some numeric attributes as JSON strings (e.g.
+/// `format-version = '3'` on `.mcool` resolution groups), so string-typed
+/// attributes are parsed rather than rejected.
 pub(crate) fn attr_i64(group: &Group, name: &str) -> Result<Option<i64>> {
     if !group
         .attr_names()
@@ -101,6 +105,26 @@ pub(crate) fn attr_i64(group: &Group, name: &str) -> Result<Option<i64>> {
     let attr = group
         .attr(name)
         .map_err(|error| h5_err(&format!("Failed to open attribute {name}"), error))?;
+    let td = attr
+        .dtype()
+        .and_then(|dtype| dtype.to_descriptor())
+        .map_err(|error| h5_err(&format!("Failed to read dtype of attribute {name}"), error))?;
+    if matches!(
+        td,
+        TypeDescriptor::FixedAscii(_)
+            | TypeDescriptor::FixedUnicode(_)
+            | TypeDescriptor::VarLenAscii
+            | TypeDescriptor::VarLenUnicode
+    ) {
+        let text = read_attr_string_value(&attr, name)?;
+        let value = text.trim().parse::<i64>().map_err(|error| {
+            h5_err(
+                &format!("Failed to parse string attribute {name} ({text:?}) as integer"),
+                error,
+            )
+        })?;
+        return Ok(Some(value));
+    }
     let value = attr
         .as_reader()
         .conversion(Conversion::Soft)
