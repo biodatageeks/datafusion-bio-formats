@@ -133,6 +133,27 @@ pub(crate) fn attr_i64(group: &Group, name: &str) -> Result<Option<i64>> {
     Ok(Some(value))
 }
 
+/// Read an optional float attribute from a group. Integer-typed attributes
+/// convert losslessly for the magnitudes cooler stores; `sum` in particular
+/// is a float for float-count coolers and must not be truncated.
+pub(crate) fn attr_f64(group: &Group, name: &str) -> Result<Option<f64>> {
+    if !group
+        .attr_names()
+        .is_ok_and(|names| names.iter().any(|n| n == name))
+    {
+        return Ok(None);
+    }
+    let attr = group
+        .attr(name)
+        .map_err(|error| h5_err(&format!("Failed to open attribute {name}"), error))?;
+    let value = attr
+        .as_reader()
+        .conversion(Conversion::Soft)
+        .read_scalar::<f64>()
+        .map_err(|error| h5_err(&format!("Failed to read attribute {name}"), error))?;
+    Ok(Some(value))
+}
+
 /// Read a whole 1-D numeric dataset with soft conversion (handles enum-typed
 /// `bins/chrom` and any integer width used by the writer).
 pub(crate) fn read_numeric_1d<T: hdf5_metno::H5Type + Clone>(

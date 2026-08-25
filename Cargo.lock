@@ -1393,6 +1393,7 @@ dependencies = [
  "async-trait",
  "datafusion",
  "datafusion-bio-format-core",
+ "flate2",
  "futures-util",
  "hdf5-metno",
  "ndarray 0.16.1",

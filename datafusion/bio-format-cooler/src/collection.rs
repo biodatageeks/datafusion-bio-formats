@@ -4,7 +4,9 @@
 use datafusion::common::{DataFusionError, Result};
 use hdf5_metno::{File, Group};
 
-use crate::hdf5_utils::{attr_i64, attr_string, h5_err, read_numeric_1d, read_string_dataset};
+use crate::hdf5_utils::{
+    attr_f64, attr_i64, attr_string, h5_err, read_numeric_1d, read_string_dataset,
+};
 
 /// A parsed cooler URI: `path` or `path::/group/path`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,7 +155,8 @@ pub struct CoolerCollectionInfo {
     pub assembly: Option<String>,
     pub nbins: Option<i64>,
     pub nnz: Option<i64>,
-    pub sum: Option<i64>,
+    /// Float because float-count coolers store a float sum.
+    pub sum: Option<f64>,
     pub nchroms: i64,
 }
 
@@ -176,7 +179,7 @@ fn collection_info(file: &File, group_path: &str) -> Result<CoolerCollectionInfo
         assembly: attr_string(&group, "genome-assembly")?,
         nbins: attr_i64(&group, "nbins")?,
         nnz: attr_i64(&group, "nnz")?,
-        sum: attr_i64(&group, "sum")?,
+        sum: attr_f64(&group, "sum")?,
         nchroms,
     })
 }
