@@ -205,6 +205,12 @@ scan sizing or joined array indexing.
   spans disagree with the corresponding `bins/chrom` assignments
 - **THEN** the provider returns a contextual invalid-file error before pruning
 
+#### Scenario: Duplicate chromosome names
+
+- **WHEN** multiple `chroms/name` rows contain the same exposed chromosome name
+- **THEN** the provider returns a contextual invalid-file error before pruning
+  can select only one of the matching chromosome spans
+
 #### Scenario: Bin offsets disagree with pixels
 
 - **WHEN** `indexes/bin1_offset` is structurally valid but any span disagrees

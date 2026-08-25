@@ -146,7 +146,8 @@ are required to match `bins/chrom`,
 within the bins table. CSR offsets are validated whenever pruning or aligned
 partition planning consumes them; every `chrom_offset` span must also agree
 with the corresponding `bins/chrom` assignments, and every `bin1_offset` span
-is checked against `pixels/bin1_id` in bounded batches. Malformed references
+is checked against `pixels/bin1_id` in bounded batches. Chromosome names must
+be unique before a name can be mapped to one chromosome span. Malformed references
 return contextual DataFusion errors rather than panics or incorrect pruning.
 
 ## Risks / Trade-offs

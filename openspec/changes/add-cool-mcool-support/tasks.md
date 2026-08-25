@@ -58,6 +58,7 @@
   coordinate-derived empty-result pruning.
 - [x] 4.11 Gate pruning metadata and index setup on predicates the genomic
   extractor can actually map to ranges.
+- [x] 4.12 Reject duplicate chromosome names before name-based pruning.
 
 ## 5. Verification
 

@@ -1,6 +1,8 @@
 //! Cooler data-collection discovery: URI parsing, `.cool` vs `.mcool`
 //! detection, resolution selection, and metadata listing.
 
+use std::collections::HashMap;
+
 use datafusion::common::{DataFusionError, Result};
 use hdf5_metno::types::TypeDescriptor;
 use hdf5_metno::{File, Group};
@@ -294,6 +296,7 @@ pub(crate) fn load_bin_data(group: &Group, projection: BinDataProjection) -> Res
                 .map_err(|error| h5_err("Failed to open chroms/name", error))?,
             "chroms/name",
         )?;
+        validate_chrom_names(&chrom_names)?;
         // bins/chrom is enum-typed (h5py categorical); soft conversion reads it as i32.
         let stored_chrom_idx = read_numeric_1d::<i32>(&chrom_dataset, "bins/chrom")?;
         let chrom_idx = validate_bin_chrom(chrom_names.len(), stored_chrom_idx, nbins)?;
@@ -368,6 +371,18 @@ fn validate_bin_array_len(name: &str, length: usize, nbins: usize) -> Result<()>
         return Err(DataFusionError::Plan(format!(
             "{name} has {length} rows but bins/chrom has {nbins}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_chrom_names(names: &[String]) -> Result<()> {
+    let mut first_indexes = HashMap::with_capacity(names.len());
+    for (index, name) in names.iter().enumerate() {
+        if let Some(first_index) = first_indexes.insert(name.as_str(), index) {
+            return Err(DataFusionError::Plan(format!(
+                "chroms/name[{index}]='{name}' duplicates chroms/name[{first_index}]"
+            )));
+        }
     }
     Ok(())
 }
@@ -566,7 +581,7 @@ fn validate_bin1_assignment_block(
 mod validation_tests {
     use super::{
         validate_bin_array_len, validate_bin_chrom, validate_bin1_assignment_block,
-        validate_chrom_offsets_match_bins, validate_offsets,
+        validate_chrom_names, validate_chrom_offsets_match_bins, validate_offsets,
     };
 
     #[test]
@@ -580,6 +595,17 @@ mod validation_tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("bins/chrom[1]=2"), "{error}");
+    }
+
+    #[test]
+    fn rejects_duplicate_chromosome_names() {
+        validate_chrom_names(&["chr1".to_string(), "chr2".to_string()]).unwrap();
+
+        let error = validate_chrom_names(&["chr1".to_string(), "chr1".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("chroms/name[1]='chr1'"), "{error}");
+        assert!(error.contains("chroms/name[0]"), "{error}");
     }
 
     #[test]
