@@ -106,7 +106,8 @@ The provider SHALL map supported first-axis chromosome and coordinate filters th
 #### Scenario: Unsupported filter
 
 - **WHEN** a predicate cannot be mapped safely to a first-axis row range
-- **THEN** the provider leaves the scan range unpruned
+- **THEN** the provider leaves the scan range unpruned without loading bin
+  metadata or indexes solely for pruning
 
 #### Scenario: Partially extractable chromosome list
 

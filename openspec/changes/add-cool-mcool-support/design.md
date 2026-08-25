@@ -95,7 +95,8 @@ The sorted `bin1_id` order maps first-axis chromosome and coordinate predicates
 to bin ranges, then to pixel row ranges through `chrom_offset` and
 `bin1_offset`. Supported filters are reported `Inexact` so consumers reapply
 them and preserve exact semantics. Unsupported or second-axis predicates do
-not alter the row range. UInt64 start bounds that cannot be converted to the
+not alter the row range and do not trigger pruning-only metadata or index
+loads. UInt64 start bounds that cannot be converted to the
 shared 1-based region representation without overflow also leave the scan
 unpruned and are evaluated exactly by DataFusion. An `IN` list is pruned only
 when every member is a supported literal; partially extractable lists remain

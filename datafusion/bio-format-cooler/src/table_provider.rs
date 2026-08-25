@@ -423,7 +423,7 @@ impl TableProvider for CoolerTableProvider {
         // DataFusion re-applies them and pruning only needs to be a superset.
         let target_partitions = state.config().target_partitions();
         let pruning_projection = if self.join_bins {
-            first_axis_pruning_projection(filters)
+            first_axis_pruning_projection(filters, self.coordinate_system_zero_based)?
         } else {
             BinDataProjection::default()
         };
@@ -641,6 +641,28 @@ mod tests {
         assert!(provider.fast_bin2_cache.get().is_none());
         assert!(provider.fast_count_cache.get().is_none());
         assert!(provider.index_cache.get().is_none());
+    }
+
+    #[tokio::test]
+    async fn unsupported_first_axis_filter_does_not_load_pruning_index() {
+        let path = format!("{}/tests/data/test.cool", env!("CARGO_MANIFEST_DIR"));
+        let provider = CoolerTableProvider::new(path, None, true, false, true).unwrap();
+        let projection = Vec::new();
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
+
+        provider
+            .scan(
+                &ctx.state(),
+                Some(&projection),
+                &[datafusion::logical_expr::col("chrom1")
+                    .like(datafusion::logical_expr::lit("chr%"))],
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert!(provider.index_cache.get().is_none());
+        assert!(provider.bin_cache.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

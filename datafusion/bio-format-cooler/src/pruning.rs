@@ -10,7 +10,7 @@
 use datafusion::common::tree_node::{Transformed, TreeNode};
 use datafusion::common::{Result, ScalarValue};
 use datafusion::logical_expr::{Expr, Operator};
-use datafusion_bio_format_core::genomic_filter::extract_genomic_regions;
+use datafusion_bio_format_core::genomic_filter::{GenomicFilterAnalysis, extract_genomic_regions};
 
 use crate::collection::{BinData, BinDataProjection, IndexData};
 
@@ -24,23 +24,37 @@ pub(crate) fn is_first_axis_filter(expr: &Expr) -> bool {
             .all(|column| matches!(column.name.as_str(), "chrom1" | "start1" | "end1"))
 }
 
-/// Bin metadata needed to prune the supplied first-axis filters. Chromosome
-/// names are always required to map regions; coordinate arrays are only
-/// needed when a candidate expression actually references a coordinate.
-pub(crate) fn first_axis_pruning_projection(filters: &[Expr]) -> BinDataProjection {
-    let mut projection = BinDataProjection::default();
-    for filter in filters.iter().filter(|filter| is_first_axis_filter(filter)) {
-        projection.chrom = true;
-        if filter
-            .column_refs()
-            .iter()
-            .any(|column| matches!(column.name.as_str(), "start1" | "end1"))
-        {
-            projection.start = true;
-            projection.end = true;
-        }
+/// Bin metadata needed to prune the supplied first-axis filters. Unsupported
+/// first-axis expressions remain residual and do not trigger index setup.
+pub(crate) fn first_axis_pruning_projection(
+    filters: &[Expr],
+    coordinate_system_zero_based: bool,
+) -> Result<BinDataProjection> {
+    if filters
+        .iter()
+        .any(|filter| start_bound_conversion_would_overflow(filter, coordinate_system_zero_based))
+    {
+        return Ok(BinDataProjection::default());
     }
-    projection
+    let analysis = analyze_first_axis_filters(filters, coordinate_system_zero_based)?;
+    Ok(pruning_projection_from_analysis(&analysis))
+}
+
+fn pruning_projection_from_analysis(analysis: &GenomicFilterAnalysis) -> BinDataProjection {
+    if !analysis.unsatisfiable && analysis.regions.is_empty() {
+        return BinDataProjection::default();
+    }
+    let needs_coordinates = analysis.unsatisfiable
+        || analysis
+            .regions
+            .iter()
+            .any(|region| region.start.is_some() || region.end.is_some());
+    BinDataProjection {
+        chrom: true,
+        start: needs_coordinates,
+        end: needs_coordinates,
+        weight: false,
+    }
 }
 
 /// Rewrite `chrom1`/`start1`/`end1` column references to the `chrom`/`start`/
@@ -70,6 +84,20 @@ fn rename_first_axis_columns(expr: &Expr) -> Result<Expr> {
             })
         })
         .map(|transformed| transformed.data)
+}
+
+fn analyze_first_axis_filters(
+    filters: &[Expr],
+    coordinate_system_zero_based: bool,
+) -> Result<GenomicFilterAnalysis> {
+    let renamed = filters
+        .iter()
+        .map(rename_first_axis_columns)
+        .collect::<Result<Vec<_>>>()?;
+    Ok(extract_genomic_regions(
+        &renamed,
+        coordinate_system_zero_based,
+    ))
 }
 
 /// True when the shared genomic-filter extractor cannot represent a start
@@ -148,12 +176,11 @@ pub(crate) fn plan_first_axis_ranges(
     {
         return Ok(vec![(0, nnz)]);
     }
-    let renamed = filters
-        .iter()
-        .map(rename_first_axis_columns)
-        .collect::<Result<Vec<_>>>()?;
-    let analysis = extract_genomic_regions(&renamed, coordinate_system_zero_based);
-    let coordinate_projection = first_axis_pruning_projection(filters);
+    let analysis = analyze_first_axis_filters(filters, coordinate_system_zero_based)?;
+    let coordinate_projection = pruning_projection_from_analysis(&analysis);
+    if !coordinate_projection.any() {
+        return Ok(vec![(0, nnz)]);
+    }
     if coordinate_projection.start || coordinate_projection.end {
         validate_pruning_coordinate_order(bins, index)?;
     }
@@ -356,18 +383,30 @@ mod tests {
 
     #[test]
     fn chromosome_only_pruning_does_not_load_coordinate_arrays() {
-        let projection = first_axis_pruning_projection(&[col("chrom1").eq(lit("chr1"))]);
+        let projection =
+            first_axis_pruning_projection(&[col("chrom1").eq(lit("chr1"))], true).unwrap();
         assert!(projection.chrom);
         assert!(!projection.start);
         assert!(!projection.end);
 
-        let projection = first_axis_pruning_projection(&[
-            col("chrom1").eq(lit("chr1")),
-            col("start1").gt_eq(lit(10_u64)),
-        ]);
+        let projection = first_axis_pruning_projection(
+            &[
+                col("chrom1").eq(lit("chr1")),
+                col("start1").gt_eq(lit(10_u64)),
+            ],
+            true,
+        )
+        .unwrap();
         assert!(projection.chrom);
         assert!(projection.start);
         assert!(projection.end);
+    }
+
+    #[test]
+    fn unsupported_first_axis_filter_does_not_enable_pruning() {
+        let projection =
+            first_axis_pruning_projection(&[col("chrom1").like(lit("chr%"))], true).unwrap();
+        assert!(!projection.any());
     }
 
     #[test]

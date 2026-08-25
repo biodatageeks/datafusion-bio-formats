@@ -56,6 +56,8 @@
 - [x] 4.10 Keep parallel empty-projection row counts free of index scans and
   validate non-empty per-chromosome coordinate order before binary-search or
   coordinate-derived empty-result pruning.
+- [x] 4.11 Gate pruning metadata and index setup on predicates the genomic
+  extractor can actually map to ranges.
 
 ## 5. Verification
 
