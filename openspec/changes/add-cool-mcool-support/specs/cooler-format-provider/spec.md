@@ -101,6 +101,13 @@ The provider SHALL map supported first-axis chromosome and coordinate filters th
 - **WHEN** a predicate cannot be mapped safely to a first-axis row range
 - **THEN** the provider leaves the scan range unpruned
 
+#### Scenario: Unrepresentable converted bound
+
+- **WHEN** a UInt64 start bound would overflow while converting a zero-based
+  filter to the shared 1-based region representation
+- **THEN** the provider leaves the scan range unpruned and the consumer
+  evaluates the original filter exactly
+
 ### Requirement: Bounded and partitioned execution
 
 The provider SHALL stream bounded Arrow batches and SHALL partition the row space into disjoint ranges aligned to `bin1` boundaries when multiple target partitions are requested.

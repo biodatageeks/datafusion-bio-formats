@@ -7,9 +7,9 @@
 //! `bin1_offset`. Pruning is a superset (filters are reported `Inexact` and
 //! DataFusion re-applies them), so bins overlapping the query edge are kept.
 
-use datafusion::common::Result;
 use datafusion::common::tree_node::{Transformed, TreeNode};
-use datafusion::logical_expr::Expr;
+use datafusion::common::{Result, ScalarValue};
+use datafusion::logical_expr::{Expr, Operator};
 use datafusion_bio_format_core::genomic_filter::extract_genomic_regions;
 
 use crate::collection::{BinData, IndexData};
@@ -53,6 +53,67 @@ fn rename_first_axis_columns(expr: &Expr) -> Result<Expr> {
         .map(|transformed| transformed.data)
 }
 
+/// True when the shared genomic-filter extractor cannot represent a start
+/// bound after its conversion to 1-based coordinates. Falling back to the
+/// full row range is safe because pushed filters are inexact and DataFusion
+/// re-applies the original UInt64 expression.
+fn start_bound_conversion_would_overflow(expr: &Expr, coordinate_system_zero_based: bool) -> bool {
+    match expr {
+        Expr::BinaryExpr(binary) if binary.op == Operator::And => {
+            start_bound_conversion_would_overflow(&binary.left, coordinate_system_zero_based)
+                || start_bound_conversion_would_overflow(
+                    &binary.right,
+                    coordinate_system_zero_based,
+                )
+        }
+        Expr::BinaryExpr(binary) => {
+            let Expr::Column(column) = &*binary.left else {
+                return false;
+            };
+            let Expr::Literal(scalar, _) = &*binary.right else {
+                return false;
+            };
+            if column.name != "start1" {
+                return false;
+            }
+            let Some(value) = scalar_to_u64(scalar) else {
+                return false;
+            };
+            let increments =
+                u64::from(coordinate_system_zero_based) + u64::from(binary.op == Operator::Gt);
+            value.checked_add(increments).is_none()
+        }
+        Expr::Between(between) => {
+            let Expr::Column(column) = &*between.expr else {
+                return false;
+            };
+            if column.name != "start1" || between.negated {
+                return false;
+            }
+            let (Expr::Literal(low, _), Expr::Literal(high, _)) = (&*between.low, &*between.high)
+            else {
+                return false;
+            };
+            let (Some(low), Some(high)) = (scalar_to_u64(low), scalar_to_u64(high)) else {
+                return false;
+            };
+            let increments = u64::from(coordinate_system_zero_based);
+            low.checked_add(increments).is_none() || high.checked_add(increments).is_none()
+        }
+        _ => false,
+    }
+}
+
+fn scalar_to_u64(scalar: &ScalarValue) -> Option<u64> {
+    match scalar {
+        ScalarValue::UInt32(Some(value)) => Some(u64::from(*value)),
+        ScalarValue::UInt64(Some(value)) => Some(*value),
+        ScalarValue::Int32(Some(value)) if *value >= 0 => Some(*value as u64),
+        ScalarValue::Int64(Some(value)) if *value >= 0 => Some(*value as u64),
+        _ => None,
+    }
+}
+
 /// Map first-axis genomic filters to the disjoint, ascending pixel row
 /// ranges to scan.
 pub(crate) fn plan_first_axis_ranges(
@@ -62,6 +123,12 @@ pub(crate) fn plan_first_axis_ranges(
     index: &IndexData,
     nnz: usize,
 ) -> Result<Vec<(usize, usize)>> {
+    if filters
+        .iter()
+        .any(|filter| start_bound_conversion_would_overflow(filter, coordinate_system_zero_based))
+    {
+        return Ok(vec![(0, nnz)]);
+    }
     let renamed = filters
         .iter()
         .map(rename_first_axis_columns)
@@ -168,4 +235,60 @@ pub(crate) fn plan_partitions(
         partitions.push(Vec::new());
     }
     partitions
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::logical_expr::{Between, col, lit};
+
+    use super::*;
+
+    #[test]
+    fn overflowing_zero_based_start_bound_leaves_scan_unpruned() {
+        let filters = vec![
+            col("chrom1").eq(lit("chr1")),
+            col("start1").lt(lit(u64::MAX)),
+        ];
+        let bins = BinData {
+            nbins: 1,
+            chrom_names: vec!["chr1".to_string()],
+            chrom_idx: vec![0],
+            start: vec![0],
+            end: vec![100],
+            weight: None,
+        };
+        let index = IndexData {
+            chrom_offset: vec![0, 1],
+            bin1_offset: vec![0, 7],
+        };
+
+        assert_eq!(
+            plan_first_axis_ranges(&filters, true, &bins, &index, 7).unwrap(),
+            vec![(0, 7)]
+        );
+    }
+
+    #[test]
+    fn detects_every_overflowing_start_conversion() {
+        assert!(start_bound_conversion_would_overflow(
+            &col("start1").gt(lit(u64::MAX - 1)),
+            true,
+        ));
+        assert!(start_bound_conversion_would_overflow(
+            &col("start1").gt(lit(u64::MAX)),
+            false,
+        ));
+        assert!(!start_bound_conversion_would_overflow(
+            &col("start1").lt(lit(u64::MAX - 1)),
+            true,
+        ));
+
+        let between = Expr::Between(Between {
+            expr: Box::new(col("start1")),
+            negated: false,
+            low: Box::new(lit(0_u64)),
+            high: Box::new(lit(u64::MAX)),
+        });
+        assert!(start_bound_conversion_would_overflow(&between, true));
+    }
 }

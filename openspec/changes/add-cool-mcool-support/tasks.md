@@ -39,7 +39,8 @@
 - [x] 4.2 Cover full, projected, raw, weighted, filtered, partitioned,
   metadata-only, and error paths with integration tests.
 - [x] 4.3 Cover Int64, UInt32, UInt64, Float64, coordinates above `u32::MAX`,
-  exact metadata sums above `2^53`, and direct-chunk fallback cases.
+  overflowing UInt64 query bounds, exact metadata sums above `2^53`, and
+  direct-chunk fallback cases.
 - [x] 4.4 Document the public provider API, schema, addressing forms,
   coordinate behavior, weights, and local-file limitation.
 
