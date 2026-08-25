@@ -158,6 +158,12 @@ The provider MAY decode supported HDF5 chunks directly, but SHALL select the lib
   a conservative bound derived from its decoded chunk size
 - **THEN** the provider selects libhdf5 before allocating the direct-read buffer
 
+#### Scenario: Excessive logical chunk count
+
+- **WHEN** dataset shape metadata implies a dense direct-chunk index beyond the
+  fixed memory budget or implausible for the physical file size
+- **THEN** the provider selects libhdf5 before allocating the index
+
 ### Requirement: Validated joined references
 
 The provider SHALL validate parallel pixel-array shapes, bin-array shapes,

@@ -25,6 +25,11 @@ use hdf5_metno::filters::Filter;
 
 use crate::hdf5_utils::h5_err;
 
+/// Direct indexes are an optimization and must never consume unbounded memory
+/// from an untrusted logical dataset shape. This permits millions of chunks
+/// while keeping the worst-case dense index allocation below 64 MiB.
+const MAX_CHUNK_INDEX_BYTES: usize = 64 * 1024 * 1024;
+
 /// One chunk's location in the file.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChunkLoc {
@@ -95,6 +100,9 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
     }
 
     let expected = n_elems.div_ceil(chunk_elems);
+    if !chunk_index_within_budget(expected, file_size) {
+        return None;
+    }
     let mut chunks = vec![
         ChunkLoc {
             addr: u64::MAX,
@@ -172,6 +180,16 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
 
 fn supports_direct_byte_order(byte_order: ByteOrder) -> bool {
     byte_order == ByteOrder::LittleEndian
+}
+
+fn chunk_index_within_budget(chunk_count: usize, file_size: u64) -> bool {
+    let Some(index_bytes) = chunk_count.checked_mul(std::mem::size_of::<ChunkLoc>()) else {
+        return false;
+    };
+    let Ok(chunk_count) = u64::try_from(chunk_count) else {
+        return false;
+    };
+    index_bytes <= MAX_CHUNK_INDEX_BYTES && chunk_count <= file_size
 }
 
 /// Validate a stored chunk extent before retaining it in the direct index.
@@ -404,6 +422,19 @@ mod tests {
         assert!(!supports_direct_byte_order(ByteOrder::Vax));
         assert!(!supports_direct_byte_order(ByteOrder::Mixed));
         assert!(!supports_direct_byte_order(ByteOrder::None));
+    }
+
+    #[test]
+    fn logical_chunk_index_is_bounded_before_dense_allocation() {
+        let maximum_chunks = MAX_CHUNK_INDEX_BYTES / std::mem::size_of::<ChunkLoc>();
+
+        assert!(chunk_index_within_budget(
+            maximum_chunks,
+            maximum_chunks as u64
+        ));
+        assert!(!chunk_index_within_budget(maximum_chunks + 1, u64::MAX));
+        assert!(!chunk_index_within_budget(10_000, 9_999));
+        assert!(!chunk_index_within_budget(usize::MAX, u64::MAX));
     }
 
     #[test]

@@ -47,6 +47,8 @@
   of oversized deflate streams.
 - [x] 4.6 Require explicit little-endian datatype metadata and reject
   out-of-file or implausibly large stored chunk extents during indexing.
+- [x] 4.7 Bound dense direct-chunk index allocation before trusting logical
+  dataset extents.
 
 ## 5. Verification
 
