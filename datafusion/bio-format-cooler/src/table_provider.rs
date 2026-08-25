@@ -109,11 +109,26 @@ impl CoolerTableProvider {
         );
         let nnz = count_ds.shape()[0];
 
+        // Collection attributes surfaced as bio.cool.* schema metadata so the
+        // Python layer can expose resolution/assembly without extra file reads.
+        let mut extra_metadata: Vec<(String, String)> =
+            vec![("bio.cool.group_path".to_string(), group_path.clone())];
+        if let Some(bin_size) = crate::hdf5_utils::attr_i64(&group, "bin-size")? {
+            extra_metadata.push(("bio.cool.resolution".to_string(), bin_size.to_string()));
+        }
+        if let Some(assembly) = crate::hdf5_utils::attr_string(&group, "genome-assembly")? {
+            extra_metadata.push(("bio.cool.assembly".to_string(), assembly));
+        }
+        if let Some(version) = crate::hdf5_utils::attr_i64(&group, "format-version")? {
+            extra_metadata.push(("bio.cool.format_version".to_string(), version.to_string()));
+        }
+
         let schema = cooler_schema(
             join_bins,
             include_weights,
             count_is_float,
             coordinate_system_zero_based,
+            &extra_metadata,
         );
         Ok(Self {
             file_path,
@@ -289,6 +304,7 @@ fn cooler_schema(
     include_weights: bool,
     count_is_float: bool,
     coordinate_system_zero_based: bool,
+    extra_metadata: &[(String, String)],
 ) -> SchemaRef {
     let count_type = if count_is_float {
         DataType::Float64
@@ -322,5 +338,8 @@ fn cooler_schema(
         COORDINATE_SYSTEM_METADATA_KEY.to_string(),
         coordinate_system_zero_based.to_string(),
     );
+    for (key, value) in extra_metadata {
+        metadata.insert(key.clone(), value.clone());
+    }
     Arc::new(Schema::new_with_metadata(fields, metadata))
 }
