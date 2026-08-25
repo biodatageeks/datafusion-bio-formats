@@ -69,12 +69,12 @@ async fn full_scan_joined_one_based() {
     let start1 = batch
         .column(1)
         .as_any()
-        .downcast_ref::<UInt32Array>()
+        .downcast_ref::<UInt64Array>()
         .unwrap();
     let end1 = batch
         .column(2)
         .as_any()
-        .downcast_ref::<UInt32Array>()
+        .downcast_ref::<UInt64Array>()
         .unwrap();
     let chrom2 = batch
         .column(3)
@@ -84,7 +84,7 @@ async fn full_scan_joined_one_based() {
     let start2 = batch
         .column(4)
         .as_any()
-        .downcast_ref::<UInt32Array>()
+        .downcast_ref::<UInt64Array>()
         .unwrap();
     let count = batch
         .column(6)
@@ -115,12 +115,12 @@ async fn full_scan_zero_based() {
     let start1 = batch
         .column(1)
         .as_any()
-        .downcast_ref::<UInt32Array>()
+        .downcast_ref::<UInt64Array>()
         .unwrap();
     let end1 = batch
         .column(2)
         .as_any()
-        .downcast_ref::<UInt32Array>()
+        .downcast_ref::<UInt64Array>()
         .unwrap();
     assert_eq!(start1.value(0), 0);
     assert_eq!(end1.value(0), 1000);
@@ -569,7 +569,7 @@ async fn unsigned_count_dtypes_not_truncated() {
 }
 
 #[tokio::test]
-async fn coordinates_above_i32_max_are_preserved() {
+async fn coordinates_above_u32_max_are_preserved() {
     let batches = collect(
         provider(&fixture("test_wide_coords.cool"), None, true, false, true),
         "SELECT start1, end1 FROM c",
@@ -580,15 +580,34 @@ async fn coordinates_above_i32_max_are_preserved() {
     let start = batch
         .column(0)
         .as_any()
-        .downcast_ref::<UInt32Array>()
+        .downcast_ref::<UInt64Array>()
         .unwrap();
     let end = batch
         .column(1)
         .as_any()
-        .downcast_ref::<UInt32Array>()
+        .downcast_ref::<UInt64Array>()
         .unwrap();
-    assert_eq!(start.value(0), 3_000_000_000);
-    assert_eq!(end.value(0), 4_000_000_000);
+    assert_eq!(start.value(0), 5_000_000_000);
+    assert_eq!(end.value(0), 6_000_000_000);
+
+    let one_based = collect(
+        provider(&fixture("test_wide_coords.cool"), None, true, false, false),
+        "SELECT start1, end1 FROM c",
+        1,
+    )
+    .await;
+    let one_based_start = one_based[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    let one_based_end = one_based[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .unwrap();
+    assert_eq!(one_based_start.value(0), 5_000_000_001);
+    assert_eq!(one_based_end.value(0), 6_000_000_000);
 }
 
 #[test]

@@ -300,7 +300,7 @@ impl CoolerPixelStream {
             None => CountValues::Int32(Vec::new()),
         };
 
-        let start_offset: u32 = if self.coordinate_system_zero_based {
+        let start_offset: u64 = if self.coordinate_system_zero_based {
             0
         } else {
             1
@@ -423,16 +423,16 @@ fn joined_column(
     name: &str,
     indexes: &[usize],
     bins: &BinData,
-    start_offset: u32,
+    start_offset: u64,
 ) -> Result<ArrayRef> {
-    let lookup = |&index: &usize, table: &[u32]| -> u32 { table[index] };
+    let lookup = |&index: &usize, table: &[u64]| -> u64 { table[index] };
     let array: ArrayRef = match name {
         "chrom1" | "chrom2" => Arc::new(StringArray::from_iter_values(
             indexes
                 .iter()
                 .map(|&index| bins.chrom_names[bins.chrom_idx[index]].as_str()),
         )),
-        "start1" | "start2" => Arc::new(UInt32Array::from_iter_values(
+        "start1" | "start2" => Arc::new(UInt64Array::from_iter_values(
             indexes
                 .iter()
                 .map(|id| {
@@ -440,14 +440,14 @@ fn joined_column(
                         .checked_add(start_offset)
                         .ok_or_else(|| {
                             DataFusionError::Plan(
-                                "A 1-based cooler start coordinate exceeds the UInt32 range"
+                                "A 1-based cooler start coordinate exceeds the UInt64 range"
                                     .to_string(),
                             )
                         })
                 })
                 .collect::<Result<Vec<_>>>()?,
         )),
-        "end1" | "end2" => Arc::new(UInt32Array::from_iter_values(
+        "end1" | "end2" => Arc::new(UInt64Array::from_iter_values(
             indexes.iter().map(|index| lookup(index, &bins.end)),
         )),
         "weight1" | "weight2" => {

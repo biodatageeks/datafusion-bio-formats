@@ -39,7 +39,7 @@ The provider SHALL expose either joined genomic pixel rows or raw COO rows, SHAL
 
 #### Scenario: Wide numeric values
 
-- **WHEN** bin coordinates exceed `i32::MAX` or `count` uses Int64, UInt32,
+- **WHEN** bin coordinates exceed `u32::MAX` or `count` uses Int64, UInt32,
   UInt64, or Float64 storage
 - **THEN** the Arrow schema and values preserve the stored range without
   signed or floating-point narrowing

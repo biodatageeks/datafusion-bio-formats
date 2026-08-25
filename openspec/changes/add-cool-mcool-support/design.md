@@ -61,9 +61,10 @@ Detection follows HDF5 structure rather than relying only on the extension.
 ### Output schemas and numeric fidelity
 
 Joined mode emits `chrom1`, `start1`, `end1`, `chrom2`, `start2`, `end2`, and
-`count`. Coordinates are Arrow UInt32 after reading through a wide signed
-intermediate and validating the Cooler values; one-based starts use checked
-addition. Raw mode emits `bin1_id`, `bin2_id`, and `count`.
+`count`. Non-negative signed or unsigned stored coordinates are emitted as
+Arrow UInt64 so the complete standard int64 coordinate range is retained;
+one-based starts use checked addition. Raw mode emits `bin1_id`, `bin2_id`, and
+`count`.
 
 The `pixels/count` physical dtype selects Int32, Int64, UInt32, UInt64, or
 Float64 output without narrowing. Narrow signed and unsigned storage may widen

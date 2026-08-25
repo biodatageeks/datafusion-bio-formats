@@ -2,6 +2,7 @@
 //! detection, resolution selection, and metadata listing.
 
 use datafusion::common::{DataFusionError, Result};
+use hdf5_metno::types::TypeDescriptor;
 use hdf5_metno::{File, Group};
 
 use crate::hdf5_utils::{
@@ -238,8 +239,8 @@ pub(crate) struct BinData {
     pub nbins: usize,
     pub chrom_names: Vec<String>,
     pub chrom_idx: Vec<usize>,
-    pub start: Vec<u32>,
-    pub end: Vec<u32>,
+    pub start: Vec<u64>,
+    pub end: Vec<u64>,
     pub weight: Option<Vec<f64>>,
 }
 
@@ -298,18 +299,30 @@ pub(crate) fn load_bin_data(group: &Group, projection: BinDataProjection) -> Res
     } else {
         (Vec::new(), Vec::new())
     };
-    let read_coordinate = |name: &str| -> Result<Vec<u32>> {
-        read_numeric_1d::<i64>(&open(name)?, &format!("bins/{name}"))?
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                u32::try_from(value).map_err(|_| {
-                    DataFusionError::Plan(format!(
-                        "bins/{name}[{index}]={value} is outside the supported UInt32 coordinate range"
-                    ))
+    let read_coordinate = |name: &str| -> Result<Vec<u64>> {
+        let path = format!("bins/{name}");
+        let dataset = open(name)?;
+        let descriptor = dataset
+            .dtype()
+            .and_then(|dtype| dtype.to_descriptor())
+            .map_err(|error| h5_err(&format!("Failed to read {path} dtype"), error))?;
+        match descriptor {
+            TypeDescriptor::Integer(_) => read_numeric_1d::<i64>(&dataset, &path)?
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    u64::try_from(value).map_err(|_| {
+                        DataFusionError::Plan(format!(
+                            "{path}[{index}]={value} is not a non-negative coordinate"
+                        ))
+                    })
                 })
-            })
-            .collect()
+                .collect(),
+            TypeDescriptor::Unsigned(_) => read_numeric_1d::<u64>(&dataset, &path),
+            other => Err(DataFusionError::Plan(format!(
+                "Unsupported {path} dtype: {other}"
+            ))),
+        }
     };
     let start = if projection.start {
         let values = read_coordinate("start")?;

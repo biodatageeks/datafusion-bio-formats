@@ -88,14 +88,12 @@ pub(crate) fn plan_first_axis_ranges(
         let chrom_bin_hi = index.chrom_offset[chrom_index + 1] as usize;
         // Region bounds are 1-based inclusive; bins are stored 0-based
         // half-open. Keep every bin overlapping [query_start0, query_end0).
-        let query_start0 = region.start.map_or(0, |start| start.saturating_sub(1)) as i64;
-        let query_end0 = region.end.map_or(i64::MAX, |end| end as i64);
+        let query_start0 = region.start.map_or(0, |start| start.saturating_sub(1));
+        let query_end0 = region.end.unwrap_or(u64::MAX);
         let chrom_starts = &bins.start[chrom_bin_lo..chrom_bin_hi];
         let chrom_ends = &bins.end[chrom_bin_lo..chrom_bin_hi];
-        let bin_lo =
-            chrom_bin_lo + chrom_ends.partition_point(|&end| i64::from(end) <= query_start0);
-        let bin_hi =
-            chrom_bin_lo + chrom_starts.partition_point(|&start| i64::from(start) < query_end0);
+        let bin_lo = chrom_bin_lo + chrom_ends.partition_point(|&end| end <= query_start0);
+        let bin_hi = chrom_bin_lo + chrom_starts.partition_point(|&start| start < query_end0);
         if bin_lo >= bin_hi {
             continue;
         }

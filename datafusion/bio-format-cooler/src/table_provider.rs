@@ -566,11 +566,11 @@ fn cooler_schema(
     let mut fields = if join_bins {
         vec![
             Field::new("chrom1", DataType::Utf8, false),
-            Field::new("start1", DataType::UInt32, false),
-            Field::new("end1", DataType::UInt32, false),
+            Field::new("start1", DataType::UInt64, false),
+            Field::new("end1", DataType::UInt64, false),
             Field::new("chrom2", DataType::Utf8, false),
-            Field::new("start2", DataType::UInt32, false),
-            Field::new("end2", DataType::UInt32, false),
+            Field::new("start2", DataType::UInt64, false),
+            Field::new("end2", DataType::UInt64, false),
             Field::new("count", count_type, false),
         ]
     } else {
