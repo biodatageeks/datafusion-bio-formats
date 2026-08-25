@@ -20,6 +20,12 @@ pub(crate) fn read_string_dataset(ds: &Dataset, what: &str) -> Result<Vec<String
         .and_then(|dtype| dtype.to_descriptor())
         .map_err(|error| h5_err(&format!("Failed to read dtype of {what}"), error))?;
     let values = match td {
+        TypeDescriptor::FixedAscii(size) | TypeDescriptor::FixedUnicode(size) if size > 256 => {
+            return Err(h5_err(
+                &format!("Unsupported string dtype for {what}"),
+                format!("fixed-length strings wider than 256 bytes (got {size})"),
+            ));
+        }
         TypeDescriptor::FixedAscii(_) | TypeDescriptor::FixedUnicode(_) => ds
             .read_1d::<FixedAscii<256>>()
             .map_err(|error| h5_err(&format!("Failed to read {what}"), error))?

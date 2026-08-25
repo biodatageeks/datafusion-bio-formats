@@ -109,7 +109,13 @@ impl CoolerTableProvider {
                 .map_err(|error| h5_err("Failed to read pixels/count dtype", error))?,
             TypeDescriptor::Float(_)
         );
-        let nnz = count_ds.shape()[0];
+        let count_shape = count_ds.shape();
+        if count_shape.len() != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "pixels/count in '{group_path}' is not a 1-D dataset"
+            )));
+        }
+        let nnz = count_shape[0];
 
         // Collection attributes surfaced as bio.cool.* schema metadata so the
         // Python layer can expose resolution/assembly without extra file reads.
@@ -153,6 +159,10 @@ impl CoolerTableProvider {
     }
 
     fn bin_data(&self) -> Result<Arc<BinData>> {
+        // Concurrent first scans may both load and one result wins the cache —
+        // accepted trade-off: scan() runs once per query (partitions share the
+        // Arc), so the duplicated load is bounded by concurrent queries, and
+        // OnceLock keeps the fallible load out of get_or_init.
         if let Some(bins) = self.bin_cache.get() {
             return Ok(bins.clone());
         }
@@ -204,6 +214,9 @@ impl CoolerTableProvider {
                 if std::env::var_os("DATAFUSION_BIO_COOLER_DISABLE_FAST_PATH").is_some() {
                     return Arc::new(FastPixels::default());
                 }
+                // Fallback reasons are logged at debug level: a user seeing
+                // lock-bound scan speeds can enable logging to learn why the
+                // fast path is inactive.
                 let build = || -> Result<FastPixels> {
                     let file = File::open(&self.file_path)
                         .map_err(|error| h5_err("Failed to open cooler file", error))?;
@@ -245,6 +258,12 @@ impl CoolerTableProvider {
                                 .collect(),
                         };
                         if !validate_against_reference(&column, &self.file_path, &reference) {
+                            // Also covers byte order: the reference bytes are
+                            // little-endian by construction, so a big-endian
+                            // dataset fails the probe and stays on hdf5 reads.
+                            log::debug!(
+                                "cooler fast path disabled for pixels/{name}: reference probe mismatch"
+                            );
                             return Ok(None);
                         }
                         Ok(Some(column))
@@ -261,7 +280,10 @@ impl CoolerTableProvider {
                         count: indexed("count", count_type)?,
                     })
                 };
-                Arc::new(build().unwrap_or_default())
+                Arc::new(build().unwrap_or_else(|error| {
+                    log::debug!("cooler fast path disabled: {error}");
+                    FastPixels::default()
+                }))
             })
             .clone()
     }

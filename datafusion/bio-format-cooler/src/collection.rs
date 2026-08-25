@@ -167,10 +167,16 @@ fn collection_info(file: &File, group_path: &str) -> Result<CoolerCollectionInfo
     let chroms = group
         .group("chroms")
         .map_err(|error| h5_err("Failed to open chroms group", error))?;
-    let nchroms = chroms
+    let name_shape = chroms
         .dataset("name")
         .map_err(|error| h5_err("Failed to open chroms/name", error))?
-        .shape()[0] as i64;
+        .shape();
+    if name_shape.len() != 1 {
+        return Err(DataFusionError::Plan(format!(
+            "chroms/name in '{group_path}' is not a 1-D dataset"
+        )));
+    }
+    let nchroms = name_shape[0] as i64;
     Ok(CoolerCollectionInfo {
         group_path: group_path.to_string(),
         bin_size: attr_i64(&group, "bin-size")?,
