@@ -16,9 +16,14 @@ use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, Pla
 use hdf5_metno::{Dataset, File};
 
 use crate::collection::BinData;
+use crate::fast_chunk::{
+    ChunkReader, ChunkedColumn, FastPixels, bytes_to_f64, bytes_to_i32, bytes_to_i64,
+};
 use crate::hdf5_utils::{h5_err, read_numeric_slice};
 
-pub(crate) const COOLER_BATCH_ROWS: usize = 8192;
+// Large batches amortize per-read overhead (reader setup, chunk-cache probes,
+// array construction); 128Ki rows of the widest joined batch stay ~5 MB.
+pub(crate) const COOLER_BATCH_ROWS: usize = 131_072;
 
 /// Physical plan streaming pixel row ranges as record batches. Each partition
 /// owns a list of disjoint row ranges (pruning can produce several per
@@ -31,6 +36,7 @@ pub struct CoolerExec {
     pub(crate) count_is_float: bool,
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) bins: Option<Arc<BinData>>,
+    pub(crate) fast: Arc<FastPixels>,
     pub(crate) cache: Arc<PlanProperties>,
 }
 
@@ -111,7 +117,9 @@ impl ExecutionPlan for CoolerExec {
             count_is_float: self.count_is_float,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             bins: self.bins.clone(),
-            datasets: None,
+            fast: self.fast.clone(),
+            sources: None,
+            chunk_reader: None,
         });
         Ok(Box::pin(RecordBatchStreamAdapter::new(
             self.schema.clone(),
@@ -120,11 +128,18 @@ impl ExecutionPlan for CoolerExec {
     }
 }
 
-/// Lazily opened handles to the pixel datasets a projection needs.
-struct PixelDatasets {
-    bin1: Option<Dataset>,
-    bin2: Option<Dataset>,
-    count: Option<Dataset>,
+/// Where one pixel column's values come from: the direct-chunk fast path or
+/// an ordinary (lock-serialized) hdf5 dataset read.
+enum ColumnSource {
+    Fast(Arc<ChunkedColumn>),
+    H5(Dataset),
+}
+
+/// Lazily resolved per-column sources for the projection's needs.
+struct PixelSources {
+    bin1: Option<ColumnSource>,
+    bin2: Option<ColumnSource>,
+    count: Option<ColumnSource>,
 }
 
 /// Synchronous iterator yielding fixed-size record batches across a
@@ -140,7 +155,9 @@ struct CoolerPixelStream {
     count_is_float: bool,
     coordinate_system_zero_based: bool,
     bins: Option<Arc<BinData>>,
-    datasets: Option<PixelDatasets>,
+    fast: Arc<FastPixels>,
+    sources: Option<PixelSources>,
+    chunk_reader: Option<ChunkReader>,
 }
 
 impl CoolerPixelStream {
@@ -161,62 +178,100 @@ impl CoolerPixelStream {
         })
     }
 
-    fn open_datasets(&mut self) -> Result<()> {
-        if self.datasets.is_some() {
+    fn open_sources(&mut self) -> Result<()> {
+        if self.sources.is_some() {
             return Ok(());
         }
-        let file = File::open(&self.file_path).map_err(|error| {
-            h5_err(
-                &format!("Failed to open cooler file '{}'", self.file_path),
-                error,
-            )
-        })?;
-        let pixels = file
-            .group(&self.group_path)
-            .and_then(|group| group.group("pixels"))
-            .map_err(|error| h5_err("Failed to open pixels group", error))?;
-        let open = |name: &str| {
-            pixels
+        let needed = [
+            (self.needs('1'), "bin1_id", self.fast.bin1.clone()),
+            (self.needs('2'), "bin2_id", self.fast.bin2.clone()),
+            (self.needs('c'), "count", self.fast.count.clone()),
+        ];
+        // The hdf5 file/group is only opened when some needed column lacks a
+        // fast index; all-fast streams never touch libhdf5 at execution time.
+        let mut h5_pixels = None;
+        let mut resolve = |wanted: bool,
+                           name: &str,
+                           fast: Option<Arc<ChunkedColumn>>|
+         -> Result<Option<ColumnSource>> {
+            if !wanted {
+                return Ok(None);
+            }
+            if let Some(column) = fast {
+                return Ok(Some(ColumnSource::Fast(column)));
+            }
+            if h5_pixels.is_none() {
+                let file = File::open(&self.file_path).map_err(|error| {
+                    h5_err(
+                        &format!("Failed to open cooler file '{}'", self.file_path),
+                        error,
+                    )
+                })?;
+                let pixels = file
+                    .group(&self.group_path)
+                    .and_then(|group| group.group("pixels"))
+                    .map_err(|error| h5_err("Failed to open pixels group", error))?;
+                h5_pixels = Some(pixels);
+            }
+            let dataset = h5_pixels
+                .as_ref()
+                .expect("pixels group opened")
                 .dataset(name)
-                .map_err(|error| h5_err(&format!("Failed to open pixels/{name}"), error))
+                .map_err(|error| h5_err(&format!("Failed to open pixels/{name}"), error))?;
+            Ok(Some(ColumnSource::H5(dataset)))
         };
-        self.datasets = Some(PixelDatasets {
-            bin1: if self.needs('1') {
-                Some(open("bin1_id")?)
-            } else {
-                None
-            },
-            bin2: if self.needs('2') {
-                Some(open("bin2_id")?)
-            } else {
-                None
-            },
-            count: if self.needs('c') {
-                Some(open("count")?)
-            } else {
-                None
-            },
+        let [bin1, bin2, count] = needed;
+        self.sources = Some(PixelSources {
+            bin1: resolve(bin1.0, bin1.1, bin1.2)?,
+            bin2: resolve(bin2.0, bin2.1, bin2.2)?,
+            count: resolve(count.0, count.1, count.2)?,
         });
         Ok(())
     }
 
     fn build_batch(&mut self, lo: usize, hi: usize) -> Result<RecordBatch> {
-        self.open_datasets()?;
-        let datasets = self.datasets.as_ref().expect("datasets opened");
-        let bin1 = match &datasets.bin1 {
-            Some(ds) => read_numeric_slice::<i64>(ds, lo, hi, "pixels/bin1_id")?,
-            None => Vec::new(),
-        };
-        let bin2 = match &datasets.bin2 {
-            Some(ds) => read_numeric_slice::<i64>(ds, lo, hi, "pixels/bin2_id")?,
-            None => Vec::new(),
-        };
-        let (count_int, count_float) = match &datasets.count {
-            Some(ds) if self.count_is_float => (
+        self.open_sources()?;
+        let sources = self.sources.as_ref().expect("sources resolved");
+        let mut scratch: Vec<u8> = Vec::new();
+        let bin1 = read_id_column(
+            &sources.bin1,
+            &mut self.chunk_reader,
+            &self.file_path,
+            lo,
+            hi,
+            "pixels/bin1_id",
+            &mut scratch,
+        )?;
+        let bin2 = read_id_column(
+            &sources.bin2,
+            &mut self.chunk_reader,
+            &self.file_path,
+            lo,
+            hi,
+            "pixels/bin2_id",
+            &mut scratch,
+        )?;
+        let (count_int, count_float) = match &sources.count {
+            Some(ColumnSource::Fast(column)) => {
+                let bytes = fast_read(
+                    &mut self.chunk_reader,
+                    &self.file_path,
+                    column,
+                    lo,
+                    hi,
+                    &mut scratch,
+                )?;
+                if self.count_is_float {
+                    (Vec::new(), bytes_to_f64(bytes))
+                } else {
+                    (bytes_to_i32(bytes), Vec::new())
+                }
+            }
+            Some(ColumnSource::H5(ds)) if self.count_is_float => (
                 Vec::new(),
                 read_numeric_slice::<f64>(ds, lo, hi, "pixels/count")?,
             ),
-            Some(ds) => (
+            Some(ColumnSource::H5(ds)) => (
                 read_numeric_slice::<i32>(ds, lo, hi, "pixels/count")?,
                 Vec::new(),
             ),
@@ -253,6 +308,42 @@ impl CoolerPixelStream {
         let options = RecordBatchOptions::new().with_row_count(Some(hi - lo));
         RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
             .map_err(|error| DataFusionError::ArrowError(Box::new(error), None))
+    }
+}
+
+fn fast_read<'a>(
+    reader: &mut Option<ChunkReader>,
+    file_path: &str,
+    column: &ChunkedColumn,
+    lo: usize,
+    hi: usize,
+    scratch: &'a mut Vec<u8>,
+) -> Result<&'a [u8]> {
+    if reader.is_none() {
+        *reader = Some(ChunkReader::open(file_path)?);
+    }
+    reader
+        .as_mut()
+        .expect("chunk reader opened")
+        .read_range(column, lo, hi, scratch)?;
+    Ok(scratch.as_slice())
+}
+
+fn read_id_column(
+    source: &Option<ColumnSource>,
+    reader: &mut Option<ChunkReader>,
+    file_path: &str,
+    lo: usize,
+    hi: usize,
+    what: &str,
+    scratch: &mut Vec<u8>,
+) -> Result<Vec<i64>> {
+    match source {
+        Some(ColumnSource::Fast(column)) => Ok(bytes_to_i64(fast_read(
+            reader, file_path, column, lo, hi, scratch,
+        )?)),
+        Some(ColumnSource::H5(ds)) => read_numeric_slice::<i64>(ds, lo, hi, what),
+        None => Ok(Vec::new()),
     }
 }
 

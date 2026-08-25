@@ -7,6 +7,7 @@
 //! `count`).
 
 pub mod collection;
+mod fast_chunk;
 mod hdf5_utils;
 pub mod physical_exec;
 mod pruning;

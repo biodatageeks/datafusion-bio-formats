@@ -23,7 +23,8 @@ use crate::collection::{
     BinData, CoolerUri, IndexData, ensure_local_path, load_bin_data, load_index_data,
     resolve_collection_group,
 };
-use crate::hdf5_utils::h5_err;
+use crate::fast_chunk::{FastPixels, index_column, validate_against_reference};
+use crate::hdf5_utils::{h5_err, read_numeric_slice};
 use crate::physical_exec::CoolerExec;
 use crate::pruning::{is_first_axis_filter, plan_first_axis_ranges, plan_partitions};
 
@@ -43,6 +44,7 @@ pub struct CoolerTableProvider {
     coordinate_system_zero_based: bool,
     bin_cache: OnceLock<Arc<BinData>>,
     index_cache: OnceLock<Arc<IndexData>>,
+    fast_cache: OnceLock<Arc<FastPixels>>,
 }
 
 impl Debug for CoolerTableProvider {
@@ -141,6 +143,7 @@ impl CoolerTableProvider {
             coordinate_system_zero_based,
             bin_cache: OnceLock::new(),
             index_cache: OnceLock::new(),
+            fast_cache: OnceLock::new(),
         })
     }
 
@@ -187,6 +190,80 @@ impl CoolerTableProvider {
         })?;
         let index = Arc::new(load_index_data(&group)?);
         Ok(self.index_cache.get_or_init(|| index).clone())
+    }
+}
+
+impl CoolerTableProvider {
+    /// Build (once) the direct-chunk indexes for the pixel columns. Each
+    /// column is validated against a libhdf5 reference read of its leading
+    /// elements; any disagreement or unsupported layout falls back to the
+    /// ordinary hdf5 read path for that column.
+    fn fast_pixels(&self) -> Arc<FastPixels> {
+        self.fast_cache
+            .get_or_init(|| {
+                if std::env::var_os("DATAFUSION_BIO_COOLER_DISABLE_FAST_PATH").is_some() {
+                    return Arc::new(FastPixels::default());
+                }
+                let build = || -> Result<FastPixels> {
+                    let file = File::open(&self.file_path)
+                        .map_err(|error| h5_err("Failed to open cooler file", error))?;
+                    let pixels = file
+                        .group(&self.group_path)
+                        .and_then(|group| group.group("pixels"))
+                        .map_err(|error| h5_err("Failed to open pixels group", error))?;
+                    let indexed = |name: &str, expected: TypeDescriptor| -> Result<Option<_>> {
+                        let ds = pixels.dataset(name).map_err(|error| {
+                            h5_err(&format!("Failed to open pixels/{name}"), error)
+                        })?;
+                        let td = ds
+                            .dtype()
+                            .and_then(|dtype| dtype.to_descriptor())
+                            .map_err(|error| h5_err("Failed to read dtype", error))?;
+                        if td != expected {
+                            return Ok(None);
+                        }
+                        let Some(column) = index_column(&ds) else {
+                            return Ok(None);
+                        };
+                        let probe = column.chunk_elems.min(column.n_elems).min(8192);
+                        let reference: Vec<u8> = match expected {
+                            TypeDescriptor::Integer(hdf5_metno::types::IntSize::U8) => {
+                                read_numeric_slice::<i64>(&ds, 0, probe, name)?
+                                    .iter()
+                                    .flat_map(|value| value.to_le_bytes())
+                                    .collect()
+                            }
+                            TypeDescriptor::Integer(hdf5_metno::types::IntSize::U4) => {
+                                read_numeric_slice::<i32>(&ds, 0, probe, name)?
+                                    .iter()
+                                    .flat_map(|value| value.to_le_bytes())
+                                    .collect()
+                            }
+                            _ => read_numeric_slice::<f64>(&ds, 0, probe, name)?
+                                .iter()
+                                .flat_map(|value| value.to_le_bytes())
+                                .collect(),
+                        };
+                        if !validate_against_reference(&column, &self.file_path, &reference) {
+                            return Ok(None);
+                        }
+                        Ok(Some(column))
+                    };
+                    use hdf5_metno::types::{FloatSize, IntSize};
+                    let count_type = if self.count_is_float {
+                        TypeDescriptor::Float(FloatSize::U8)
+                    } else {
+                        TypeDescriptor::Integer(IntSize::U4)
+                    };
+                    Ok(FastPixels {
+                        bin1: indexed("bin1_id", TypeDescriptor::Integer(IntSize::U8))?,
+                        bin2: indexed("bin2_id", TypeDescriptor::Integer(IntSize::U8))?,
+                        count: indexed("count", count_type)?,
+                    })
+                };
+                Arc::new(build().unwrap_or_default())
+            })
+            .clone()
     }
 }
 
@@ -276,6 +353,7 @@ impl TableProvider for CoolerTableProvider {
             count_is_float: self.count_is_float,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             bins,
+            fast: self.fast_pixels(),
             cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema),
                 Partitioning::UnknownPartitioning(partition_count),

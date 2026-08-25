@@ -19,6 +19,8 @@ futures-util.workspace = true
 # time with a filter-plugin error. Validated by the polars-bio wheel-CI spike
 # (openspec change add-cool-mcool-support, task 1.2).
 hdf5-metno = { version = "0.10", features = ["static", "zlib"] }
+# zlib-rs inflation for the direct-chunk fast path (no libhdf5 in the data path)
+flate2.workspace = true
 ndarray = "0.16"
 
 [dev-dependencies]
