@@ -153,18 +153,15 @@ pub(crate) fn plan_first_axis_ranges(
         .map(rename_first_axis_columns)
         .collect::<Result<Vec<_>>>()?;
     let analysis = extract_genomic_regions(&renamed, coordinate_system_zero_based);
+    let coordinate_projection = first_axis_pruning_projection(filters);
+    if coordinate_projection.start || coordinate_projection.end {
+        validate_pruning_coordinate_order(bins, index)?;
+    }
     if analysis.unsatisfiable {
         return Ok(Vec::new());
     }
     if analysis.regions.is_empty() {
         return Ok(vec![(0, nnz)]);
-    }
-    if analysis
-        .regions
-        .iter()
-        .any(|region| region.start.is_some() || region.end.is_some())
-    {
-        validate_pruning_coordinate_order(bins, index)?;
     }
 
     let mut ranges: Vec<(usize, usize)> = Vec::new();
@@ -225,9 +222,9 @@ fn validate_pruning_coordinate_order(bins: &BinData, index: &IndexData) -> Resul
         for bin_index in lo..hi {
             let start = bins.start[bin_index];
             let end = bins.end[bin_index];
-            if start > end {
+            if start >= end {
                 return Err(datafusion::common::DataFusionError::Plan(format!(
-                    "bins/start[{bin_index}]={start} exceeds bins/end[{bin_index}]={end}"
+                    "bins/start[{bin_index}]={start} does not precede bins/end[{bin_index}]={end}"
                 )));
             }
             if bin_index > lo && bins.start[bin_index - 1] > start {
@@ -407,6 +404,39 @@ mod tests {
             error.contains("bins/start is not non-decreasing"),
             "{error}"
         );
+
+        bins.start = vec![0, 50];
+        bins.end = vec![50, 50];
+        let error = plan_first_axis_ranges(&filters, true, &bins, &index, 2)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not precede bins/end[1]=50"), "{error}");
+    }
+
+    #[test]
+    fn unsatisfiable_coordinate_filter_still_validates_bins() {
+        let filters = vec![
+            col("chrom1").eq(lit("chr1")),
+            col("start1").gt_eq(lit(10_u64)),
+            col("end1").lt_eq(lit(5_u64)),
+        ];
+        let bins = BinData {
+            nbins: 1,
+            chrom_names: vec!["chr1".to_string()],
+            chrom_idx: vec![0],
+            start: vec![10],
+            end: vec![5],
+            weight: None,
+        };
+        let index = IndexData {
+            chrom_offset: vec![0, 1],
+            bin1_offset: vec![0, 1],
+        };
+
+        let error = plan_first_axis_ranges(&filters, true, &bins, &index, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not precede bins/end[0]=5"), "{error}");
     }
 
     #[test]

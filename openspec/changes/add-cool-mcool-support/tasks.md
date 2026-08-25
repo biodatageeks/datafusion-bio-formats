@@ -54,7 +54,8 @@
 - [x] 4.9 Cross-validate bin offsets with pixel bin assignments in bounded
   batches and keep chromosome-only pruning free of coordinate-array loads.
 - [x] 4.10 Keep parallel empty-projection row counts free of index scans and
-  validate per-chromosome coordinate order before binary-search pruning.
+  validate non-empty per-chromosome coordinate order before binary-search or
+  coordinate-derived empty-result pruning.
 
 ## 5. Verification
 

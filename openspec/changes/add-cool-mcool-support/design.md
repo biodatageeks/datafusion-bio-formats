@@ -102,7 +102,8 @@ when every member is a supported literal; partially extractable lists remain
 unpruned so an inexact pushdown can never discard valid rows.
 Before coordinate pruning uses binary search, `bins/start` and `bins/end` are
 validated as non-decreasing within every chromosome span and each bin is
-validated as a well-formed half-open interval.
+validated as a non-empty, well-formed half-open interval. This validation also
+precedes an unsatisfiable coordinate predicate's empty-scan return.
 
 ### Partitions and HDF5 locking
 

@@ -123,10 +123,10 @@ The provider SHALL map supported first-axis chromosome and coordinate filters th
 
 #### Scenario: Non-monotone bin coordinates
 
-- **WHEN** `bins/start` or `bins/end` is not non-decreasing within a chromosome
-  span used by coordinate pruning
+- **WHEN** a bin is empty or reversed, or `bins/start`/`bins/end` is not
+  non-decreasing within a chromosome span used by coordinate pruning
 - **THEN** the provider returns a contextual invalid-file error before binary
-  search can discard pixel rows
+  search or a coordinate-derived empty result can discard pixel rows
 
 ### Requirement: Bounded and partitioned execution
 
