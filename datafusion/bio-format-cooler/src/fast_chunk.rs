@@ -78,10 +78,10 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
     }
     // Decode order is the inverse of the write pipeline: inflate first, then
     // unshuffle. That only holds when shuffle precedes deflate on write.
-    if let (Some(shuffle), Some(deflate)) = (positions.shuffle, positions.deflate) {
-        if shuffle > deflate {
-            return None;
-        }
+    if let (Some(shuffle), Some(deflate)) = (positions.shuffle, positions.deflate)
+        && shuffle > deflate
+    {
+        return None;
     }
 
     let expected = n_elems.div_ceil(chunk_elems);
