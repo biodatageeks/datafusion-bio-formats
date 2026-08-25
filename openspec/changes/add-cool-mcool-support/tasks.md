@@ -45,6 +45,8 @@
   coordinate behavior, weights, and local-file limitation.
 - [x] 4.5 Cover partially extractable chromosome lists and bounded rejection
   of oversized deflate streams.
+- [x] 4.6 Require explicit little-endian datatype metadata and reject
+  out-of-file or implausibly large stored chunk extents during indexing.
 
 ## 5. Verification
 

@@ -146,6 +146,18 @@ The provider MAY decode supported HDF5 chunks directly, but SHALL select the lib
 - **THEN** direct decoding stops after at most one excess byte and rejects the
   malformed chunk without unbounded memory growth
 
+#### Scenario: Non-little-endian stored datatype
+
+- **WHEN** a numeric pixel dataset reports any byte order other than explicit
+  little-endian storage, even if its leading values are byte-symmetric
+- **THEN** the provider selects libhdf5 before direct execution
+
+#### Scenario: Implausible stored chunk extent
+
+- **WHEN** an indexed chunk advertises a stored size beyond the file or beyond
+  a conservative bound derived from its decoded chunk size
+- **THEN** the provider selects libhdf5 before allocating the direct-read buffer
+
 ### Requirement: Validated joined references
 
 The provider SHALL validate parallel pixel-array shapes, bin-array shapes,

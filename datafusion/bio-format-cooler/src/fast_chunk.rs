@@ -20,6 +20,7 @@ use std::sync::Arc;
 use datafusion::common::{DataFusionError, Result};
 use flate2::read::ZlibDecoder;
 use hdf5_metno::Dataset;
+use hdf5_metno::datatype::ByteOrder;
 use hdf5_metno::filters::Filter;
 
 use crate::hdf5_utils::h5_err;
@@ -28,7 +29,7 @@ use crate::hdf5_utils::h5_err;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChunkLoc {
     addr: u64,
-    size: u32,
+    size: usize,
     filter_mask: u32,
 }
 
@@ -63,7 +64,16 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
         return None;
     }
     let chunk_elems = chunk[0];
-    let elem_size = ds.dtype().ok()?.size();
+    let dtype = ds.dtype().ok()?;
+    // Direct conversion below is deliberately little-endian. Inspect the
+    // stored datatype instead of inferring its order from probe values: zero
+    // and other byte-symmetric leading values cannot distinguish byte order.
+    if !supports_direct_byte_order(dtype.byte_order()) {
+        return None;
+    }
+    let elem_size = dtype.size();
+    let chunk_bytes = chunk_elems.checked_mul(elem_size)?;
+    let file_size = std::fs::metadata(ds.filename()).ok()?.len();
     let filters = ds.filters();
     let mut positions = FilterPositions {
         shuffle: None,
@@ -95,14 +105,35 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
     ];
     let mut malformed = false;
     ds.chunks_visit(|info| {
-        let index = (info.offset[0] as usize) / chunk_elems;
-        if info.offset.len() != 1 || index >= expected {
+        if info.offset.len() != 1 {
+            malformed = true;
+            return 1;
+        }
+        let Ok(offset) = usize::try_from(info.offset[0]) else {
+            malformed = true;
+            return 1;
+        };
+        let index = offset / chunk_elems;
+        let deflate_applied = positions
+            .deflate
+            .is_some_and(|position| info.filter_mask & (1_u32 << position) == 0);
+        let Some(size) = valid_stored_chunk_size(
+            info.addr,
+            info.size,
+            chunk_bytes,
+            deflate_applied,
+            file_size,
+        ) else {
+            malformed = true;
+            return 1;
+        };
+        if index >= expected {
             malformed = true;
             return 1;
         }
         chunks[index] = ChunkLoc {
             addr: info.addr,
-            size: info.size as u32,
+            size,
             filter_mask: info.filter_mask,
         };
         0
@@ -137,6 +168,37 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
         chunks,
     });
     Some(column)
+}
+
+fn supports_direct_byte_order(byte_order: ByteOrder) -> bool {
+    byte_order == ByteOrder::LittleEndian
+}
+
+/// Validate a stored chunk extent before retaining it in the direct index.
+///
+/// A deflate stream emitted by ordinary HDF5/zlib should stay close to its
+/// decoded size even for incompressible input. The deliberately conservative
+/// 12.5% plus 64-byte allowance exceeds standard zlib bounds while rejecting
+/// attacker-controlled multi-gigabyte extents. Unfiltered chunks must have
+/// exactly the decoded chunk size. Any unusual but valid stream falls back to
+/// libhdf5 rather than entering the optimized path.
+fn valid_stored_chunk_size(
+    addr: u64,
+    stored_size: u64,
+    decoded_size: usize,
+    deflate_applied: bool,
+    file_size: u64,
+) -> Option<usize> {
+    let stored_limit = if deflate_applied {
+        decoded_size
+            .checked_add(decoded_size.div_ceil(8))?
+            .checked_add(64)?
+    } else {
+        decoded_size
+    };
+    let size = usize::try_from(stored_size).ok()?;
+    let end = addr.checked_add(stored_size)?;
+    (size > 0 && size <= stored_limit && end <= file_size).then_some(size)
 }
 
 /// Verify the fast path against a libhdf5 reference read of the leading
@@ -201,7 +263,7 @@ impl ChunkReader {
         let chunk_bytes = column.chunk_elems * column.elem_size;
         for chunk_index in (lo / column.chunk_elems)..=((hi - 1) / column.chunk_elems) {
             let loc = column.chunks[chunk_index];
-            self.compressed.resize(loc.size as usize, 0);
+            self.compressed.resize(loc.size, 0);
             self.file
                 .seek(SeekFrom::Start(loc.addr))
                 .and_then(|_| self.file.read_exact(&mut self.compressed))
@@ -336,6 +398,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn direct_path_requires_explicit_little_endian_metadata() {
+        assert!(supports_direct_byte_order(ByteOrder::LittleEndian));
+        assert!(!supports_direct_byte_order(ByteOrder::BigEndian));
+        assert!(!supports_direct_byte_order(ByteOrder::Vax));
+        assert!(!supports_direct_byte_order(ByteOrder::Mixed));
+        assert!(!supports_direct_byte_order(ByteOrder::None));
+    }
+
+    #[test]
+    fn oversized_or_out_of_file_stored_chunks_are_rejected_before_indexing() {
+        let decoded_size: usize = 64;
+        let allowed = decoded_size + decoded_size.div_ceil(8) + 64;
+
+        assert_eq!(
+            valid_stored_chunk_size(10, allowed as u64, decoded_size, true, 10_000),
+            Some(allowed)
+        );
+        assert_eq!(
+            valid_stored_chunk_size(10, (allowed + 1) as u64, decoded_size, true, 10_000),
+            None
+        );
+        assert_eq!(
+            valid_stored_chunk_size(9_990, 64, decoded_size, false, 10_000),
+            None
+        );
+        assert_eq!(
+            valid_stored_chunk_size(u64::MAX - 1, 64, decoded_size, false, u64::MAX),
+            None
+        );
+    }
+
+    #[test]
     fn oversized_inflated_chunk_is_bounded_and_rejected() {
         let chunk_bytes = 64;
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -353,7 +447,7 @@ mod tests {
             deflate: true,
             chunks: vec![ChunkLoc {
                 addr: 0,
-                size: compressed.len() as u32,
+                size: compressed.len(),
                 filter_mask: 0,
             }],
         };

@@ -345,8 +345,6 @@ impl CoolerTableProvider {
                     .collect(),
             };
             if !validate_against_reference(&column, &self.file_path, &reference) {
-                // Also covers byte order: the reference bytes are little-endian
-                // by construction, so a big-endian dataset fails the probe.
                 log::debug!(
                     "cooler fast path disabled for pixels/{name}: reference probe mismatch"
                 );

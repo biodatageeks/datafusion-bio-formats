@@ -112,9 +112,12 @@ For contiguous logical rows in chunked numeric datasets, the optimized path
 reads raw chunks, validates filter metadata and byte order, inflates deflate,
 undoes byte shuffle, and slices values directly. It is enabled only for
 unfiltered chunks or the supported shuffle-plus-deflate pipeline with no
-skipped filter masks. Inflation is bounded to the declared decoded chunk size
-plus one byte, allowing oversized malformed streams to be rejected without
-unbounded memory growth.
+skipped filter masks. Stored datatype metadata must explicitly report
+little-endian order; byte order is never inferred from data-dependent probes.
+Stored chunk extents must fit the file and a conservative bound derived from
+the decoded chunk size before the index is retained. Inflation is bounded to
+the declared decoded chunk size plus one byte, allowing oversized malformed
+streams to be rejected without unbounded memory growth.
 
 Dataset indexing validates all recorded chunks before scan execution. Any
 unsupported layout, filter, per-chunk mask, byte order, reference-probe
