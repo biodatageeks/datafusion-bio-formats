@@ -512,3 +512,23 @@ async fn explain_shows_pruned_row_count() {
         "expected pruned row count, got {rows}"
     );
 }
+
+#[tokio::test]
+async fn int64_count_dtype_not_truncated() {
+    let batches = collect(
+        provider(&fixture("test_int64.cool"), None, true, false, false),
+        "SELECT count FROM c",
+        1,
+    )
+    .await;
+    let batch = &batches[0];
+    assert_eq!(batch.schema().field(0).data_type(), &DataType::Int64);
+    let count = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    // first pixel's count exceeds i32::MAX; truncation would corrupt it
+    assert_eq!(count.value(0), 5_000_000_000);
+    assert_eq!(count.value(1), 6);
+}

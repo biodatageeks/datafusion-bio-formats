@@ -217,6 +217,16 @@ pub fn list_data_collections(path: &str) -> Result<Vec<CoolerCollectionInfo>> {
     )))
 }
 
+/// Storage type of `pixels/count`: cooler defaults to int32 but permits
+/// int64 and float counts; each maps to its own Arrow type so wide counts
+/// are never truncated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CountType {
+    Int32,
+    Int64,
+    Float64,
+}
+
 /// The `bins` and `chroms` tables of a collection, loaded once per scan and
 /// shared across partitions for the pixel → coordinate join.
 #[derive(Debug)]

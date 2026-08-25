@@ -15,7 +15,7 @@ use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use hdf5_metno::{Dataset, File};
 
-use crate::collection::BinData;
+use crate::collection::{BinData, CountType};
 use crate::fast_chunk::{
     ChunkReader, ChunkedColumn, FastPixels, bytes_to_f64, bytes_to_i32, bytes_to_i64,
 };
@@ -33,7 +33,7 @@ pub struct CoolerExec {
     pub(crate) group_path: String,
     pub(crate) schema: SchemaRef,
     pub(crate) partitions: Vec<Vec<(usize, usize)>>,
-    pub(crate) count_is_float: bool,
+    pub(crate) count_type: CountType,
     pub(crate) coordinate_system_zero_based: bool,
     pub(crate) bins: Option<Arc<BinData>>,
     pub(crate) fast: Arc<FastPixels>,
@@ -114,7 +114,7 @@ impl ExecutionPlan for CoolerExec {
             ranges: ranges.clone().into_iter(),
             cursor: 0,
             row_hi: 0,
-            count_is_float: self.count_is_float,
+            count_type: self.count_type,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             bins: self.bins.clone(),
             fast: self.fast.clone(),
@@ -135,6 +135,13 @@ enum ColumnSource {
     H5(Dataset),
 }
 
+/// Decoded `count` values in their stored width.
+enum CountValues {
+    Int32(Vec<i32>),
+    Int64(Vec<i64>),
+    Float64(Vec<f64>),
+}
+
 /// Lazily resolved per-column sources for the projection's needs.
 struct PixelSources {
     bin1: Option<ColumnSource>,
@@ -152,7 +159,7 @@ struct CoolerPixelStream {
     ranges: std::vec::IntoIter<(usize, usize)>,
     cursor: usize,
     row_hi: usize,
-    count_is_float: bool,
+    count_type: CountType,
     coordinate_system_zero_based: bool,
     bins: Option<Arc<BinData>>,
     fast: Arc<FastPixels>,
@@ -251,7 +258,7 @@ impl CoolerPixelStream {
             "pixels/bin2_id",
             &mut scratch,
         )?;
-        let (count_int, count_float) = match &sources.count {
+        let count = match &sources.count {
             Some(ColumnSource::Fast(column)) => {
                 let bytes = fast_read(
                     &mut self.chunk_reader,
@@ -261,21 +268,24 @@ impl CoolerPixelStream {
                     hi,
                     &mut scratch,
                 )?;
-                if self.count_is_float {
-                    (Vec::new(), bytes_to_f64(bytes))
-                } else {
-                    (bytes_to_i32(bytes), Vec::new())
+                match self.count_type {
+                    CountType::Float64 => CountValues::Float64(bytes_to_f64(bytes)),
+                    CountType::Int64 => CountValues::Int64(bytes_to_i64(bytes)),
+                    CountType::Int32 => CountValues::Int32(bytes_to_i32(bytes)),
                 }
             }
-            Some(ColumnSource::H5(ds)) if self.count_is_float => (
-                Vec::new(),
-                read_numeric_slice::<f64>(ds, lo, hi, "pixels/count")?,
-            ),
-            Some(ColumnSource::H5(ds)) => (
-                read_numeric_slice::<i32>(ds, lo, hi, "pixels/count")?,
-                Vec::new(),
-            ),
-            None => (Vec::new(), Vec::new()),
+            Some(ColumnSource::H5(ds)) => match self.count_type {
+                CountType::Float64 => {
+                    CountValues::Float64(read_numeric_slice::<f64>(ds, lo, hi, "pixels/count")?)
+                }
+                CountType::Int64 => {
+                    CountValues::Int64(read_numeric_slice::<i64>(ds, lo, hi, "pixels/count")?)
+                }
+                CountType::Int32 => {
+                    CountValues::Int32(read_numeric_slice::<i32>(ds, lo, hi, "pixels/count")?)
+                }
+            },
+            None => CountValues::Int32(Vec::new()),
         };
 
         let start_offset: u32 = if self.coordinate_system_zero_based {
@@ -289,10 +299,17 @@ impl CoolerPixelStream {
             let array: ArrayRef = match field.name().as_str() {
                 "bin1_id" => Arc::new(Int64Array::from_iter_values(bin1.iter().copied())),
                 "bin2_id" => Arc::new(Int64Array::from_iter_values(bin2.iter().copied())),
-                "count" if self.count_is_float => {
-                    Arc::new(Float64Array::from_iter_values(count_float.iter().copied()))
-                }
-                "count" => Arc::new(Int32Array::from_iter_values(count_int.iter().copied())),
+                "count" => match &count {
+                    CountValues::Float64(values) => {
+                        Arc::new(Float64Array::from_iter_values(values.iter().copied()))
+                    }
+                    CountValues::Int64(values) => {
+                        Arc::new(Int64Array::from_iter_values(values.iter().copied()))
+                    }
+                    CountValues::Int32(values) => {
+                        Arc::new(Int32Array::from_iter_values(values.iter().copied()))
+                    }
+                },
                 name => {
                     let bins = bins.ok_or_else(|| {
                         DataFusionError::Internal(format!(

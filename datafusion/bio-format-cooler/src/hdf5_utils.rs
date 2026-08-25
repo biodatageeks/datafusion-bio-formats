@@ -152,6 +152,27 @@ pub(crate) fn attr_f64(group: &Group, name: &str) -> Result<Option<f64>> {
     let attr = group
         .attr(name)
         .map_err(|error| h5_err(&format!("Failed to open attribute {name}"), error))?;
+    let td = attr
+        .dtype()
+        .and_then(|dtype| dtype.to_descriptor())
+        .map_err(|error| h5_err(&format!("Failed to read dtype of attribute {name}"), error))?;
+    if matches!(
+        td,
+        TypeDescriptor::FixedAscii(_)
+            | TypeDescriptor::FixedUnicode(_)
+            | TypeDescriptor::VarLenAscii
+            | TypeDescriptor::VarLenUnicode
+    ) {
+        // cooler <=0.8.x string-typed numeric attrs, same as attr_i64.
+        let text = read_attr_string_value(&attr, name)?;
+        let value = text.trim().parse::<f64>().map_err(|error| {
+            h5_err(
+                &format!("Failed to parse string attribute {name} ({text:?}) as float"),
+                error,
+            )
+        })?;
+        return Ok(Some(value));
+    }
     let value = attr
         .as_reader()
         .conversion(Conversion::Soft)

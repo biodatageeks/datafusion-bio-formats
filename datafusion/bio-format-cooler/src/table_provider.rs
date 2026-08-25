@@ -20,7 +20,7 @@ use hdf5_metno::File;
 use hdf5_metno::types::TypeDescriptor;
 
 use crate::collection::{
-    BinData, CoolerUri, IndexData, ensure_local_path, load_bin_data, load_index_data,
+    BinData, CoolerUri, CountType, IndexData, ensure_local_path, load_bin_data, load_index_data,
     resolve_collection_group,
 };
 use crate::fast_chunk::{FastPixels, index_column, validate_against_reference};
@@ -39,7 +39,7 @@ pub struct CoolerTableProvider {
     schema: SchemaRef,
     join_bins: bool,
     include_weights: bool,
-    count_is_float: bool,
+    count_type: CountType,
     nnz: usize,
     coordinate_system_zero_based: bool,
     bin_cache: OnceLock<Arc<BinData>>,
@@ -102,13 +102,16 @@ impl CoolerTableProvider {
             .group("pixels")
             .and_then(|pixels| pixels.dataset("count"))
             .map_err(|error| h5_err("Failed to open pixels/count", error))?;
-        let count_is_float = matches!(
-            count_ds
-                .dtype()
-                .and_then(|dtype| dtype.to_descriptor())
-                .map_err(|error| h5_err("Failed to read pixels/count dtype", error))?,
-            TypeDescriptor::Float(_)
-        );
+        let count_type = match count_ds
+            .dtype()
+            .and_then(|dtype| dtype.to_descriptor())
+            .map_err(|error| h5_err("Failed to read pixels/count dtype", error))?
+        {
+            TypeDescriptor::Float(_) => CountType::Float64,
+            TypeDescriptor::Integer(hdf5_metno::types::IntSize::U8)
+            | TypeDescriptor::Unsigned(hdf5_metno::types::IntSize::U8) => CountType::Int64,
+            _ => CountType::Int32,
+        };
         let count_shape = count_ds.shape();
         if count_shape.len() != 1 {
             return Err(DataFusionError::Plan(format!(
@@ -134,7 +137,7 @@ impl CoolerTableProvider {
         let schema = cooler_schema(
             join_bins,
             include_weights,
-            count_is_float,
+            count_type,
             coordinate_system_zero_based,
             &extra_metadata,
         );
@@ -144,7 +147,7 @@ impl CoolerTableProvider {
             schema,
             join_bins,
             include_weights,
-            count_is_float,
+            count_type,
             nnz,
             coordinate_system_zero_based,
             bin_cache: OnceLock::new(),
@@ -269,10 +272,10 @@ impl CoolerTableProvider {
                         Ok(Some(column))
                     };
                     use hdf5_metno::types::{FloatSize, IntSize};
-                    let count_type = if self.count_is_float {
-                        TypeDescriptor::Float(FloatSize::U8)
-                    } else {
-                        TypeDescriptor::Integer(IntSize::U4)
+                    let count_type = match self.count_type {
+                        CountType::Float64 => TypeDescriptor::Float(FloatSize::U8),
+                        CountType::Int64 => TypeDescriptor::Integer(IntSize::U8),
+                        CountType::Int32 => TypeDescriptor::Integer(IntSize::U4),
                     };
                     Ok(FastPixels {
                         bin1: indexed("bin1_id", TypeDescriptor::Integer(IntSize::U8))?,
@@ -372,7 +375,7 @@ impl TableProvider for CoolerTableProvider {
             group_path: self.group_path.clone(),
             schema: schema.clone(),
             partitions,
-            count_is_float: self.count_is_float,
+            count_type: self.count_type,
             coordinate_system_zero_based: self.coordinate_system_zero_based,
             bins,
             fast: self.fast_pixels(),
@@ -402,14 +405,14 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Schema
 fn cooler_schema(
     join_bins: bool,
     include_weights: bool,
-    count_is_float: bool,
+    count_type: CountType,
     coordinate_system_zero_based: bool,
     extra_metadata: &[(String, String)],
 ) -> SchemaRef {
-    let count_type = if count_is_float {
-        DataType::Float64
-    } else {
-        DataType::Int32
+    let count_type = match count_type {
+        CountType::Float64 => DataType::Float64,
+        CountType::Int64 => DataType::Int64,
+        CountType::Int32 => DataType::Int32,
     };
     let mut fields = if join_bins {
         vec![
