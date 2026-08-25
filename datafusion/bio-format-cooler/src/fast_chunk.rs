@@ -30,6 +30,11 @@ use crate::hdf5_utils::h5_err;
 /// while keeping the worst-case dense index allocation below 64 MiB.
 const MAX_CHUNK_INDEX_BYTES: usize = 64 * 1024 * 1024;
 
+/// Each direct reader may retain compressed, inflated, and unshuffled copies
+/// of a chunk. Keep an untrusted declared chunk dimension from multiplying
+/// into a multi-gigabyte planning or execution allocation.
+const MAX_DECODED_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
 /// One chunk's location in the file.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ChunkLoc {
@@ -77,7 +82,7 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
         return None;
     }
     let elem_size = dtype.size();
-    let chunk_bytes = chunk_elems.checked_mul(elem_size)?;
+    let chunk_bytes = bounded_decoded_chunk_size(chunk_elems, elem_size)?;
     let file_size = std::fs::metadata(ds.filename()).ok()?.len();
     let filters = ds.filters();
     let mut positions = FilterPositions {
@@ -180,6 +185,11 @@ pub(crate) fn index_column(ds: &Dataset) -> Option<Arc<ChunkedColumn>> {
 
 fn supports_direct_byte_order(byte_order: ByteOrder) -> bool {
     byte_order == ByteOrder::LittleEndian
+}
+
+fn bounded_decoded_chunk_size(chunk_elems: usize, elem_size: usize) -> Option<usize> {
+    let chunk_bytes = chunk_elems.checked_mul(elem_size)?;
+    (chunk_bytes <= MAX_DECODED_CHUNK_BYTES).then_some(chunk_bytes)
 }
 
 fn chunk_index_within_budget(chunk_count: usize, file_size: u64) -> bool {
@@ -435,6 +445,19 @@ mod tests {
         assert!(!chunk_index_within_budget(maximum_chunks + 1, u64::MAX));
         assert!(!chunk_index_within_budget(10_000, 9_999));
         assert!(!chunk_index_within_budget(usize::MAX, u64::MAX));
+    }
+
+    #[test]
+    fn decoded_chunk_size_is_bounded_before_direct_indexing() {
+        assert_eq!(
+            bounded_decoded_chunk_size(MAX_DECODED_CHUNK_BYTES / 8, 8),
+            Some(MAX_DECODED_CHUNK_BYTES)
+        );
+        assert_eq!(
+            bounded_decoded_chunk_size(MAX_DECODED_CHUNK_BYTES / 8 + 1, 8),
+            None
+        );
+        assert_eq!(bounded_decoded_chunk_size(usize::MAX, 2), None);
     }
 
     #[test]

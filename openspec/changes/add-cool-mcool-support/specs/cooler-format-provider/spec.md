@@ -188,6 +188,13 @@ The provider MAY decode supported HDF5 chunks directly, but SHALL select the lib
   fixed memory budget or implausible for the physical file size
 - **THEN** the provider selects libhdf5 before allocating the index
 
+#### Scenario: Excessive decoded chunk size
+
+- **WHEN** a dataset declares a decoded chunk larger than the fixed direct-read
+  memory budget
+- **THEN** the provider selects libhdf5 before indexing or running a direct
+  reference probe
+
 ### Requirement: Validated joined references
 
 The provider SHALL validate parallel pixel-array shapes, bin-array shapes,

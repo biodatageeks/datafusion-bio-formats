@@ -129,9 +129,10 @@ little-endian order; byte order is never inferred from data-dependent probes.
 Stored chunk extents must fit the file and a conservative bound derived from
 the decoded chunk size before the index is retained. The dense logical chunk
 index is also bounded by a fixed memory budget and must be plausible for the
-physical file size before it is allocated. Inflation is bounded to the
-declared decoded chunk size plus one byte, allowing oversized malformed streams
-to be rejected without unbounded memory growth.
+physical file size before it is allocated. Declared decoded chunks larger than
+16 MiB use libhdf5 before direct indexing or probing. Inflation is bounded to
+the accepted decoded chunk size plus one byte, allowing oversized malformed
+streams to be rejected without unbounded memory growth.
 
 Dataset indexing validates all recorded chunks before scan execution. Any
 unsupported layout, filter, per-chunk mask, byte order, reference-probe

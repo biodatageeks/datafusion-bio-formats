@@ -61,6 +61,7 @@
 - [x] 4.12 Reject duplicate chromosome names before name-based pruning.
 - [x] 4.13 Keep count-only and second-axis-only parallel projections free of
   first-axis index scans.
+- [x] 4.14 Bound decoded direct-read chunk storage before indexing or probing.
 
 ## 5. Verification
 
