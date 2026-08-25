@@ -1,0 +1,20 @@
+[package]
+name = "cooler-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone spike crate — deliberately NOT part of the workspace so normal
+# workspace builds don't compile the static libhdf5.
+[workspace]
+
+[dependencies]
+# static: build libhdf5 from source via hdf5-src (cmake), no system HDF5 at runtime.
+# zlib is mandatory or gzip-compressed cooler datasets fail at read time.
+hdf5-metno = { version = "0.10", features = ["static", "zlib"] }
+anyhow = "1"
+# pinned to polars-bio / datafusion-bio-formats versions to validate co-build
+datafusion = { version = "53.0.0", default-features = false, features = ["sql"] }
+arrow = "58.3.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+ndarray = "0.16"
