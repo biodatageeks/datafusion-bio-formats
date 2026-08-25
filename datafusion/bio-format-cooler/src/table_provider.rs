@@ -459,11 +459,12 @@ impl TableProvider for CoolerTableProvider {
         } else {
             None
         };
-        let bin1_offset = if target_partitions > 1 {
-            self.index_data().ok()
-        } else {
-            None
-        };
+        let bin1_offset =
+            if target_partitions > 1 && (!schema.fields().is_empty() || has_first_axis_filter) {
+                self.index_data().ok()
+            } else {
+                None
+            };
         let partitions = plan_partitions(
             &ranges,
             target_partitions,
@@ -604,7 +605,7 @@ fn cooler_schema(
 #[cfg(test)]
 mod tests {
     use datafusion::catalog::TableProvider;
-    use datafusion::prelude::SessionContext;
+    use datafusion::prelude::{SessionConfig, SessionContext};
 
     use super::{CoolerTableProvider, validate_pixel_shapes};
     use crate::physical_exec::CoolerExec;
@@ -629,7 +630,7 @@ mod tests {
         let path = format!("{}/tests/data/test.cool", env!("CARGO_MANIFEST_DIR"));
         let provider = CoolerTableProvider::new(path, None, true, false, true).unwrap();
         let projection = Vec::new();
-        let ctx = SessionContext::new();
+        let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(4));
 
         provider
             .scan(&ctx.state(), Some(&projection), &[], None)
@@ -639,6 +640,7 @@ mod tests {
         assert!(provider.fast_bin1_cache.get().is_none());
         assert!(provider.fast_bin2_cache.get().is_none());
         assert!(provider.fast_count_cache.get().is_none());
+        assert!(provider.index_cache.get().is_none());
     }
 
     #[tokio::test]

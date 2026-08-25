@@ -90,7 +90,8 @@ The provider SHALL read and materialize only the datasets required by the projec
 
 - **WHEN** a row-count query supplies an empty projection
 - **THEN** the provider returns the correct row count without indexing or
-  decoding pixel columns
+  decoding pixel columns, including when multiple target partitions are
+  requested
 
 ### Requirement: Cooler genomic predicate pruning
 
@@ -120,9 +121,19 @@ The provider SHALL map supported first-axis chromosome and coordinate filters th
 - **THEN** the provider leaves the scan range unpruned and the consumer
   evaluates the original filter exactly
 
+#### Scenario: Non-monotone bin coordinates
+
+- **WHEN** `bins/start` or `bins/end` is not non-decreasing within a chromosome
+  span used by coordinate pruning
+- **THEN** the provider returns a contextual invalid-file error before binary
+  search can discard pixel rows
+
 ### Requirement: Bounded and partitioned execution
 
-The provider SHALL stream bounded Arrow batches and SHALL partition the row space into disjoint ranges aligned to `bin1` boundaries when multiple target partitions are requested.
+The provider SHALL stream bounded Arrow batches and SHALL partition the row
+space into disjoint ranges aligned to `bin1` boundaries when pixel data or
+predicate pruning already requires the validated index. Empty-projection row
+counts MAY split ranges without loading that index.
 
 #### Scenario: Partition equivalence
 

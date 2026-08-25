@@ -159,6 +159,13 @@ pub(crate) fn plan_first_axis_ranges(
     if analysis.regions.is_empty() {
         return Ok(vec![(0, nnz)]);
     }
+    if analysis
+        .regions
+        .iter()
+        .any(|region| region.start.is_some() || region.end.is_some())
+    {
+        validate_pruning_coordinate_order(bins, index)?;
+    }
 
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     for region in &analysis.regions {
@@ -205,6 +212,41 @@ pub(crate) fn plan_first_axis_ranges(
         }
     }
     Ok(merged)
+}
+
+/// Validate the ordering assumptions required by `partition_point` before
+/// coordinate pruning can discard any rows. Coordinates may reset between
+/// chromosomes, but starts and ends must each be non-decreasing within a
+/// chromosome span and every bin must be a valid half-open interval.
+fn validate_pruning_coordinate_order(bins: &BinData, index: &IndexData) -> Result<()> {
+    for (chrom_index, pair) in index.chrom_offset.windows(2).enumerate() {
+        let lo = pair[0] as usize;
+        let hi = pair[1] as usize;
+        for bin_index in lo..hi {
+            let start = bins.start[bin_index];
+            let end = bins.end[bin_index];
+            if start > end {
+                return Err(datafusion::common::DataFusionError::Plan(format!(
+                    "bins/start[{bin_index}]={start} exceeds bins/end[{bin_index}]={end}"
+                )));
+            }
+            if bin_index > lo && bins.start[bin_index - 1] > start {
+                return Err(datafusion::common::DataFusionError::Plan(format!(
+                    "bins/start is not non-decreasing within chromosome {chrom_index} at rows {} and {bin_index}: {} then {start}",
+                    bin_index - 1,
+                    bins.start[bin_index - 1]
+                )));
+            }
+            if bin_index > lo && bins.end[bin_index - 1] > end {
+                return Err(datafusion::common::DataFusionError::Plan(format!(
+                    "bins/end is not non-decreasing within chromosome {chrom_index} at rows {} and {bin_index}: {} then {end}",
+                    bin_index - 1,
+                    bins.end[bin_index - 1]
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Split disjoint row ranges into up to `target` partitions of roughly equal
@@ -329,6 +371,42 @@ mod tests {
         assert!(projection.chrom);
         assert!(projection.start);
         assert!(projection.end);
+    }
+
+    #[test]
+    fn coordinate_pruning_rejects_non_monotone_bin_coordinates() {
+        let filters = vec![
+            col("chrom1").eq(lit("chr1")),
+            col("start1").gt_eq(lit(10_u64)),
+            col("end1").lt_eq(lit(200_u64)),
+        ];
+        let index = IndexData {
+            chrom_offset: vec![0, 2],
+            bin1_offset: vec![0, 1, 2],
+        };
+        let mut bins = BinData {
+            nbins: 2,
+            chrom_names: vec!["chr1".to_string()],
+            chrom_idx: vec![0, 0],
+            start: vec![0, 20],
+            end: vec![100, 50],
+            weight: None,
+        };
+
+        let error = plan_first_axis_ranges(&filters, true, &bins, &index, 2)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bins/end is not non-decreasing"), "{error}");
+
+        bins.start = vec![100, 0];
+        bins.end = vec![150, 50];
+        let error = plan_first_axis_ranges(&filters, true, &bins, &index, 2)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bins/start is not non-decreasing"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -80,8 +80,9 @@ class rather than through a floating intermediate.
 Only datasets required by the projected fields are loaded. Joined-coordinate
 projections load only the required chromosome, start, end, or weight bin
 metadata once per scan and skip unused bin/axis/count work. An empty
-projection constructs row counts from metadata/index ranges without building
-the direct pixel cache or decoding any pixel column. The execution plan
+projection constructs row counts from the collection row count without building
+the direct pixel cache, loading pixel indexes, or decoding any pixel column,
+including for parallel scans. The execution plan
 reports the projection for inspection. Direct-chunk indexes are also built and
 cached independently per projected pixel column, so projecting `count` does
 not visit either ID dataset and projecting one axis does not index the other.
@@ -99,11 +100,18 @@ shared 1-based region representation without overflow also leave the scan
 unpruned and are evaluated exactly by DataFusion. An `IN` list is pruned only
 when every member is a supported literal; partially extractable lists remain
 unpruned so an inexact pushdown can never discard valid rows.
+Before coordinate pruning uses binary search, `bins/start` and `bins/end` are
+validated as non-decreasing within every chromosome span and each bin is
+validated as a well-formed half-open interval.
 
 ### Partitions and HDF5 locking
 
 Partition planning divides the pruned row space into contiguous ranges aligned
-to `bin1` boundaries. HDF5 calls remain short and coarse because the library
+to `bin1` boundaries when pixel output is projected or pruning requires the
+validated index. An empty
+projection instead splits the full row range arithmetically so `count(*)` does
+not scan the pixel table merely to choose boundaries. HDF5 calls remain short
+and coarse because the library
 serializes access; decompression, joining, and Arrow construction happen
 outside that critical section where possible. Every partition produces a
 disjoint slice of the same rows as a single-partition scan.
