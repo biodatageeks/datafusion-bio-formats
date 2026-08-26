@@ -1,0 +1,72 @@
+# Tasks: add-cool-mcool-support
+
+## 1. Crate and HDF5 foundation
+
+- [x] 1.1 Add `datafusion-bio-format-cooler` to the workspace with DataFusion,
+  Arrow, async-stream, and logging dependencies.
+- [x] 1.2 Configure `hdf5-metno` for static linking with zlib so standard
+  shuffle/deflate Cooler datasets work in self-contained builds.
+- [x] 1.3 Add local-path validation and contextual HDF5 error conversion.
+
+## 2. Collection resolution and schema
+
+- [x] 2.1 Parse plain paths and cooler `file::/group` URIs, resolve `.cool`
+  roots and `.mcool` resolutions, and report ambiguous or missing resolutions.
+- [x] 2.2 Read `chroms`, `bins`, `indexes`, and collection attributes with
+  shape, range, and reference validation.
+- [x] 2.3 Provide joined-coordinate and raw-COO schemas, optional balancing
+  weights, and lossless signed, unsigned, or floating `count` types.
+- [x] 2.4 List data-collection metadata without scanning pixels and preserve
+  signed, unsigned, and floating `sum` attribute classes.
+
+## 3. Scan execution and pushdown
+
+- [x] 3.1 Stream pixel row ranges into bounded Arrow batches and join bin
+  coordinates by validated array indexing.
+- [x] 3.2 Push projections into execution, including an empty-projection row
+  count path that does not index or decode pixel datasets.
+- [x] 3.3 Prune supported first-axis genomic filters through `chrom_offset`
+  and `bin1_offset`, while reporting filter support as inexact.
+- [x] 3.4 Partition scans on `bin1` boundaries and preserve equivalence with a
+  single-partition scan.
+- [x] 3.5 Decode supported HDF5 chunks directly and select the libhdf5 fallback
+  before execution for unsupported filters, masks, byte order, or layouts.
+
+## 4. Correctness and documentation
+
+- [x] 4.1 Generate and commit small `.cool`/`.mcool` fixtures with the Python
+  `cooler` reference implementation.
+- [x] 4.2 Cover full, projected, raw, weighted, filtered, partitioned,
+  metadata-only, and error paths with integration tests.
+- [x] 4.3 Cover Int64, UInt32, UInt64, Float64, coordinates above `u32::MAX`,
+  overflowing UInt64 query bounds, exact metadata sums above `2^53`, and
+  direct-chunk fallback cases.
+- [x] 4.4 Document the public provider API, schema, addressing forms,
+  coordinate behavior, weights, and local-file limitation.
+- [x] 4.5 Cover partially extractable chromosome lists and bounded rejection
+  of oversized deflate streams.
+- [x] 4.6 Require explicit little-endian datatype metadata and reject
+  out-of-file or implausibly large stored chunk extents during indexing.
+- [x] 4.7 Bound dense direct-chunk index allocation before trusting logical
+  dataset extents.
+- [x] 4.8 Cross-validate chromosome offsets with the stored bin chromosome
+  assignments before predicate pruning.
+- [x] 4.9 Cross-validate bin offsets with pixel bin assignments in bounded
+  batches and keep chromosome-only pruning free of coordinate-array loads.
+- [x] 4.10 Keep parallel empty-projection row counts free of index scans and
+  validate non-empty per-chromosome coordinate order before binary-search or
+  coordinate-derived empty-result pruning.
+- [x] 4.11 Gate pruning metadata and index setup on predicates the genomic
+  extractor can actually map to ranges.
+- [x] 4.12 Reject duplicate chromosome names before name-based pruning.
+- [x] 4.13 Keep count-only and second-axis-only parallel projections free of
+  first-axis index scans.
+- [x] 4.14 Bound decoded direct-read chunk storage before indexing or probing.
+- [x] 4.15 Reject pixel ID dtypes that cannot convert losslessly to Int64.
+
+## 5. Verification
+
+- [x] 5.1 Run `cargo fmt --all -- --check`.
+- [x] 5.2 Run `cargo test -p datafusion-bio-format-cooler`.
+- [x] 5.3 Run `cargo clippy -p datafusion-bio-format-cooler --all-targets -- -D warnings`.
+- [x] 5.4 Validate this change with `openspec validate add-cool-mcool-support --strict`.

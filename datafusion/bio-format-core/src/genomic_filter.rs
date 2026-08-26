@@ -304,18 +304,20 @@ fn collect_genomic_constraints(
                 && col.name == "chrom"
                 && !in_list.negated
             {
-                let mut extracted_chroms: Vec<String> = in_list
+                let extracted_chroms = in_list
                     .list
                     .iter()
-                    .filter_map(|e| {
+                    .map(|e| {
                         if let Expr::Literal(scalar, _) = e {
                             scalar_to_string(scalar)
                         } else {
                             None
                         }
                     })
-                    .collect();
-                if !extracted_chroms.is_empty() {
+                    .collect::<Option<Vec<_>>>();
+                if let Some(mut extracted_chroms) = extracted_chroms
+                    && !extracted_chroms.is_empty()
+                {
                     chroms.append(&mut extracted_chroms);
                     return;
                 }
@@ -370,6 +372,15 @@ mod tests {
         assert_eq!(analysis.regions.len(), 2);
         assert_eq!(analysis.regions[0].chrom, "chr1");
         assert_eq!(analysis.regions[1].chrom, "chr2");
+    }
+
+    #[test]
+    fn test_mixed_chrom_in_list_is_not_partially_extracted() {
+        let filter = col("chrom").in_list(vec![lit("missing"), col("chrom")], false);
+        let analysis = extract_genomic_regions(std::slice::from_ref(&filter), true);
+
+        assert!(analysis.regions.is_empty());
+        assert_eq!(analysis.residual_filters, vec![filter]);
     }
 
     #[test]
