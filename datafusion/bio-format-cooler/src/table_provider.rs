@@ -219,7 +219,7 @@ impl CoolerTableProvider {
             .clone())
     }
 
-    fn index_data(&self) -> Result<Arc<IndexData>> {
+    fn index_data(&self, validation_partitions: usize) -> Result<Arc<IndexData>> {
         if let Some(index) = self.index_cache.get() {
             return Ok(index.clone());
         }
@@ -235,7 +235,7 @@ impl CoolerTableProvider {
                 error,
             )
         })?;
-        let index = Arc::new(load_index_data(&group)?);
+        let index = Arc::new(load_index_data(&group, validation_partitions)?);
         Ok(self.index_cache.get_or_init(|| index).clone())
     }
 }
@@ -446,7 +446,7 @@ impl TableProvider for CoolerTableProvider {
                 filters,
                 self.coordinate_system_zero_based,
                 bin_data.as_deref().expect("pruning bin data loaded"),
-                self.index_data()?.as_ref(),
+                self.index_data(target_partitions)?.as_ref(),
                 self.nnz,
             )?
         } else {
@@ -463,7 +463,7 @@ impl TableProvider for CoolerTableProvider {
         };
         let bin1_offset =
             if target_partitions > 1 && (schema_needs_bin1(&schema) || has_first_axis_filter) {
-                self.index_data().ok()
+                self.index_data(target_partitions).ok()
             } else {
                 None
             };

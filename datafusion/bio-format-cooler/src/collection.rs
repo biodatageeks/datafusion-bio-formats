@@ -7,6 +7,7 @@ use datafusion::common::{DataFusionError, Result};
 use hdf5_metno::types::TypeDescriptor;
 use hdf5_metno::{File, Group};
 
+use crate::fast_chunk::{ChunkReader, index_column, validate_against_reference};
 use crate::hdf5_utils::{
     CoolerCollectionSum, attr_i64, attr_string, attr_sum, h5_err, read_numeric_1d,
     read_numeric_slice, read_string_dataset,
@@ -417,7 +418,7 @@ pub(crate) struct IndexData {
     pub bin1_offset: Vec<i64>,
 }
 
-pub(crate) fn load_index_data(group: &Group) -> Result<IndexData> {
+pub(crate) fn load_index_data(group: &Group, validation_partitions: usize) -> Result<IndexData> {
     let indexes = group
         .group("indexes")
         .map_err(|error| h5_err("Failed to open indexes group", error))?;
@@ -464,7 +465,7 @@ pub(crate) fn load_index_data(group: &Group) -> Result<IndexData> {
     let bin1_dataset = pixels
         .dataset("bin1_id")
         .map_err(|error| h5_err("Failed to open pixels/bin1_id", error))?;
-    validate_bin1_offsets_match_pixels(&bin1_dataset, &bin1_offset, nnz)?;
+    validate_bin1_offsets_match_pixels(&bin1_dataset, &bin1_offset, nnz, validation_partitions)?;
     Ok(IndexData {
         chrom_offset,
         bin1_offset,
@@ -544,12 +545,102 @@ fn validate_bin1_offsets_match_pixels(
     dataset: &hdf5_metno::Dataset,
     offsets: &[i64],
     nnz: usize,
+    validation_partitions: usize,
 ) -> Result<()> {
+    if std::env::var_os("DATAFUSION_BIO_COOLER_DISABLE_FAST_PATH").is_none()
+        && let Some(column) = index_column(dataset)
+    {
+        let probe = column.chunk_elems.min(column.n_elems).min(8192);
+        let reference = read_numeric_slice::<i64>(dataset, 0, probe, "pixels/bin1_id")?
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        if validate_against_reference(&column, &dataset.filename(), &reference) {
+            return validate_bin1_offsets_direct(
+                &dataset.filename(),
+                column,
+                offsets,
+                nnz,
+                validation_partitions,
+            );
+        }
+    }
+
     let mut expected_bin = 0;
     for lo in (0..nnz).step_by(INDEX_VALIDATION_BATCH_ROWS) {
         let hi = (lo + INDEX_VALIDATION_BATCH_ROWS).min(nnz);
         let values = read_numeric_slice::<i64>(dataset, lo, hi, "pixels/bin1_id")?;
         validate_bin1_assignment_block(offsets, lo, &values, &mut expected_bin)?;
+    }
+    Ok(())
+}
+
+fn validate_bin1_offsets_direct(
+    file_path: &str,
+    column: std::sync::Arc<crate::fast_chunk::ChunkedColumn>,
+    offsets: &[i64],
+    nnz: usize,
+    validation_partitions: usize,
+) -> Result<()> {
+    let available_parallelism = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let partition_count = validation_partitions
+        .max(1)
+        .min(available_parallelism)
+        .min(nnz.max(1));
+    std::thread::scope(|scope| {
+        let handles = (0..partition_count)
+            .map(|partition| {
+                let boundary = |part: usize| {
+                    let quotient = nnz / partition_count;
+                    let remainder = nnz % partition_count;
+                    quotient * part + remainder * part / partition_count
+                };
+                let lo = boundary(partition);
+                let hi = boundary(partition + 1);
+                let column = column.clone();
+                scope.spawn(move || -> Result<()> {
+                    let mut reader = ChunkReader::open(file_path)?;
+                    let mut expected_bin = offsets
+                        .partition_point(|&offset| offset as usize <= lo)
+                        .saturating_sub(1);
+                    reader.visit_i64_range(&column, lo, hi, |row, actual_bin| {
+                        validate_bin1_assignment(offsets, row, actual_bin, &mut expected_bin)
+                    })?;
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().map_err(|_| {
+                DataFusionError::Internal("cooler bin1 validation thread panicked".to_string())
+            })??;
+        }
+        Ok(())
+    })
+}
+
+fn advance_expected_bin(offsets: &[i64], row: usize, expected_bin: &mut usize) {
+    // `validate_offsets` has already established that every value is
+    // non-negative, monotonic, and bounded by `nnz`, so this cast is exact.
+    while *expected_bin + 1 < offsets.len() && offsets[*expected_bin + 1] as usize <= row {
+        *expected_bin += 1;
+    }
+}
+
+fn validate_bin1_assignment(
+    offsets: &[i64],
+    row: usize,
+    actual_bin: i64,
+    expected_bin: &mut usize,
+) -> Result<()> {
+    advance_expected_bin(offsets, row, expected_bin);
+    if *expected_bin + 1 >= offsets.len() || actual_bin != *expected_bin as i64 {
+        return Err(DataFusionError::Plan(format!(
+            "indexes/bin1_offset assigns pixels/bin1_id[{row}]={actual_bin} to bin {}",
+            *expected_bin
+        )));
     }
     Ok(())
 }
@@ -562,17 +653,7 @@ fn validate_bin1_assignment_block(
 ) -> Result<()> {
     for (index, &actual_bin) in values.iter().enumerate() {
         let row = row_start + index;
-        while *expected_bin + 1 < offsets.len()
-            && usize::try_from(offsets[*expected_bin + 1]).is_ok_and(|offset| offset <= row)
-        {
-            *expected_bin += 1;
-        }
-        if *expected_bin + 1 >= offsets.len() || actual_bin != *expected_bin as i64 {
-            return Err(DataFusionError::Plan(format!(
-                "indexes/bin1_offset assigns pixels/bin1_id[{row}]={actual_bin} to bin {}",
-                *expected_bin
-            )));
-        }
+        validate_bin1_assignment(offsets, row, actual_bin, expected_bin)?;
     }
     Ok(())
 }

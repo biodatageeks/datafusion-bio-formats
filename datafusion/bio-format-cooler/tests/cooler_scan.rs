@@ -17,6 +17,8 @@ use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion_bio_format_cooler::{
     CoolerCollectionSum, CoolerTableProvider, list_data_collections,
 };
+use hdf5_metno::File;
+use tempfile::NamedTempFile;
 
 fn fixture(name: &str) -> String {
     format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -323,6 +325,51 @@ async fn partitioned_scan_matches_single_partition() {
     assert_eq!(value(&single, 0), value(&parallel, 0));
     assert_eq!(value(&single, 1), value(&parallel, 1));
     assert_eq!(value(&single, 1), 4210);
+}
+
+#[tokio::test]
+async fn partitioned_scan_rejects_bin1_assignments_that_disagree_with_csr_offsets() {
+    let temp = NamedTempFile::new().unwrap();
+    std::fs::copy(fixture("test.cool"), temp.path()).unwrap();
+    let file = File::open_rw(temp.path()).unwrap();
+    let group = file.group("/").unwrap();
+    let offsets = group
+        .dataset("indexes/bin1_offset")
+        .unwrap()
+        .read_raw::<i64>()
+        .unwrap();
+    let dataset = group.dataset("pixels/bin1_id").unwrap();
+    let mut bin1 = dataset.read_raw::<i64>().unwrap();
+    let row = bin1.len() / 2;
+    let expected = offsets.partition_point(|&offset| offset as usize <= row) - 1;
+    bin1[row] = ((expected + 1) % (offsets.len() - 1)) as i64;
+    dataset.write_raw(&bin1).unwrap();
+    drop(dataset);
+    drop(group);
+    drop(file);
+
+    let config = SessionConfig::new().with_target_partitions(4);
+    let ctx = SessionContext::new_with_config(config);
+    ctx.register_table(
+        "c",
+        Arc::new(provider(
+            temp.path().to_str().unwrap(),
+            None,
+            true,
+            false,
+            false,
+        )),
+    )
+    .unwrap();
+    let error = ctx
+        .sql("SELECT chrom1, count FROM c WHERE chrom1 = 'chr1'")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&format!("pixels/bin1_id[{row}]")), "{error}");
 }
 
 #[test]

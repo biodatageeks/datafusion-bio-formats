@@ -244,25 +244,62 @@ impl CoolerPixelStream {
         self.open_sources()?;
         let sources = self.sources.as_ref().expect("sources resolved");
         let mut scratch: Vec<u8> = Vec::new();
-        let bin1 = read_id_column(
-            &sources.bin1,
-            &mut self.chunk_reader,
-            &self.file_path,
-            lo,
-            hi,
-            "pixels/bin1_id",
-            &mut scratch,
-        )?;
-        let bin2 = read_id_column(
-            &sources.bin2,
-            &mut self.chunk_reader,
-            &self.file_path,
-            lo,
-            hi,
-            "pixels/bin2_id",
-            &mut scratch,
-        )?;
-        let count = match &sources.count {
+        let bins = self.bins.as_deref();
+        let (mut bin1, bin1_indexes) = if let Some(bins) = bins {
+            (
+                Vec::new(),
+                Some(read_bin_indexes(
+                    &sources.bin1,
+                    &mut self.chunk_reader,
+                    &self.file_path,
+                    lo,
+                    hi,
+                    "pixels/bin1_id",
+                    bins.nbins,
+                )?),
+            )
+        } else {
+            (
+                read_id_column(
+                    &sources.bin1,
+                    &mut self.chunk_reader,
+                    &self.file_path,
+                    lo,
+                    hi,
+                    "pixels/bin1_id",
+                    &mut scratch,
+                )?,
+                None,
+            )
+        };
+        let (mut bin2, bin2_indexes) = if let Some(bins) = bins {
+            (
+                Vec::new(),
+                Some(read_bin_indexes(
+                    &sources.bin2,
+                    &mut self.chunk_reader,
+                    &self.file_path,
+                    lo,
+                    hi,
+                    "pixels/bin2_id",
+                    bins.nbins,
+                )?),
+            )
+        } else {
+            (
+                read_id_column(
+                    &sources.bin2,
+                    &mut self.chunk_reader,
+                    &self.file_path,
+                    lo,
+                    hi,
+                    "pixels/bin2_id",
+                    &mut scratch,
+                )?,
+                None,
+            )
+        };
+        let mut count = match &sources.count {
             Some(ColumnSource::Fast(column)) => {
                 let bytes = fast_read(
                     &mut self.chunk_reader,
@@ -305,34 +342,17 @@ impl CoolerPixelStream {
         } else {
             1
         };
-        let bins = self.bins.as_deref();
-        let bin1_indexes = bins
-            .map(|bins| validate_bin_references(&bin1, bins.nbins, "pixels/bin1_id", lo))
-            .transpose()?;
-        let bin2_indexes = bins
-            .map(|bins| validate_bin_references(&bin2, bins.nbins, "pixels/bin2_id", lo))
-            .transpose()?;
         let mut arrays: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
         for field in self.schema.fields() {
             let array: ArrayRef = match field.name().as_str() {
-                "bin1_id" => Arc::new(Int64Array::from_iter_values(bin1.iter().copied())),
-                "bin2_id" => Arc::new(Int64Array::from_iter_values(bin2.iter().copied())),
-                "count" => match &count {
-                    CountValues::Float64(values) => {
-                        Arc::new(Float64Array::from_iter_values(values.iter().copied()))
-                    }
-                    CountValues::Int64(values) => {
-                        Arc::new(Int64Array::from_iter_values(values.iter().copied()))
-                    }
-                    CountValues::Int32(values) => {
-                        Arc::new(Int32Array::from_iter_values(values.iter().copied()))
-                    }
-                    CountValues::UInt64(values) => {
-                        Arc::new(UInt64Array::from_iter_values(values.iter().copied()))
-                    }
-                    CountValues::UInt32(values) => {
-                        Arc::new(UInt32Array::from_iter_values(values.iter().copied()))
-                    }
+                "bin1_id" => Arc::new(Int64Array::from(std::mem::take(&mut bin1))),
+                "bin2_id" => Arc::new(Int64Array::from(std::mem::take(&mut bin2))),
+                "count" => match std::mem::replace(&mut count, CountValues::Int32(Vec::new())) {
+                    CountValues::Float64(values) => Arc::new(Float64Array::from(values)),
+                    CountValues::Int64(values) => Arc::new(Int64Array::from(values)),
+                    CountValues::Int32(values) => Arc::new(Int32Array::from(values)),
+                    CountValues::UInt64(values) => Arc::new(UInt64Array::from(values)),
+                    CountValues::UInt32(values) => Arc::new(UInt32Array::from(values)),
                 },
                 name => {
                     let bins = bins.ok_or_else(|| {
@@ -397,6 +417,52 @@ fn read_id_column(
     }
 }
 
+fn read_bin_indexes(
+    source: &Option<ColumnSource>,
+    reader: &mut Option<ChunkReader>,
+    file_path: &str,
+    lo: usize,
+    hi: usize,
+    what: &str,
+    nbins: usize,
+) -> Result<Vec<usize>> {
+    match source {
+        Some(ColumnSource::Fast(column)) => {
+            if reader.is_none() {
+                *reader = Some(ChunkReader::open(file_path)?);
+            }
+            let mut indexes = Vec::with_capacity(hi - lo);
+            reader
+                .as_mut()
+                .expect("chunk reader opened")
+                .visit_i64_range(column, lo, hi, |row, value| {
+                    indexes.push(validate_bin_reference(value, nbins, what, row)?);
+                    Ok(())
+                })?;
+            Ok(indexes)
+        }
+        Some(ColumnSource::H5(ds)) => read_numeric_slice::<i64>(ds, lo, hi, what)?
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| validate_bin_reference(value, nbins, what, lo + index))
+            .collect(),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[inline]
+fn validate_bin_reference(value: i64, nbins: usize, name: &str, row: usize) -> Result<usize> {
+    usize::try_from(value)
+        .ok()
+        .filter(|&value| value < nbins)
+        .ok_or_else(|| {
+            DataFusionError::Plan(format!(
+                "{name}[{row}]={value} does not reference one of the {nbins} bins"
+            ))
+        })
+}
+
+#[cfg(test)]
 fn validate_bin_references(
     ids: &[i64],
     nbins: usize,
@@ -405,17 +471,7 @@ fn validate_bin_references(
 ) -> Result<Vec<usize>> {
     ids.iter()
         .enumerate()
-        .map(|(index, &value)| {
-            usize::try_from(value)
-                .ok()
-                .filter(|&value| value < nbins)
-                .ok_or_else(|| {
-                    DataFusionError::Plan(format!(
-                        "{name}[{}]={value} does not reference one of the {nbins} bins",
-                        row_offset + index
-                    ))
-                })
-        })
+        .map(|(index, &value)| validate_bin_reference(value, nbins, name, row_offset + index))
         .collect()
 }
 
@@ -432,21 +488,22 @@ fn joined_column(
                 .iter()
                 .map(|&index| bins.chrom_names[bins.chrom_idx[index]].as_str()),
         )),
-        "start1" | "start2" => Arc::new(UInt64Array::from_iter_values(
-            indexes
-                .iter()
-                .map(|id| {
-                    lookup(id, &bins.start)
-                        .checked_add(start_offset)
-                        .ok_or_else(|| {
-                            DataFusionError::Plan(
-                                "A 1-based cooler start coordinate exceeds the UInt64 range"
-                                    .to_string(),
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )),
+        "start1" | "start2" => {
+            if start_offset != 0
+                && indexes
+                    .iter()
+                    .any(|index| lookup(index, &bins.start) == u64::MAX)
+            {
+                return Err(DataFusionError::Plan(
+                    "A 1-based cooler start coordinate exceeds the UInt64 range".to_string(),
+                ));
+            }
+            Arc::new(UInt64Array::from_iter_values(
+                indexes
+                    .iter()
+                    .map(|index| lookup(index, &bins.start) + start_offset),
+            ))
+        }
         "end1" | "end2" => Arc::new(UInt64Array::from_iter_values(
             indexes.iter().map(|index| lookup(index, &bins.end)),
         )),
@@ -480,7 +537,7 @@ impl Iterator for CoolerPixelStream {
             self.row_hi = hi;
         }
         let lo = self.cursor;
-        let hi = (lo + COOLER_BATCH_ROWS).min(self.row_hi);
+        let hi = lo.saturating_add(COOLER_BATCH_ROWS).min(self.row_hi);
         self.cursor = hi;
         if self.schema.fields().is_empty() {
             // count(*) fast path: row counts come from the row range alone,

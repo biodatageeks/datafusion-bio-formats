@@ -290,58 +290,18 @@ impl ChunkReader {
         out.reserve((hi - lo) * column.elem_size);
         let chunk_bytes = column.chunk_elems * column.elem_size;
         for chunk_index in (lo / column.chunk_elems)..=((hi - 1) / column.chunk_elems) {
-            let loc = column.chunks[chunk_index];
-            self.compressed.resize(loc.size, 0);
-            self.file
-                .seek(SeekFrom::Start(loc.addr))
-                .and_then(|_| self.file.read_exact(&mut self.compressed))
-                .map_err(|error| h5_err(&format!("Failed to read chunk {chunk_index}"), error))?;
-
-            // filter_mask bit i set == pipeline filter i was skipped for this chunk
-            let deflate = column.deflate && loc.filter_mask & 0b01 == 0;
-            let shuffle_bit = if column.deflate { 0b10 } else { 0b01 };
-            let shuffle = column.shuffle && loc.filter_mask & shuffle_bit == 0;
-            if column.deflate && column.shuffle && loc.filter_mask != 0 {
-                // Mixed per-chunk filter skips are vanishingly rare; decoding
-                // them correctly needs pipeline-position bookkeeping we don't
-                // carry, so refuse instead of risking garbage.
-                return Err(DataFusionError::Internal(format!(
-                    "cooler fast path: unsupported per-chunk filter mask {:#x}",
-                    loc.filter_mask
-                )));
-            }
-
-            let decoded: &[u8] = if deflate {
-                self.inflated.clear();
-                let inflation_limit = u64::try_from(chunk_bytes)
-                    .ok()
-                    .and_then(|size| size.checked_add(1))
-                    .ok_or_else(|| {
-                        DataFusionError::Internal(format!(
-                            "cooler fast path: chunk {chunk_index} size limit overflow"
-                        ))
-                    })?;
-                ZlibDecoder::new(self.compressed.as_slice())
-                    .take(inflation_limit)
-                    .read_to_end(&mut self.inflated)
-                    .map_err(|error| {
-                        h5_err(&format!("Failed to inflate chunk {chunk_index}"), error)
-                    })?;
-                &self.inflated
-            } else {
-                &self.compressed
-            };
-            // Filtered edge chunks are stored at full chunk size (padded).
-            if decoded.len() != chunk_bytes {
-                return Err(DataFusionError::Internal(format!(
-                    "cooler fast path: chunk {chunk_index} decoded to {} bytes, expected {chunk_bytes}",
-                    decoded.len()
-                )));
-            }
-            let decoded: &[u8] = if shuffle {
+            let (decoded, shuffle) = read_decoded_chunk(
+                &mut self.file,
+                &mut self.compressed,
+                &mut self.inflated,
+                column,
+                chunk_index,
+                chunk_bytes,
+            )?;
+            let decoded = if shuffle {
                 self.unshuffled.resize(chunk_bytes, 0);
                 unshuffle(decoded, column.elem_size, &mut self.unshuffled);
-                &self.unshuffled
+                self.unshuffled.as_slice()
             } else {
                 decoded
             };
@@ -355,6 +315,117 @@ impl ChunkReader {
         }
         Ok(())
     }
+
+    /// Visit i64 elements in `[lo, hi)` without materializing an unshuffled
+    /// output buffer. HDF5's shuffle layout stores each byte plane contiguously,
+    /// so validation can reconstruct one value at a time after the same bounded
+    /// chunk read and inflation used by `read_range`.
+    pub(crate) fn visit_i64_range(
+        &mut self,
+        column: &ChunkedColumn,
+        lo: usize,
+        hi: usize,
+        mut visit: impl FnMut(usize, i64) -> Result<()>,
+    ) -> Result<()> {
+        if lo > hi || hi > column.n_elems {
+            return Err(DataFusionError::Internal(format!(
+                "cooler fast path: invalid i64 range {lo}..{hi} for {} elements",
+                column.n_elems
+            )));
+        }
+        if lo == hi {
+            return Ok(());
+        }
+        if column.elem_size != 8 {
+            return Err(DataFusionError::Internal(format!(
+                "cooler fast path: i64 visitor requires 8-byte elements, found {}",
+                column.elem_size
+            )));
+        }
+
+        let chunk_bytes = column.chunk_elems * column.elem_size;
+        for chunk_index in (lo / column.chunk_elems)..=((hi - 1) / column.chunk_elems) {
+            let (decoded, shuffle) = read_decoded_chunk(
+                &mut self.file,
+                &mut self.compressed,
+                &mut self.inflated,
+                column,
+                chunk_index,
+                chunk_bytes,
+            )?;
+            let chunk_start = chunk_index * column.chunk_elems;
+            let local_lo = lo.max(chunk_start) - chunk_start;
+            let local_hi = hi.min(chunk_start + column.chunk_elems) - chunk_start;
+
+            for local in local_lo..local_hi {
+                let bytes = if shuffle {
+                    std::array::from_fn(|byte| decoded[byte * column.chunk_elems + local])
+                } else {
+                    decoded[local * 8..(local + 1) * 8]
+                        .try_into()
+                        .expect("8-byte element")
+                };
+                visit(chunk_start + local, i64::from_le_bytes(bytes))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn read_decoded_chunk<'a>(
+    file: &mut File,
+    compressed: &'a mut Vec<u8>,
+    inflated: &'a mut Vec<u8>,
+    column: &ChunkedColumn,
+    chunk_index: usize,
+    chunk_bytes: usize,
+) -> Result<(&'a [u8], bool)> {
+    let loc = column.chunks[chunk_index];
+    compressed.resize(loc.size, 0);
+    file.seek(SeekFrom::Start(loc.addr))
+        .and_then(|_| file.read_exact(compressed))
+        .map_err(|error| h5_err(&format!("Failed to read chunk {chunk_index}"), error))?;
+
+    // filter_mask bit i set == pipeline filter i was skipped for this chunk
+    let deflate = column.deflate && loc.filter_mask & 0b01 == 0;
+    let shuffle_bit = if column.deflate { 0b10 } else { 0b01 };
+    let shuffle = column.shuffle && loc.filter_mask & shuffle_bit == 0;
+    if column.deflate && column.shuffle && loc.filter_mask != 0 {
+        // Mixed per-chunk filter skips are vanishingly rare; decoding them
+        // correctly needs pipeline-position bookkeeping we don't carry, so
+        // refuse instead of risking garbage.
+        return Err(DataFusionError::Internal(format!(
+            "cooler fast path: unsupported per-chunk filter mask {:#x}",
+            loc.filter_mask
+        )));
+    }
+
+    let decoded: &[u8] = if deflate {
+        inflated.clear();
+        let inflation_limit = u64::try_from(chunk_bytes)
+            .ok()
+            .and_then(|size| size.checked_add(1))
+            .ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "cooler fast path: chunk {chunk_index} size limit overflow"
+                ))
+            })?;
+        ZlibDecoder::new(compressed.as_slice())
+            .take(inflation_limit)
+            .read_to_end(inflated)
+            .map_err(|error| h5_err(&format!("Failed to inflate chunk {chunk_index}"), error))?;
+        inflated
+    } else {
+        compressed
+    };
+    // Filtered edge chunks are stored at full chunk size (padded).
+    if decoded.len() != chunk_bytes {
+        return Err(DataFusionError::Internal(format!(
+            "cooler fast path: chunk {chunk_index} decoded to {} bytes, expected {chunk_bytes}",
+            decoded.len()
+        )));
+    }
+    Ok((decoded, shuffle))
 }
 
 /// Invert HDF5's shuffle filter: input is grouped by byte plane
@@ -518,5 +589,80 @@ mod tests {
         );
         assert_eq!(reader.inflated.len(), chunk_bytes + 1);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn i64_visitor_decodes_shuffled_values_without_materializing_range() {
+        let values = [-7_i64, 0, 42, i64::MAX];
+        let contiguous = values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let mut shuffled = vec![0_u8; contiguous.len()];
+        for byte in 0..8 {
+            for element in 0..values.len() {
+                shuffled[byte * values.len() + element] = contiguous[element * 8 + byte];
+            }
+        }
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&shuffled).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(&compressed).unwrap();
+        file.flush().unwrap();
+
+        let column = ChunkedColumn {
+            elem_size: 8,
+            chunk_elems: values.len(),
+            n_elems: values.len(),
+            shuffle: true,
+            deflate: true,
+            chunks: vec![ChunkLoc {
+                addr: 0,
+                size: compressed.len(),
+                filter_mask: 0,
+            }],
+        };
+        let mut reader = ChunkReader::open(file.path().to_str().unwrap()).unwrap();
+        let mut visited = Vec::new();
+        reader
+            .visit_i64_range(&column, 1, values.len(), |row, value| {
+                visited.push((row, value));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(visited, vec![(1, 0), (2, 42), (3, i64::MAX)]);
+    }
+
+    #[test]
+    fn i64_visitor_rejects_invalid_ranges_and_element_widths() {
+        let file = NamedTempFile::new().unwrap();
+        let mut reader = ChunkReader::open(file.path().to_str().unwrap()).unwrap();
+        let mut column = ChunkedColumn {
+            elem_size: 8,
+            chunk_elems: 1,
+            n_elems: 1,
+            shuffle: false,
+            deflate: false,
+            chunks: vec![ChunkLoc {
+                addr: 0,
+                size: 8,
+                filter_mask: 0,
+            }],
+        };
+
+        let range_error = reader
+            .visit_i64_range(&column, 0, 2, |_, _| Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(range_error.contains("invalid i64 range"), "{range_error}");
+
+        column.elem_size = 4;
+        let width_error = reader
+            .visit_i64_range(&column, 0, 1, |_, _| Ok(()))
+            .unwrap_err()
+            .to_string();
+        assert!(width_error.contains("8-byte elements"), "{width_error}");
     }
 }
