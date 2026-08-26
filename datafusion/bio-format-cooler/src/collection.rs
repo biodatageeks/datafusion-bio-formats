@@ -549,6 +549,7 @@ fn validate_bin1_offsets_match_pixels(
 ) -> Result<()> {
     if std::env::var_os("DATAFUSION_BIO_COOLER_DISABLE_FAST_PATH").is_none()
         && let Some(column) = index_column(dataset)
+        && column.elem_size == std::mem::size_of::<i64>()
     {
         let probe = column.chunk_elems.min(column.n_elems).min(8192);
         let reference = read_numeric_slice::<i64>(dataset, 0, probe, "pixels/bin1_id")?

@@ -372,6 +372,41 @@ async fn partitioned_scan_rejects_bin1_assignments_that_disagree_with_csr_offset
     assert!(error.contains(&format!("pixels/bin1_id[{row}]")), "{error}");
 }
 
+#[tokio::test]
+async fn partitioned_scan_accepts_int32_bin1_ids_via_hdf5_validation_fallback() {
+    let temp = NamedTempFile::new().unwrap();
+    std::fs::copy(fixture("test.cool"), temp.path()).unwrap();
+    let file = File::open_rw(temp.path()).unwrap();
+    let pixels = file.group("pixels").unwrap();
+    let dataset = pixels.dataset("bin1_id").unwrap();
+    let bin1 = dataset
+        .read_raw::<i64>()
+        .unwrap()
+        .into_iter()
+        .map(|value| i32::try_from(value).unwrap())
+        .collect::<Vec<_>>();
+    drop(dataset);
+    pixels.unlink("bin1_id").unwrap();
+    pixels
+        .new_dataset_builder()
+        .with_data(&bin1)
+        .chunk(bin1.len())
+        .shuffle()
+        .deflate(6)
+        .create("bin1_id")
+        .unwrap();
+    drop(pixels);
+    drop(file);
+
+    let batches = collect(
+        provider(temp.path().to_str().unwrap(), None, true, false, false),
+        "SELECT chrom1, count FROM c",
+        4,
+    )
+    .await;
+    assert_eq!(total_rows(&batches), 4210);
+}
+
 #[test]
 fn list_collections_cool_and_mcool() {
     let cool = list_data_collections(&fixture("test.cool")).unwrap();
