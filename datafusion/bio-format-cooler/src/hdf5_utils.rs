@@ -1,7 +1,7 @@
 //! Low-level HDF5 helpers shared by the cooler reader.
 
 use datafusion::common::{DataFusionError, Result};
-use hdf5_metno::types::{FixedAscii, TypeDescriptor, VarLenAscii, VarLenUnicode};
+use hdf5_metno::types::{FixedAscii, FixedUnicode, TypeDescriptor, VarLenAscii, VarLenUnicode};
 use hdf5_metno::{Attribute, Conversion, Dataset, Group};
 
 /// Exact numeric representation of a cooler collection's `sum` attribute.
@@ -25,7 +25,7 @@ pub(crate) fn h5_err(context: &str, error: impl std::fmt::Display) -> DataFusion
 
 /// Read a 1-D string dataset regardless of fixed/variable-length encoding.
 /// Cooler writes chromosome names as fixed-length ASCII (h5py `S{n}`), but
-/// other writers may use variable-length strings.
+/// other writers may use fixed or variable-length UTF-8 strings.
 pub(crate) fn read_string_dataset(ds: &Dataset, what: &str) -> Result<Vec<String>> {
     let td = ds
         .dtype()
@@ -38,8 +38,14 @@ pub(crate) fn read_string_dataset(ds: &Dataset, what: &str) -> Result<Vec<String
                 format!("fixed-length strings wider than 256 bytes (got {size})"),
             ));
         }
-        TypeDescriptor::FixedAscii(_) | TypeDescriptor::FixedUnicode(_) => ds
+        TypeDescriptor::FixedAscii(_) => ds
             .read_1d::<FixedAscii<256>>()
+            .map_err(|error| h5_err(&format!("Failed to read {what}"), error))?
+            .iter()
+            .map(|value| value.to_string())
+            .collect(),
+        TypeDescriptor::FixedUnicode(_) => ds
+            .read_1d::<FixedUnicode<256>>()
             .map_err(|error| h5_err(&format!("Failed to read {what}"), error))?
             .iter()
             .map(|value| value.to_string())
@@ -80,8 +86,18 @@ fn read_attr_string_value(attr: &Attribute, what: &str) -> Result<String> {
             .read_scalar::<VarLenAscii>()
             .map_err(|error| h5_err(&format!("Failed to read attribute {what}"), error))?
             .to_string(),
-        TypeDescriptor::FixedAscii(_) | TypeDescriptor::FixedUnicode(_) => attr
+        TypeDescriptor::FixedAscii(size) | TypeDescriptor::FixedUnicode(size) if size > 256 => {
+            return Err(h5_err(
+                &format!("Unsupported dtype for string attribute {what}"),
+                format!("fixed-length strings wider than 256 bytes (got {size})"),
+            ));
+        }
+        TypeDescriptor::FixedAscii(_) => attr
             .read_scalar::<FixedAscii<256>>()
+            .map_err(|error| h5_err(&format!("Failed to read attribute {what}"), error))?
+            .to_string(),
+        TypeDescriptor::FixedUnicode(_) => attr
+            .read_scalar::<FixedUnicode<256>>()
             .map_err(|error| h5_err(&format!("Failed to read attribute {what}"), error))?
             .to_string(),
         other => {

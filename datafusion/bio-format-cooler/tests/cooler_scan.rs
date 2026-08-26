@@ -18,6 +18,7 @@ use datafusion_bio_format_cooler::{
     CoolerCollectionSum, CoolerTableProvider, list_data_collections,
 };
 use hdf5_metno::File;
+use hdf5_metno::types::FixedUnicode;
 use tempfile::NamedTempFile;
 
 fn fixture(name: &str) -> String {
@@ -405,6 +406,51 @@ async fn partitioned_scan_accepts_int32_bin1_ids_via_hdf5_validation_fallback() 
     )
     .await;
     assert_eq!(total_rows(&batches), 4210);
+}
+
+#[tokio::test]
+async fn fixed_unicode_chromosome_names_and_metadata_are_preserved() {
+    let temp = NamedTempFile::new().unwrap();
+    std::fs::copy(fixture("test.cool"), temp.path()).unwrap();
+    let file = File::open_rw(temp.path()).unwrap();
+    let chroms = file.group("chroms").unwrap();
+    chroms.unlink("name").unwrap();
+    let names = [
+        "chrα".parse::<FixedUnicode<32>>().unwrap(),
+        "chrβ".parse::<FixedUnicode<32>>().unwrap(),
+    ];
+    chroms
+        .new_dataset_builder()
+        .with_data(&names)
+        .create("name")
+        .unwrap();
+
+    let root = file.group("/").unwrap();
+    root.delete_attr("genome-assembly").unwrap();
+    let assembly = "génome".parse::<FixedUnicode<32>>().unwrap();
+    root.new_attr::<FixedUnicode<32>>()
+        .create("genome-assembly")
+        .unwrap()
+        .write_scalar(&assembly)
+        .unwrap();
+    drop(root);
+    drop(chroms);
+    drop(file);
+
+    let info = list_data_collections(temp.path().to_str().unwrap()).unwrap();
+    assert_eq!(info[0].assembly.as_deref(), Some("génome"));
+    let batches = collect(
+        provider(temp.path().to_str().unwrap(), None, true, false, false),
+        "SELECT chrom1 FROM c LIMIT 1",
+        1,
+    )
+    .await;
+    let chrom1 = batches[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(chrom1.value(0), "chrα");
 }
 
 #[test]
