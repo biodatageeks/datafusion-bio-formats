@@ -22,6 +22,19 @@ fn source_region_preference_expr(start_col: &str, source_file_col: &str) -> Stri
     )
 }
 
+/// Numeric start of the 1 Mb cache region a row was read from, parsed out of the
+/// `<start>-<end>.gz` source file name.
+///
+/// Lexicographic ordering on `source_file` is unsafe here: `10000001-11000000`
+/// sorts before `9000001-10000000` as text. `TRY_CAST` yields NULL when the name
+/// does not match, so a non-region source degrades to the following order terms
+/// rather than erroring.
+fn source_region_start_expr(source_file_col: &str) -> String {
+    format!(
+        "TRY_CAST(REGEXP_REPLACE({source_file_col}, '^.*/([0-9]+)-[0-9]+\\.gz$', '$1') AS BIGINT)"
+    )
+}
+
 fn transcript_select_list(schema: &Schema) -> String {
     schema
         .fields()
@@ -77,11 +90,22 @@ fn build_export_query_with_where_clause(
         }
         EnsemblEntityKind::Translation => unreachable!("use translation split export instead"),
         EnsemblEntityKind::Exon => {
+            // An exon of a transcript that straddles a 1 Mb cache-region boundary
+            // is stored in both region files, and both copies carry the same
+            // `stable_id` — so `stable_id` alone leaves the duplicates fully tied
+            // and `ROW_NUMBER()` keeps whichever copy the scan happened to emit
+            // first. The remaining terms mirror the transcript and translation
+            // dedup rules: Ensembl VEP's `merge_features` keeps the FIRST copy
+            // over a region-ordered feature list, so the lowest region wins, with
+            // the start-region preference as a fallback for source names that do
+            // not parse and `source_file` as the final total-order tie-break.
+            let region_start = source_region_start_expr("source_file");
+            let source_pref = source_region_preference_expr("start", "source_file");
             format!(
                 "SELECT * FROM (\
                     SELECT *, ROW_NUMBER() OVER (\
                         PARTITION BY chrom, transcript_id, exon_number \
-                        ORDER BY stable_id NULLS LAST\
+                        ORDER BY stable_id NULLS LAST, {region_start} NULLS LAST, {source_pref}, source_file\
                     ) AS _rn \
                     FROM {table_name}{where_clause}\
                 ) WHERE _rn = 1 \
@@ -248,6 +272,45 @@ mod tests {
         let q = build_export_query(EnsemblEntityKind::Exon, "exon", None, None);
         assert!(q.contains("PARTITION BY chrom, transcript_id, exon_number"));
         assert!(q.contains("ORDER BY transcript_id, start"));
+    }
+
+    #[test]
+    fn exon_dedup_breaks_the_stable_id_tie_deterministically() {
+        let q = build_export_query(EnsemblEntityKind::Exon, "exon", None, None);
+        let window_order = q
+            .split("ORDER BY ")
+            .nth(1)
+            .expect("window ORDER BY present");
+        // `stable_id` stays the leading term, but it is identical for the two
+        // copies of a boundary-straddling exon, so the tie must be resolved by
+        // the region the row was read from and finally by `source_file`.
+        assert!(window_order.starts_with("stable_id NULLS LAST,"));
+        assert!(window_order.contains("REGEXP_REPLACE(source_file"));
+        assert!(window_order.contains("source_file LIKE CONCAT('%/'"));
+        let terms: Vec<&str> = window_order.split(") AS _rn").collect();
+        assert!(
+            terms[0].trim_end().ends_with("source_file"),
+            "window ORDER BY must end with source_file as the total-order tie-break, got: {}",
+            terms[0]
+        );
+    }
+
+    #[test]
+    fn exon_dedup_prefers_the_lowest_source_region() {
+        let q = build_export_query(EnsemblEntityKind::Exon, "exon", None, None);
+        let window_order = q
+            .split("ORDER BY ")
+            .nth(1)
+            .expect("window ORDER BY present");
+        let region_start = window_order
+            .find("REGEXP_REPLACE(source_file")
+            .expect("region-start term present");
+        let start_region_pref = window_order
+            .find("source_file LIKE CONCAT('%/'")
+            .expect("start-region preference term present");
+        // Ensembl VEP's merge_features keeps the first copy over a region-ordered
+        // list, so the lowest region must outrank the start-region fallback.
+        assert!(region_start < start_region_pref);
     }
 
     #[test]
