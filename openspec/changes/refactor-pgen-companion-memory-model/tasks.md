@@ -22,5 +22,5 @@
 - [x] 4.3 Unit test: limit errors name the option and the configured value.
 - [x] 4.3a Unit test: a full scan and a contiguous filtered scan produce `All`/`Range` selections; a sparse filter produces `Sparse`; partition plans are identical to the previous `Vec<usize>` plans on the fixtures.
 - [x] 4.4 Existing PGEN oracle, conformance, and pushdown suites green; `cargo clippy` and `cargo fmt` clean.
-- [ ] 4.5 Opt-in example against `pgsc_1000G_v1/GRCh38_1000G_ALL.pgen`: open time and peak RSS recorded in `PERF_HANDOVER.md`.
+- [x] 4.5 Opt-in example against `pgsc_1000G_v1/GRCh38_1000G_ALL.pgen`: open time and peak RSS recorded in `PERF_HANDOVER.md`.
 - [ ] 4.6 Update CHANGELOG and cut a release tag for polars-bio to consume.

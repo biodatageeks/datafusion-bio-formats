@@ -174,6 +174,11 @@ impl GenotypeMatrixReader {
         self.fileset.variants.starts().collect()
     }
 
+    /// The variant start positions, in row order, without materializing them.
+    pub fn positions_iter(&self) -> impl Iterator<Item = u64> + '_ {
+        self.fileset.variants.starts()
+    }
+
     /// Decodes into `destination`, which must be exactly `variants * samples`
     /// long.
     pub async fn read_into(&self, destination: MatrixData<'_>, threads: usize) -> Result<()> {
