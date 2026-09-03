@@ -29,6 +29,7 @@ use crate::decode::{
 };
 use crate::fileset::{PgenFileset, PgenMode};
 use crate::physical_exec::{MergedIndices, PgenPartition, alt_count_from_code, record_payload};
+use crate::selection::{SelectionSlice, VariantSelection};
 use crate::table_provider::{PgenReadOptions, plan_payload_partitions};
 
 /// The internal code for a missing call.
@@ -170,11 +171,7 @@ impl GenotypeMatrixReader {
 
     /// The variant start positions, in row order.
     pub fn positions(&self) -> Vec<u64> {
-        self.fileset
-            .variants
-            .iter()
-            .map(|variant| variant.start)
-            .collect()
+        self.fileset.variants.starts().collect()
     }
 
     /// Decodes into `destination`, which must be exactly `variants * samples`
@@ -216,7 +213,7 @@ async fn decode_matrix(
     }
 
     let threads = threads.max(1);
-    let selection = Arc::new((0..variants).collect::<Vec<_>>());
+    let selection = VariantSelection::All(variants);
     let partitions =
         plan_payload_partitions(selection, fileset, threads, max_range_gap, max_range_bytes)?;
 
@@ -391,7 +388,7 @@ struct PartitionDecoder<'a, T, F, D> {
     dosage_of: D,
     workspace: GtDecodeWorkspace,
     projection: GenotypeProjection,
-    owned: &'a [usize],
+    owned: SelectionSlice<'a>,
     retained: HashSet<usize>,
     /// Lazy rather than collected: the whole selection is a usize per variant,
     /// and materialising it per partition costs more than the walk it saves.
@@ -503,14 +500,14 @@ where
 
             // A record this partition does not emit is decoded only far enough
             // to serve as the next one's LD base.
-            if owned.binary_search(&variant_index).is_err() {
+            if !owned.contains(variant_index) {
                 let main = decode_main_track_and_validate(
                     payload,
                     fileset.mode,
                     record.record_type,
                     variant_index,
                     fileset.sample_count,
-                    fileset.variants[variant_index].allele_count(),
+                    fileset.variants.allele_count(variant_index),
                     base,
                 )?;
                 if retained.contains(&variant_index) {
@@ -528,7 +525,7 @@ where
                         "PGEN variant {variant_index} row {next_row} is outside the matrix"
                     ))
                 })?;
-            let allele_count = fileset.variants[variant_index].allele_count();
+            let allele_count = fileset.variants.allele_count(variant_index);
             let retain_main = retained.contains(&variant_index);
             let identity = workspace.has_identity_selection();
             let biallelic = supports_biallelic_gt_fast_path(record.record_type, allele_count);

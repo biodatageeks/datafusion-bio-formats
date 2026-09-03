@@ -30,18 +30,19 @@ use crate::decode::{
     supports_biallelic_gt_fast_path, supports_common_difflist_fast_path, validated_dense_hardcalls,
 };
 use crate::fileset::{PgenFileset, PgenMode};
+use crate::selection::{SelectionSlice, VariantSelection};
 
 #[derive(Clone, Debug)]
 pub(crate) struct PgenPartition {
-    pub(crate) selection: Arc<Vec<usize>>,
+    pub(crate) selection: VariantSelection,
     pub(crate) owned: Range<usize>,
     pub(crate) dependencies: Vec<usize>,
     pub(crate) ranges: Vec<ByteRange>,
 }
 
 impl PgenPartition {
-    pub(crate) fn owned(&self) -> &[usize] {
-        &self.selection[self.owned.clone()]
+    pub(crate) fn owned(&self) -> SelectionSlice<'_> {
+        self.selection.slice(self.owned.clone())
     }
 
     pub(crate) fn required(&self) -> MergedIndices<'_> {
@@ -57,7 +58,7 @@ impl PgenPartition {
 /// Owned and dependency indices merged in file order, resumable because the
 /// matrix decoder carries one across the byte ranges of its partition.
 pub(crate) struct MergedIndices<'a> {
-    owned: &'a [usize],
+    owned: SelectionSlice<'a>,
     dependencies: &'a [usize],
     owned_position: usize,
     dependency_position: usize,
@@ -68,7 +69,7 @@ impl Iterator for MergedIndices<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match (
-            self.owned.get(self.owned_position).copied(),
+            self.owned.get(self.owned_position),
             self.dependencies.get(self.dependency_position).copied(),
         ) {
             (Some(owned), Some(dependency)) if owned <= dependency => {
@@ -226,7 +227,7 @@ impl ExecutionPlan for PgenExec {
             let mut rows = Vec::with_capacity(max_rows);
 
             if assignment.ranges.is_empty() {
-                for &variant_index in assignment.owned() {
+                for variant_index in assignment.owned().iter() {
                     if sizer.should_flush_before(estimated_row_bytes) {
                         let row_count = rows.len();
                         let batch = build_batch(&fileset, schema.clone(), &genotype_fields, &rows)?;
@@ -295,14 +296,14 @@ impl ExecutionPlan for PgenExec {
                                 Ok(ld_base.as_slice())
                             })
                             .transpose()?;
-                        if owned.binary_search(&variant_index).is_err() {
+                        if !owned.contains(variant_index) {
                             let main = decode_main_track_and_validate(
                                 payload,
                                 fileset.mode,
                                 record.record_type,
                                 variant_index,
                                 fileset.sample_count,
-                                fileset.variants[variant_index].allele_count(),
+                                fileset.variants.allele_count(variant_index),
                                 base,
                             )?;
                             if retained_bases.contains(&variant_index) {
@@ -329,7 +330,7 @@ impl ExecutionPlan for PgenExec {
                             record.record_type,
                             variant_index,
                             fileset.sample_count,
-                            fileset.variants[variant_index].allele_count(),
+                            fileset.variants.allele_count(variant_index),
                             genotype_projection,
                             fileset.selected_samples.source_indices(),
                             base,
@@ -1324,14 +1325,14 @@ fn execute_single_field(
                     })
                     .transpose()?;
 
-                if owned.binary_search(&variant_index).is_err() {
+                if !owned.contains(variant_index) {
                     let main = decode_main_track_and_validate(
                         payload,
                         fileset.mode,
                         record.record_type,
                         variant_index,
                         fileset.sample_count,
-                        fileset.variants[variant_index].allele_count(),
+                        fileset.variants.allele_count(variant_index),
                         base,
                     )?;
                     if retained_bases.contains(&variant_index) {
@@ -1351,7 +1352,7 @@ fn execute_single_field(
                     sizer.reset();
                 }
 
-                let allele_count = fileset.variants[variant_index].allele_count();
+                let allele_count = fileset.variants.allele_count(variant_index);
                 let retain_main = retained_bases.contains(&variant_index);
                 let direct_dense = workspace.has_identity_selection()
                     && !retain_main
@@ -1526,28 +1527,28 @@ fn build_gt_batch(
             "chrom" => Ok(Arc::new(StringArray::from_iter_values(
                 variant_indices
                     .iter()
-                    .map(|&index| fileset.variants[index].chrom.as_str()),
+                    .map(|&index| fileset.variants.chrom(index)),
             )) as ArrayRef),
             "start" => Ok(Arc::new(UInt64Array::from_iter_values(
                 variant_indices
                     .iter()
-                    .map(|&index| fileset.variants[index].start),
+                    .map(|&index| fileset.variants.start(index)),
             )) as ArrayRef),
             "end" => Ok(Arc::new(UInt64Array::from_iter_values(
                 variant_indices
                     .iter()
-                    .map(|&index| fileset.variants[index].end),
+                    .map(|&index| fileset.variants.end(index)),
             )) as ArrayRef),
             "id" => Ok(Arc::new(StringArray::from(
                 variant_indices
                     .iter()
-                    .map(|&index| fileset.variants[index].id.as_deref())
+                    .map(|&index| fileset.variants.id(index))
                     .collect::<Vec<_>>(),
             )) as ArrayRef),
             "ref" => Ok(Arc::new(StringArray::from_iter_values(
                 variant_indices
                     .iter()
-                    .map(|&index| fileset.variants[index].reference.as_str()),
+                    .map(|&index| fileset.variants.reference(index)),
             )) as ArrayRef),
             "alt" => build_alt_index_array(fileset, field.data_type(), variant_indices),
             "genotypes" => {
@@ -1583,7 +1584,7 @@ fn build_alt_index_array(
     };
     let mut builder = ListBuilder::new(StringBuilder::new()).with_field(allele_field.clone());
     for &variant_index in variant_indices {
-        for allele in &fileset.variants[variant_index].alternate {
+        for allele in fileset.variants.alternates(variant_index) {
             builder.values().append_value(allele);
         }
         builder.append(true);
@@ -1603,24 +1604,24 @@ fn build_batch(
         .map(|field| match field.name().as_str() {
             "chrom" => Ok(Arc::new(StringArray::from_iter_values(
                 rows.iter()
-                    .map(|row| fileset.variants[row.variant_index].chrom.as_str()),
+                    .map(|row| fileset.variants.chrom(row.variant_index)),
             )) as ArrayRef),
             "start" => Ok(Arc::new(UInt64Array::from_iter_values(
                 rows.iter()
-                    .map(|row| fileset.variants[row.variant_index].start),
+                    .map(|row| fileset.variants.start(row.variant_index)),
             )) as ArrayRef),
             "end" => Ok(Arc::new(UInt64Array::from_iter_values(
                 rows.iter()
-                    .map(|row| fileset.variants[row.variant_index].end),
+                    .map(|row| fileset.variants.end(row.variant_index)),
             )) as ArrayRef),
             "id" => Ok(Arc::new(StringArray::from(
                 rows.iter()
-                    .map(|row| fileset.variants[row.variant_index].id.as_deref())
+                    .map(|row| fileset.variants.id(row.variant_index))
                     .collect::<Vec<_>>(),
             )) as ArrayRef),
             "ref" => Ok(Arc::new(StringArray::from_iter_values(
                 rows.iter()
-                    .map(|row| fileset.variants[row.variant_index].reference.as_str()),
+                    .map(|row| fileset.variants.reference(row.variant_index)),
             )) as ArrayRef),
             "alt" => build_alt_array(fileset, field.data_type(), rows),
             "genotypes" => build_genotype_array(field.data_type(), genotype_fields, rows),
@@ -1649,7 +1650,7 @@ fn build_alt_array(
     };
     let mut builder = ListBuilder::new(StringBuilder::new()).with_field(allele_field.clone());
     for row in rows {
-        for allele in &fileset.variants[row.variant_index].alternate {
+        for allele in fileset.variants.alternates(row.variant_index) {
             builder.values().append_value(allele);
         }
         builder.append(true);

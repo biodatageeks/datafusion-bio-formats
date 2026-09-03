@@ -1,7 +1,7 @@
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Between, Expr, Operator, expr::InList};
 
-use crate::fileset::PvarVariant;
+use crate::pvar::PvarRow;
 
 pub(crate) fn supports_exact_filter(expr: &Expr) -> bool {
     match expr {
@@ -23,7 +23,7 @@ pub(crate) fn supports_exact_filter(expr: &Expr) -> bool {
     }
 }
 
-pub(crate) fn evaluate_exact_filter(variant: &PvarVariant, expr: &Expr) -> bool {
+pub(crate) fn evaluate_exact_filter(variant: PvarRow<'_>, expr: &Expr) -> bool {
     debug_assert!(supports_exact_filter(expr));
     match expr {
         Expr::BinaryExpr(binary) if binary.op == Operator::And => {
@@ -89,21 +89,21 @@ fn supports_in_list(in_list: &InList) -> bool {
 }
 
 fn evaluate_comparison(
-    variant: &PvarVariant,
+    variant: PvarRow<'_>,
     name: &str,
     literal: &ScalarValue,
     operator: &Operator,
 ) -> bool {
     match name {
-        "chrom" => compare_string(Some(variant.chrom.as_str()), literal, operator),
-        "id" => compare_string(variant.id.as_deref(), literal, operator),
+        "chrom" => compare_string(Some(variant.chrom), literal, operator),
+        "id" => compare_string(variant.id, literal, operator),
         "start" => compare_integer(variant.start, literal, operator),
         "end" => compare_integer(variant.end, literal, operator),
         _ => true,
     }
 }
 
-fn evaluate_between(variant: &PvarVariant, between: &Between) -> bool {
+fn evaluate_between(variant: PvarRow<'_>, between: &Between) -> bool {
     let (Expr::Column(column), Expr::Literal(low, _), Expr::Literal(high, _)) =
         (&*between.expr, &*between.low, &*between.high)
     else {
@@ -124,21 +124,22 @@ fn evaluate_between(variant: &PvarVariant, between: &Between) -> bool {
     if between.negated { !matches } else { matches }
 }
 
-fn evaluate_in_list(variant: &PvarVariant, in_list: &InList) -> bool {
+fn evaluate_in_list(variant: PvarRow<'_>, in_list: &InList) -> bool {
     let Expr::Column(column) = &*in_list.expr else {
         return true;
     };
     let matches = match column.name.as_str() {
-        "chrom" => in_list.list.iter().any(|expr| {
-            matches!(expr, Expr::Literal(value, _) if string(value) == Some(variant.chrom.as_str()))
-        }),
+        "chrom" => in_list.list.iter().any(
+            |expr| matches!(expr, Expr::Literal(value, _) if string(value) == Some(variant.chrom)),
+        ),
         "id" => {
-            let Some(id) = variant.id.as_deref() else {
+            let Some(id) = variant.id else {
                 return false;
             };
-            in_list.list.iter().any(
-                |expr| matches!(expr, Expr::Literal(value, _) if string(value) == Some(id)),
-            )
+            in_list
+                .list
+                .iter()
+                .any(|expr| matches!(expr, Expr::Literal(value, _) if string(value) == Some(id)))
         }
         "start" => in_list.list.iter().any(
             |expr| matches!(expr, Expr::Literal(value, _) if integer(value) == Some(variant.start)),
@@ -215,14 +216,12 @@ mod tests {
 
     use super::*;
 
-    fn variant() -> PvarVariant {
-        PvarVariant {
-            chrom: "1".to_string(),
+    fn variant() -> PvarRow<'static> {
+        PvarRow {
+            chrom: "1",
             start: 9,
             end: 10,
-            id: Some("rs1".to_string()),
-            reference: "A".to_string(),
-            alternate: vec!["C".to_string()],
+            id: Some("rs1"),
         }
     }
 
@@ -232,7 +231,7 @@ mod tests {
             .eq(lit("1"))
             .and(col("start").between(lit(5_u64), lit(10_u64)));
         assert!(supports_exact_filter(&filter));
-        assert!(evaluate_exact_filter(&variant(), &filter));
+        assert!(evaluate_exact_filter(variant(), &filter));
         assert!(supports_exact_filter(
             &col("id").in_list(vec![lit("rs1"), lit("rs2")], false)
         ));
@@ -245,6 +244,6 @@ mod tests {
         without_id.id = None;
         let filter = col("id").in_list(vec![lit("rs2")], true);
         assert!(supports_exact_filter(&filter));
-        assert!(!evaluate_exact_filter(&without_id, &filter));
+        assert!(!evaluate_exact_filter(without_id, &filter));
     }
 }

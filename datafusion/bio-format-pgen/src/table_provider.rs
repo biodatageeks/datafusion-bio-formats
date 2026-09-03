@@ -24,6 +24,7 @@ use datafusion_bio_format_core::range_planning::{ByteRange, try_coalesce_sorted_
 use crate::fileset::{PGEN_SPEC_BASELINE, PgenFileset};
 use crate::filter::{evaluate_exact_filter, supports_exact_filter};
 use crate::physical_exec::{PgenExec, PgenPartition};
+use crate::selection::VariantSelection;
 
 /// Field metadata containing selected original PSAM identities as JSON.
 pub const PGEN_SAMPLE_IDENTITIES_KEY: &str = "bio.pgen.sample_identities";
@@ -61,15 +62,18 @@ pub struct PgenReadOptions {
     pub coordinate_system: CoordinateSystem,
     /// Credentials and transport configuration for remote objects.
     pub object_storage_options: Option<ObjectStorageOptions>,
-    /// Maximum compressed bytes accepted for either text companion.
+    /// Maximum on-disk bytes accepted for either text companion. Companions
+    /// are streamed, so this bounds work rather than memory.
     pub max_companion_bytes: usize,
-    /// Maximum decoded bytes accepted for either text companion.
+    /// Maximum decoded bytes accepted for either text companion; the decode
+    /// stops at this point rather than after buffering it all.
     pub max_decompressed_companion_bytes: usize,
     /// Maximum bytes accepted for a PGEN or PGI header.
     pub max_header_bytes: usize,
     /// Maximum encoded bytes accepted for one PGEN variant record.
     pub max_record_bytes: u64,
-    /// Maximum accepted PVAR row count.
+    /// Maximum accepted PVAR row count. The parsed table costs a few tens of
+    /// bytes per row, so this is the cap that still bounds resident memory.
     pub max_variants: usize,
     /// Maximum accepted PSAM row count.
     pub max_samples: usize,
@@ -93,11 +97,11 @@ impl Default for PgenReadOptions {
             genotype_fields: None,
             coordinate_system: CoordinateSystem::ZeroBasedHalfOpen,
             object_storage_options: None,
-            max_companion_bytes: 512 * 1024 * 1024,
-            max_decompressed_companion_bytes: 1024 * 1024 * 1024,
+            max_companion_bytes: 4 * 1024 * 1024 * 1024,
+            max_decompressed_companion_bytes: 16 * 1024 * 1024 * 1024,
             max_header_bytes: 1024 * 1024 * 1024,
             max_record_bytes: 512 * 1024 * 1024,
-            max_variants: 100_000_000,
+            max_variants: 250_000_000,
             max_samples: 10_000_000,
             max_range_gap: 0,
             max_range_bytes: 16 * 1024 * 1024,
@@ -208,19 +212,23 @@ impl TableProvider for PgenTableProvider {
             .iter()
             .filter(|filter| supports_exact_filter(filter))
             .collect::<Vec<_>>();
-        let mut selected = self
-            .fileset
-            .variants
-            .iter()
-            .enumerate()
-            .filter(|(_, variant)| {
-                exact_filters
-                    .iter()
-                    .all(|filter| evaluate_exact_filter(variant, filter))
-            })
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        let exact_filter_rejections = (self.fileset.variants.len() - selected.len()) as u64;
+        let total = self.fileset.variants.len();
+        let mut selected = if exact_filters.is_empty() {
+            VariantSelection::All(total)
+        } else {
+            let variants = &self.fileset.variants;
+            let indices = (0..total)
+                .filter(|&index| {
+                    let row = variants.row(index);
+                    exact_filters
+                        .iter()
+                        .all(|filter| evaluate_exact_filter(row, filter))
+                })
+                .map(|index| index as u32)
+                .collect::<Vec<_>>();
+            VariantSelection::from_sorted_indices(indices, total)
+        };
+        let exact_filter_rejections = (total - selected.len()) as u64;
         if can_push_limit_below_filters(&guarantees)
             && let Some(limit) = limit
         {
@@ -231,7 +239,6 @@ impl TableProvider for PgenTableProvider {
         let needs_payload = genotype_projected
             && !self.genotype_fields.is_empty()
             && !self.fileset.selected_samples.is_empty();
-        let selected = Arc::new(selected);
         let partitions = if selected.is_empty() {
             vec![PgenPartition {
                 selection: selected.clone(),
@@ -316,6 +323,12 @@ fn validate_options(options: &PgenReadOptions) -> Result<()> {
                 "{name} must be greater than zero"
             )));
         }
+    }
+    if options.max_variants > u32::MAX as usize {
+        return Err(DataFusionError::Plan(format!(
+            "max_variants must not exceed {}",
+            u32::MAX
+        )));
     }
     if options.max_range_bytes == 0 {
         return Err(DataFusionError::Plan(
@@ -532,7 +545,7 @@ fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> Result
 }
 
 pub(crate) fn plan_payload_partitions(
-    selected: Arc<Vec<usize>>,
+    selected: VariantSelection,
     fileset: &PgenFileset,
     target_partitions: usize,
     max_gap: u64,
@@ -544,11 +557,11 @@ pub(crate) fn plan_payload_partitions(
     assignments
         .into_iter()
         .map(|owned| {
-            let owned_indices = &selected[owned.clone()];
+            let owned_indices = selected.slice(owned.clone());
             let mut dependencies = Vec::new();
-            for &index in owned_indices {
+            for index in owned_indices.iter() {
                 if let Some(base) = fileset.records.record(index)?.ld_base
-                    && owned_indices.binary_search(&base).is_err()
+                    && !owned_indices.contains(base)
                 {
                     dependencies.push(base);
                 }
@@ -579,7 +592,7 @@ pub(crate) fn plan_payload_partitions(
 }
 
 fn contiguous_partition_bounds(
-    selected: &[usize],
+    selected: &VariantSelection,
     target_partitions: usize,
     mut record_bytes: impl FnMut(usize) -> Result<u64>,
 ) -> Result<Vec<Range<usize>>> {
@@ -587,7 +600,7 @@ fn contiguous_partition_bounds(
         return Ok(Vec::new());
     }
     let partition_count = target_partitions.max(1).min(selected.len());
-    let mut remaining_bytes = selected.iter().try_fold(0_u64, |total, &index| {
+    let mut remaining_bytes = selected.iter().try_fold(0_u64, |total, index| {
         total.checked_add(record_bytes(index)?).ok_or_else(|| {
             DataFusionError::Plan("PGEN selected payload byte count overflowed".to_string())
         })
@@ -601,11 +614,12 @@ fn contiguous_partition_bounds(
         let mut bytes = 0_u64;
         let mut take = 0;
         while take < max_take && (take == 0 || bytes < target_bytes) {
-            bytes = bytes
-                .checked_add(record_bytes(selected[cursor + take])?)
-                .ok_or_else(|| {
-                    DataFusionError::Plan("PGEN partition byte count overflowed".to_string())
-                })?;
+            let index = selected.get(cursor + take).ok_or_else(|| {
+                DataFusionError::Plan("PGEN selection position out of range".to_string())
+            })?;
+            bytes = bytes.checked_add(record_bytes(index)?).ok_or_else(|| {
+                DataFusionError::Plan("PGEN partition byte count overflowed".to_string())
+            })?;
             take += 1;
         }
         partitions.push(cursor..cursor + take);
@@ -617,7 +631,7 @@ fn contiguous_partition_bounds(
 }
 
 fn plan_metadata_partitions(
-    selected: Arc<Vec<usize>>,
+    selected: VariantSelection,
     target_partitions: usize,
 ) -> Vec<PgenPartition> {
     let partition_count = target_partitions.max(1).min(selected.len());
@@ -639,6 +653,22 @@ mod tests {
     use crate::fileset::RecordInfo;
 
     #[test]
+    fn defaults_open_the_published_reference_panels() {
+        // The PGS Catalog 1000 Genomes panels (pgsc_1000G_v1) are the largest
+        // filesets a user is likely to point at without tuning; measured on
+        // 2026-09-03. The GRCh37 PVAR is the bigger companion, the GRCh37
+        // variant count the higher one.
+        const GRCH37_PVAR_ZST_BYTES: usize = 621_102_964;
+        const GRCH37_PVAR_DECODED_BYTES: usize = 2_673_000_000;
+        const GRCH37_VARIANTS: usize = 84_805_772;
+        let defaults = PgenReadOptions::default();
+        assert!(defaults.max_companion_bytes >= 2 * GRCH37_PVAR_ZST_BYTES);
+        assert!(defaults.max_decompressed_companion_bytes >= 2 * GRCH37_PVAR_DECODED_BYTES);
+        assert!(defaults.max_variants >= 2 * GRCH37_VARIANTS);
+        assert!(defaults.max_variants <= u32::MAX as usize);
+    }
+
+    #[test]
     fn plans_ld_dependencies_without_transferring_ownership() {
         let fileset = PgenFileset {
             pgen_path: String::new(),
@@ -646,7 +676,9 @@ mod tests {
             psam_path: String::new(),
             pgi_path: None,
             source: crate::source::ObjectAccess::Local(String::new()),
-            variants: Arc::new(Vec::new()),
+            variants: Arc::new(crate::pvar::PvarTable::empty(
+                CoordinateSystem::ZeroBasedHalfOpen,
+            )),
             selected_samples: datafusion_bio_format_core::genotype::resolve_samples(
                 &[],
                 None,
@@ -673,21 +705,83 @@ mod tests {
             companion_bytes: 0,
             header_bytes: 0,
         };
-        let partitions = plan_payload_partitions(Arc::new(vec![1]), &fileset, 4, 0, 1024).unwrap();
-        assert_eq!(partitions[0].owned(), &[1]);
+        let selection = VariantSelection::Sparse(Arc::from([1_u32]));
+        let partitions = plan_payload_partitions(selection, &fileset, 4, 0, 1024).unwrap();
+        assert_eq!(partitions[0].owned().iter().collect::<Vec<_>>(), vec![1]);
         assert_eq!(partitions[0].required().collect::<Vec<_>>(), vec![0, 1]);
     }
 
     #[test]
     fn preserves_locality_while_balancing_equal_records() {
-        let selected = (0..8).collect::<Vec<_>>();
+        let selected = VariantSelection::All(8);
         let partitions = contiguous_partition_bounds(&selected, 4, |_| Ok(10)).unwrap();
         assert_eq!(
             partitions
                 .iter()
-                .map(|partition| selected[partition.clone()].to_vec())
+                .map(|partition| selected.slice(partition.clone()).iter().collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             vec![vec![0, 1], vec![2, 3], vec![4, 5], vec![6, 7]]
         );
+    }
+
+    #[test]
+    fn dense_and_sparse_selections_plan_identically() {
+        // A full scan carries no index vector; its plan must still match the
+        // plan the explicit index list produces, ranges and dependencies alike.
+        let records = (0..6)
+            .map(|index| RecordInfo {
+                offset: 100 + index as u64 * 10,
+                length: 10,
+                record_type: if index % 3 == 0 { 0 } else { 2 },
+                ld_base: (index % 3 != 0).then(|| index - index % 3),
+            })
+            .collect::<Vec<_>>();
+        let fileset = PgenFileset {
+            pgen_path: String::new(),
+            pvar_path: String::new(),
+            psam_path: String::new(),
+            pgi_path: None,
+            source: crate::source::ObjectAccess::Local(String::new()),
+            variants: Arc::new(crate::pvar::PvarTable::empty(
+                CoordinateSystem::ZeroBasedHalfOpen,
+            )),
+            selected_samples: datafusion_bio_format_core::genotype::resolve_samples(
+                &[],
+                None,
+                MissingSamplePolicy::Error,
+            )
+            .unwrap(),
+            selected_identities: Arc::new(Vec::new()),
+            sample_count: 0,
+            records: Arc::new(crate::fileset::RecordIndex::explicit(records)),
+            mode: crate::fileset::PgenMode::Variable,
+            companion_bytes: 0,
+            header_bytes: 0,
+        };
+        let describe = |selection: VariantSelection| {
+            plan_payload_partitions(selection, &fileset, 4, 0, 1024)
+                .unwrap()
+                .into_iter()
+                .map(|partition| {
+                    (
+                        partition.owned().iter().collect::<Vec<_>>(),
+                        partition.dependencies.clone(),
+                        partition.ranges.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let dense = describe(VariantSelection::All(6));
+        assert_eq!(dense, describe(VariantSelection::Range(0..6)));
+        assert_eq!(
+            dense,
+            describe(VariantSelection::Sparse(Arc::from([0, 1, 2, 3, 4, 5])))
+        );
+        assert_eq!(dense.len(), 4);
+
+        let sparse = describe(VariantSelection::Sparse(Arc::from([1, 4])));
+        assert_eq!(sparse[0], (vec![1], vec![0], sparse[0].2.clone()));
+        assert_eq!(sparse[1].0, vec![4]);
+        assert_eq!(sparse[1].1, vec![3]);
     }
 }
