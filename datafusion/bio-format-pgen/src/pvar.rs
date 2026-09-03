@@ -404,22 +404,33 @@ pub(crate) fn parse_pvar(
 
 /// Fills `block` with the next `block_bytes`, extended to a newline.
 ///
+/// Reads at most `allowance + 1` bytes in total, so a line that never ends
+/// cannot run past the decoded cap before the caller enforces it: a block
+/// longer than `allowance` is returned as-is for the caller to reject.
+///
 /// Returns whether the stream is exhausted afterwards.
 fn read_block(
     reader: &mut impl BufRead,
     block_bytes: usize,
+    allowance: usize,
     block: &mut Vec<u8>,
 ) -> std::io::Result<bool> {
     block.clear();
-    reader
-        .by_ref()
-        .take(block_bytes as u64)
-        .read_to_end(block)?;
-    if block.len() < block_bytes {
+    let budget = allowance.saturating_add(1);
+    let fill = block_bytes.min(budget);
+    reader.by_ref().take(fill as u64).read_to_end(block)?;
+    if block.len() < fill {
         return Ok(true);
     }
+    if block.len() > allowance {
+        return Ok(false);
+    }
     if block.last() != Some(&b'\n') {
-        reader.read_until(b'\n', block)?;
+        let remaining = (budget - block.len()) as u64;
+        reader.by_ref().take(remaining).read_until(b'\n', block)?;
+        if block.len() > allowance {
+            return Ok(false);
+        }
     }
     Ok(reader.fill_buf()?.is_empty())
 }
@@ -669,8 +680,13 @@ pub(crate) fn parse_pvar_gauged(
     let mut decoded_bytes = 0_usize;
 
     let mut first = Vec::new();
-    let complete = read_block(&mut reader, block_bytes, &mut first)
-        .map_err(|error| companion_read_error(path, &error))?;
+    let complete = read_block(
+        &mut reader,
+        block_bytes,
+        config.max_decoded_bytes,
+        &mut first,
+    )
+    .map_err(|error| companion_read_error(path, &error))?;
     decoded_bytes += first.len();
     if decoded_bytes > config.max_decoded_bytes {
         return Err(decoded_cap_error(path, config.max_decoded_bytes));
@@ -745,7 +761,8 @@ pub(crate) fn parse_pvar_gauged(
                     return Ok(count);
                 }
                 let mut bytes = Vec::new();
-                exhausted = read_block(&mut reader, block_bytes, &mut bytes)
+                let allowance = config.max_decoded_bytes.saturating_sub(decoded_bytes);
+                exhausted = read_block(&mut reader, block_bytes, allowance, &mut bytes)
                     .map_err(|error| companion_read_error(path, &error))?;
                 if bytes.is_empty() {
                     return Ok(count);
@@ -847,7 +864,7 @@ fn count_newlines(bytes: &[u8]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::io::{Read, Write};
 
     use datafusion_bio_format_core::genotype::CoordinateSystem;
 
@@ -1102,6 +1119,50 @@ mod tests {
             ..config(1 << 10, 2)
         };
         assert_eq!(parse(&text, &capped).unwrap().len(), 10_000);
+    }
+
+    /// Counts the bytes a parser pulled from its source.
+    struct CountingReader<R> {
+        inner: R,
+        read: std::sync::Arc<AtomicUsize>,
+    }
+
+    impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.inner.read(buf)?;
+            self.read.fetch_add(count, Ordering::Relaxed);
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn a_line_longer_than_the_decoded_cap_stops_at_the_cap() {
+        // A block is extended to the next newline after its fixed fill. A
+        // hostile or corrupt companion whose "line" never ends must not be
+        // read past the decoded cap before the cap is enforced.
+        let header = b"#CHROM\tPOS\tID\tREF\tALT\n22\t1\trs1\tA\t";
+        let endless = std::io::Read::chain(&header[..], std::io::repeat(b'C').take(64 << 20));
+        let read = std::sync::Arc::new(AtomicUsize::new(0));
+        let source = CountingReader {
+            inner: endless,
+            read: std::sync::Arc::clone(&read),
+        };
+        let capped = PvarParseConfig {
+            max_decoded_bytes: 64 << 10,
+            ..config(4 << 10, 2)
+        };
+        let error = parse_pvar("cohort.pvar", source, &capped)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("max_decompressed_companion_bytes 65536"),
+            "{error}"
+        );
+        let pulled = read.load(Ordering::Relaxed);
+        assert!(
+            pulled <= (64 << 10) + 2 * (4 << 10) + (1 << 16),
+            "{pulled} bytes read past a 64 KiB cap"
+        );
     }
 
     #[test]
