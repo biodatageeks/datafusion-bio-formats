@@ -24,6 +24,9 @@ const BLOCK_CHANNEL_CAPACITY: usize = 2;
 const MAX_PVAR_WORKERS: usize = 16;
 /// Raw allele output is `UInt16`, so a variant cannot carry more alleles.
 const MAX_ALLELES_PER_VARIANT: usize = 65_536;
+/// A block's text arenas are addressed by `u32` offsets, so a block, its
+/// newline extension included, must stay below this.
+const MAX_BLOCK_TEXT: usize = u32::MAX as usize;
 
 /// Workers to parse with on this host.
 pub(crate) fn default_workers() -> usize {
@@ -424,17 +427,20 @@ pub(crate) fn parse_pvar(
 ///
 /// Reads at most `allowance + 1` bytes in total, so a line that never ends
 /// cannot run past the decoded cap before the caller enforces it: a block
-/// longer than `allowance` is returned as-is for the caller to reject.
+/// longer than `allowance` is returned as-is for the caller to reject. A
+/// line that would carry the block past `max_block_bytes` is an error, since
+/// the block's arenas could not address it.
 ///
 /// Returns whether the stream is exhausted afterwards.
 fn read_block(
     reader: &mut impl BufRead,
     block_bytes: usize,
     allowance: usize,
+    max_block_bytes: usize,
     block: &mut Vec<u8>,
 ) -> std::io::Result<bool> {
     block.clear();
-    let budget = allowance.saturating_add(1);
+    let budget = allowance.saturating_add(1).min(max_block_bytes);
     let fill = block_bytes.min(budget);
     reader.by_ref().take(fill as u64).read_to_end(block)?;
     if block.len() < fill {
@@ -448,6 +454,11 @@ fn read_block(
         reader.by_ref().take(remaining).read_until(b'\n', block)?;
         if block.len() > allowance {
             return Ok(false);
+        }
+        if block.len() >= max_block_bytes && block.last() != Some(&b'\n') {
+            return Err(std::io::Error::other(format!(
+                "a PVAR line runs past the {max_block_bytes} bytes one block can address"
+            )));
         }
     }
     Ok(reader.fill_buf()?.is_empty())
@@ -712,6 +723,7 @@ pub(crate) fn parse_pvar_gauged(
         &mut reader,
         block_bytes,
         config.max_decoded_bytes,
+        MAX_BLOCK_TEXT,
         &mut first,
     )
     .map_err(|error| companion_read_error(path, &error))?;
@@ -728,6 +740,10 @@ pub(crate) fn parse_pvar_gauged(
     let Some((header_lines, body_start, layout)) = parse_header(path, text, complete)? else {
         return Ok(PvarTable::empty(config.coordinates));
     };
+    // A first block that is exactly the header closed it without seeing the
+    // next line; the body parser skips '#' lines, so that line is checked
+    // here when it arrives, as a single-block parse would have checked it.
+    let header_unverified = body_start == first.len() && !complete;
     let first_lines = count_newlines(&first);
 
     let mut table = PvarTable::empty(config.coordinates);
@@ -790,10 +806,22 @@ pub(crate) fn parse_pvar_gauged(
                 }
                 let mut bytes = Vec::new();
                 let allowance = config.max_decoded_bytes.saturating_sub(decoded_bytes);
-                exhausted = read_block(&mut reader, block_bytes, allowance, &mut bytes)
-                    .map_err(|error| companion_read_error(path, &error))?;
+                exhausted = read_block(
+                    &mut reader,
+                    block_bytes,
+                    allowance,
+                    MAX_BLOCK_TEXT,
+                    &mut bytes,
+                )
+                .map_err(|error| companion_read_error(path, &error))?;
                 if bytes.is_empty() {
                     return Ok(count);
+                }
+                if count == 1 && header_unverified && continues_header(&bytes) {
+                    return Err(DataFusionError::Plan(format!(
+                        "PVAR {} #CHROM line must be the final header line",
+                        sanitize_location(path)
+                    )));
                 }
                 decoded_bytes += bytes.len();
                 if decoded_bytes > config.max_decoded_bytes {
@@ -884,6 +912,15 @@ fn collect_block(
         });
     }
     Ok(())
+}
+
+/// Whether the first non-blank line of a body block is a header line.
+fn continues_header(bytes: &[u8]) -> bool {
+    bytes
+        .split(|&byte| byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line[0] == b'#')
 }
 
 fn count_newlines(bytes: &[u8]) -> usize {
@@ -1119,6 +1156,43 @@ mod tests {
         // before the #CHROM line leaves the header genuinely unfinished.
         let error = parse(&text, &config(10, 2)).unwrap_err().to_string();
         assert!(error.contains("header"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_header_line_that_follows_chrom_across_a_block_boundary() {
+        // Within one block a '##' line after #CHROM is a malformed header.
+        // The same file split so that #CHROM closes the first block must
+        // fail the same way, not skip the line as a body comment.
+        let header = "##fileformat=PVARv1.0\n#CHROM\tPOS\tID\tREF\tALT\n";
+        let text = format!("{header}##late=1\n1\t10\trs1\tA\tC\n");
+        let whole = parse(&text, &config(usize::MAX, 1))
+            .unwrap_err()
+            .to_string();
+        assert!(whole.contains("final header line"), "{whole}");
+        let split = parse(&text, &config(header.len(), 2))
+            .unwrap_err()
+            .to_string();
+        assert!(split.contains("final header line"), "{split}");
+    }
+
+    #[test]
+    fn rejects_a_line_longer_than_a_block_can_address() {
+        // Arena offsets are u32, so a block, one extended line included, must
+        // stay below that; the bound is a parameter here so the test does
+        // not need a 4 GiB line.
+        let text =
+            "#CHROM\tPOS\tID\tREF\tALT\n1\t10\trs1\tA\tCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n";
+        let mut reader = BufReader::new(text.as_bytes());
+        let mut block = Vec::new();
+        // The header line ends within the bound; the long record does not.
+        assert!(!read_block(&mut reader, 8, usize::MAX, 32, &mut block).unwrap());
+        assert_eq!(block, b"#CHROM\tPOS\tID\tREF\tALT\n");
+        let error = read_block(&mut reader, 8, usize::MAX, 32, &mut block).unwrap_err();
+        assert!(error.to_string().contains("32 bytes"), "{error}");
+        let mut reader = BufReader::new(text.as_bytes());
+        assert!(!read_block(&mut reader, 8, usize::MAX, 1 << 20, &mut block).unwrap());
+        assert!(read_block(&mut reader, 8, usize::MAX, 1 << 20, &mut block).unwrap());
+        assert!(block.ends_with(b"C\n"));
     }
 
     #[test]
