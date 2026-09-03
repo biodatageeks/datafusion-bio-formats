@@ -22,6 +22,8 @@ pub(crate) const PVAR_BLOCK_BYTES: usize = 16 << 20;
 const BLOCK_CHANNEL_CAPACITY: usize = 2;
 /// Parse workers are CPU-bound; more than this only adds contention.
 const MAX_PVAR_WORKERS: usize = 16;
+/// Raw allele output is `UInt16`, so a variant cannot carry more alleles.
+const MAX_ALLELES_PER_VARIANT: usize = 65_536;
 
 /// Workers to parse with on this host.
 pub(crate) fn default_workers() -> usize {
@@ -197,6 +199,8 @@ pub(crate) struct PvarRow<'a> {
 pub(crate) struct PvarTable {
     coordinates: CoordinateSystem,
     contigs: Vec<String>,
+    /// Position of each contig in `contigs`, for remapping incoming blocks.
+    contig_index: std::collections::HashMap<String, u32>,
     blocks: Vec<PvarBlock>,
     /// `blocks.len() + 1` prefix sums of block row counts.
     row_starts: Vec<usize>,
@@ -207,6 +211,7 @@ impl PvarTable {
         Self {
             coordinates,
             contigs: Vec::new(),
+            contig_index: std::collections::HashMap::new(),
             blocks: Vec::new(),
             row_starts: vec![0],
         }
@@ -314,11 +319,13 @@ impl PvarTable {
         let map = contigs
             .into_iter()
             .map(|contig| {
-                if let Some(found) = self.contigs.iter().position(|known| *known == contig) {
-                    found as u32
+                if let Some(&found) = self.contig_index.get(&contig) {
+                    found
                 } else {
+                    let index = self.contigs.len() as u32;
+                    self.contig_index.insert(contig.clone(), index);
                     self.contigs.push(contig);
-                    (self.contigs.len() - 1) as u32
+                    index
                 }
             })
             .collect::<Vec<_>>();
@@ -343,10 +350,13 @@ fn decode_reader<'a>(
     reader: impl Read + Send + 'a,
 ) -> Result<Box<dyn Read + Send + 'a>> {
     let mut buffered = BufReader::with_capacity(1 << 16, reader);
-    let head = buffered
+    let mut head = [0_u8; 4];
+    let peeked = buffered
         .fill_buf()
-        .map_err(|error| companion_read_error(path, &error))?
-        .to_vec();
+        .map_err(|error| companion_read_error(path, &error))?;
+    let known = peeked.len().min(head.len());
+    head[..known].copy_from_slice(&peeked[..known]);
+    let head = &head[..known];
     if head.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         let decoder = zstd::stream::read::Decoder::with_buffer(buffered).map_err(|error| {
             DataFusionError::Plan(format!(
@@ -620,6 +630,12 @@ fn push_record(
             .any(|allele| allele.is_empty() || allele == ".")
     {
         return Err("has malformed ALT allele list".to_string());
+    }
+    let allele_count = 1 + alternates.split(',').count();
+    if allele_count > MAX_ALLELES_PER_VARIANT {
+        return Err(format!(
+            "has {allele_count} alleles; raw UInt16 allele output supports at most {MAX_ALLELES_PER_VARIANT}"
+        ));
     }
 
     let chrom = fields[layout.chrom];
@@ -999,6 +1015,42 @@ mod tests {
             assert_eq!(blocks.start(row), row as u64);
             assert_eq!(blocks.id(row), Some(format!("rs{row}").as_str()));
         }
+    }
+
+    #[test]
+    fn remaps_contigs_that_blocks_number_differently() {
+        // Each block interns its own contigs in the order it meets them, so a
+        // block that starts on "2" numbers it 0 while the table numbers it 1.
+        // Positions restart per contig, so a mismapped index would be visible.
+        let mut text = String::from("#CHROM\tPOS\tID\tREF\tALT\n");
+        let pattern = ["1", "2", "3", "2", "1"];
+        let per_contig = 3_000;
+        for contig in pattern {
+            for row in 0..per_contig {
+                text.push_str(&format!("{contig}\t{}\trs\tA\tC\n", row + 1));
+            }
+        }
+        let table = parse(&text, &config(8 << 10, 3)).unwrap();
+        assert_eq!(table.len(), pattern.len() * per_contig);
+        for (block, contig) in pattern.iter().enumerate() {
+            for row in 0..per_contig {
+                let index = block * per_contig + row;
+                assert_eq!(table.chrom(index), *contig, "row {index}");
+                assert_eq!(table.start(index), row as u64, "row {index}");
+            }
+        }
+        assert_eq!(table.contigs, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn rejects_a_variant_with_more_alleles_than_the_raw_output_holds() {
+        let mut text = String::from("#CHROM\tPOS\tID\tREF\tALT\n1\t10\trs1\tA\tC\n1\t20\trs2\tA\t");
+        text.push_str(&vec!["C"; 65_536].join(","));
+        text.push('\n');
+        let error = parse(&text, &config(1 << 20, 2)).unwrap_err().to_string();
+        assert!(error.contains("line 3"), "{error}");
+        assert!(error.contains("65537 alleles"), "{error}");
+        assert!(error.contains("at most 65536"), "{error}");
     }
 
     #[test]

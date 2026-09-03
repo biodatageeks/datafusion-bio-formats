@@ -281,7 +281,63 @@ fn external_error(
 
 #[cfg(test)]
 mod tests {
-    use super::ObjectAccess;
+    use std::io::Read;
+
+    use bytes::Bytes;
+
+    use super::{ChannelReader, ObjectAccess};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_reader_joins_chunks_and_surfaces_stream_errors() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        tokio::spawn(async move {
+            for chunk in [&b"ab"[..], b"", b"cdef", b"g"] {
+                sender
+                    .send(Ok(Bytes::copy_from_slice(chunk)))
+                    .await
+                    .unwrap();
+            }
+            sender
+                .send(Err(std::io::Error::other("stream broke")))
+                .await
+                .unwrap();
+        });
+        let (joined, error) = tokio::task::spawn_blocking(move || {
+            let mut reader = ChannelReader {
+                receiver,
+                current: Bytes::new(),
+            };
+            // Small reads straddle chunk boundaries; the empty chunk is skipped.
+            let mut joined = Vec::new();
+            let mut buf = [0_u8; 3];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => return (joined, None),
+                    Ok(count) => joined.extend_from_slice(&buf[..count]),
+                    Err(error) => return (joined, Some(error)),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(joined, b"abcdefg");
+        assert_eq!(error.unwrap().to_string(), "stream broke");
+
+        let (sender, receiver) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(1);
+        drop(sender);
+        let mut reader = ChannelReader {
+            receiver,
+            current: Bytes::new(),
+        };
+        let mut rest = Vec::new();
+        assert_eq!(
+            tokio::task::spawn_blocking(move || reader.read_to_end(&mut rest).map(|_| rest))
+                .await
+                .unwrap()
+                .unwrap(),
+            b""
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

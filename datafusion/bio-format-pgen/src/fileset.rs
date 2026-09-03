@@ -301,16 +301,6 @@ impl PgenFileset {
         })
         .await
         .map_err(|error| DataFusionError::Plan(format!("PVAR parse task failed: {error}")))??;
-        if let Some((index, count)) = (0..variants.len())
-            .map(|index| variants.allele_count(index))
-            .enumerate()
-            .find(|(_, count)| *count > 65_536)
-        {
-            return Err(DataFusionError::Plan(format!(
-                "PVAR variant {index} has {count} alleles; raw UInt16 allele output supports at most 65536"
-            )));
-        }
-
         let psam_source = ObjectAccess::open(&psam_path, &storage_options).await?;
         let psam_size = psam_source.size(&psam_path).await?;
         let psam_reader = psam_source
