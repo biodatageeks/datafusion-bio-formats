@@ -7,6 +7,8 @@ mod fileset;
 mod filter;
 pub mod matrix;
 mod physical_exec;
+mod pvar;
+mod selection;
 mod source;
 mod table_provider;
 

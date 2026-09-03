@@ -7,8 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- PGEN text companions are now streamed: the `.pvar` (plain, gzip, or zstd) is
+  decoded and parsed in bounded, newline-aligned blocks on a worker pool, and
+  the parsed variants live in a columnar `PvarTable` (interned contigs,
+  positions, and one byte arena for IDs and alleles) instead of one heap
+  struct per row. Transient memory no longer grows with the companion, and
+  the resident table costs tens of bytes per variant rather than hundreds.
+- PGEN `PgenReadOptions` defaults: `max_companion_bytes` 512 MiB → 4 GiB,
+  `max_decompressed_companion_bytes` 1 GiB → 16 GiB, `max_variants`
+  100M → 250M, so the published PGS Catalog 1000 Genomes panels
+  (`pgsc_1000G_v1`, 75–85M variants, 541–592 MiB `.pvar.zst`) open with
+  default options. `max_variants` above `u32::MAX` is rejected.
+- PGEN scans represent their variant selection compactly (`All`, `Range`,
+  or `u32` indices) instead of a `Vec<usize>` of every selected row.
+
 ### Fixed
 
+- PGEN companion limit errors name the option to raise
+  (`max_companion_bytes`, `max_decompressed_companion_bytes`) and its
+  configured value, as `max_variants` and `max_samples` already did
+  (biodatageeks/polars-bio#453).
 - FASTQ gzip reader now decodes all members of multi-member (concatenated /
   block) gzip files (pigz, bgzip-as-gzip, fastp, etc.). Previously only the first
   gzip member was read, causing silent truncation or an `UnexpectedEof` crash

@@ -50,8 +50,13 @@ let batches = context
 ```
 
 The provider resolves `.pvar` (then `.pvar.zst`) and `.psam` beside the PGEN
-file unless explicit locations are supplied. Explicit gzip/zstd PVAR and PSAM
-companions are decompressed within the configured bound. Modes `0x01`, `0x02`,
+file unless explicit locations are supplied. Plain, gzip, and zstd companions
+are decoded as a bounded stream and parsed in parallel blocks into a columnar
+variant table, so opening a panel of tens of millions of variants holds a
+fixed window of text plus a few tens of bytes per variant. The companion
+caps (`max_companion_bytes`, `max_decompressed_companion_bytes`,
+`max_variants`, `max_samples`) default high enough for the published 1000
+Genomes reference panels and name themselves in their errors. Modes `0x01`, `0x02`,
 `0x03`, `0x04`, `0x10`, `0x11`, `0x20`, and `0x21` are supported, including
 standard `.pgen.pgi` external indexes. BED/BIM/FAM hybrid companions are
 rejected.

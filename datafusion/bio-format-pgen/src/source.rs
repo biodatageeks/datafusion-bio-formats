@@ -1,12 +1,17 @@
+use std::io::Read;
 use std::path::Path;
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use datafusion::common::{DataFusionError, Result};
 use datafusion_bio_format_core::companion::sanitize_location;
 use datafusion_bio_format_core::object_storage::{
     ObjectStorageOptions, RemoteObject, StorageType, get_storage_type,
 };
+use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+/// Remote chunks buffered ahead of a companion decoder.
+const STREAM_CHANNEL_CHUNKS: usize = 4;
 
 #[derive(Clone, Debug)]
 pub(crate) enum ObjectAccess {
@@ -107,19 +112,105 @@ impl ObjectAccess {
         }
     }
 
-    pub(crate) async fn read_all_bounded(
+    /// The object as a blocking reader, for a decoder on a worker thread.
+    ///
+    /// The size is checked against `max_bytes` first, so an oversized companion
+    /// fails before a byte is read. A remote object is streamed through a
+    /// bounded channel rather than fetched whole.
+    pub(crate) async fn companion_reader(
         &self,
         display_path: &str,
         max_bytes: usize,
-    ) -> Result<Bytes> {
+    ) -> Result<Box<dyn Read + Send>> {
         let size = self.size(display_path).await?;
         if size > max_bytes as u64 {
             return Err(DataFusionError::Plan(format!(
-                "object {} is {size} bytes, exceeding configured limit {max_bytes}",
+                "object {} is {size} bytes, exceeding max_companion_bytes {max_bytes}",
                 sanitize_location(display_path)
             )));
         }
-        self.read_range(display_path, 0..size).await
+        let capped = |inner: Box<dyn Read + Send>| -> Box<dyn Read + Send> {
+            Box::new(CappedReader {
+                inner,
+                remaining: max_bytes.saturating_add(1),
+                display_path: display_path.to_string(),
+                max_bytes,
+            })
+        };
+        match self {
+            Self::Local(path) => Ok(capped(Box::new(
+                std::fs::File::open(path).map_err(|error| io_error("open", display_path, error))?,
+            ))),
+            Self::Remote(object) => {
+                let mut stream = object
+                    .stream()
+                    .await
+                    .map_err(|error| external_error("read", display_path, error))?;
+                let (sender, receiver) = tokio::sync::mpsc::channel(STREAM_CHANNEL_CHUNKS);
+                tokio::spawn(async move {
+                    while let Some(chunk) = stream.next().await {
+                        if sender.send(chunk).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                Ok(capped(Box::new(ChannelReader {
+                    receiver,
+                    current: Bytes::new(),
+                })))
+            }
+        }
+    }
+}
+
+/// Stops a companion stream at `max_companion_bytes`, whatever the object's
+/// size said at open time.
+///
+/// The size check is a point in time; a local file can grow while it is read.
+/// The reader hands out at most `max_bytes + 1` bytes, so the caller sees the
+/// limit error rather than streaming to wherever the object now ends.
+struct CappedReader {
+    inner: Box<dyn Read + Send>,
+    remaining: usize,
+    display_path: String,
+    max_bytes: usize,
+}
+
+impl Read for CappedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(std::io::Error::other(format!(
+                "object {} exceeds max_companion_bytes {}",
+                sanitize_location(&self.display_path),
+                self.max_bytes
+            )));
+        }
+        let window = buf.len().min(self.remaining);
+        let count = self.inner.read(&mut buf[..window])?;
+        self.remaining -= count;
+        Ok(count)
+    }
+}
+
+/// A blocking `Read` over chunks a runtime task streams into a channel.
+struct ChannelReader {
+    receiver: tokio::sync::mpsc::Receiver<std::io::Result<Bytes>>,
+    current: Bytes,
+}
+
+impl Read for ChannelReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.current.is_empty() {
+            match self.receiver.blocking_recv() {
+                Some(Ok(chunk)) => self.current = chunk,
+                Some(Err(error)) => return Err(error),
+                None => return Ok(0),
+            }
+        }
+        let count = buf.len().min(self.current.len());
+        buf[..count].copy_from_slice(&self.current[..count]);
+        self.current.advance(count);
+        Ok(count)
     }
 }
 
@@ -227,7 +318,87 @@ fn external_error(
 
 #[cfg(test)]
 mod tests {
-    use super::ObjectAccess;
+    use std::io::Read;
+
+    use bytes::Bytes;
+
+    use super::{ChannelReader, ObjectAccess};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn channel_reader_joins_chunks_and_surfaces_stream_errors() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(2);
+        tokio::spawn(async move {
+            for chunk in [&b"ab"[..], b"", b"cdef", b"g"] {
+                sender
+                    .send(Ok(Bytes::copy_from_slice(chunk)))
+                    .await
+                    .unwrap();
+            }
+            sender
+                .send(Err(std::io::Error::other("stream broke")))
+                .await
+                .unwrap();
+        });
+        let (joined, error) = tokio::task::spawn_blocking(move || {
+            let mut reader = ChannelReader {
+                receiver,
+                current: Bytes::new(),
+            };
+            // Small reads straddle chunk boundaries; the empty chunk is skipped.
+            let mut joined = Vec::new();
+            let mut buf = [0_u8; 3];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => return (joined, None),
+                    Ok(count) => joined.extend_from_slice(&buf[..count]),
+                    Err(error) => return (joined, Some(error)),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(joined, b"abcdefg");
+        assert_eq!(error.unwrap().to_string(), "stream broke");
+
+        let (sender, receiver) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(1);
+        drop(sender);
+        let mut reader = ChannelReader {
+            receiver,
+            current: Bytes::new(),
+        };
+        let mut rest = Vec::new();
+        assert_eq!(
+            tokio::task::spawn_blocking(move || reader.read_to_end(&mut rest).map(|_| rest))
+                .await
+                .unwrap()
+                .unwrap(),
+            b""
+        );
+    }
+
+    #[tokio::test]
+    async fn companion_reader_enforces_the_cap_while_streaming() {
+        // The size check runs once at open; a companion that grows afterwards
+        // must still stop at the cap rather than stream to its new end.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cohort.pvar");
+        std::fs::write(&path, b"#CHROM POS ID REF ALT\n").unwrap();
+        let source = ObjectAccess::Local(path.to_string_lossy().into_owned());
+        let mut reader = source.companion_reader("cohort.pvar", 64).await.unwrap();
+        let mut grown = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut grown, &vec![b'x'; 1024]).unwrap();
+        let mut sink = Vec::new();
+        let error = reader.read_to_end(&mut sink).unwrap_err().to_string();
+        assert!(error.contains("max_companion_bytes 64"), "{error}");
+        assert!(
+            sink.len() <= 65,
+            "{} bytes streamed past the cap",
+            sink.len()
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

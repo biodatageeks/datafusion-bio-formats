@@ -2029,3 +2029,46 @@ async fn matrix_path_keeps_fractional_dosages() {
         }
     }
 }
+
+#[tokio::test]
+async fn companion_caps_name_the_option_to_raise() {
+    // A caller who hits a cap on a real panel has to learn which option to
+    // change from the error alone; the cap's value is what they compare against.
+    let fixture = fixed_fixture(2);
+    for (options, expected) in [
+        (
+            PgenReadOptions {
+                max_companion_bytes: 1,
+                ..Default::default()
+            },
+            "max_companion_bytes 1",
+        ),
+        (
+            PgenReadOptions {
+                max_decompressed_companion_bytes: 4,
+                ..Default::default()
+            },
+            "max_decompressed_companion_bytes 4",
+        ),
+        (
+            PgenReadOptions {
+                max_variants: 1,
+                ..Default::default()
+            },
+            "max_variants 1",
+        ),
+        (
+            PgenReadOptions {
+                max_samples: 1,
+                ..Default::default()
+            },
+            "max_samples 1",
+        ),
+    ] {
+        let error = PgenTableProvider::try_new(path(&fixture.pgen), options)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error} (expected {expected})");
+    }
+}

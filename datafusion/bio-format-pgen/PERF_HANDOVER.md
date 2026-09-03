@@ -3,7 +3,27 @@
 State as of 2026-08-17. Everything below is measured on this machine unless
 marked otherwise.
 
-## Where things stand
+## Companion loading (2026-09-03)
+
+Opening a fileset parses the whole PVAR. It used to hold the compressed and
+decoded companion plus one heap struct per row, ~600 B per variant at peak, and
+capped companions at 512 MiB / 1 GiB decoded, which rejected the published PGS
+Catalog 1000 Genomes panels (`pgsc_1000G_v1`, biodatageeks/polars-bio#453).
+The PVAR is now streamed in 16 MiB blocks through a worker pool into a
+columnar table. `pgen_open_profile`, release build, `/usr/bin/time -l`:
+
+| fileset | variants | `.pvar.zst` | open | peak RSS |
+|---|---:|---:|---:|---:|
+| `GRCh38_1000G_ALL` | 75,193,455 | 541 MiB | 4.27 s | 3.74 GB |
+| `GRCh37_1000G_ALL` companions (parse only) | 84,805,772 | 592 MiB | ~4.9 s | 3.24 GB |
+| chr22 slice | 993,881 | 12 MiB | 0.072 s | 268 MB |
+
+The GRCh38 row includes a second open in the same process; the GRCh37 run
+opened its companions against the GRCh38 PGEN and stopped at the header
+count check after the full parse. Before this change the chr22 slice peaked at
+~600 MB above the process baseline (measured through polars-bio's
+`describe_pgen`), so the full panel would have needed ~45 GB.
+
 
 Whole chromosome 22 of 1000 Genomes: 993,881 variants × 2,548 samples =
 2,532,408,788 genotypes. Single partition, release build with
