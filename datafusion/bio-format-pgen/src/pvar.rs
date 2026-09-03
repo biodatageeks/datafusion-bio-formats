@@ -347,16 +347,24 @@ impl PvarTable {
 /// Wraps a companion's bytes in the decoder its magic calls for.
 fn decode_reader<'a>(
     path: &str,
-    reader: impl Read + Send + 'a,
+    mut reader: impl Read + Send + 'a,
 ) -> Result<Box<dyn Read + Send + 'a>> {
-    let mut buffered = BufReader::with_capacity(1 << 16, reader);
-    let mut head = [0_u8; 4];
-    let peeked = buffered
-        .fill_buf()
-        .map_err(|error| companion_read_error(path, &error))?;
-    let known = peeked.len().min(head.len());
-    head[..known].copy_from_slice(&peeked[..known]);
-    let head = &head[..known];
+    // The magic is read byte by byte rather than peeked from a buffer: a
+    // remote stream's first chunk can be shorter than four bytes, and a
+    // buffered peek would then classify a compressed companion as plain text.
+    let mut head = Vec::with_capacity(4);
+    let mut byte = [0_u8; 1];
+    while head.len() < 4 {
+        match reader.read(&mut byte) {
+            Ok(0) => break,
+            Ok(_) => head.push(byte[0]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(companion_read_error(path, &error)),
+        }
+    }
+    let magic = head.clone();
+    let buffered = BufReader::with_capacity(1 << 16, std::io::Cursor::new(head).chain(reader));
+    let head = magic.as_slice();
     if head.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         let decoder = zstd::stream::read::Decoder::with_buffer(buffered).map_err(|error| {
             DataFusionError::Plan(format!(
@@ -475,7 +483,11 @@ fn parse_header(
         offset = next;
         body_start = offset;
     }
-    if !saw_body && !complete {
+    // A block ends on a newline, so a first block that is exactly the header
+    // is complete as long as its last line is the #CHROM line; only a header
+    // that is still going when the block ends has outgrown it.
+    let header_closed = header.is_some_and(|(index, _)| index + 1 == header_lines);
+    if !saw_body && !complete && !header_closed {
         return Err(DataFusionError::Plan(format!(
             "PVAR {} header does not end within the first {} bytes",
             sanitize_location(path),
@@ -1051,6 +1063,62 @@ mod tests {
         assert!(error.contains("line 3"), "{error}");
         assert!(error.contains("65537 alleles"), "{error}");
         assert!(error.contains("at most 65536"), "{error}");
+    }
+
+    /// Hands out one byte per read, the way a remote stream's first chunk can.
+    struct TrickleReader<R>(R);
+
+    impl<R: std::io::Read> std::io::Read for TrickleReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            self.0.read(&mut buf[..1])
+        }
+    }
+
+    #[test]
+    fn detects_compression_when_the_first_read_is_short() {
+        let (text, _) = large_pvar(500, None);
+        let whole = parse(&text, &config(usize::MAX, 1)).unwrap();
+        let zstd_bytes = zstd::encode_all(text.as_bytes(), 3).unwrap();
+        let trickled = parse_pvar(
+            "cohort.pvar.zst",
+            TrickleReader(&zstd_bytes[..]),
+            &config(1 << 10, 2),
+        )
+        .unwrap();
+        assert_same(&whole, &trickled);
+        let plain = parse_pvar(
+            "cohort.pvar",
+            TrickleReader(text.as_bytes()),
+            &config(1 << 10, 2),
+        )
+        .unwrap();
+        assert_same(&whole, &plain);
+        // A companion shorter than the magic is still read for what it is.
+        assert!(parse_pvar("tiny.pvar", TrickleReader(&b"1\n"[..]), &config(1 << 10, 2)).is_err());
+        assert!(
+            parse_pvar("empty.pvar", TrickleReader(&b""[..]), &config(1 << 10, 2))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn accepts_a_header_that_ends_exactly_at_the_block_boundary() {
+        let header = "##fileformat=PVARv1.0\n#CHROM\tPOS\tID\tREF\tALT\n";
+        let text = format!("{header}1\t10\trs1\tA\tC\n1\t20\trs2\tA\tC\n");
+        // The first block is exactly the header, newline included; the body
+        // starts in the next block.
+        let table = parse(&text, &config(header.len(), 2)).unwrap();
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.id(1), Some("rs2"));
+        // A block cut inside the last header line is extended to that line's
+        // newline, so it still closes the header. Only a boundary that falls
+        // before the #CHROM line leaves the header genuinely unfinished.
+        let error = parse(&text, &config(10, 2)).unwrap_err().to_string();
+        assert!(error.contains("header"), "{error}");
     }
 
     #[test]

@@ -129,10 +129,18 @@ impl ObjectAccess {
                 sanitize_location(display_path)
             )));
         }
+        let capped = |inner: Box<dyn Read + Send>| -> Box<dyn Read + Send> {
+            Box::new(CappedReader {
+                inner,
+                remaining: max_bytes.saturating_add(1),
+                display_path: display_path.to_string(),
+                max_bytes,
+            })
+        };
         match self {
-            Self::Local(path) => Ok(Box::new(
+            Self::Local(path) => Ok(capped(Box::new(
                 std::fs::File::open(path).map_err(|error| io_error("open", display_path, error))?,
-            )),
+            ))),
             Self::Remote(object) => {
                 let mut stream = object
                     .stream()
@@ -146,12 +154,41 @@ impl ObjectAccess {
                         }
                     }
                 });
-                Ok(Box::new(ChannelReader {
+                Ok(capped(Box::new(ChannelReader {
                     receiver,
                     current: Bytes::new(),
-                }))
+                })))
             }
         }
+    }
+}
+
+/// Stops a companion stream at `max_companion_bytes`, whatever the object's
+/// size said at open time.
+///
+/// The size check is a point in time; a local file can grow while it is read.
+/// The reader hands out at most `max_bytes + 1` bytes, so the caller sees the
+/// limit error rather than streaming to wherever the object now ends.
+struct CappedReader {
+    inner: Box<dyn Read + Send>,
+    remaining: usize,
+    display_path: String,
+    max_bytes: usize,
+}
+
+impl Read for CappedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.remaining == 0 {
+            return Err(std::io::Error::other(format!(
+                "object {} exceeds max_companion_bytes {}",
+                sanitize_location(&self.display_path),
+                self.max_bytes
+            )));
+        }
+        let window = buf.len().min(self.remaining);
+        let count = self.inner.read(&mut buf[..window])?;
+        self.remaining -= count;
+        Ok(count)
     }
 }
 
@@ -336,6 +373,30 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             b""
+        );
+    }
+
+    #[tokio::test]
+    async fn companion_reader_enforces_the_cap_while_streaming() {
+        // The size check runs once at open; a companion that grows afterwards
+        // must still stop at the cap rather than stream to its new end.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("cohort.pvar");
+        std::fs::write(&path, b"#CHROM POS ID REF ALT\n").unwrap();
+        let source = ObjectAccess::Local(path.to_string_lossy().into_owned());
+        let mut reader = source.companion_reader("cohort.pvar", 64).await.unwrap();
+        let mut grown = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut grown, &vec![b'x'; 1024]).unwrap();
+        let mut sink = Vec::new();
+        let error = reader.read_to_end(&mut sink).unwrap_err().to_string();
+        assert!(error.contains("max_companion_bytes 64"), "{error}");
+        assert!(
+            sink.len() <= 65,
+            "{} bytes streamed past the cap",
+            sink.len()
         );
     }
 
