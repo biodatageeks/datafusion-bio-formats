@@ -27,6 +27,10 @@ env_logger = "0.11.8"
 noodles-bed = { git = "https://github.com/biodatageeks/noodles.git", rev = "42a3c0165617b7b8f9f5c5905287968eef92e31e" }
 futures-util = "0.3.31"
 
+[dev-dependencies]
+flate2.workspace = true
+tempfile = "3"
+
 [[example]]
 name = "test_bed_reader"
 # Some issue when publishing and path isn't specified, so adding here

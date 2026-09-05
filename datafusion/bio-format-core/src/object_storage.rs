@@ -226,14 +226,26 @@ pub async fn get_compression_type(
         buffer.truncate(n);
         buffer
     } else {
-        // For remote files, read only the minimum bytes needed for compression detection (18 bytes)
-        match get_remote_stream(file_path.clone(), object_storage_options.clone(), Some(18)).await {
+        // Consume only the prefix needed for detection. HTTP range readers
+        // require the requested length exactly, rejecting valid objects shorter
+        // than 18 bytes. An unbounded sequential GET accepts EOF naturally and
+        // does not require HEAD permission; stop consuming it after the prefix.
+        let stream = if matches!(storage_type, StorageType::HTTP) {
+            RemoteObject::open(file_path.clone(), object_storage_options.clone())
+                .await?
+                .stream_single_request()
+                .await
+        } else {
+            get_remote_stream(file_path.clone(), object_storage_options.clone(), Some(18)).await
+        };
+        match stream {
             Ok(mut stream) => {
                 let mut buffer = Vec::with_capacity(18);
                 while let Some(chunk_result) = stream.next().await {
                     match chunk_result {
                         Ok(chunk) => {
-                            buffer.extend_from_slice(&chunk);
+                            let take = chunk.len().min(18 - buffer.len());
+                            buffer.extend_from_slice(&chunk[..take]);
                             if buffer.len() >= 18 {
                                 break;
                             }
