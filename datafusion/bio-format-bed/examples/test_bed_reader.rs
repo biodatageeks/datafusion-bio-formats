@@ -35,8 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .unwrap();
     let ctx = datafusion::execution::context::SessionContext::new();
-    ctx.sql("set datafusion.execution.skip_physical_aggregate_schema_check=true")
-        .await?;
     ctx.register_table("example", Arc::new(table)).unwrap();
     let df = ctx.sql("SELECT * FROM example limit 2").await?;
     df.show().await?;

@@ -1,75 +1,107 @@
 # datafusion-bio-format-bed
 
-BED (Browser Extensible Data) file format support for Apache DataFusion, enabling SQL queries on genomic intervals and annotations.
+A streaming DataFusion `TableProvider` for tab-delimited BED records, including
+plain, gzip (multiple members), and BGZF files. Local paths, `file://` paths,
+HTTP(S), GCS, S3, and Azure Blob Storage use the same record validation.
 
-## Overview
+## Output schema
 
-This crate provides a DataFusion `TableProvider` implementation for reading BED files, a simple tab-delimited format for representing genomic regions and annotations.
+The `BEDFields` argument selects the output columns:
 
-## Features
+| Mode | Columns |
+| --- | --- |
+| `BED3` | `chrom: Utf8`, `start: UInt32`, `end: UInt32` |
+| `BED4` | BED3 plus `name: Utf8` |
+| `BED5` | BED4 plus `score: UInt16` |
+| `BED6` | BED5 plus `strand: Utf8` |
 
-- Read BED files directly into DataFusion tables
-- Support for BED3, BED6, BED12, and custom BED formats
-- Cloud storage support (GCS, S3, Azure Blob Storage)
-- Efficient querying of genomic intervals
+Every record must have `chrom`, `start`, and `end`. Optional output fields are
+nullable: an absent field or `.` becomes null. An explicitly empty name remains
+an empty string. BED4 accepts BED3 input without changing its four-column schema,
+which preserves compatibility with polars-bio.
 
-## Installation
+BED7–BED12 and custom suffix columns are accepted, but only the selected columns
+are exposed. Fields beyond the selected mode are not interpreted; this reader
+does not validate BED12 block structure. Mixed widths are accepted for
+compatibility, though the UCSC format recommends consistent widths per track.
 
-```toml
-[dependencies]
-datafusion-bio-format-bed = { path = "../bio-format-bed" }
-datafusion = "50.3.0"
-```
+Coordinates must be unsigned integers fitting UInt32, with `end >= start`.
+Zero-length intervals, including `0–0`, are supported. With `zero_based=true`,
+coordinates are the on-disk half-open `(start, end)` values. With `false`, only
+start changes to `start + 1`, using checked arithmetic. An empty interval remains
+empty (`start > end` in this representation). Schema coordinate metadata is
+preserved through column projections and count queries.
 
-## Schema
+When included in the output mode, score must be 0–1000 (or missing), and strand
+must be `+`, `-`, or `.` (or absent). See the
+[UCSC BED definition](https://genome.ucsc.edu/FAQ/FAQformat.html#format1).
 
-BED files support multiple formats with varying numbers of columns:
-
-**BED3 (minimum):**
-- `chrom`: Chromosome name
-- `chrom_start`: Start position (0-based)
-- `chrom_end`: End position (exclusive)
-
-**BED6:**
-- Adds: `name`, `score`, `strand`
-
-**BED12:**
-- Adds: `thick_start`, `thick_end`, `item_rgb`, `block_count`, `block_sizes`, `block_starts`
-
-## Usage Example
+## Example
 
 ```rust
 use datafusion::prelude::*;
-use datafusion_bio_format_bed::BedTableProvider;
+use datafusion_bio_format_bed::table_provider::{BEDFields, BedTableProvider};
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> datafusion::error::Result<()> {
     let ctx = SessionContext::new();
-
-    // Register a BED file as a table
-    let table = BedTableProvider::try_new("data/genes.bed").await?;
-    ctx.register_table("genes", Arc::new(table))?;
-
-    // Query the data with SQL
-    let df = ctx.sql("
-        SELECT chrom, chrom_start, chrom_end, name
-        FROM genes
-        WHERE chrom = 'chr1' AND (chrom_end - chrom_start) > 1000
-        ORDER BY chrom_start
-        LIMIT 10
-    ").await?;
-
-    df.show().await?;
+    let table = BedTableProvider::new(
+        "regions.bed".to_owned(),
+        BEDFields::BED4,
+        None,
+        true,
+    )?;
+    ctx.register_table("regions", Arc::new(table))?;
+    let result = ctx.sql("SELECT chrom, start, \"end\", name FROM regions").await?;
+    result.show().await?;
     Ok(())
 }
 ```
 
-## Supported File Types
+Compression is detected from the content, independent of the suffix. Set
+`ObjectStorageOptions.compression_type` to override detection; the override is
+honored for both local and remote files. Passing `None` for storage options uses
+defaults for remote files too.
 
-- Uncompressed BED (`.bed`)
-- GZIP-compressed BED (`.bed.gz`)
-- Cloud storage URLs (`gs://`, `s3://`, `https://`)
+## Errors and line handling
 
-## License
+LF, CRLF, and an unterminated final record behave consistently across backends.
+Blank lines, `#` comments, and space-delimited UCSC `track`/`browser` directives
+are skipped. Tab-delimited records whose chromosome is `track` or `browser` are
+still read as data. File contents must be UTF-8.
 
-Licensed under Apache-2.0
+Missing required fields, invalid coordinates, selected invalid optional fields,
+invalid UTF-8, and I/O/decompression failures return errors. The reader never
+logs a failed record and continues with an incomplete successful result. Parsing
+errors include the physical line number; conversion errors include the record
+number, and query errors identify the file. As with other streaming readers,
+rows may already have been yielded before a later error; a limited query only
+validates the records it consumes.
+
+## Low-level reader API
+
+`BedLocalReader::<N>::new(path).await?` and
+`BedRemoteReader::<N>::new(path, options).await?` return fallible readers.
+The remote constructor now returns `Result` instead of panicking on open or
+compression-detection errors; callers must handle it with `?` or equivalent.
+`BedLocalReader::with_options` accepts explicit compression options.
+
+Low-level `N=4` readers accept BED3 and pad its absent name with `.`. Low-level
+`N=5`/`N=6` readers require at least that many fields. The table provider reads the
+three required fields and supplies nulls for absent optional output columns.
+The `get_local_bed_*_reader` helpers return raw Noodles readers and retain the
+Noodles parser's strict width semantics.
+
+## Tests
+
+```sh
+cargo test -p datafusion-bio-format-bed
+cargo clippy -p datafusion-bio-format-bed --all-targets -- -D warnings
+cargo fmt -p datafusion-bio-format-bed -- --check
+```
+
+The tests cover the width/output-mode matrix, line endings, names, coordinates,
+malformed input, tiny buffers, injected read errors, compression boundaries,
+projections/counts/filters/limits, metadata, and actual remote reads against a
+local HTTP fixture server. No cloud account or external test service is required.

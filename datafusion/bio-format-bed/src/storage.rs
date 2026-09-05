@@ -1,4 +1,5 @@
 use crate::async_reader;
+use crate::record::{line_error, prepare_line};
 use async_compression::tokio::bufread::GzipDecoder;
 use async_stream::try_stream;
 use bytes::Bytes;
@@ -8,14 +9,14 @@ use datafusion_bio_format_core::object_storage::{
 };
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
-use log::{debug, error, info};
+use log::{debug, info};
 use noodles_bed;
 use noodles_bed::Record;
 use noodles_bgzf as bgzf;
 use noodles_bgzf::io::Reader as BgzfReader;
 use opendal::FuturesBytesStream;
 use std::fs::File;
-use std::io::Error;
+use std::io::{BufRead, Cursor, Error};
 use tokio_util::io::StreamReader;
 
 /// Creates a remote BGZF-compressed BED reader from cloud storage
@@ -104,7 +105,7 @@ pub fn get_local_bed_bgzf_reader<const N: usize>(
     file_path: String,
 ) -> Result<noodles_bed::io::Reader<N, BgzfReader<File>>, Error> {
     debug!("Reading BED file from local storage");
-    File::open(file_path)
+    File::open(file_path.strip_prefix("file://").unwrap_or(&file_path))
         .map(BgzfReader::new)
         .map(noodles_bed::io::Reader::new)
 }
@@ -131,7 +132,7 @@ pub async fn get_local_bed_gz_reader<const N: usize>(
     >,
     Error,
 > {
-    tokio::fs::File::open(file_path)
+    tokio::fs::File::open(file_path.strip_prefix("file://").unwrap_or(&file_path))
         .await
         .map(tokio::io::BufReader::new)
         .map(gzip_multi_member_decoder)
@@ -156,7 +157,7 @@ pub fn get_local_bed_reader<const N: usize>(
     file_path: String,
 ) -> Result<noodles_bed::io::Reader<N, std::io::BufReader<File>>, Error> {
     debug!("Reading BED file from local storage with sync reader");
-    File::open(file_path)
+    File::open(file_path.strip_prefix("file://").unwrap_or(&file_path))
         .map(std::io::BufReader::new)
         .map(noodles_bed::io::Reader::new)
 }
@@ -192,7 +193,7 @@ macro_rules! impl_bed_remote_reader {
         $(
             impl BedRemoteReader<$n> {
                 /// Creates a new remote BED reader, auto-detecting compression format
-                pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Self {
+                pub async fn new(file_path: String, object_storage_options: ObjectStorageOptions) -> Result<Self, Error> {
                     info!("Creating remote BED reader: {}", object_storage_options);
                     let compression_type = get_compression_type(
                         file_path.clone(),
@@ -200,22 +201,22 @@ macro_rules! impl_bed_remote_reader {
                         object_storage_options.clone(),
                     )
                     .await
-                    .unwrap_or(CompressionType::NONE);
+                    .map_err(Error::other)?;
                     match compression_type {
                         CompressionType::BGZF => {
-                            let reader = get_remote_bed_bgzf_reader::<$n>(file_path, object_storage_options).await.unwrap();
-                            BedRemoteReader::BGZF(reader)
+                            let reader = get_remote_bed_bgzf_reader::<$n>(file_path, object_storage_options).await?;
+                            Ok(BedRemoteReader::BGZF(reader))
                         }
                         CompressionType::GZIP => {
-                            let reader = get_remote_bed_gz_reader::<$n>(file_path, object_storage_options).await.unwrap();
-                            BedRemoteReader::GZIP(reader)
+                            let reader = get_remote_bed_gz_reader::<$n>(file_path, object_storage_options).await?;
+                            Ok(BedRemoteReader::GZIP(reader))
                         }
                         CompressionType::NONE => {
-                            let reader = get_remote_bed_reader::<$n>(file_path, object_storage_options).await.unwrap();
-                            BedRemoteReader::PLAIN(reader)
+                            let reader = get_remote_bed_reader::<$n>(file_path, object_storage_options).await?;
+                            Ok(BedRemoteReader::PLAIN(reader))
                         }
 
-                        _ => panic!("Compression type not supported."),
+                        _ => Err(Error::new(std::io::ErrorKind::InvalidInput, "unsupported BED compression")),
                     }
                 }
 
@@ -268,6 +269,33 @@ pub enum BedLocalReader<const N: usize> {
     PLAIN(noodles_bed::io::Reader<N, std::io::BufReader<File>>),
 }
 
+// Both synchronous backends use the same framing and errors as the async reader.
+macro_rules! sync_records {
+    ($reader:expr, $n:expr) => {
+        try_stream! {
+            let mut buf = Vec::new();
+            let mut line_number = 0;
+            loop {
+                buf.clear();
+                line_number += 1;
+                let n = $reader.get_mut().read_until(b'\n', &mut buf)
+                    .map_err(|e| line_error(line_number, e))?;
+                if n == 0 {
+                    break;
+                }
+                if !prepare_line(&mut buf, $n).map_err(|e| line_error(line_number, e))? {
+                    continue;
+                }
+                let mut record = Record::<$n>::default();
+                let mut parser = noodles_bed::io::Reader::<$n, _>::new(Cursor::new(&buf));
+                parser.read_record(&mut record).map_err(|e| line_error(line_number, e))?;
+                yield record;
+            }
+        }
+        .boxed()
+    };
+}
+
 /// Macro to generate BedLocalReader implementations for different column counts
 macro_rules! impl_bed_local_reader {
     ($($n:expr),*) => {
@@ -275,11 +303,16 @@ macro_rules! impl_bed_local_reader {
             impl BedLocalReader<$n> {
                 /// Creates a new local BED reader, auto-detecting compression format
                 pub async fn new(file_path: String) -> Result<Self, Error> {
+                    Self::with_options(file_path, ObjectStorageOptions::default()).await
+                }
+
+                /// Creates a local reader honoring an explicit compression setting.
+                pub async fn with_options(file_path: String, options: ObjectStorageOptions) -> Result<Self, Error> {
                     info!("Creating local BED reader: {}", file_path);
                     let compression_type = get_compression_type(
                         file_path.clone(),
-                        None,
-                        ObjectStorageOptions::default(),
+                        options.compression_type.clone(),
+                        options,
                     )
                     .await
                     .map_err(std::io::Error::other)?;
@@ -296,38 +329,16 @@ macro_rules! impl_bed_local_reader {
                             let reader = get_local_bed_reader::<$n>(file_path)?;
                             Ok(BedLocalReader::PLAIN(reader))
                         }
-                        _ => panic!("Compression type not supported."),
+                        _ => Err(Error::new(std::io::ErrorKind::InvalidInput, "unsupported BED compression")),
                     }
                 }
 
                 /// Returns a stream of BED records from the local reader
                 pub fn read_records(&mut self) -> impl Stream<Item = Result<Record<$n>, Error>> + '_ {
                     match self {
-                        BedLocalReader::BGZF(reader) => {
-                            try_stream! {
-                                loop{
-                                    let mut record = noodles_bed::Record::<$n>::default();
-                                    match reader.read_record(&mut record) {
-                                        Ok(0) => break, // EOF
-                                        Ok(_) => yield record,
-                                        _ => error!("Error reading record from BED file"),
-                                    }
-                                }
-                            }.boxed()
-                        },
+                        BedLocalReader::BGZF(reader) => sync_records!(reader, $n),
                         BedLocalReader::GZIP(reader) => reader.records().boxed(),
-                        BedLocalReader::PLAIN(reader) => {
-                            try_stream! {
-                                loop{
-                                    let mut record = noodles_bed::Record::<$n>::default();
-                                    match reader.read_record(&mut record) {
-                                        Ok(0) => break, // EOF
-                                        Ok(_) => yield record,
-                                        _ => error!("Error reading record from BED file"),
-                                    }
-                                }
-                            }.boxed()
-                        },
+                        BedLocalReader::PLAIN(reader) => sync_records!(reader, $n),
                     }
                 }
             }
@@ -337,3 +348,54 @@ macro_rules! impl_bed_local_reader {
 
 // Generate implementations for N = 3, 4, 5, 6
 impl_bed_local_reader!(3, 4, 5, 6);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{self, Read};
+
+    struct FailingRead;
+    impl Read for FailingRead {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected sync read failure"))
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_io_failure_is_yielded_once_and_terminates() {
+        let input = Cursor::new(b"chr1\t0\t5\n").chain(FailingRead);
+        let mut reader = noodles_bed::io::Reader::<3, _>::new(std::io::BufReader::new(input));
+        let mut records = sync_records!(reader, 3);
+        assert!(records.next().await.unwrap().is_ok());
+        let error: io::Error = records.next().await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("BED line 2"));
+        assert!(error.to_string().contains("injected sync read failure"));
+        assert!(records.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sync_widths_and_small_buffers_match_async_parsing() {
+        for size in [1, 2, 7, 64] {
+            let input = &b"# comment\r\nchr1\t0\t5\r\nchr1\t5\t8\tname\nchr1\t9"[..];
+            let mut reader = noodles_bed::io::Reader::<4, _>::new(
+                std::io::BufReader::with_capacity(size, input),
+            );
+            let mut records = sync_records!(reader, 4);
+            assert!(records.next().await.unwrap().unwrap().name().is_none());
+            assert_eq!(
+                records
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .name()
+                    .unwrap()
+                    .to_string(),
+                "name"
+            );
+            let error: io::Error = records.next().await.unwrap().unwrap_err();
+            assert!(error.to_string().contains("BED line 4"));
+            assert!(records.next().await.is_none());
+        }
+    }
+}

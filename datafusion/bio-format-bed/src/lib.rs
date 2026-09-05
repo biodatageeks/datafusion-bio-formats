@@ -6,8 +6,9 @@
 //! # Features
 //!
 //! - Direct SQL queries on BED files via DataFusion
-//! - Support for BED3, BED6, BED12, and custom formats
-//! - Cloud storage support (GCS, S3, Azure)
+//! - BED3–BED6 output schemas; accepts wider BED and custom suffix fields
+//! - Consistent parsing and errors for plain, gzip and BGZF inputs
+//! - Cloud storage support (HTTP(S), GCS, S3, Azure)
 //! - Efficient interval queries
 //!
 //! # Example
@@ -25,7 +26,7 @@
 //! ctx.register_table("genes", Arc::new(table))?;
 //!
 //! // Query with SQL
-//! let df = ctx.sql("SELECT chrom, start, end FROM genes LIMIT 10").await?;
+//! let df = ctx.sql("SELECT chrom, start, \"end\" FROM genes LIMIT 10").await?;
 //! df.show().await?;
 //! # Ok(())
 //! # }
@@ -35,6 +36,7 @@
 
 mod async_reader;
 mod physical_exec;
+mod record;
 /// Storage and reader implementations for BED files
 ///
 /// This module provides readers for accessing BED file data from various storage backends

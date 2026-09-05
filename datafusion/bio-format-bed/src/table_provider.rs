@@ -16,14 +16,15 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Enumeration of supported BED format variants based on number of columns
+/// Selects the output columns of a BED scan.
 ///
-/// BED (Browser Extensible Data) files support different column counts:
+/// All modes require the three core fields; absent optional fields are null.
+/// Later columns are accepted but not interpreted. The output modes are:
 /// - BED3: 3 columns (chrom, start, end)
 /// - BED4: 4 columns (chrom, start, end, name)
 /// - BED5: 5 columns (chrom, start, end, name, score)
 /// - BED6: 6 columns (chrom, start, end, name, score, strand)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum BEDFields {
     /// 3-column BED format: chrom, start, end
     BED3,
@@ -35,20 +36,39 @@ pub enum BEDFields {
     BED6,
 }
 
+impl BEDFields {
+    pub(crate) fn count(self) -> usize {
+        match self {
+            Self::BED3 => 3,
+            Self::BED4 => 4,
+            Self::BED5 => 5,
+            Self::BED6 => 6,
+        }
+    }
+}
+
 /// Determines the schema for BED table data
 ///
 /// Returns a schema with the following fields:
 /// - `chrom` (Utf8, not nullable): Chromosome name
 /// - `start` (UInt32, not nullable): Start position (0-based)
 /// - `end` (UInt32, not nullable): End position (exclusive)
-/// - `name` (Utf8, nullable): Feature name
-fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::Result<SchemaRef> {
-    let fields = vec![
+/// - `name` (Utf8, nullable): Feature name (BED4+)
+/// - `score` (UInt16, nullable): Score (BED5+)
+/// - `strand` (Utf8, nullable): Strand (BED6)
+fn determine_schema(
+    bed_fields: BEDFields,
+    coordinate_system_zero_based: bool,
+) -> datafusion::common::Result<SchemaRef> {
+    let mut fields = vec![
         Field::new("chrom", DataType::Utf8, false),
         Field::new("start", DataType::UInt32, false),
         Field::new("end", DataType::UInt32, false),
         Field::new("name", DataType::Utf8, true),
+        Field::new("score", DataType::UInt16, true),
+        Field::new("strand", DataType::Utf8, true),
     ];
+    fields.truncate(bed_fields.count());
     // Add coordinate system metadata to schema
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -63,8 +83,8 @@ fn determine_schema(coordinate_system_zero_based: bool) -> datafusion::common::R
 /// A DataFusion TableProvider for reading BED files
 ///
 /// This struct implements the [`TableProvider`] trait to enable SQL queries over BED files.
-/// It supports both local and remote (cloud) storage backends, with configurable
-/// parallelism and compression handling.
+/// It supports local and remote storage backends and streams a single partition
+/// with configurable batch size and compression handling.
 ///
 /// # Example
 ///
@@ -120,7 +140,7 @@ impl BedTableProvider {
         object_storage_options: Option<ObjectStorageOptions>,
         coordinate_system_zero_based: bool,
     ) -> datafusion::common::Result<Self> {
-        let schema = determine_schema(coordinate_system_zero_based)?;
+        let schema = determine_schema(bed_fields, coordinate_system_zero_based)?;
         Ok(Self {
             file_path,
             bed_fields,
@@ -136,7 +156,6 @@ impl TableProvider for BedTableProvider {
     /// Returns `self` as `Any` for dynamic type casting
     fn as_any(&self) -> &dyn Any {
         self
-        // todo!()
     }
 
     /// Returns the schema of the table
@@ -147,7 +166,6 @@ impl TableProvider for BedTableProvider {
     /// Returns the table type (always Base for BED files)
     fn table_type(&self) -> TableType {
         TableType::Base
-        // todo!()
     }
 
     /// Creates an execution plan for scanning the BED file
@@ -167,38 +185,20 @@ impl TableProvider for BedTableProvider {
     ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
         debug!("BedTableProvider::scan");
 
-        fn project_schema(schema: &SchemaRef, projection: Option<&Vec<usize>>) -> SchemaRef {
-            match projection {
-                Some(indices) if indices.is_empty() => {
-                    // For empty projections (COUNT(*)), use a dummy field with preserved metadata
-                    Arc::new(Schema::new_with_metadata(
-                        vec![Field::new("dummy", DataType::Null, true)],
-                        schema.metadata().clone(),
-                    ))
-                }
-                Some(indices) => {
-                    let projected_fields: Vec<Field> =
-                        indices.iter().map(|&i| schema.field(i).clone()).collect();
-                    Arc::new(Schema::new_with_metadata(
-                        projected_fields,
-                        schema.metadata().clone(),
-                    ))
-                }
-                None => schema.clone(),
-            }
-        }
-
-        let schema = project_schema(&self.schema, projection);
+        let schema = match projection {
+            Some(indices) => Arc::new(self.schema.project(indices)?),
+            None => self.schema.clone(),
+        };
 
         Ok(Arc::new(BedExec {
             cache: Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(schema.clone()),
                 Partitioning::UnknownPartitioning(1),
-                EmissionType::Final,
+                EmissionType::Incremental,
                 Boundedness::Bounded,
             )),
             file_path: self.file_path.clone(),
-            bed_fields: self.bed_fields.clone(),
+            bed_fields: self.bed_fields,
             schema: schema.clone(),
             projection: projection.cloned(),
             limit,
