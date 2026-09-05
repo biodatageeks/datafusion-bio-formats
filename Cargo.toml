@@ -20,8 +20,8 @@ edition = "2024"
 
 
 [workspace.dependencies]
-datafusion = { version = "=53.0.0", default-features = false, features = ["nested_expressions", "crypto_expressions", "datetime_expressions", "encoding_expressions", "regex_expressions", "string_expressions", "unicode_expressions", "parquet", "recursive_protection", "sql"] }
-datafusion-execution = "=53.0.0"
+datafusion = { version = "=55.0.0", default-features = false, features = ["nested_expressions", "crypto_expressions", "datetime_expressions", "encoding_expressions", "regex_expressions", "string_expressions", "unicode_expressions", "parquet", "recursive_protection", "sql"] }
+datafusion-execution = "=55.0.0"
 async-trait = "0.1.85"
 opendal = { git = "https://github.com/apache/opendal.git", rev = "1755db1da44e0aad050cb1d62aebbb0b64266037", features = ["services-gcs", "services-s3", "blocking", "services-azblob", "services-http"] }
 noodles = { git = "https://github.com/biodatageeks/noodles.git", rev = "42a3c0165617b7b8f9f5c5905287968eef92e31e", features = ["bam", "vcf", "bgzf", "async"] }

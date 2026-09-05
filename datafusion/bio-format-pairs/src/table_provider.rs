@@ -30,7 +30,7 @@ use datafusion_bio_format_core::object_storage::{
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use datafusion_bio_format_core::record_filter::can_push_down_record_filter;
 use log::debug;
-use std::any::Any;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -168,10 +168,6 @@ impl PairsTableProvider {
 
 #[async_trait]
 impl TableProvider for PairsTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

@@ -12,7 +12,7 @@ use datafusion::physical_plan::{
 use datafusion_bio_format_core::COORDINATE_SYSTEM_METADATA_KEY;
 use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
 use log::debug;
-use std::any::Any;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -133,12 +133,6 @@ impl BedTableProvider {
 
 #[async_trait]
 impl TableProvider for BedTableProvider {
-    /// Returns `self` as `Any` for dynamic type casting
-    fn as_any(&self) -> &dyn Any {
-        self
-        // todo!()
-    }
-
     /// Returns the schema of the table
     fn schema(&self) -> SchemaRef {
         self.schema.clone()

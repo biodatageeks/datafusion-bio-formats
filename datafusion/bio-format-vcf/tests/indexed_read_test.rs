@@ -275,8 +275,7 @@ async fn test_vcf_contradictory_bounds_use_empty_plan() -> datafusion::error::Re
     let plan = provider.scan(&state, None, &filters, None).await?;
 
     assert!(
-        plan.as_any()
-            .is::<datafusion::physical_plan::empty::EmptyExec>(),
+        plan.is::<datafusion::physical_plan::empty::EmptyExec>(),
         "contradictory genomic bounds should produce an empty plan instead of a full indexed scan"
     );
 

@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -162,10 +161,6 @@ impl PgenTableProvider {
 
 #[async_trait]
 impl TableProvider for PgenTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

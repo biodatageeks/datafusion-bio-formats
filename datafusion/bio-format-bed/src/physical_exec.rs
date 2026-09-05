@@ -14,7 +14,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use log::{debug, info};
 
 use crate::table_provider::BEDFields;
-use std::any::Any;
+
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
@@ -70,14 +70,20 @@ impl DisplayAs for BedExec {
 }
 
 impl ExecutionPlan for BedExec {
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+    }
+
     /// Returns the name of this execution plan
     fn name(&self) -> &str {
         "BedExec"
-    }
-
-    /// Returns `self` as `Any` for dynamic type casting
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 
     /// Returns the properties (schema, partitioning, etc.) of this plan
