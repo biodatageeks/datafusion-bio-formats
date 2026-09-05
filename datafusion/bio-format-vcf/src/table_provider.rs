@@ -47,7 +47,7 @@ use noodles_vcf::header::Formats;
 use noodles_vcf::header::Infos;
 use noodles_vcf::header::record::value::map::format::{Number as FormatNumber, Type as FormatType};
 use noodles_vcf::header::record::value::map::info::{Number, Type as InfoType};
-use std::any::Any;
+
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -1296,10 +1296,6 @@ impl VcfTableProvider {
 
 #[async_trait]
 impl TableProvider for VcfTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

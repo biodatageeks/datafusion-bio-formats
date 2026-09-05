@@ -1187,7 +1187,7 @@ async fn exact_filters_limits_and_metadata_projection_skip_payloads() {
         .scan(&state, Some(&vec![0, 3]), &[filter], Some(1))
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
     assert_eq!(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
@@ -1219,7 +1219,7 @@ async fn empty_sample_selection_emits_empty_values_without_payload_reads() {
         .scan(&state, Some(&vec![8]), &[], Some(1))
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
     assert_eq!(
         probability_values(&batches[0], 0, 0),
@@ -1275,7 +1275,7 @@ async fn validates_local_bgi_and_reports_index_metadata() {
         .scan(&state, Some(&vec![0]), &[col("rsid").eq(lit("rs2"))], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
     assert_eq!(batches[0].num_rows(), 1);
     assert!(exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1 > 0);
@@ -1563,7 +1563,7 @@ async fn opening_the_provider_counts_toward_the_requests_a_scan_reports() {
         )
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     let batches = collect(plan.clone(), context.task_ctx()).await.unwrap();
     assert_eq!(
         batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
@@ -1814,7 +1814,7 @@ async fn an_index_downloaded_but_not_cached_still_reports_its_transfer() {
         .scan(&state, Some(&vec![0]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     collect(plan.clone(), context.task_ctx()).await.unwrap();
     let companion = exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1;
 
@@ -1851,7 +1851,7 @@ async fn an_index_rejected_by_a_size_limit_reports_no_bytes_read() {
         .scan(&state, Some(&vec![0]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     collect(plan.clone(), context.task_ctx()).await.unwrap();
     let companion = exec.metrics_snapshot()[GenotypeMetric::CompanionBytesRead as usize].1;
     assert_eq!(
@@ -1877,7 +1877,7 @@ async fn an_index_dropped_by_open_time_validation_still_reports_what_it_cost() {
         .scan(&state, Some(&vec![0]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     collect(plan.clone(), context.task_ctx()).await.unwrap();
     let metrics = exec.metrics_snapshot();
     assert!(
@@ -1933,7 +1933,7 @@ async fn an_index_row_the_catalog_rejects_follows_the_stale_index_policy() {
         .scan(&state, Some(&vec![0]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     collect(plan.clone(), context.task_ctx()).await.unwrap();
     let metrics = exec.metrics_snapshot();
     assert!(
@@ -2485,7 +2485,7 @@ async fn coalescing_bridges_metadata_gaps_without_collapsing_partitions() {
         .scan(&sequential.state(), Some(&vec![8]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     assert_eq!(
         datafusion::physical_plan::ExecutionPlan::properties(exec)
             .partitioning
@@ -3133,7 +3133,7 @@ async fn compressed_bytes_counts_payloads_not_bridged_metadata() {
         .scan(&context.state(), Some(&vec![8]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     // PrimaryBytesRead is already seeded with the header, catalog and probe
     // reads at planning, so only its growth during execution is the coalesced
     // range. Comparing against the total would pass even with the bug.
@@ -3351,7 +3351,7 @@ async fn coalesced_ranges_is_a_planning_count() {
         .scan(&context.state(), Some(&vec![8]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     let planned = exec.metrics_snapshot()[GenotypeMetric::CoalescedRanges as usize].1;
     assert!(
         planned > 0,
@@ -3383,7 +3383,7 @@ async fn preliminary_header_reads_are_counted() {
         .scan(&state, Some(&vec![0]), &[], None)
         .await
         .unwrap();
-    let exec = plan.as_any().downcast_ref::<BgenExec>().unwrap();
+    let exec = plan.downcast_ref::<BgenExec>().unwrap();
     collect(plan.clone(), context.task_ctx()).await.unwrap();
     let primary = exec.metrics_snapshot()[GenotypeMetric::PrimaryBytesRead as usize].1;
     assert!(

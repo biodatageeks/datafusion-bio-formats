@@ -19,7 +19,7 @@ use datafusion::physical_plan::{
 };
 use futures::StreamExt;
 use log::debug;
-use std::any::Any;
+
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -153,12 +153,19 @@ impl DisplayAs for VcfWriteExec {
 }
 
 impl ExecutionPlan for VcfWriteExec {
-    fn name(&self) -> &str {
-        "VcfWriteExec"
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn name(&self) -> &str {
+        "VcfWriteExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -520,8 +527,15 @@ mod tests {
 
         // with_new_children should preserve source_metadata
         let new_child = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema));
-        let rebuilt = write_exec.with_new_children(vec![new_child]).unwrap();
-        let rebuilt_exec = rebuilt.as_any().downcast_ref::<VcfWriteExec>().unwrap();
+        let rebuilt = write_exec
+            .replace_children(
+                vec![new_child],
+                datafusion::physical_plan::execution_plan::ReplaceChildrenOptions::new(
+                    datafusion::physical_plan::execution_plan::ChildrenPropertiesMode::Recompute,
+                ),
+            )
+            .unwrap();
+        let rebuilt_exec = rebuilt.downcast_ref::<VcfWriteExec>().unwrap();
         assert_eq!(rebuilt_exec.source_metadata, Some(source_meta));
     }
 }

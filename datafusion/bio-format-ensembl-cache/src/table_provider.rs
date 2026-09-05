@@ -26,7 +26,7 @@ use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use std::any::Any;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -616,10 +616,6 @@ macro_rules! impl_table_provider {
     ($provider:ty) => {
         #[async_trait]
         impl TableProvider for $provider {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-
             fn schema(&self) -> SchemaRef {
                 self.inner.schema()
             }

@@ -1,4 +1,3 @@
-use std::any::Any;
 use std::collections::HashSet;
 use std::fmt::{Debug, Formatter};
 use std::ops::Range;
@@ -153,12 +152,19 @@ impl DisplayAs for PgenExec {
 }
 
 impl ExecutionPlan for PgenExec {
-    fn name(&self) -> &str {
-        "PgenExec"
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn name(&self) -> &str {
+        "PgenExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {

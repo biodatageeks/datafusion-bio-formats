@@ -21,7 +21,7 @@ use datafusion_bio_format_core::object_storage::{
 };
 use datafusion_bio_format_core::partition_balancer::balance_partitions;
 use log::debug;
-use std::any::Any;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -189,10 +189,6 @@ impl GtfTableProvider {
 
 #[async_trait]
 impl TableProvider for GtfTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

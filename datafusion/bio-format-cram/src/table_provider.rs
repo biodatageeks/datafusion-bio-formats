@@ -23,7 +23,7 @@ use datafusion_bio_format_core::{
     BAM_TAG_TYPE_KEY, COORDINATE_SYSTEM_METADATA_KEY, extract_header_metadata,
 };
 use log::{debug, warn};
-use std::any::Any;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -759,10 +759,6 @@ impl CramTableProvider {
 
 #[async_trait]
 impl TableProvider for CramTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

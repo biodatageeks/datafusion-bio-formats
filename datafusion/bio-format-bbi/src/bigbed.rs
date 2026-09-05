@@ -1,6 +1,5 @@
 //! BigBed DataFusion table provider.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
@@ -127,10 +126,6 @@ impl BigBedTableProvider {
 
 #[async_trait]
 impl TableProvider for BigBedTableProvider {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
@@ -237,12 +232,19 @@ impl DisplayAs for BigBedExec {
 }
 
 impl ExecutionPlan for BigBedExec {
-    fn name(&self) -> &str {
-        "BigBedExec"
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(
+            &std::sync::Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        ) -> datafusion::common::Result<
+            datafusion::common::tree_node::TreeNodeRecursion,
+        >,
+    ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+        Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn name(&self) -> &str {
+        "BigBedExec"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
