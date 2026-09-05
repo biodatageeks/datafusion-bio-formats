@@ -32,7 +32,13 @@ async fn query(
     fields: BEDFields,
     sql: &str,
 ) -> datafusion::error::Result<Vec<RecordBatch>> {
-    let ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(2));
+    // Exercise repartition/coalescing even on single-core runners. Arrow 58.0
+    // panicked here in debug builds when reserving a two-row primitive buffer.
+    let ctx = SessionContext::new_with_config(
+        SessionConfig::new()
+            .with_batch_size(2)
+            .with_target_partitions(2),
+    );
     ctx.register_table(
         "bed",
         Arc::new(BedTableProvider::new(path, fields, None, true)?),

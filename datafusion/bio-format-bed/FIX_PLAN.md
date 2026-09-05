@@ -80,3 +80,17 @@ low-level callers must handle initialization errors. The `BedTableProvider::new`
 signature and BED4 schema used by polars-bio are preserved. BED3/BED5/BED6 now
 produce their declared schemas. Fields beyond the selected mode remain opaque;
 this work does not implement full BED12 block validation or output columns.
+
+## Debug-build CI follow-up
+
+The initial CI run exposed an Arrow 58.0.0 debug assertion in primitive batch
+coalescing: `Vec::reserve(2)` can allocate capacity 4, so asserting that capacity
+equals the requested batch size is invalid. Release tests did not exercise that
+assertion. The failure was reproduced locally with the same debug test command
+as CI.
+
+The lockfile now resolves the Arrow crates consistently to 58.4.0, which includes
+the upstream correction. The two-row regression batches remain in place, and
+the query helper explicitly requests two partitions so the repartition path is
+covered independently of available CPU cores. Validation now also includes
+`cargo test --locked -p datafusion-bio-format-bed` with debug assertions enabled.
