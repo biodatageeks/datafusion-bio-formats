@@ -1,6 +1,6 @@
 [package]
 name = "datafusion-bio-format-cooler"
-version = "1.12.0"
+version = "1.12.1"
 description = "Cooler (.cool/.mcool) Hi-C contact matrix support for Apache DataFusion"
 license.workspace = true
 authors.workspace = true
