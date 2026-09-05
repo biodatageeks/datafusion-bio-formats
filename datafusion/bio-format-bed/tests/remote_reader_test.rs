@@ -3,12 +3,12 @@ use datafusion::arrow::array::{Array, Int64Array, StringArray, UInt32Array};
 use datafusion::prelude::*;
 use datafusion_bio_format_bed::storage::BedRemoteReader;
 use datafusion_bio_format_bed::table_provider::{BEDFields, BedTableProvider};
-use datafusion_bio_format_core::object_storage::ObjectStorageOptions;
+use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use flate2::{Compression, write::GzEncoder};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
@@ -18,15 +18,22 @@ struct HttpFixture {
     address: SocketAddr,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    requests: Arc<Mutex<Vec<(String, bool)>>>,
 }
 
 impl HttpFixture {
     fn new(body: Vec<u8>, truncate: bool) -> Self {
+        Self::with_head_status(body, truncate, "200 OK")
+    }
+
+    fn with_head_status(body: Vec<u8>, truncate: bool, head_status: &'static str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = requests.clone();
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 let (mut socket, _) = match listener.accept() {
@@ -37,6 +44,10 @@ impl HttpFixture {
                     }
                     Err(error) => panic!("fixture server: {error}"),
                 };
+                // Accepted sockets inherit O_NONBLOCK on macOS. Read the HTTP
+                // headers with blocking I/O instead of dropping a connection
+                // whose request bytes have not arrived yet.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -68,6 +79,10 @@ impl HttpFixture {
                         range = Some((start.parse::<usize>().unwrap(), end.parse::<usize>().ok()));
                     }
                 }
+                thread_requests
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), range.is_some()));
                 if missing {
                     let _ = write!(
                         socket,
@@ -78,8 +93,12 @@ impl HttpFixture {
                 if method == "HEAD" {
                     let _ = write!(
                         socket,
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-                        body.len()
+                        "HTTP/1.1 {head_status}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        if head_status == "200 OK" {
+                            body.len()
+                        } else {
+                            0
+                        }
                     );
                     continue;
                 }
@@ -120,11 +139,196 @@ impl HttpFixture {
             address,
             stop,
             thread: Some(thread),
+            requests,
         }
     }
 
     fn url(&self) -> String {
         format!("http://{}/records.bed", self.address)
+    }
+}
+
+#[tokio::test]
+async fn http_get_only_sources_support_all_compression_modes() {
+    for (compression, compression_type) in [
+        ("plain", CompressionType::NONE),
+        ("gzip", CompressionType::GZIP),
+        ("bgzf", CompressionType::BGZF),
+    ] {
+        for explicit in [false, true] {
+            let server = HttpFixture::with_head_status(
+                encoded(b"chr1\t0\t5\nchr1\t5\t8\nchr1\t8\t9", compression),
+                false,
+                "403 Forbidden",
+            );
+            let options = ObjectStorageOptions {
+                compression_type: explicit.then_some(compression_type.clone()),
+                max_retries: Some(0),
+                timeout: Some(2),
+                ..Default::default()
+            };
+            let ctx = context(server.url(), BEDFields::BED4, false, Some(options)).await;
+            let batches = ctx
+                .sql("SELECT start, \"end\", name FROM bed")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap_or_else(|error| panic!("{compression}, explicit={explicit}: {error}"));
+            let coordinates: Vec<_> = batches
+                .iter()
+                .flat_map(|batch| {
+                    let starts = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap();
+                    let ends = batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<UInt32Array>()
+                        .unwrap();
+                    assert_eq!(batch.column(2).null_count(), batch.num_rows());
+                    starts
+                        .values()
+                        .iter()
+                        .copied()
+                        .zip(ends.values().iter().copied())
+                })
+                .collect();
+            assert_eq!(coordinates, [(1, 5), (6, 8), (9, 9)]);
+            let requests = server.requests.lock().unwrap();
+            assert!(requests.iter().any(|(method, _)| method == "HEAD"));
+            assert!(
+                requests
+                    .iter()
+                    .any(|(method, range)| method == "GET" && !range)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_tiny_and_empty_objects_auto_detect_compression() {
+    for head_status in ["200 OK", "403 Forbidden"] {
+        for compression in ["plain", "gzip", "bgzf"] {
+            for (data, expected_rows) in [(b"".as_slice(), 0), (b"#empty", 0), (b"c\t0\t0", 1)] {
+                let server =
+                    HttpFixture::with_head_status(encoded(data, compression), false, head_status);
+                let ctx = context(server.url(), BEDFields::BED4, true, None).await;
+                let batches = ctx
+                    .sql("SELECT * FROM bed")
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .unwrap_or_else(|error| {
+                        panic!("{head_status}, {compression}, {data:?}: {error}")
+                    });
+                assert_eq!(
+                    batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                    expected_rows
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_head_fallback_preserves_missing_and_truncated_response_errors() {
+    for compression in ["plain", "gzip", "bgzf"] {
+        for truncate in [false, true] {
+            let server = HttpFixture::with_head_status(
+                encoded(b"chr1\t0\t5\nchr1\t5\t8\n", compression),
+                truncate,
+                "403 Forbidden",
+            );
+            let options = ObjectStorageOptions {
+                compression_type: Some(match compression {
+                    "plain" => CompressionType::NONE,
+                    "gzip" => CompressionType::GZIP,
+                    _ => CompressionType::BGZF,
+                }),
+                max_retries: Some(0),
+                timeout: Some(2),
+                ..Default::default()
+            };
+            let url = if truncate {
+                server.url()
+            } else {
+                format!("http://{}/missing", server.address)
+            };
+            let ctx = context(url, BEDFields::BED4, true, Some(options)).await;
+            let error = ctx
+                .sql("SELECT * FROM bed")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap_err();
+            if truncate {
+                let requests = server.requests.lock().unwrap();
+                assert!(
+                    requests
+                        .iter()
+                        .any(|(method, range)| method == "GET" && !range),
+                    "{error}"
+                );
+            } else {
+                assert!(error.to_string().contains("NotFound"), "{error}");
+                assert_eq!(*server.requests.lock().unwrap(), [("HEAD".into(), false)]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn http_head_fallback_preserves_record_and_compression_errors() {
+    for compression in ["plain", "gzip", "bgzf"] {
+        for invalid in [b"chr1\t5".as_slice(), b"chr1\t5\t8\t\xff"] {
+            let server = HttpFixture::with_head_status(
+                encoded(invalid, compression),
+                false,
+                "403 Forbidden",
+            );
+            let ctx = context(server.url(), BEDFields::BED4, true, None).await;
+            let error = ctx
+                .sql("SELECT COUNT(*) FROM bed")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("BED line 1"),
+                "{compression}: {error}"
+            );
+        }
+    }
+    for compression in ["gzip", "bgzf"] {
+        let mut bytes = encoded(b"chr1\t0\t5\nchr1\t5\t8\n", compression);
+        bytes.truncate(bytes.len() / 2);
+        // HTTP delivers the complete advertised body; the compressed data itself
+        // is incomplete, so this exercises the decoder after a successful GET.
+        let server = HttpFixture::with_head_status(bytes, false, "403 Forbidden");
+        let ctx = context(server.url(), BEDFields::BED4, true, None).await;
+        assert!(
+            ctx.sql("SELECT * FROM bed")
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .is_err(),
+            "{compression}"
+        );
+        assert!(
+            server
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(method, range)| method == "GET" && !range)
+        );
     }
 }
 
@@ -219,6 +423,21 @@ async fn http_bed3_is_consistent_for_plain_gzip_and_bgzf() {
                     .value(0),
                 3
             );
+            // A server that supports HEAD should retain the chunked/range path.
+            let requests = server.requests.lock().unwrap();
+            assert!(requests.iter().any(|(method, _)| method == "HEAD"));
+            assert!(
+                requests
+                    .iter()
+                    .any(|(method, range)| method == "GET" && *range)
+            );
+            // Compression detection uses a bounded prefix of a sequential GET;
+            // the full scan after a successful HEAD must still use a range.
+            for pair in requests.windows(2) {
+                if pair[0].0 == "HEAD" {
+                    assert_eq!(pair[1], ("GET".into(), true));
+                }
+            }
         }
     }
 }
@@ -317,26 +536,28 @@ async fn http_missing_object_and_truncated_response_are_errors() {
 #[tokio::test]
 async fn http_gzip_members_can_split_a_record() {
     let data = b"chr1\t0\t5\nchr1\t5\t8\nchr1\t8\t9\n";
-    let bytes = data
+    let bytes: Vec<_> = data
         .chunks(4)
         .flat_map(|chunk| encoded(chunk, "gzip"))
         .collect();
-    let server = HttpFixture::new(bytes, false);
-    let ctx = context(server.url(), BEDFields::BED4, true, None).await;
-    let batches = ctx
-        .sql("SELECT COUNT(*) FROM bed")
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    assert_eq!(
-        batches[0]
-            .column(0)
-            .as_any()
-            .downcast_ref::<Int64Array>()
+    for head_status in ["200 OK", "403 Forbidden"] {
+        let server = HttpFixture::with_head_status(bytes.clone(), false, head_status);
+        let ctx = context(server.url(), BEDFields::BED4, true, None).await;
+        let batches = ctx
+            .sql("SELECT COUNT(*) FROM bed")
+            .await
             .unwrap()
-            .value(0),
-        3
-    );
+            .collect()
+            .await
+            .unwrap();
+        assert_eq!(
+            batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            3
+        );
+    }
 }

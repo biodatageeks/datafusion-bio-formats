@@ -86,6 +86,15 @@ validates the records it consumes.
 The remote constructor now returns `Result` instead of panicking on open or
 compression-detection errors; callers must handle it with `?` or equivalent.
 `BedLocalReader::with_options` accepts explicit compression options.
+The remote `read_records().await` and `lines().await` signatures are preserved
+for compatibility; constructing these streams does not perform I/O.
+
+HTTP scans keep chunked range reads when size discovery succeeds. If a
+GET-scoped signed URL denies the HEAD preflight, they retry with a sequential
+GET before applying the plain, multi-member gzip, or BGZF decoder. Missing
+objects and failures while reading or decoding still return errors.
+Automatic HTTP compression detection reads up to 18 bytes and accepts normal
+EOF, so empty files and BED records shorter than the probe are supported.
 
 Low-level `N=4` readers accept BED3 and pad its absent name with `.`. Low-level
 `N=5`/`N=6` readers require at least that many fields. The table provider reads the

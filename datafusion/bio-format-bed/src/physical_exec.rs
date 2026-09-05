@@ -116,6 +116,8 @@ fn open_records(
     path: String,
     options: ObjectStorageOptions,
 ) -> impl Stream<Item = io::Result<Record<3>>> {
+    // Parse the three required fields in every output mode. Columns::push
+    // decodes optional fields and supplies nulls when they are absent.
     try_stream! {
         match get_storage_type(path.clone()) {
             StorageType::LOCAL => {
@@ -208,7 +210,12 @@ impl Columns {
                 .filter(|value| *value != ".")
                 .map(|value| {
                     let value = value.to_string();
-                    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    if value.is_empty() {
+                        return Err(invalid_data(
+                            "score must not be empty; use '.' for a missing score",
+                        ));
+                    }
+                    if !value.bytes().all(|b| b.is_ascii_digit()) {
                         return Err(invalid_data("score must be an integer between 0 and 1000"));
                     }
                     let score: u16 = value

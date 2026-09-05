@@ -4,8 +4,8 @@ use async_compression::tokio::bufread::GzipDecoder;
 use async_stream::try_stream;
 use bytes::Bytes;
 use datafusion_bio_format_core::object_storage::{
-    CompressionType, ObjectStorageOptions, get_compression_type, get_remote_stream,
-    get_remote_stream_bgzf_async, get_remote_stream_gz_async, gzip_multi_member_decoder,
+    CompressionType, ObjectStorageOptions, RemoteObject, StorageType, get_compression_type,
+    get_remote_stream, get_storage_type, gzip_multi_member_decoder,
 };
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
@@ -18,6 +18,20 @@ use opendal::FuturesBytesStream;
 use std::fs::File;
 use std::io::{BufRead, Cursor, Error};
 use tokio_util::io::StreamReader;
+
+async fn get_remote_bed_stream(
+    file_path: String,
+    options: ObjectStorageOptions,
+) -> Result<FuturesBytesStream, Error> {
+    if matches!(get_storage_type(file_path.clone()), StorageType::HTTP) {
+        // GET-scoped signed URLs can refuse HEAD. Keep chunked reads when size
+        // discovery works, and retry as a sequential GET only when it is refused.
+        let object = RemoteObject::open(file_path, options).await?;
+        Ok(object.stream_with_size_preflight_fallback().await?)
+    } else {
+        Ok(get_remote_stream(file_path, options, None).await?)
+    }
+}
 
 /// Creates a remote BGZF-compressed BED reader from cloud storage
 ///
@@ -36,7 +50,8 @@ pub async fn get_remote_bed_bgzf_reader<const N: usize>(
     async_reader::Reader<bgzf::r#async::io::Reader<StreamReader<FuturesBytesStream, Bytes>>, N>,
     Error,
 > {
-    let inner = get_remote_stream_bgzf_async(file_path.clone(), object_storage_options).await?;
+    let stream = get_remote_bed_stream(file_path, object_storage_options).await?;
+    let inner = bgzf::r#async::io::Reader::new(StreamReader::new(stream));
     let reader = async_reader::Reader::new(inner);
     Ok(reader)
 }
@@ -61,10 +76,8 @@ pub async fn get_remote_bed_gz_reader<const N: usize>(
     >,
     Error,
 > {
-    // get_remote_stream_gz_async is multi-member aware (sets multiple_members(true)).
-    let stream = tokio::io::BufReader::new(
-        get_remote_stream_gz_async(file_path.clone(), object_storage_options).await?,
-    );
+    let stream = get_remote_bed_stream(file_path, object_storage_options).await?;
+    let stream = tokio::io::BufReader::new(gzip_multi_member_decoder(StreamReader::new(stream)));
     let reader = async_reader::Reader::new(stream);
     Ok(reader)
 }
@@ -83,7 +96,7 @@ pub async fn get_remote_bed_reader<const N: usize>(
     file_path: String,
     object_storage_options: ObjectStorageOptions,
 ) -> Result<async_reader::Reader<StreamReader<FuturesBytesStream, Bytes>, N>, Error> {
-    let stream = get_remote_stream(file_path.clone(), object_storage_options, None).await?;
+    let stream = get_remote_bed_stream(file_path, object_storage_options).await?;
     let reader = async_reader::Reader::new(StreamReader::new(stream));
     Ok(reader)
 }
@@ -197,7 +210,7 @@ macro_rules! impl_bed_remote_reader {
                     info!("Creating remote BED reader: {}", object_storage_options);
                     let compression_type = get_compression_type(
                         file_path.clone(),
-                        object_storage_options.clone().compression_type,
+                        object_storage_options.compression_type.clone(),
                         object_storage_options.clone(),
                     )
                     .await
@@ -221,6 +234,9 @@ macro_rules! impl_bed_remote_reader {
                 }
 
                 /// Returns a stream of BED records from the remote reader
+                ///
+                /// Stream construction is immediate; the async signature is
+                /// retained for compatibility with existing callers.
                 pub async fn read_records(&mut self) -> BoxStream<'_, Result<Record<$n>, Error>> {
                     match self {
                         BedRemoteReader::BGZF(reader) => reader.records().boxed(),
@@ -230,6 +246,9 @@ macro_rules! impl_bed_remote_reader {
                 }
 
                 /// Returns a stream of lines from the remote reader
+                ///
+                /// Stream construction is immediate; the async signature is
+                /// retained for compatibility with existing callers.
                 pub async fn lines(&mut self) -> BoxStream<'_, Result<String, Error>> {
                     match self {
                         BedRemoteReader::BGZF(reader) => reader.lines().boxed(),

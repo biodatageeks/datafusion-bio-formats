@@ -94,3 +94,35 @@ the upstream correction. The two-row regression batches remain in place, and
 the query helper explicitly requests two partitions so the repartition path is
 covered independently of available CPU cores. Validation now also includes
 `cargo test --locked -p datafusion-bio-format-bed` with debug assertions enabled.
+
+## Review follow-up
+
+- Reproduced a GET-readable HTTP object failing at a denied HEAD preflight.
+  All three remote compression helpers now use the existing core size-preflight
+  fallback for HTTP, retaining chunked reads when HEAD succeeds.
+- Added four HTTP regression tests for automatic/explicit compression,
+  one-based projected values, missing objects, truncated responses, malformed
+  records and incomplete compressed bodies. Extended the existing tests to
+  assert the normal range path and multi-member gzip across the fallback.
+- The expanded cases also reproduced empty/tiny HTTP objects failing automatic
+  compression detection because a range stream expected exactly 18 bytes. HTTP
+  detection now consumes at most 18 bytes from a sequential stream and accepts
+  normal EOF, while propagating actual read failures. This shared core fix is
+  covered by the BED tests with and without HEAD permission.
+- Fixed the HTTP test fixture to use blocking accepted sockets explicitly;
+  otherwise macOS could drop connections before their request bytes arrived.
+- Documented why table scans parse BED3 for every output mode, and clarified
+  the error for an empty score. The optional-field regression checks this error.
+- Preserved the pre-existing public async `read_records`/`lines` signatures;
+  changing them solely to remove an immediately ready future would break
+  existing callers. Their docs now explain the compatibility choice.
+- The reported one-based coverage gap was already covered by
+  `one_based_outputs_1based_closed`,
+  `coordinates_handle_empty_intervals_and_uint32_boundaries`,
+  `generated_records_match_reference_across_batch_sizes`, and the HTTP matrix.
+- Dependency follow-up: evaluate replacing the pre-existing Noodles fork with
+  an upstream release once its record API supports these readers. Run the same
+  BED framing/width/coordinate matrix when migrating.
+- Validation: all 44 BED tests/doctests and all 142 core unit tests pass in debug
+  mode. Workspace Clippy (`--all-targets --all-features -- -D warnings`),
+  formatting and `git diff --check` also pass.

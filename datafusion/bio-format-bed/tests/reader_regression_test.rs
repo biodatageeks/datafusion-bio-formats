@@ -379,10 +379,16 @@ async fn validates_scores_and_strands_even_when_not_projected() {
                 let dir = TempDir::new().unwrap();
                 let path = fixture(&dir, content.as_bytes(), compression);
                 for sql in ["SELECT * FROM bed", "SELECT COUNT(*) FROM bed"] {
-                    assert!(
-                        query(path.clone(), mode, sql).await.is_err(),
-                        "{compression} {content}"
-                    );
+                    let error = query(path.clone(), mode, sql)
+                        .await
+                        .unwrap_err()
+                        .to_string();
+                    if content.ends_with("name\t") {
+                        assert!(
+                            error.contains("score must not be empty"),
+                            "{compression}: {error}"
+                        );
+                    }
                 }
             }
         }
