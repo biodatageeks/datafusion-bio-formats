@@ -1,0 +1,502 @@
+//! Integration tests for the Stockholm provider.
+//!
+//! Numeric expectations (63/722, 712/230, 63/724) come from `esl-alistat`; the
+//! first-row sequence prefixes are the fixture bytes themselves, because the
+//! reader is a verbatim passthrough. See polars-bio `tests/data/io/msa/README.md`.
+
+use datafusion::arrow::array::{Array, AsArray, RecordBatch};
+use datafusion::arrow::datatypes::{DataType, Field, Fields, Int64Type, UInt32Type};
+use datafusion::physical_plan::ExecutionPlanProperties;
+use datafusion::prelude::*;
+use datafusion_bio_format_msa::{StockholmTableProvider, read_stockholm_annotations};
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
+
+fn data(name: &str) -> String {
+    format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+fn ctx_for(path: &str, gs_fields: Option<Vec<String>>, target_partitions: usize) -> SessionContext {
+    let config = SessionConfig::new().with_target_partitions(target_partitions);
+    let ctx = SessionContext::new_with_config(config);
+    let provider = StockholmTableProvider::new(path.to_string(), None, gs_fields).unwrap();
+    ctx.register_table("t", Arc::new(provider)).unwrap();
+    ctx
+}
+
+async fn scan(name: &str, sql: &str) -> Vec<RecordBatch> {
+    let ctx = ctx_for(&data(name), None, 1);
+    ctx.sql(sql).await.unwrap().collect().await.unwrap()
+}
+
+fn rows(batches: &[RecordBatch]) -> usize {
+    batches.iter().map(|b| b.num_rows()).sum()
+}
+
+fn strings(batches: &[RecordBatch], col: &str) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    for b in batches {
+        let arr = b.column_by_name(col).unwrap();
+        match arr.data_type() {
+            DataType::Utf8 => {
+                let a = arr.as_string::<i32>();
+                out.extend((0..a.len()).map(|i| a.is_valid(i).then(|| a.value(i).to_string())));
+            }
+            DataType::LargeUtf8 => {
+                let a = arr.as_string::<i64>();
+                out.extend((0..a.len()).map(|i| a.is_valid(i).then(|| a.value(i).to_string())));
+            }
+            other => panic!("unexpected type for {col}: {other}"),
+        }
+    }
+    out
+}
+
+/// (tag, value) pairs of one row's annotation bag.
+type TagList = Vec<(String, Option<String>)>;
+
+/// Decodes a `List<Struct<tag, value>>` column into per-row (tag, value) vectors;
+/// `None` for null rows.
+fn tag_lists(batches: &[RecordBatch], col: &str) -> Vec<Option<TagList>> {
+    let mut out = Vec::new();
+    for b in batches {
+        let list = b.column_by_name(col).unwrap().as_list::<i32>();
+        for i in 0..list.len() {
+            if !list.is_valid(i) {
+                out.push(None);
+                continue;
+            }
+            let item = list.value(i);
+            let st = item.as_struct();
+            let tags = st.column_by_name("tag").unwrap().as_string::<i32>();
+            let vals = st.column_by_name("value").unwrap().as_string::<i32>();
+            out.push(Some(
+                (0..st.len())
+                    .map(|j| {
+                        (
+                            tags.value(j).to_string(),
+                            vals.is_valid(j).then(|| vals.value(j).to_string()),
+                        )
+                    })
+                    .collect(),
+            ));
+        }
+    }
+    out
+}
+
+fn annotation_bag_type() -> DataType {
+    DataType::List(Arc::new(Field::new(
+        "item",
+        DataType::Struct(Fields::from(vec![
+            Field::new("tag", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, true),
+        ])),
+        true,
+    )))
+}
+
+#[tokio::test]
+async fn pfam_seed_schema_and_row_count() {
+    let batches = scan("PF00001.sto", "SELECT * FROM t").await;
+    assert_eq!(rows(&batches), 63);
+    let schema = batches[0].schema();
+    let fields: Vec<(&str, &DataType, bool)> = schema
+        .fields()
+        .iter()
+        .map(|f| (f.name().as_str(), f.data_type(), f.is_nullable()))
+        .collect();
+    let bag = annotation_bag_type();
+    assert_eq!(
+        fields,
+        vec![
+            ("alignment_id", &DataType::Utf8, false),
+            ("name", &DataType::Utf8, false),
+            ("sequence", &DataType::LargeUtf8, false),
+            ("gs", &bag, true),
+            ("gr", &bag, true),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn pfam_seed_rows_carry_id_name_sequence_and_gs() {
+    let batches = scan("PF00001.sto", "SELECT * FROM t").await;
+    let ids: HashSet<String> = strings(&batches, "alignment_id")
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(ids, HashSet::from(["7tm_1".to_string()]));
+    let names = strings(&batches, "name");
+    assert_eq!(names[0].as_deref(), Some("NPY1R_HUMAN/57-320"));
+    let seqs: Vec<String> = strings(&batches, "sequence")
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(seqs.iter().all(|s| s.len() == 722));
+    assert!(
+        seqs[0].starts_with("GNLALIIIILK.QKE..MRN.VT..NILIVNLSFSDLLVAI.....MCLPFTF.VYTL..MDHWVF")
+    );
+    let gs = tag_lists(&batches, "gs");
+    assert_eq!(
+        gs[0],
+        Some(vec![("AC".to_string(), Some("P25929.1".to_string()))])
+    );
+    // No #=GR lines in the Pfam seed -> null bag.
+    assert!(tag_lists(&batches, "gr").iter().all(|g| g.is_none()));
+}
+
+#[tokio::test]
+async fn interleaved_rfam_seed_is_concatenated_across_blocks() {
+    let batches = scan("RF00001.sto", "SELECT * FROM t").await;
+    assert_eq!(rows(&batches), 712);
+    let names: Vec<String> = strings(&batches, "name").into_iter().flatten().collect();
+    assert_eq!(names[0], "X01556.1/3-118");
+    assert_eq!(
+        names.iter().collect::<HashSet<_>>().len(),
+        712,
+        "one row per name"
+    );
+    let seqs: Vec<String> = strings(&batches, "sequence")
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(
+        seqs.iter().all(|s| s.len() == 230),
+        "two blocks of 200 + 30"
+    );
+    assert!(seqs[0].starts_with("--CUUGAC-GA-U-C-AU-AGA----GC-G-U-U-G---GA----------A-CC-A"));
+    // The second block starts right where the first ended.
+    assert!(seqs[0][200..].starts_with("--AGUA----GG-U-CA-UC--G-UCAAGC"));
+    let ids: HashSet<String> = strings(&batches, "alignment_id")
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(ids, HashSet::from(["5S_rRNA".to_string()]));
+}
+
+#[tokio::test]
+async fn hmmalign_output_carries_per_residue_pp_in_gr() {
+    let batches = scan("PF00001_hmmalign.sto", "SELECT * FROM t").await;
+    assert_eq!(rows(&batches), 63);
+    let seqs: Vec<String> = strings(&batches, "sequence")
+        .into_iter()
+        .flatten()
+        .collect();
+    assert!(seqs.iter().all(|s| s.len() == 724));
+    for (seq, gr) in seqs.iter().zip(tag_lists(&batches, "gr")) {
+        let gr = gr.expect("hmmalign writes #=GR PP for every sequence");
+        let pp = gr.iter().find(|(t, _)| t == "PP").expect("PP tag");
+        assert_eq!(
+            pp.1.as_ref().unwrap().len(),
+            seq.len(),
+            "PP concatenated across blocks"
+        );
+    }
+}
+
+#[tokio::test]
+async fn multi_alignment_file_yields_rows_for_every_alignment() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("multi.sto");
+    let mut text = std::fs::read_to_string(data("PF00001.sto")).unwrap();
+    text.push_str(&std::fs::read_to_string(data("RF00001.sto")).unwrap());
+    std::fs::write(&path, text).unwrap();
+
+    let ctx = ctx_for(path.to_str().unwrap(), None, 1);
+    let batches = ctx
+        .sql(
+            "SELECT alignment_id, count(*) AS n FROM t GROUP BY alignment_id ORDER BY alignment_id",
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let mut counts = BTreeMap::new();
+    for b in &batches {
+        let ids = b.column(0).as_string::<i32>();
+        let ns = b.column(1).as_primitive::<Int64Type>();
+        for i in 0..b.num_rows() {
+            counts.insert(ids.value(i).to_string(), ns.value(i));
+        }
+    }
+    assert_eq!(
+        counts,
+        BTreeMap::from([("5S_rRNA".into(), 712), ("7tm_1".into(), 63)])
+    );
+}
+
+#[tokio::test]
+async fn multi_alignment_file_is_partitioned_and_rows_are_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("multi.sto");
+    let mut text = std::fs::read_to_string(data("PF00001.sto")).unwrap();
+    text.push_str(&std::fs::read_to_string(data("RF00001.sto")).unwrap());
+    text.push_str(&std::fs::read_to_string(data("PF00001_hmmalign.sto")).unwrap());
+    std::fs::write(&path, text).unwrap();
+    let p = path.to_str().unwrap();
+
+    let single = ctx_for(p, None, 1);
+    let one = single.sql("SELECT * FROM t").await.unwrap();
+    assert_eq!(
+        one.clone()
+            .create_physical_plan()
+            .await
+            .unwrap()
+            .output_partitioning()
+            .partition_count(),
+        1
+    );
+    let one = one.collect().await.unwrap();
+
+    let multi = ctx_for(p, None, 3);
+    let many = multi.sql("SELECT * FROM t").await.unwrap();
+    let plan = many.clone().create_physical_plan().await.unwrap();
+    assert_eq!(plan.output_partitioning().partition_count(), 3);
+    let many = many.collect().await.unwrap();
+
+    assert_eq!(rows(&one), 63 + 712 + 63);
+    let key = |b: &[RecordBatch]| -> Vec<(String, String, String)> {
+        let mut v: Vec<_> = strings(b, "alignment_id")
+            .into_iter()
+            .zip(strings(b, "name"))
+            .zip(strings(b, "sequence"))
+            .map(|((a, n), s)| (a.unwrap(), n.unwrap(), s.unwrap()))
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(key(&one), key(&many));
+}
+
+#[tokio::test]
+async fn single_alignment_file_stays_one_partition_regardless_of_target_partitions() {
+    let ctx = ctx_for(&data("PF00001.sto"), None, 8);
+    let df = ctx.sql("SELECT * FROM t").await.unwrap();
+    let plan = df.clone().create_physical_plan().await.unwrap();
+    assert_eq!(plan.output_partitioning().partition_count(), 1);
+    assert_eq!(rows(&df.collect().await.unwrap()), 63);
+}
+
+#[tokio::test]
+async fn ordinal_fallback_when_no_id_or_ac() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("anon.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\nseqA ACGT\n//\n# STOCKHOLM 1.0\n#=GF AC ACC2\nseqB ACGT\n//\n# STOCKHOLM 1.0\nseqC ACGT\n//\n",
+    )
+    .unwrap();
+    let ctx = ctx_for(path.to_str().unwrap(), None, 1);
+    let batches = ctx
+        .sql("SELECT alignment_id FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(
+        strings(&batches, "alignment_id"),
+        vec![Some("0".into()), Some("ACC2".into()), Some("2".into())]
+    );
+}
+
+#[tokio::test]
+async fn missing_trailing_terminator_still_yields_rows() {
+    let batches = scan("missing_terminator.sto", "SELECT * FROM t").await;
+    assert_eq!(rows(&batches), 63);
+}
+
+#[tokio::test]
+async fn wrong_header_is_an_error_naming_the_path() {
+    let ctx = ctx_for(&data("wrong_header.sto"), None, 1);
+    let err = ctx
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("wrong_header.sto"), "{err}");
+    assert!(err.contains("# STOCKHOLM 1.0"), "{err}");
+}
+
+#[tokio::test]
+async fn empty_file_yields_no_rows() {
+    let batches = scan("empty.sto", "SELECT * FROM t").await;
+    assert_eq!(rows(&batches), 0);
+}
+
+#[tokio::test]
+async fn single_sequence_alignment() {
+    let batches = scan("single.sto", "SELECT * FROM t").await;
+    assert_eq!(
+        strings(&batches, "alignment_id"),
+        vec![Some("single".into())]
+    );
+    assert_eq!(strings(&batches, "name"), vec![Some("only".into())]);
+    assert_eq!(strings(&batches, "sequence"), vec![Some("ACDE.F-G".into())]);
+    assert_eq!(tag_lists(&batches, "gs"), vec![None]);
+    assert_eq!(tag_lists(&batches, "gr"), vec![None]);
+}
+
+#[tokio::test]
+async fn gs_fields_promote_named_features_and_keep_bag_with_sentinel() {
+    let ctx = ctx_for(
+        &data("PF00001.sto"),
+        Some(vec!["AC".into(), "DE".into()]),
+        1,
+    );
+    let batches = ctx
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let names: Vec<String> = batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    assert_eq!(
+        names,
+        ["alignment_id", "name", "sequence", "AC", "DE", "gr"]
+    );
+    let ac = strings(&batches, "AC");
+    assert_eq!(ac[0].as_deref(), Some("P25929.1"));
+    assert!(
+        strings(&batches, "DE").iter().all(|d| d.is_none()),
+        "no #=GS DE in the seed"
+    );
+
+    let ctx = ctx_for(
+        &data("PF00001.sto"),
+        Some(vec!["AC".into(), "gs".into()]),
+        1,
+    );
+    let batches = ctx
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let names: Vec<String> = batches[0]
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| f.name().clone())
+        .collect();
+    assert_eq!(
+        names,
+        ["alignment_id", "name", "sequence", "AC", "gs", "gr"]
+    );
+    assert_eq!(
+        tag_lists(&batches, "gs")[0],
+        Some(vec![("AC".to_string(), Some("P25929.1".to_string()))])
+    );
+}
+
+#[tokio::test]
+async fn compressed_inputs_match_plain() {
+    let plain = scan("PF00001.sto", "SELECT name, sequence FROM t").await;
+    for name in ["PF00001.sto.gz", "PF00001.sto.bgz"] {
+        let got = scan(name, "SELECT name, sequence FROM t").await;
+        assert_eq!(strings(&plain, "name"), strings(&got, "name"), "{name}");
+        assert_eq!(
+            strings(&plain, "sequence"),
+            strings(&got, "sequence"),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn projection_count_and_limit() {
+    let only_name = scan("PF00001.sto", "SELECT name FROM t").await;
+    assert_eq!(only_name[0].num_columns(), 1);
+    assert_eq!(rows(&only_name), 63);
+
+    let count = scan("RF00001.sto", "SELECT count(*) AS n FROM t").await;
+    assert_eq!(count[0].column(0).as_primitive::<Int64Type>().value(0), 712);
+
+    let limited = scan("RF00001.sto", "SELECT name FROM t LIMIT 10").await;
+    assert_eq!(rows(&limited), 10);
+}
+
+#[tokio::test]
+async fn annotations_preserve_repeated_gf_features_in_order() {
+    let batch = read_stockholm_annotations(data("PF00001.sto"), None)
+        .await
+        .unwrap();
+    let kinds = strings(std::slice::from_ref(&batch), "kind");
+    let features = strings(std::slice::from_ref(&batch), "feature");
+    let values = strings(std::slice::from_ref(&batch), "value");
+    let gf: Vec<&str> = kinds
+        .iter()
+        .zip(&features)
+        .filter(|(k, _)| k.as_deref() == Some("GF"))
+        .map(|(_, f)| f.as_deref().unwrap())
+        .collect();
+    assert_eq!(gf.len(), 49);
+    assert_eq!(&gf[..3], ["ID", "AC", "DE"]);
+    assert_eq!(gf.iter().filter(|f| **f == "DR").count(), 11);
+    assert_eq!(gf.iter().filter(|f| **f == "CC").count(), 10);
+    assert_eq!(values[0].as_deref(), Some("7tm_1"));
+    assert_eq!(values[1].as_deref(), Some("PF00001.27"));
+
+    let gc: Vec<(&str, usize)> = kinds
+        .iter()
+        .zip(&features)
+        .zip(&values)
+        .filter(|((k, _), _)| k.as_deref() == Some("GC"))
+        .map(|((_, f), v)| (f.as_deref().unwrap(), v.as_deref().unwrap().len()))
+        .collect();
+    assert_eq!(gc, vec![("seq_cons", 722), ("RF", 722)]);
+
+    let n = batch
+        .column_by_name("n_sequences")
+        .unwrap()
+        .as_primitive::<UInt32Type>();
+    let len = batch
+        .column_by_name("alignment_length")
+        .unwrap()
+        .as_primitive::<UInt32Type>();
+    assert!((0..batch.num_rows()).all(|i| n.value(i) == 63 && len.value(i) == 722));
+    let ids: HashSet<String> = strings(&[batch], "alignment_id")
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(ids, HashSet::from(["7tm_1".to_string()]));
+}
+
+#[tokio::test]
+async fn annotations_of_interleaved_file_concatenate_gc_across_blocks() {
+    let batch = read_stockholm_annotations(data("RF00001.sto"), None)
+        .await
+        .unwrap();
+    let kinds = strings(std::slice::from_ref(&batch), "kind");
+    let features = strings(std::slice::from_ref(&batch), "feature");
+    let values = strings(std::slice::from_ref(&batch), "value");
+    let gc: Vec<(&str, usize)> = kinds
+        .iter()
+        .zip(&features)
+        .zip(&values)
+        .filter(|((k, _), _)| k.as_deref() == Some("GC"))
+        .map(|((_, f), v)| (f.as_deref().unwrap(), v.as_deref().unwrap().len()))
+        .collect();
+    assert_eq!(gc, vec![("SS_cons", 230), ("RF", 230)]);
+    let n = batch
+        .column_by_name("n_sequences")
+        .unwrap()
+        .as_primitive::<UInt32Type>();
+    let len = batch
+        .column_by_name("alignment_length")
+        .unwrap()
+        .as_primitive::<UInt32Type>();
+    assert_eq!((n.value(0), len.value(0)), (712, 230));
+}
