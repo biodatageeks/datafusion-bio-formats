@@ -504,6 +504,33 @@ async fn a_zero_limit_reads_nothing() {
 }
 
 #[tokio::test]
+async fn a_zero_limit_does_not_touch_the_input() {
+    // Planning must not open the file either: no compression sniffing, no
+    // boundary scan. A path that cannot be opened at all proves it.
+    use datafusion::catalog::TableProvider;
+    use datafusion::physical_plan::collect;
+
+    let missing = format!(
+        "{}/tests/data/does-not-exist.sto",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    for target_partitions in [1, 4] {
+        let config = SessionConfig::new().with_target_partitions(target_partitions);
+        let ctx = SessionContext::new_with_config(config);
+        let provider = StockholmTableProvider::new(missing.clone(), None, None).unwrap();
+        let plan = provider
+            .scan(&ctx.state(), None, &[], Some(0))
+            .await
+            .unwrap_or_else(|e| {
+                panic!("target_partitions={target_partitions}: planning read the input: {e}")
+            });
+        assert_eq!(plan.output_partitioning().partition_count(), 1);
+        let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+        assert_eq!(rows(&batches), 0);
+    }
+}
+
+#[tokio::test]
 async fn a_positive_limit_is_never_multiplied_across_partitions() {
     let dir = tempfile::tempdir().unwrap();
     let path = three_alignment_file(dir.path());
