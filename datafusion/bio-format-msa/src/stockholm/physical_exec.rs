@@ -271,7 +271,15 @@ async fn record_batches(
         .await
         .map_err(|e| DataFusionError::Execution(format!("failed to open {file_path}: {e}")))?;
     let collect_sequences = columns.contains(&ColumnKind::Sequence);
-    let mut reader = StockholmReader::new(src, file_path, part.first_ordinal, collect_sequences);
+    // Only a partition that opens at byte 0 sees the input's compulsory header.
+    let at_input_start = part.range.as_ref().is_none_or(|r| r.start == 0);
+    let mut reader = StockholmReader::new_at(
+        src,
+        file_path,
+        part.first_ordinal,
+        at_input_start,
+        collect_sequences,
+    );
     let out_schema = schema.clone();
     let stream = try_stream! {
         let mut builders = RowBuilders::new(&columns);

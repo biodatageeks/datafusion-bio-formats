@@ -15,6 +15,11 @@ use crate::storage::{LineSource, read_line};
 use datafusion::common::DataFusionError;
 use std::collections::HashMap;
 
+/// Everything before the version in the compulsory first line.
+const STOCKHOLM_HEADER_PREFIX: &str = "# STOCKHOLM";
+/// The only format version this reader implements.
+const STOCKHOLM_VERSION: &str = "1.0";
+
 /// One sequence row of an alignment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SequenceRecord {
@@ -96,18 +101,35 @@ fn append_or_push(list: &mut Vec<(String, String)>, key: &str, value: &str) {
 }
 
 impl StockholmReader {
-    /// Creates a reader over `src`. `first_ordinal` seeds alignment numbering
-    /// (non-zero when reading a partition that does not start at the file's
-    /// first alignment). With `collect_sequences == false` rows are still
-    /// created but sequence text is not stored.
-    pub fn new(src: LineSource, path: String, first_ordinal: u64, collect_sequences: bool) -> Self {
+    /// Creates a reader over `src` positioned at the start of the input.
+    ///
+    /// With `collect_sequences == false` rows are still created but sequence
+    /// text is not stored.
+    pub fn new(src: LineSource, path: String, collect_sequences: bool) -> Self {
+        Self::new_at(src, path, 0, true, collect_sequences)
+    }
+
+    /// Creates a reader over one slice of an input.
+    ///
+    /// `first_ordinal` seeds alignment numbering, and `at_input_start` says
+    /// whether `src` begins at the first alignment of the whole input. Only
+    /// there is a `# STOCKHOLM 1.0` header compulsory: a partition that starts
+    /// mid-file may legitimately open on an alignment that omits its header,
+    /// and rejecting it would make the result depend on `target_partitions`.
+    pub fn new_at(
+        src: LineSource,
+        path: String,
+        first_ordinal: u64,
+        at_input_start: bool,
+        collect_sequences: bool,
+    ) -> Self {
         Self {
             src,
             path,
             line: Vec::new(),
             line_no: 0,
             next_ordinal: first_ordinal,
-            seen_alignment: false,
+            seen_alignment: !at_input_start,
             collect_sequences,
             pushed_back: false,
         }
@@ -144,16 +166,30 @@ impl StockholmReader {
                 return Ok(None);
             }
             let text = self.line_str()?;
-            if text.trim().is_empty() {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
                 continue;
             }
-            if text.starts_with("# STOCKHOLM") {
+            if let Some(version) = trimmed.strip_prefix(STOCKHOLM_HEADER_PREFIX) {
+                // Easel accepts trailing whitespace after the version but
+                // rejects every other suffix, `# STOCKHOLM 2.0` included.
+                if version.trim() != STOCKHOLM_VERSION {
+                    return Err(self.err(format!(
+                        "unsupported Stockholm header {trimmed:?}; expected '{STOCKHOLM_HEADER_PREFIX} {STOCKHOLM_VERSION}'"
+                    )));
+                }
                 break;
             }
             if !self.seen_alignment {
                 return Err(self.err(
                     "expected a '# STOCKHOLM 1.0' header line at the start of the Stockholm input",
                 ));
+            }
+            // Past the first alignment a bare `#` line is an ordinary comment,
+            // not the start of a headerless alignment. Treating it as data
+            // would emit an empty alignment and shift every later ordinal.
+            if trimmed.starts_with('#') && !trimmed.starts_with("#=G") {
+                continue;
             }
             // Lenient: a later alignment without its own header line.
             self.pushed_back = true;

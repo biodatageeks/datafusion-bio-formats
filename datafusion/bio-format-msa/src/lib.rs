@@ -43,11 +43,10 @@
 
 #![warn(missing_docs)]
 
-/// A2M / A3M provider and execution plan.
+// Each module carries its own `//!` docs; an outer `///` here would be merged
+// into them and resolved in this scope, breaking their intra-doc links.
 pub mod fastalike;
-/// Stockholm parser, provider, execution plan and annotation reader.
 pub mod stockholm;
-/// Line-oriented input over local and remote, plain / `gz` / `bgz` files.
 pub mod storage;
 
 pub use fastalike::{FastaLikeExec, FastaLikeTableProvider, MsaFlavor, fasta_like_schema};

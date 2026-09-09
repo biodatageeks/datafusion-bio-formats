@@ -303,6 +303,151 @@ async fn ordinal_fallback_when_no_id_or_ac() {
 }
 
 #[tokio::test]
+async fn later_alignments_without_a_header_survive_partitioning() {
+    // A later alignment may omit its own header; splitting the file must not
+    // turn that from a successful scan into a missing-header error.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("headerless.sto");
+    let mut text = String::from("# STOCKHOLM 1.0\n#=GF ID first\nseqA ACGT\n//\n");
+    for i in 1..6 {
+        text.push_str(&format!("#=GF ID a{i}\nseq{i} ACGT\n//\n"));
+    }
+    std::fs::write(&path, &text).unwrap();
+    let p = path.to_str().unwrap();
+
+    let expected: Vec<Option<String>> = ["first", "a1", "a2", "a3", "a4", "a5"]
+        .iter()
+        .map(|s| Some(s.to_string()))
+        .collect();
+    for partitions in [1, 3, 8] {
+        let ctx = ctx_for(p, None, partitions);
+        let batches = ctx
+            .sql("SELECT alignment_id FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap_or_else(|e| panic!("target_partitions={partitions}: {e}"));
+        let mut got = strings(&batches, "alignment_id");
+        got.sort();
+        let mut want = expected.clone();
+        want.sort();
+        assert_eq!(got, want, "target_partitions={partitions}");
+    }
+}
+
+#[tokio::test]
+async fn comment_between_alignments_does_not_consume_an_ordinal() {
+    // Easel reads this file as exactly two alignments; a generic comment
+    // between them must not be mistaken for a headerless alignment.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("comment.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\nseqA ACGT\n//\n\
+         # a generic comment between alignments\n\
+         # STOCKHOLM 1.0\nseqB ACGT\n//\n",
+    )
+    .unwrap();
+    let ctx = ctx_for(path.to_str().unwrap(), None, 1);
+    let batches = ctx
+        .sql("SELECT alignment_id, name FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(rows(&batches), 2);
+    assert_eq!(
+        strings(&batches, "alignment_id"),
+        vec![Some("0".into()), Some("1".into())]
+    );
+    assert_eq!(
+        strings(&batches, "name"),
+        vec![Some("seqA".into()), Some("seqB".into())]
+    );
+}
+
+#[tokio::test]
+async fn unsupported_header_versions_are_rejected() {
+    // Easel rejects every one of these with "missing Stockholm header".
+    let dir = tempfile::tempdir().unwrap();
+    for header in [
+        "# STOCKHOLM 2.0",
+        "# STOCKHOLM garbage",
+        "# STOCKHOLMX",
+        "#STOCKHOLM 1.0",
+    ] {
+        let path = dir.path().join("h.sto");
+        std::fs::write(&path, format!("{header}\nseqA ACGT\n//\n")).unwrap();
+        let ctx = ctx_for(path.to_str().unwrap(), None, 1);
+        let err = ctx
+            .sql("SELECT * FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("# STOCKHOLM 1.0"), "{header:?}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn header_tolerates_trailing_whitespace() {
+    // Easel accepts this.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ws.sto");
+    std::fs::write(&path, "# STOCKHOLM 1.0   \nseqA ACGT\n//\n").unwrap();
+    let ctx = ctx_for(path.to_str().unwrap(), None, 1);
+    let batches = ctx
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(rows(&batches), 1);
+}
+
+#[tokio::test]
+async fn local_file_uri_is_accepted() {
+    let uri = format!("file://{}", data("PF00001.sto"));
+    let ctx = ctx_for(&uri, None, 1);
+    let batches = ctx
+        .sql("SELECT name FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(rows(&batches), 63);
+}
+
+#[tokio::test]
+async fn local_file_uri_is_accepted_when_partitioning() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("multi.sto");
+    let mut text = std::fs::read_to_string(data("PF00001.sto")).unwrap();
+    text.push_str(&std::fs::read_to_string(data("RF00001.sto")).unwrap());
+    std::fs::write(&path, text).unwrap();
+    let uri = format!("file://{}", path.to_str().unwrap());
+    let ctx = ctx_for(&uri, None, 2);
+    let df = ctx.sql("SELECT name FROM t").await.unwrap();
+    assert_eq!(
+        df.clone()
+            .create_physical_plan()
+            .await
+            .unwrap()
+            .output_partitioning()
+            .partition_count(),
+        2,
+        "the boundary scan must resolve the file:// URI too"
+    );
+    assert_eq!(rows(&df.collect().await.unwrap()), 63 + 712);
+}
+
+#[tokio::test]
 async fn missing_trailing_terminator_still_yields_rows() {
     let batches = scan("missing_terminator.sto", "SELECT * FROM t").await;
     assert_eq!(rows(&batches), 63);
