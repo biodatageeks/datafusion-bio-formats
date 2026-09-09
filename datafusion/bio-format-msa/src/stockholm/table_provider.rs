@@ -1,7 +1,7 @@
 //! DataFusion table provider for Stockholm files.
 
 use crate::stockholm::physical_exec::{PartitionRange, StockholmExec};
-use crate::stockholm::reader::{STOCKHOLM_HEADER_PREFIX, has_alignment_content, is_terminator};
+use crate::stockholm::reader::{has_alignment_content, is_terminator, opens_alignment};
 use crate::storage::{is_local, local_path, resolve_compression};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
@@ -203,11 +203,16 @@ fn alignment_boundaries(path: &str) -> std::io::Result<Vec<Run>> {
                     end: offset,
                     alignments,
                 });
+                start = offset;
+                alignments = 0;
             }
-            start = offset;
-            alignments = 0;
+            // A terminator closing nothing — a leading `//`, or two in a row —
+            // yields no range. Leaving `start` where it is keeps those bytes in
+            // the next range, so the first range still begins at byte 0 and the
+            // reader there still sees the input's first line. Advancing past
+            // them would hide a missing header from a split scan only.
         } else if has_alignment_content(text) {
-            if text.trim_start().starts_with(STOCKHOLM_HEADER_PREFIX) {
+            if opens_alignment(text) {
                 // Each header opens an alignment, terminator or not.
                 alignments += 1;
             } else if alignments == 0 {

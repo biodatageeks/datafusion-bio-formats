@@ -169,6 +169,16 @@ fn split_ws(s: &str) -> (&str, &str) {
 /// unknown extension, which the parse loop ignores like any other comment.
 const MARKUP_PREFIXES: [&str; 4] = ["#=GF", "#=GS", "#=GC", "#=GR"];
 
+/// Whether `line` opens a new alignment mid-input.
+///
+/// Only the end is trimmed, so an indented `# STOCKHOLM 1.0` is not a header
+/// here — the parse loop reads it as sequence data. Shared with the
+/// partition-boundary scan, which counts alignments and would otherwise seed a
+/// later range with an ordinal the reader never reaches.
+pub fn opens_alignment(line: &str) -> bool {
+    line.trim_end().starts_with(STOCKHOLM_HEADER_PREFIX)
+}
+
 /// Whether `line` ends an alignment. Easel accepts surrounding whitespace, so
 /// `  //` terminates just as `//` does.
 ///
@@ -369,7 +379,7 @@ impl StockholmReader {
                     let (feature, value) = split_ws(rest);
                     append_or_push(&mut alignment.sequences[row].gr, feature, value);
                 }
-            } else if trimmed.starts_with("# STOCKHOLM") {
+            } else if opens_alignment(trimmed) {
                 // A new alignment began without a terminator: emit what we have.
                 self.pushed_back = true;
                 break;

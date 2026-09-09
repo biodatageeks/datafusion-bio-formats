@@ -493,6 +493,87 @@ async fn a_missing_internal_terminator_keeps_ordinals_stable_when_split() {
     }
 }
 
+/// Collects `(alignment_id, name)` at several partition counts, asserting the
+/// answer never depends on how the file was split.
+async fn ids_are_split_invariant(path: &str) -> Vec<(Option<String>, Option<String>)> {
+    let mut baseline: Vec<(Option<String>, Option<String>)> = Vec::new();
+    for partitions in [1, 2, 4] {
+        let ctx = ctx_for(path, None, partitions);
+        let batches = ctx
+            .sql("SELECT alignment_id, name FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut got: Vec<_> = strings(&batches, "alignment_id")
+            .into_iter()
+            .zip(strings(&batches, "name"))
+            .collect();
+        got.sort_by(|a, b| a.1.cmp(&b.1));
+        if baseline.is_empty() {
+            baseline = got;
+        } else {
+            assert_eq!(got, baseline, "target_partitions={partitions}");
+        }
+    }
+    baseline
+}
+
+#[tokio::test]
+async fn an_input_opening_with_a_terminator_is_rejected_however_it_is_split() {
+    // The leading `//` produces no alignment, so planning must not drop those
+    // bytes: if the first range started after them, a split scan would accept a
+    // file that a single-partition scan rejects for its missing header.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("leading_term.sto");
+    std::fs::write(&path, "//\nseqA ACGT\n//\nseqB ACGT\n//\n").unwrap();
+    let p = path.to_str().unwrap();
+
+    for partitions in [1, 2, 4] {
+        let ctx = ctx_for(p, None, partitions);
+        let err = ctx
+            .sql("SELECT * FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .expect_err(&format!(
+                "target_partitions={partitions}: a missing header must not become valid"
+            ))
+            .to_string();
+        assert!(err.contains("# STOCKHOLM 1.0"), "{partitions}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn an_indented_internal_header_is_counted_as_the_reader_counts_it() {
+    // The reader trims only the end inside an alignment, so an indented
+    // `# STOCKHOLM 1.0` there is sequence data, not a new alignment. Planning
+    // must agree or it seeds the next range one ordinal too high.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("indented_header.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\nseqA ACGT\n  # STOCKHOLM 1.0\nseqB ACGT\n//\n\
+         # STOCKHOLM 1.0\nseqC ACGT\n//\n\
+         # STOCKHOLM 1.0\nseqD ACGT\n//\n",
+    )
+    .unwrap();
+    let ids = ids_are_split_invariant(path.to_str().unwrap()).await;
+    // One alignment holds seqA, the indented line and seqB; then two more.
+    assert_eq!(
+        ids.iter().map(|(a, _)| a.clone()).collect::<Vec<_>>(),
+        vec![
+            Some("0".into()),
+            Some("0".into()),
+            Some("0".into()),
+            Some("1".into()),
+            Some("2".into())
+        ]
+    );
+}
+
 #[tokio::test]
 async fn unsupported_header_versions_are_rejected() {
     // Easel rejects every one of these with "missing Stockholm header".
