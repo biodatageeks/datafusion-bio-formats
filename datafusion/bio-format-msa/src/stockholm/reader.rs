@@ -15,10 +15,13 @@ use crate::storage::{LineSource, read_line};
 use datafusion::common::DataFusionError;
 use std::collections::HashMap;
 
-/// Everything before the version in the compulsory first line.
+/// The only first line this reader accepts, trailing whitespace aside. Easel
+/// requires exactly this spelling: it rejects `# STOCKHOLM1.0` and
+/// `# STOCKHOLM  1.0` as readily as `# STOCKHOLM 2.0`.
+const STOCKHOLM_HEADER: &str = "# STOCKHOLM 1.0";
+/// Anything opening with this is meant to be the header, so a mismatch is
+/// reported as an unsupported header rather than treated as a comment.
 const STOCKHOLM_HEADER_PREFIX: &str = "# STOCKHOLM";
-/// The only format version this reader implements.
-const STOCKHOLM_VERSION: &str = "1.0";
 
 /// One sequence row of an alignment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -34,15 +37,46 @@ pub struct SequenceRecord {
     pub gr: Vec<(String, String)>,
 }
 
+/// Which markup an alignment-level annotation came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationKind {
+    /// `#=GF`: per-file (per-alignment) free text.
+    Gf,
+    /// `#=GC`: per-column, one character per alignment column.
+    Gc,
+}
+
+impl AnnotationKind {
+    /// The two-letter label used in the long-format output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AnnotationKind::Gf => "GF",
+            AnnotationKind::Gc => "GC",
+        }
+    }
+}
+
+/// One alignment-level annotation line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileAnnotation {
+    /// `#=GF` or `#=GC`.
+    pub kind: AnnotationKind,
+    /// The feature name, e.g. `ID`, `DR`, `SS_cons`.
+    pub feature: String,
+    /// Free text for `#=GF`; for `#=GC` the value concatenated across blocks.
+    pub value: String,
+}
+
 /// One alignment (`# STOCKHOLM 1.0` … `//`).
 #[derive(Clone, Debug, Default)]
 pub struct Alignment {
     /// 0-based position of this alignment in the input.
     pub ordinal: u64,
-    /// `#=GF` annotations in file order (repeats preserved).
-    pub gf: Vec<(String, String)>,
-    /// `#=GC` annotations, each concatenated across blocks.
-    pub gc: Vec<(String, String)>,
+    /// `#=GF` and `#=GC` annotations in one list, in file order, so a consumer
+    /// can reconstruct the alignment header as written. `#=GF` repeats are kept
+    /// as separate entries; a `#=GC` feature appears once, at the position of
+    /// its first block, with the later blocks appended to its value.
+    pub annotations: Vec<FileAnnotation>,
     /// Sequence rows in first-appearance order.
     pub sequences: Vec<SequenceRecord>,
     /// Whether a `//` terminator was seen.
@@ -55,8 +89,12 @@ impl Alignment {
     /// `#=GF ID`, else `#=GF AC`, else the ordinal as a string.
     pub fn id(&self) -> String {
         for key in ["ID", "AC"] {
-            if let Some((_, v)) = self.gf.iter().find(|(k, _)| k == key) {
-                return v.clone();
+            if let Some(a) = self
+                .annotations
+                .iter()
+                .find(|a| a.kind == AnnotationKind::Gf && a.feature == key)
+            {
+                return a.value.clone();
             }
         }
         self.ordinal.to_string()
@@ -170,15 +208,15 @@ impl StockholmReader {
             if trimmed.is_empty() {
                 continue;
             }
-            if let Some(version) = trimmed.strip_prefix(STOCKHOLM_HEADER_PREFIX) {
-                // Easel accepts trailing whitespace after the version but
-                // rejects every other suffix, `# STOCKHOLM 2.0` included.
-                if version.trim() != STOCKHOLM_VERSION {
-                    return Err(self.err(format!(
-                        "unsupported Stockholm header {trimmed:?}; expected '{STOCKHOLM_HEADER_PREFIX} {STOCKHOLM_VERSION}'"
-                    )));
-                }
+            // Easel tolerates trailing whitespace and nothing else, so compare
+            // the whole line rather than a prefix plus a trimmed version.
+            if trimmed == STOCKHOLM_HEADER {
                 break;
+            }
+            if trimmed.starts_with(STOCKHOLM_HEADER_PREFIX) {
+                return Err(self.err(format!(
+                    "unsupported Stockholm header {trimmed:?}; expected '{STOCKHOLM_HEADER}'"
+                )));
             }
             if !self.seen_alignment {
                 return Err(self.err(
@@ -219,10 +257,27 @@ impl StockholmReader {
             }
             if let Some(rest) = trimmed.strip_prefix("#=GF") {
                 let (feature, value) = split_ws(rest);
-                alignment.gf.push((feature.to_string(), value.to_string()));
+                alignment.annotations.push(FileAnnotation {
+                    kind: AnnotationKind::Gf,
+                    feature: feature.to_string(),
+                    value: value.to_string(),
+                });
             } else if let Some(rest) = trimmed.strip_prefix("#=GC") {
                 let (feature, value) = split_ws(rest);
-                append_or_push(&mut alignment.gc, feature, value);
+                // Later blocks extend the entry made at the feature's first
+                // appearance, so its position in file order is preserved.
+                match alignment
+                    .annotations
+                    .iter_mut()
+                    .find(|a| a.kind == AnnotationKind::Gc && a.feature == feature)
+                {
+                    Some(existing) => existing.value.push_str(value),
+                    None => alignment.annotations.push(FileAnnotation {
+                        kind: AnnotationKind::Gc,
+                        feature: feature.to_string(),
+                        value: value.to_string(),
+                    }),
+                }
             } else if let Some(rest) = trimmed.strip_prefix("#=GS") {
                 let (name, rest) = split_ws(rest);
                 let (feature, value) = split_ws(rest);
