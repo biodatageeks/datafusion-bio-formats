@@ -154,6 +154,12 @@ The provider SHALL accept a list of `#=GS` feature names to promote to top-level
 - **WHEN** a caller requests `AC` and the `gs` sentinel
 - **THEN** the schema contains both the promoted column and the full `gs` bag
 
+#### Scenario: Rejecting ambiguous promoted names
+
+- **WHEN** `gs_fields` repeats a name (including the `gs` sentinel), or requests `alignment_id`, `name`, `sequence` or `gr`
+- **THEN** provider construction fails with an error naming the conflicting column
+- **AND** no schema with duplicate column names is exposed
+
 ### Requirement: Alignment-level annotation reader
 
 The provider SHALL expose the `#=GF` and `#=GC` lines of every alignment in long format — `alignment_id`, `kind`, `feature`, `value`, `n_sequences`, `alignment_length` — preserving repeats and file order across both kinds, without materialising sequences.

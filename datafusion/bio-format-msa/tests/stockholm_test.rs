@@ -96,6 +96,29 @@ fn annotation_bag_type() -> DataType {
     )))
 }
 
+#[test]
+fn gs_fields_reject_duplicate_and_reserved_column_names() {
+    for fields in [
+        vec!["alignment_id"],
+        vec!["name"],
+        vec!["sequence"],
+        vec!["gr"],
+        vec!["AC", "AC"],
+        vec!["gs", "gs"],
+        vec!["AC", "gs", "AC"],
+    ] {
+        let err = StockholmTableProvider::new(
+            "unused.sto".to_string(),
+            None,
+            Some(fields.iter().map(|field| (*field).to_string()).collect()),
+        )
+        .expect_err(&format!("ambiguous gs_fields must be rejected: {fields:?}"))
+        .to_string();
+        assert!(err.contains("gs_fields"), "{fields:?}: {err}");
+        assert!(err.contains(fields.last().unwrap()), "{fields:?}: {err}");
+    }
+}
+
 #[tokio::test]
 async fn pfam_seed_schema_and_row_count() {
     let batches = scan("PF00001.sto", "SELECT * FROM t").await;

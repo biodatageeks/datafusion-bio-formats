@@ -24,7 +24,9 @@ One row per sequence per alignment. `alignment_id` is `#=GF ID`, else
 `#=GF AC`, else the alignment's 0-based ordinal. Interleaved blocks are
 concatenated; a file may contain many alignments; a missing trailing `//` is
 tolerated. `gs_fields = ["AC", "DE"]` promotes those `#=GS` features to columns
-(add `"gs"` to keep the bag as well). Alignment-level `#=GF` / `#=GC` lines are
+(add `"gs"` to keep the bag as well). Duplicate requested names and the fixed
+column names `alignment_id`, `name`, `sequence`, and `gr` are rejected.
+Alignment-level `#=GF` / `#=GC` lines are
 available via `read_stockholm_annotations`, one row per line, repeats preserved.
 
 Local uncompressed multi-alignment files are split across DataFusion
