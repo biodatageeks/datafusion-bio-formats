@@ -310,16 +310,16 @@ impl StockholmReader {
                     "unsupported Stockholm header {line:?}; expected '{STOCKHOLM_HEADER}'"
                 )));
             }
-            // A `//` with no alignment open closes nothing. Emitting an empty
-            // alignment for it would consume an ordinal that the partition
-            // planner, which does not count orphan terminators, never allows for.
-            if is_terminator(line) {
-                continue;
-            }
             if !self.seen_alignment {
                 return Err(self.err(
                     "expected a '# STOCKHOLM 1.0' header line at the start of the Stockholm input",
                 ));
+            }
+            // After the compulsory header, a `//` with no alignment open
+            // closes nothing. Emitting an empty alignment for it would consume
+            // an ordinal that the partition planner never allows for.
+            if is_terminator(line) {
+                continue;
             }
             // Past the first alignment a bare `#` line is an ordinary comment,
             // not the start of a headerless alignment. Treating it as data
