@@ -33,7 +33,7 @@ pub async fn read_stockholm_annotations(
     let src = open_lines(&file_path, &opts, None)
         .await
         .map_err(|e| DataFusionError::Execution(format!("failed to open {file_path}: {e}")))?;
-    let mut reader = StockholmReader::new(src, file_path, 0, false);
+    let mut reader = StockholmReader::new(src, file_path, false);
 
     let mut alignment_id = StringBuilder::new();
     let mut kind = StringBuilder::new();

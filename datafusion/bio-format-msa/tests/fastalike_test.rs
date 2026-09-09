@@ -158,6 +158,24 @@ async fn empty_file_yields_no_rows() {
 }
 
 #[tokio::test]
+async fn local_file_uri_is_accepted() {
+    let plain = scan("query.a3m", MsaFlavor::A3m, "SELECT * FROM t").await;
+    let ctx = SessionContext::new();
+    let uri = format!("file://{}", data("query.a3m"));
+    let provider = FastaLikeTableProvider::new(uri, MsaFlavor::A3m, None).unwrap();
+    ctx.register_table("t", Arc::new(provider)).unwrap();
+    let via_uri = ctx
+        .sql("SELECT * FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(strings(&plain, "name"), strings(&via_uri, "name"));
+    assert_eq!(strings(&plain, "sequence"), strings(&via_uri, "sequence"));
+}
+
+#[tokio::test]
 async fn single_record_without_trailing_newline_handling() {
     let batches = scan("single.a3m", MsaFlavor::A3m, "SELECT * FROM t").await;
     assert_eq!(strings(&batches, "name"), vec![Some("only".into())]);

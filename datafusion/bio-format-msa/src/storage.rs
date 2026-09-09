@@ -26,6 +26,16 @@ pub fn is_local(path: &str) -> bool {
     matches!(get_storage_type(path.to_string()), StorageType::LOCAL)
 }
 
+/// Strips a `file://` scheme so a local URI can be handed to the filesystem.
+///
+/// `get_storage_type` classifies `file://…` as local and the shared compression
+/// sniffing already strips the scheme, so without this every filesystem open
+/// would look for a file whose name literally starts with `file://`. Matches
+/// what the BED and Cooler providers do.
+pub fn local_path(path: &str) -> &str {
+    path.strip_prefix("file://").unwrap_or(path)
+}
+
 /// Resolves the effective compression of `path`, honouring an explicit hint in
 /// `opts` and otherwise sniffing the extension / magic bytes.
 pub async fn resolve_compression(
@@ -63,7 +73,7 @@ pub async fn open_lines(
     }
 
     if local {
-        let file = tokio::fs::File::open(path).await?;
+        let file = tokio::fs::File::open(local_path(path)).await?;
         return match compression {
             CompressionType::NONE => match range {
                 Some(r) => {

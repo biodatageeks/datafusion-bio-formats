@@ -1,7 +1,7 @@
 //! DataFusion table provider for Stockholm files.
 
 use crate::stockholm::physical_exec::{PartitionRange, StockholmExec};
-use crate::storage::{is_local, resolve_compression};
+use crate::storage::{is_local, local_path, resolve_compression};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
@@ -152,6 +152,7 @@ impl StockholmTableProvider {
 /// Byte offsets `(start, end)` of every alignment in a local file, found by
 /// scanning for `//` lines. Trailing unterminated content becomes a final range.
 fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
+    let path = local_path(path);
     let mut reader = BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
     let mut out = Vec::new();
     let mut line = Vec::new();
