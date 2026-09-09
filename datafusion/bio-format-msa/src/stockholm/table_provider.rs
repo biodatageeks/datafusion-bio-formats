@@ -15,6 +15,7 @@ use datafusion::physical_plan::{ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use log::debug;
 use std::any::Any;
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 
@@ -101,15 +102,25 @@ pub struct StockholmTableProvider {
 impl StockholmTableProvider {
     /// Creates a provider for `file_path`. `gs_fields` promotes the named
     /// `#=GS` features to top-level columns; include `"gs"` to also keep the bag.
+    /// Duplicate names and names of fixed columns (`alignment_id`, `name`,
+    /// `sequence`, `gr`) are rejected.
     pub fn new(
         file_path: String,
         object_storage_options: Option<ObjectStorageOptions>,
         gs_fields: Option<Vec<String>>,
     ) -> datafusion::common::Result<Self> {
         let columns = column_layout(gs_fields.as_deref());
-        let schema = Arc::new(Schema::new(
-            columns.iter().map(field_for).collect::<Vec<_>>(),
-        ));
+        let fields: Vec<_> = columns.iter().map(field_for).collect();
+        let mut names = HashSet::new();
+        for field in &fields {
+            if !names.insert(field.name()) {
+                return Err(DataFusionError::Plan(format!(
+                    "Stockholm gs_fields produces duplicate column name {:?}",
+                    field.name()
+                )));
+            }
+        }
+        let schema = Arc::new(Schema::new(fields));
         Ok(Self {
             file_path,
             object_storage_options,
