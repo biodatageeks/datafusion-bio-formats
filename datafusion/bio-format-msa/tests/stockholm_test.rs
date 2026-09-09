@@ -527,22 +527,40 @@ async fn an_input_opening_with_a_terminator_is_rejected_however_it_is_split() {
     // file that a single-partition scan rejects for its missing header.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("leading_term.sto");
-    std::fs::write(&path, "//\nseqA ACGT\n//\nseqB ACGT\n//\n").unwrap();
     let p = path.to_str().unwrap();
 
-    for partitions in [1, 2, 4] {
-        let ctx = ctx_for(p, None, partitions);
-        let err = ctx
-            .sql("SELECT * FROM t")
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .expect_err(&format!(
-                "target_partitions={partitions}: a missing header must not become valid"
-            ))
-            .to_string();
-        assert!(err.contains("# STOCKHOLM 1.0"), "{partitions}: {err}");
+    for prefix in ["//\n", "\n \t// \t\r\n", "//\n//\n"] {
+        for body in [
+            "seqA ACGT\n//\nseqB ACGT\n//\n",
+            // Finding a valid header later cannot repair the invalid first line.
+            "# STOCKHOLM 1.0\n#=GF ID first\nseqA ACGT\n//\n\
+             # STOCKHOLM 1.0\nseqB ACGT\n//\n",
+            "",
+        ] {
+            std::fs::write(&path, format!("{prefix}{body}")).unwrap();
+            for partitions in [1, 2, 4] {
+                let ctx = ctx_for(p, None, partitions);
+                let err = ctx
+                    .sql("SELECT * FROM t")
+                    .await
+                    .unwrap()
+                    .collect()
+                    .await
+                    .expect_err(&format!(
+                        "target_partitions={partitions}, prefix={prefix:?}, body={body:?}: \
+                         the first nonblank line must be a header"
+                    ))
+                    .to_string();
+                assert!(err.contains("# STOCKHOLM 1.0"), "{partitions}: {err}");
+                assert!(err.contains(p), "{partitions}: {err}");
+            }
+            let err = read_stockholm_annotations(p.to_string(), None)
+                .await
+                .expect_err("annotation reads must also reject a leading terminator")
+                .to_string();
+            assert!(err.contains("# STOCKHOLM 1.0"), "{err}");
+            assert!(err.contains(p), "{err}");
+        }
     }
 }
 
