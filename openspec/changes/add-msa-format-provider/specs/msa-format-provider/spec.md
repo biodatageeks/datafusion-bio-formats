@@ -82,7 +82,7 @@ The provider SHALL expose a Stockholm input as one row per sequence per alignmen
 
 ### Requirement: Stockholm header validation
 
-The provider SHALL accept exactly `# STOCKHOLM 1.0` — ignoring trailing whitespace, but requiring the single separating space — as the first non-blank line of an input, and SHALL reject every other first line, including other version numbers and other spellings.
+The provider SHALL accept exactly `# STOCKHOLM 1.0` — ignoring trailing whitespace only, and requiring the single separating space — as the first non-blank line of an input, and SHALL reject every other first line, including other version numbers, other spellings and leading whitespace.
 
 #### Scenario: The supported header
 
@@ -98,6 +98,11 @@ The provider SHALL accept exactly `# STOCKHOLM 1.0` — ignoring trailing whites
 #### Scenario: A malformed header
 
 - **WHEN** an input begins with `# STOCKHOLM garbage`, `# STOCKHOLMX`, `#STOCKHOLM 1.0`, `# STOCKHOLM1.0`, `# STOCKHOLM  1.0` or a comment line
+- **THEN** the scan fails with an error naming the path and the expected header
+
+#### Scenario: Leading whitespace before the header
+
+- **WHEN** the first line is `# STOCKHOLM 1.0` preceded by spaces or a tab
 - **THEN** the scan fails with an error naming the path and the expected header
 
 ### Requirement: Stockholm block and alignment structure
@@ -197,6 +202,17 @@ The provider SHALL build only the projected columns, SHALL serve an empty projec
 
 - **WHEN** an input holds exactly one alignment
 - **THEN** the scan uses one partition regardless of `target_partitions`
+
+#### Scenario: Comment-only tail after the final terminator
+
+- **WHEN** blank lines and ordinary `#` comments follow the last `//`
+- **THEN** they earn no partition of their own, because the reader treats them as no alignment
+- **AND** WHEN annotation or sequence data follows the last `//` instead, it is planned and read as a further alignment
+
+#### Scenario: A pushed-down limit of zero
+
+- **WHEN** a scan is planned with a limit of zero
+- **THEN** no rows are returned and the input is not opened
 
 #### Scenario: Headerless later alignments under partitioning
 

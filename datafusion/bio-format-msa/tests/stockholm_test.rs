@@ -381,6 +381,9 @@ async fn unsupported_header_versions_are_rejected() {
         // of these, so a trimmed-suffix comparison is not enough.
         "# STOCKHOLM1.0",
         "# STOCKHOLM  1.0",
+        // Easel accepts trailing whitespace but rejects leading whitespace.
+        "  # STOCKHOLM 1.0",
+        "\t# STOCKHOLM 1.0",
     ] {
         let path = dir.path().join("h.sto");
         std::fs::write(&path, format!("{header}\nseqA ACGT\n//\n")).unwrap();
@@ -412,6 +415,75 @@ async fn header_tolerates_trailing_whitespace() {
         .await
         .unwrap();
     assert_eq!(rows(&batches), 1);
+}
+
+#[tokio::test]
+async fn comment_after_the_final_terminator_keeps_one_partition() {
+    // The reader skips a trailing comment and returns no second alignment, so
+    // the boundary scan must not advertise a partition for it either.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tail.sto");
+    let mut text = std::fs::read_to_string(data("PF00001.sto")).unwrap();
+    text.push_str("\n# a trailing comment\n   \n");
+    std::fs::write(&path, text).unwrap();
+
+    let ctx = ctx_for(path.to_str().unwrap(), None, 4);
+    let df = ctx.sql("SELECT * FROM t").await.unwrap();
+    assert_eq!(
+        df.clone()
+            .create_physical_plan()
+            .await
+            .unwrap()
+            .output_partitioning()
+            .partition_count(),
+        1,
+        "a comment-only tail is not an alignment"
+    );
+    assert_eq!(rows(&df.collect().await.unwrap()), 63);
+}
+
+#[tokio::test]
+async fn headerless_alignment_after_the_final_terminator_is_still_a_partition() {
+    // The counterpart to the test above: annotation or sequence data after the
+    // last `//` really is another alignment and must keep its partition.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tail_data.sto");
+    let mut text = std::fs::read_to_string(data("PF00001.sto")).unwrap();
+    text.push_str("#=GF ID second\nseqZ ACGT\n");
+    std::fs::write(&path, text).unwrap();
+
+    let ctx = ctx_for(path.to_str().unwrap(), None, 4);
+    let df = ctx.sql("SELECT alignment_id FROM t").await.unwrap();
+    assert_eq!(
+        df.clone()
+            .create_physical_plan()
+            .await
+            .unwrap()
+            .output_partitioning()
+            .partition_count(),
+        2
+    );
+    let batches = df.collect().await.unwrap();
+    assert_eq!(rows(&batches), 64);
+    let mut ids = strings(&batches, "alignment_id");
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids, vec![Some("7tm_1".into()), Some("second".into())]);
+}
+
+#[tokio::test]
+async fn a_zero_limit_reads_nothing() {
+    use datafusion::catalog::TableProvider;
+    use datafusion::physical_plan::collect;
+
+    let ctx = SessionContext::new();
+    let provider = StockholmTableProvider::new(data("PF00001.sto"), None, None).unwrap();
+    let plan = provider
+        .scan(&ctx.state(), None, &[], Some(0))
+        .await
+        .unwrap();
+    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+    assert_eq!(rows(&batches), 0);
 }
 
 #[tokio::test]

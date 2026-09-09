@@ -158,6 +158,21 @@ async fn empty_file_yields_no_rows() {
 }
 
 #[tokio::test]
+async fn a_zero_limit_reads_nothing() {
+    use datafusion::catalog::TableProvider;
+    use datafusion::physical_plan::collect;
+
+    let ctx = SessionContext::new();
+    let provider = FastaLikeTableProvider::new(data("query.a3m"), MsaFlavor::A3m, None).unwrap();
+    let plan = provider
+        .scan(&ctx.state(), None, &[], Some(0))
+        .await
+        .unwrap();
+    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+    assert_eq!(rows(&batches), 0);
+}
+
+#[tokio::test]
 async fn local_file_uri_is_accepted() {
     let plain = scan("query.a3m", MsaFlavor::A3m, "SELECT * FROM t").await;
     let ctx = SessionContext::new();
