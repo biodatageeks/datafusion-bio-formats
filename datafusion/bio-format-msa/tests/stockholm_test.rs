@@ -471,19 +471,96 @@ async fn headerless_alignment_after_the_final_terminator_is_still_a_partition() 
     assert_eq!(ids, vec![Some("7tm_1".into()), Some("second".into())]);
 }
 
-#[tokio::test]
-async fn a_zero_limit_reads_nothing() {
+/// Writes PF00001 + RF00001 + the hmmalign fixture into one file: three
+/// alignments, so `target_partitions = 3` really splits.
+fn three_alignment_file(dir: &std::path::Path) -> String {
+    let path = dir.join("multi.sto");
+    let mut text = std::fs::read_to_string(data("PF00001.sto")).unwrap();
+    text.push_str(&std::fs::read_to_string(data("RF00001.sto")).unwrap());
+    text.push_str(&std::fs::read_to_string(data("PF00001_hmmalign.sto")).unwrap());
+    std::fs::write(&path, text).unwrap();
+    path.to_str().unwrap().to_string()
+}
+
+async fn scan_with_limit(path: &str, target_partitions: usize, limit: Option<usize>) -> usize {
     use datafusion::catalog::TableProvider;
     use datafusion::physical_plan::collect;
 
-    let ctx = SessionContext::new();
-    let provider = StockholmTableProvider::new(data("PF00001.sto"), None, None).unwrap();
-    let plan = provider
-        .scan(&ctx.state(), None, &[], Some(0))
+    let config = SessionConfig::new().with_target_partitions(target_partitions);
+    let ctx = SessionContext::new_with_config(config);
+    let provider = StockholmTableProvider::new(path.to_string(), None, None).unwrap();
+    let plan = provider.scan(&ctx.state(), None, &[], limit).await.unwrap();
+    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
+    rows(&batches)
+}
+
+#[tokio::test]
+async fn a_zero_limit_reads_nothing() {
+    assert_eq!(scan_with_limit(&data("PF00001.sto"), 1, Some(0)).await, 0);
+    // Zero per partition is zero overall, so this must hold when split too.
+    let dir = tempfile::tempdir().unwrap();
+    let path = three_alignment_file(dir.path());
+    assert_eq!(scan_with_limit(&path, 3, Some(0)).await, 0);
+}
+
+#[tokio::test]
+async fn a_positive_limit_is_never_multiplied_across_partitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = three_alignment_file(dir.path());
+    let total = 63 + 712 + 63;
+
+    // One partition: a per-partition stop is the global stop, so it applies.
+    assert_eq!(scan_with_limit(&path, 1, Some(5)).await, 5);
+
+    // Several partitions: a per-partition stop is not the global stop. The
+    // limit is a lower bound the plan may exceed, so returning everything is
+    // fine — returning 5 per partition (15) is the bug.
+    let split = scan_with_limit(&path, 3, Some(5)).await;
+    assert_eq!(split, total, "the limit must not be applied per partition");
+    assert!(split >= 5);
+
+    // SQL is unaffected either way: DataFusion enforces the real limit above.
+    let config = SessionConfig::new().with_target_partitions(3);
+    let ctx = SessionContext::new_with_config(config);
+    let provider = StockholmTableProvider::new(path.clone(), None, None).unwrap();
+    ctx.register_table("t", Arc::new(provider)).unwrap();
+    let via_sql = ctx
+        .sql("SELECT * FROM t LIMIT 5")
+        .await
+        .unwrap()
+        .collect()
         .await
         .unwrap();
-    let batches = collect(plan, ctx.task_ctx()).await.unwrap();
-    assert_eq!(rows(&batches), 0);
+    assert_eq!(rows(&via_sql), 5);
+}
+
+#[tokio::test]
+async fn unterminated_final_alignment_survives_partitioning() {
+    // Exercises the boundary scan's tail handling: the last alignment has no
+    // `//`, and the file is split.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unterminated.sto");
+    let mut text = std::fs::read_to_string(data("PF00001.sto")).unwrap();
+    text.push_str("# STOCKHOLM 1.0\n#=GF ID tail\nseqZ ACGT\n");
+    std::fs::write(&path, text).unwrap();
+
+    let ctx = ctx_for(path.to_str().unwrap(), None, 4);
+    let df = ctx.sql("SELECT alignment_id FROM t").await.unwrap();
+    assert_eq!(
+        df.clone()
+            .create_physical_plan()
+            .await
+            .unwrap()
+            .output_partitioning()
+            .partition_count(),
+        2
+    );
+    let batches = df.collect().await.unwrap();
+    assert_eq!(rows(&batches), 64);
+    let mut ids = strings(&batches, "alignment_id");
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids, vec![Some("7tm_1".into()), Some("tail".into())]);
 }
 
 #[tokio::test]

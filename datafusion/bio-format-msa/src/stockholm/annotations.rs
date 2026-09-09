@@ -1,6 +1,6 @@
 //! Alignment-level (`#=GF` / `#=GC`) annotations in long format.
 
-use crate::stockholm::reader::StockholmReader;
+use crate::stockholm::reader::{Collect, StockholmReader};
 use crate::storage::open_lines;
 use datafusion::arrow::array::{
     ArrayRef, LargeStringBuilder, RecordBatch, StringBuilder, UInt32Builder,
@@ -33,7 +33,7 @@ pub async fn read_stockholm_annotations(
     let src = open_lines(&file_path, &opts, None)
         .await
         .map_err(|e| DataFusionError::Execution(format!("failed to open {file_path}: {e}")))?;
-    let mut reader = StockholmReader::new(src, file_path, false);
+    let mut reader = StockholmReader::new(src, file_path, Collect::ANNOTATIONS);
 
     let mut alignment_id = StringBuilder::new();
     let mut kind = StringBuilder::new();

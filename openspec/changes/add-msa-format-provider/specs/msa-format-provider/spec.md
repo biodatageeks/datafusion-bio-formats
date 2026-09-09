@@ -209,10 +209,27 @@ The provider SHALL build only the projected columns, SHALL serve an empty projec
 - **THEN** they earn no partition of their own, because the reader treats them as no alignment
 - **AND** WHEN annotation or sequence data follows the last `//` instead, it is planned and read as a further alignment
 
+#### Scenario: Planning reads the input once
+
+- **WHEN** partitions are planned for a file whose final alignment has no `//`
+- **THEN** the boundary scan does not re-read that alignment or buffer it whole
+
 #### Scenario: A pushed-down limit of zero
 
 - **WHEN** a scan is planned with a limit of zero
 - **THEN** no rows are returned and the input is not opened
+- **AND** this holds however many partitions the scan uses
+
+#### Scenario: A positive pushed-down limit under partitioning
+
+- **WHEN** a scan with a positive limit is planned over several partitions
+- **THEN** the limit is not applied independently in each partition, so the plan never returns the limit multiplied by the partition count
+- **AND** WHEN the scan uses a single partition, the limit stops the read early
+
+#### Scenario: Unprojected alignment-wide annotations are not materialised
+
+- **WHEN** a Stockholm scan projects neither `sequence` nor `gr`
+- **THEN** neither those payloads nor the `#=GC` tracks, which no table column exposes, are accumulated
 
 #### Scenario: Headerless later alignments under partitioning
 

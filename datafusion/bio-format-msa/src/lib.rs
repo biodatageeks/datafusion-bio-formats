@@ -51,7 +51,7 @@ pub mod storage;
 
 pub use fastalike::{FastaLikeExec, FastaLikeTableProvider, MsaFlavor, fasta_like_schema};
 pub use stockholm::{
-    Alignment, AnnotationKind, ColumnKind, FileAnnotation, GS_BAG_SENTINEL, PartitionRange,
-    SequenceRecord, StockholmExec, StockholmReader, StockholmTableProvider, annotation_bag_type,
-    annotations_schema, read_stockholm_annotations,
+    Alignment, AnnotationKind, Collect, ColumnKind, FileAnnotation, GS_BAG_SENTINEL,
+    PartitionRange, SequenceRecord, StockholmExec, StockholmReader, StockholmTableProvider,
+    annotation_bag_type, annotations_schema, read_stockholm_annotations,
 };

@@ -15,7 +15,7 @@ use datafusion::physical_plan::{ExecutionPlan, PlanProperties};
 use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageOptions};
 use log::debug;
 use std::any::Any;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 
 /// Sentinel accepted in `gs_fields` that keeps the full `gs` bag column
@@ -152,6 +152,11 @@ impl StockholmTableProvider {
 
 /// Byte offsets `(start, end)` of every alignment in a local file, found by
 /// scanning for `//` lines. Trailing unterminated content becomes a final range.
+///
+/// One sequential pass: whether the run since the last `//` holds anything the
+/// reader would call an alignment is tracked as the lines go by, so an
+/// unterminated final alignment — a supported case — costs neither a second
+/// read of the file nor a buffer proportional to it.
 fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
     let path = local_path(path);
     let mut reader = BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
@@ -159,6 +164,7 @@ fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
     let mut line = Vec::new();
     let mut offset: u64 = 0;
     let mut start: u64 = 0;
+    let mut tail_has_content = false;
     loop {
         line.clear();
         let n = reader.read_until(b'\n', &mut line)?;
@@ -172,19 +178,18 @@ fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
         {
             out.push((start, offset));
             start = offset;
+            tail_has_content = false;
+        } else if !tail_has_content {
+            // Invalid UTF-8 is content: the reader will raise on it rather
+            // than skip it, so it must not be mistaken for a blank tail.
+            tail_has_content = match std::str::from_utf8(body) {
+                Ok(text) => has_alignment_content(text),
+                Err(_) => true,
+            };
         }
     }
-    if offset > start {
-        // Content after the last `//` is another alignment only if the reader
-        // would treat it as one. Blank lines and ordinary comments are not, so
-        // a trailing comment must not earn a partition that yields no rows.
-        let mut tail = String::new();
-        let mut f = std::fs::File::open(path)?;
-        std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(start))?;
-        f.read_to_string(&mut tail)?;
-        if has_alignment_content(&tail) {
-            out.push((start, offset));
-        }
+    if offset > start && tail_has_content {
+        out.push((start, offset));
     }
     Ok(out)
 }
@@ -253,6 +258,16 @@ impl TableProvider for StockholmTableProvider {
         let partitions = self
             .plan_partitions(state.config().target_partitions())
             .await?;
+        // A per-partition stop is only the global stop when there is one
+        // partition; applying `n` in each of `p` partitions would return up to
+        // `n * p` rows. `Some(0)` is the exception — zero per partition is zero
+        // overall — and DataFusion enforces the real limit above the scan
+        // either way, so dropping the hint only forgoes an early exit.
+        let limit = match limit {
+            Some(0) => Some(0),
+            other if partitions.len() <= 1 => other,
+            _ => None,
+        };
         debug!(
             "StockholmTableProvider::scan {} partitions={} projection={:?}",
             self.file_path,

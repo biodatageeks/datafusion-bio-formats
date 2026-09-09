@@ -1,6 +1,6 @@
 //! Physical execution plan for Stockholm scans.
 
-use crate::stockholm::reader::{SequenceRecord, StockholmReader};
+use crate::stockholm::reader::{Collect, SequenceRecord, StockholmReader};
 use crate::stockholm::table_provider::{ColumnKind, annotation_struct_fields};
 use crate::storage::open_lines;
 use async_stream::try_stream;
@@ -277,16 +277,16 @@ async fn record_batches(
     let src = open_lines(&file_path, &opts, part.range.clone())
         .await
         .map_err(|e| DataFusionError::Execution(format!("failed to open {file_path}: {e}")))?;
-    let collect_sequences = columns.contains(&ColumnKind::Sequence);
+    // Only materialise the alignment-width parts this projection asks for.
+    let collect = Collect {
+        sequences: columns.contains(&ColumnKind::Sequence),
+        column_annotations: false,
+        residue_annotations: columns.contains(&ColumnKind::GrBag),
+    };
     // Only a partition that opens at byte 0 sees the input's compulsory header.
     let at_input_start = part.range.as_ref().is_none_or(|r| r.start == 0);
-    let mut reader = StockholmReader::new_at(
-        src,
-        file_path,
-        part.first_ordinal,
-        at_input_start,
-        collect_sequences,
-    );
+    let mut reader =
+        StockholmReader::new_at(src, file_path, part.first_ordinal, at_input_start, collect);
     let out_schema = schema.clone();
     let stream = try_stream! {
         let mut builders = RowBuilders::new(&columns);

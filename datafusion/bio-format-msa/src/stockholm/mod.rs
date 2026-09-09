@@ -9,7 +9,7 @@ pub mod table_provider;
 pub use annotations::{annotations_schema, read_stockholm_annotations};
 pub use physical_exec::{PartitionRange, StockholmExec};
 pub use reader::{
-    Alignment, AnnotationKind, FileAnnotation, SequenceRecord, StockholmReader,
+    Alignment, AnnotationKind, Collect, FileAnnotation, SequenceRecord, StockholmReader,
     has_alignment_content, is_skippable_comment,
 };
 pub use table_provider::{
