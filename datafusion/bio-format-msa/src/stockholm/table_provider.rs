@@ -1,6 +1,7 @@
 //! DataFusion table provider for Stockholm files.
 
 use crate::stockholm::physical_exec::{PartitionRange, StockholmExec};
+use crate::stockholm::reader::has_alignment_content;
 use crate::storage::{is_local, local_path, resolve_compression};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
@@ -174,12 +175,14 @@ fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
         }
     }
     if offset > start {
-        // Only count trailing content that is not just whitespace.
+        // Content after the last `//` is another alignment only if the reader
+        // would treat it as one. Blank lines and ordinary comments are not, so
+        // a trailing comment must not earn a partition that yields no rows.
         let mut tail = String::new();
         let mut f = std::fs::File::open(path)?;
         std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(start))?;
         f.read_to_string(&mut tail)?;
-        if !tail.trim().is_empty() {
+        if has_alignment_content(&tail) {
             out.push((start, offset));
         }
     }

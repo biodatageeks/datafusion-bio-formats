@@ -267,6 +267,13 @@ async fn record_batches(
     batch_size: usize,
     part: PartitionRange,
 ) -> datafusion::common::Result<SendableRecordBatchStream> {
+    // A pushed-down `LIMIT 0` asks for nothing, so do not open the input at all.
+    if limit == Some(0) {
+        return Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            futures::stream::empty(),
+        )));
+    }
     let src = open_lines(&file_path, &opts, part.range.clone())
         .await
         .map_err(|e| DataFusionError::Execution(format!("failed to open {file_path}: {e}")))?;

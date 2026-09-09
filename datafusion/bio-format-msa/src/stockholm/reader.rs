@@ -131,6 +131,25 @@ fn split_ws(s: &str) -> (&str, &str) {
     }
 }
 
+/// Whether `line` is a comment the start search skips between alignments: a
+/// `#` line that is neither markup (`#=G…`) nor a header (`# STOCKHOLM…`).
+///
+/// Shared with the partition-boundary scan so the bytes it calls an alignment
+/// and the bytes this reader calls an alignment cannot drift apart.
+pub fn is_skippable_comment(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with('#')
+        && !trimmed.starts_with("#=G")
+        && !trimmed.starts_with(STOCKHOLM_HEADER_PREFIX)
+}
+
+/// Whether `text` holds anything the reader would treat as an alignment, as
+/// opposed to only blank lines and ordinary comments.
+pub fn has_alignment_content(text: &str) -> bool {
+    text.lines()
+        .any(|line| !line.trim().is_empty() && !is_skippable_comment(line))
+}
+
 fn append_or_push(list: &mut Vec<(String, String)>, key: &str, value: &str) {
     match list.iter_mut().find(|(k, _)| k == key) {
         Some((_, v)) => v.push_str(value),
@@ -204,18 +223,20 @@ impl StockholmReader {
                 return Ok(None);
             }
             let text = self.line_str()?;
-            let trimmed = text.trim();
+            // Easel tolerates trailing whitespace around the header and nothing
+            // else — leading whitespace is rejected — so the comparison sees a
+            // line trimmed only at the end.
+            let line = text.trim_end();
+            let trimmed = line.trim_start();
             if trimmed.is_empty() {
                 continue;
             }
-            // Easel tolerates trailing whitespace and nothing else, so compare
-            // the whole line rather than a prefix plus a trimmed version.
-            if trimmed == STOCKHOLM_HEADER {
+            if line == STOCKHOLM_HEADER {
                 break;
             }
             if trimmed.starts_with(STOCKHOLM_HEADER_PREFIX) {
                 return Err(self.err(format!(
-                    "unsupported Stockholm header {trimmed:?}; expected '{STOCKHOLM_HEADER}'"
+                    "unsupported Stockholm header {line:?}; expected '{STOCKHOLM_HEADER}'"
                 )));
             }
             if !self.seen_alignment {
@@ -226,7 +247,7 @@ impl StockholmReader {
             // Past the first alignment a bare `#` line is an ordinary comment,
             // not the start of a headerless alignment. Treating it as data
             // would emit an empty alignment and shift every later ordinal.
-            if trimmed.starts_with('#') && !trimmed.starts_with("#=G") {
+            if is_skippable_comment(line) {
                 continue;
             }
             // Lenient: a later alignment without its own header line.
