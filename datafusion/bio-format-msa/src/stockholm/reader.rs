@@ -169,6 +169,15 @@ fn split_ws(s: &str) -> (&str, &str) {
 /// unknown extension, which the parse loop ignores like any other comment.
 const MARKUP_PREFIXES: [&str; 4] = ["#=GF", "#=GS", "#=GC", "#=GR"];
 
+/// Strips a markup label, requiring whitespace or end of line after it.
+///
+/// `#=GSX` is not `#=GS`: without this the label test would match it and the
+/// dispatch would read `X` as a sequence name, inventing a row.
+fn strip_markup<'a>(line: &'a str, label: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(label)?;
+    (rest.is_empty() || rest.starts_with([' ', '\t'])).then_some(rest)
+}
+
 /// Whether `line` opens a new alignment mid-input.
 ///
 /// Only the end is trimmed, so an indented `# STOCKHOLM 1.0` is not a header
@@ -201,7 +210,9 @@ pub fn is_terminator(line: &str) -> bool {
 pub fn is_skippable_comment(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.starts_with('#')
-        && !MARKUP_PREFIXES.iter().any(|p| trimmed.starts_with(p))
+        && !MARKUP_PREFIXES
+            .iter()
+            .any(|p| strip_markup(trimmed, p).is_some())
         && !trimmed.starts_with(STOCKHOLM_HEADER_PREFIX)
 }
 
@@ -299,6 +310,12 @@ impl StockholmReader {
                     "unsupported Stockholm header {line:?}; expected '{STOCKHOLM_HEADER}'"
                 )));
             }
+            // A `//` with no alignment open closes nothing. Emitting an empty
+            // alignment for it would consume an ordinal that the partition
+            // planner, which does not count orphan terminators, never allows for.
+            if is_terminator(line) {
+                continue;
+            }
             if !self.seen_alignment {
                 return Err(self.err(
                     "expected a '# STOCKHOLM 1.0' header line at the start of the Stockholm input",
@@ -336,14 +353,14 @@ impl StockholmReader {
                 alignment.terminated = true;
                 break;
             }
-            if let Some(rest) = trimmed.strip_prefix("#=GF") {
+            if let Some(rest) = strip_markup(trimmed, "#=GF") {
                 let (feature, value) = split_ws(rest);
                 alignment.annotations.push(FileAnnotation {
                     kind: AnnotationKind::Gf,
                     feature: feature.to_string(),
                     value: value.to_string(),
                 });
-            } else if let Some(rest) = trimmed.strip_prefix("#=GC") {
+            } else if let Some(rest) = strip_markup(trimmed, "#=GC") {
                 // Alignment-width, and no table column exposes it, so a scan
                 // skips the payload entirely.
                 if self.collect.column_annotations {
@@ -363,14 +380,14 @@ impl StockholmReader {
                         }),
                     }
                 }
-            } else if let Some(rest) = trimmed.strip_prefix("#=GS") {
+            } else if let Some(rest) = strip_markup(trimmed, "#=GS") {
                 let (name, rest) = split_ws(rest);
                 let (feature, value) = split_ws(rest);
                 let row = row_index(&mut alignment, &mut index, name);
                 alignment.sequences[row]
                     .gs
                     .push((feature.to_string(), value.to_string()));
-            } else if let Some(rest) = trimmed.strip_prefix("#=GR") {
+            } else if let Some(rest) = strip_markup(trimmed, "#=GR") {
                 let (name, rest) = split_ws(rest);
                 // Also alignment-width. The row itself still has to exist, so
                 // that a sequence mentioned only by markup is counted.

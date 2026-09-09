@@ -575,6 +575,52 @@ async fn an_indented_internal_header_is_counted_as_the_reader_counts_it() {
 }
 
 #[tokio::test]
+async fn an_orphan_terminator_is_not_an_alignment() {
+    // A `//` with no alignment open closes nothing, so it must not emit an
+    // empty alignment and consume an ordinal — planning does not count it.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("orphan.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\nseqA ACGT\n//\n//\nseqB ACGT\n//\nseqC ACGT\n//\n",
+    )
+    .unwrap();
+    let ids = ids_are_split_invariant(path.to_str().unwrap()).await;
+    assert_eq!(
+        ids,
+        vec![
+            (Some("0".into()), Some("seqA".into())),
+            (Some("1".into()), Some("seqB".into())),
+            (Some("2".into()), Some("seqC".into())),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_markup_label_needs_a_separator() {
+    // `#=GSX` is not `#=GS`: it is an unknown `#` line, so it is ignored inside
+    // an alignment and consumes no ordinal between two.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("label.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\n#=GSX ignored\nseqA ACGT\n//\n\
+         #=GRX ignored\n\
+         # STOCKHOLM 1.0\nseqB ACGT\n//\n",
+    )
+    .unwrap();
+    let ids = ids_are_split_invariant(path.to_str().unwrap()).await;
+    assert_eq!(
+        ids,
+        vec![
+            (Some("0".into()), Some("seqA".into())),
+            (Some("1".into()), Some("seqB".into())),
+        ],
+        "unknown labels must not create rows or consume ordinals"
+    );
+}
+
+#[tokio::test]
 async fn unsupported_header_versions_are_rejected() {
     // Easel rejects every one of these with "missing Stockholm header".
     let dir = tempfile::tempdir().unwrap();
