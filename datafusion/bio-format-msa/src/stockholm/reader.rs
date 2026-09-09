@@ -111,6 +111,40 @@ impl Alignment {
     }
 }
 
+/// Which of an alignment's bulky parts the caller will actually read.
+///
+/// Sequence text, `#=GC` tracks and `#=GR` tracks are each alignment-width, so
+/// materialising one a caller never looks at costs memory proportional to the
+/// alignment. Names, `#=GS` values and `#=GF` lines are short and always kept —
+/// `#=GF` also carries the identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Collect {
+    /// Aligned sequence text.
+    pub sequences: bool,
+    /// `#=GC` per-column tracks. Only the annotation reader exposes these; the
+    /// table schema has no column for them.
+    pub column_annotations: bool,
+    /// `#=GR` per-residue tracks, exposed as the `gr` column.
+    pub residue_annotations: bool,
+}
+
+impl Collect {
+    /// A table scan projecting `sequence` and `gr`.
+    pub const ROWS: Self = Self {
+        sequences: true,
+        column_annotations: false,
+        residue_annotations: true,
+    };
+
+    /// What [`read_stockholm_annotations`](crate::read_stockholm_annotations)
+    /// needs: alignment-level annotations and the row count, nothing wider.
+    pub const ANNOTATIONS: Self = Self {
+        sequences: false,
+        column_annotations: true,
+        residue_annotations: false,
+    };
+}
+
 /// Streaming reader yielding one [`Alignment`] at a time.
 pub struct StockholmReader {
     src: LineSource,
@@ -119,7 +153,7 @@ pub struct StockholmReader {
     line_no: u64,
     next_ordinal: u64,
     seen_alignment: bool,
-    collect_sequences: bool,
+    collect: Collect,
     pushed_back: bool,
 }
 
@@ -158,12 +192,10 @@ fn append_or_push(list: &mut Vec<(String, String)>, key: &str, value: &str) {
 }
 
 impl StockholmReader {
-    /// Creates a reader over `src` positioned at the start of the input.
-    ///
-    /// With `collect_sequences == false` rows are still created but sequence
-    /// text is not stored.
-    pub fn new(src: LineSource, path: String, collect_sequences: bool) -> Self {
-        Self::new_at(src, path, 0, true, collect_sequences)
+    /// Creates a reader over `src` positioned at the start of the input,
+    /// materialising the parts named by `collect`.
+    pub fn new(src: LineSource, path: String, collect: Collect) -> Self {
+        Self::new_at(src, path, 0, true, collect)
     }
 
     /// Creates a reader over one slice of an input.
@@ -178,7 +210,7 @@ impl StockholmReader {
         path: String,
         first_ordinal: u64,
         at_input_start: bool,
-        collect_sequences: bool,
+        collect: Collect,
     ) -> Self {
         Self {
             src,
@@ -187,7 +219,7 @@ impl StockholmReader {
             line_no: 0,
             next_ordinal: first_ordinal,
             seen_alignment: !at_input_start,
-            collect_sequences,
+            collect,
             pushed_back: false,
         }
     }
@@ -284,20 +316,24 @@ impl StockholmReader {
                     value: value.to_string(),
                 });
             } else if let Some(rest) = trimmed.strip_prefix("#=GC") {
-                let (feature, value) = split_ws(rest);
-                // Later blocks extend the entry made at the feature's first
-                // appearance, so its position in file order is preserved.
-                match alignment
-                    .annotations
-                    .iter_mut()
-                    .find(|a| a.kind == AnnotationKind::Gc && a.feature == feature)
-                {
-                    Some(existing) => existing.value.push_str(value),
-                    None => alignment.annotations.push(FileAnnotation {
-                        kind: AnnotationKind::Gc,
-                        feature: feature.to_string(),
-                        value: value.to_string(),
-                    }),
+                // Alignment-width, and no table column exposes it, so a scan
+                // skips the payload entirely.
+                if self.collect.column_annotations {
+                    let (feature, value) = split_ws(rest);
+                    // Later blocks extend the entry made at the feature's first
+                    // appearance, so its position in file order is preserved.
+                    match alignment
+                        .annotations
+                        .iter_mut()
+                        .find(|a| a.kind == AnnotationKind::Gc && a.feature == feature)
+                    {
+                        Some(existing) => existing.value.push_str(value),
+                        None => alignment.annotations.push(FileAnnotation {
+                            kind: AnnotationKind::Gc,
+                            feature: feature.to_string(),
+                            value: value.to_string(),
+                        }),
+                    }
                 }
             } else if let Some(rest) = trimmed.strip_prefix("#=GS") {
                 let (name, rest) = split_ws(rest);
@@ -308,9 +344,13 @@ impl StockholmReader {
                     .push((feature.to_string(), value.to_string()));
             } else if let Some(rest) = trimmed.strip_prefix("#=GR") {
                 let (name, rest) = split_ws(rest);
-                let (feature, value) = split_ws(rest);
+                // Also alignment-width. The row itself still has to exist, so
+                // that a sequence mentioned only by markup is counted.
                 let row = row_index(&mut alignment, &mut index, name);
-                append_or_push(&mut alignment.sequences[row].gr, feature, value);
+                if self.collect.residue_annotations {
+                    let (feature, value) = split_ws(rest);
+                    append_or_push(&mut alignment.sequences[row].gr, feature, value);
+                }
             } else if trimmed.starts_with("# STOCKHOLM") {
                 // A new alignment began without a terminator: emit what we have.
                 self.pushed_back = true;
@@ -323,7 +363,7 @@ impl StockholmReader {
                 if row == 0 {
                     alignment.first_sequence_len += seq.len();
                 }
-                if self.collect_sequences {
+                if self.collect.sequences {
                     alignment.sequences[row].sequence.push_str(seq);
                 }
             }
