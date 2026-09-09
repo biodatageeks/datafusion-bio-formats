@@ -443,6 +443,57 @@ async fn an_indented_terminator_is_read_the_same_however_the_file_is_split() {
 }
 
 #[tokio::test]
+async fn a_missing_internal_terminator_keeps_ordinals_stable_when_split() {
+    // The reader starts a new alignment at a `# STOCKHOLM 1.0` even without a
+    // preceding `//`, so planning must count those too: otherwise a later
+    // range is seeded with too small an ordinal and the fallback ids shift.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing_internal.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\nseqA ACGT\n\
+         # STOCKHOLM 1.0\nseqB ACGT\n//\n\
+         # STOCKHOLM 1.0\nseqC ACGT\n//\n\
+         # STOCKHOLM 1.0\nseqD ACGT\n//\n",
+    )
+    .unwrap();
+    let p = path.to_str().unwrap();
+
+    let mut baseline: Vec<(Option<String>, Option<String>)> = Vec::new();
+    for partitions in [1, 2, 4] {
+        let ctx = ctx_for(p, None, partitions);
+        let batches = ctx
+            .sql("SELECT alignment_id, name FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut got: Vec<_> = strings(&batches, "alignment_id")
+            .into_iter()
+            .zip(strings(&batches, "name"))
+            .collect();
+        got.sort_by(|a, b| a.1.cmp(&b.1));
+        if baseline.is_empty() {
+            // No alignment carries ID or AC, so every one falls back to its
+            // 0-based position in the file.
+            assert_eq!(
+                got,
+                vec![
+                    (Some("0".into()), Some("seqA".into())),
+                    (Some("1".into()), Some("seqB".into())),
+                    (Some("2".into()), Some("seqC".into())),
+                    (Some("3".into()), Some("seqD".into())),
+                ]
+            );
+            baseline = got;
+        } else {
+            assert_eq!(got, baseline, "target_partitions={partitions}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn unsupported_header_versions_are_rejected() {
     // Easel rejects every one of these with "missing Stockholm header".
     let dir = tempfile::tempdir().unwrap();

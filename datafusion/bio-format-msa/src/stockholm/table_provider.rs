@@ -1,7 +1,7 @@
 //! DataFusion table provider for Stockholm files.
 
 use crate::stockholm::physical_exec::{PartitionRange, StockholmExec};
-use crate::stockholm::reader::{has_alignment_content, is_terminator};
+use crate::stockholm::reader::{STOCKHOLM_HEADER_PREFIX, has_alignment_content, is_terminator};
 use crate::storage::{is_local, local_path, resolve_compression};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
@@ -150,21 +150,33 @@ impl StockholmTableProvider {
     }
 }
 
-/// Byte offsets `(start, end)` of every alignment in a local file, found by
-/// scanning for `//` lines. Trailing unterminated content becomes a final range.
+/// One `//`-delimited run of a local file: its byte range, and how many
+/// alignments the reader will emit from it.
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    start: u64,
+    end: u64,
+    alignments: u64,
+}
+
+/// The `//`-delimited runs of a local file. Trailing unterminated content
+/// becomes a final run.
 ///
-/// One sequential pass: whether the run since the last `//` holds anything the
-/// reader would call an alignment is tracked as the lines go by, so an
+/// One sequential pass, and it counts alignments rather than runs: the reader
+/// also starts a new alignment at a `# STOCKHOLM 1.0` that follows a missing
+/// terminator, so a run can hold more than one. Counting runs instead would
+/// seed a later partition with too small an ordinal and duplicate the fallback
+/// identifiers. Tracking the count as the lines go by also means an
 /// unterminated final alignment — a supported case — costs neither a second
 /// read of the file nor a buffer proportional to it.
-fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
+fn alignment_boundaries(path: &str) -> std::io::Result<Vec<Run>> {
     let path = local_path(path);
     let mut reader = BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
-    let mut out = Vec::new();
+    let mut out: Vec<Run> = Vec::new();
     let mut line = Vec::new();
     let mut offset: u64 = 0;
     let mut start: u64 = 0;
-    let mut tail_has_content = false;
+    let mut alignments: u64 = 0;
     loop {
         line.clear();
         let n = reader.read_until(b'\n', &mut line)?;
@@ -177,40 +189,65 @@ fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
         // Invalid UTF-8 is never a terminator, and counts as content: the
         // reader raises on it rather than skipping it, so it must not be
         // mistaken for a blank tail.
-        match std::str::from_utf8(body) {
-            Ok(text) if is_terminator(text) => {
-                out.push((start, offset));
-                start = offset;
-                tail_has_content = false;
+        let text = match std::str::from_utf8(body) {
+            Ok(text) => text,
+            Err(_) => {
+                alignments = alignments.max(1);
+                continue;
             }
-            Ok(text) if !tail_has_content => tail_has_content = has_alignment_content(text),
-            Ok(_) => {}
-            Err(_) => tail_has_content = true,
+        };
+        if is_terminator(text) {
+            if alignments > 0 {
+                out.push(Run {
+                    start,
+                    end: offset,
+                    alignments,
+                });
+            }
+            start = offset;
+            alignments = 0;
+        } else if has_alignment_content(text) {
+            if text.trim_start().starts_with(STOCKHOLM_HEADER_PREFIX) {
+                // Each header opens an alignment, terminator or not.
+                alignments += 1;
+            } else if alignments == 0 {
+                // Data before any header: an alignment that omits its own.
+                alignments = 1;
+            }
         }
     }
-    if offset > start && tail_has_content {
-        out.push((start, offset));
+    if offset > start && alignments > 0 {
+        out.push(Run {
+            start,
+            end: offset,
+            alignments,
+        });
     }
     Ok(out)
 }
 
-/// Groups consecutive alignments into at most `n` byte ranges of roughly equal size.
-fn group_alignments(boundaries: &[(u64, u64)], n: usize) -> Vec<PartitionRange> {
-    let total: u64 = boundaries.iter().map(|(s, e)| e - s).sum();
-    let n = n.min(boundaries.len()).max(1);
+/// Groups consecutive runs into at most `n` byte ranges of roughly equal size.
+///
+/// `first_ordinal` counts the alignments before each range, not the runs, so a
+/// run holding several alignments advances it by all of them.
+fn group_alignments(runs: &[Run], n: usize) -> Vec<PartitionRange> {
+    let total: u64 = runs.iter().map(|r| r.end - r.start).sum();
+    let n = n.min(runs.len()).max(1);
     let target = total.div_ceil(n as u64).max(1);
     let mut out = Vec::with_capacity(n);
     let mut i = 0;
-    while i < boundaries.len() {
-        let first_ordinal = i as u64;
-        let start = boundaries[i].0;
-        let mut end = boundaries[i].1;
+    let mut ordinal: u64 = 0;
+    while i < runs.len() {
+        let first_ordinal = ordinal;
+        let start = runs[i].start;
+        let mut end = runs[i].end;
         let remaining_bins = n - out.len();
+        ordinal += runs[i].alignments;
         i += 1;
-        // Always leave at least one alignment per remaining bin.
-        while i < boundaries.len() && end - start < target && boundaries.len() - i >= remaining_bins
-        {
-            end = boundaries[i].1;
+        // Always leave at least one run per remaining bin.
+        while i < runs.len() && end - start < target && runs.len() - i >= remaining_bins {
+            end = runs[i].end;
+            ordinal += runs[i].alignments;
             i += 1;
         }
         out.push(PartitionRange {

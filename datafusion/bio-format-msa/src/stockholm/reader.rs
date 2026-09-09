@@ -21,7 +21,7 @@ use std::collections::HashMap;
 const STOCKHOLM_HEADER: &str = "# STOCKHOLM 1.0";
 /// Anything opening with this is meant to be the header, so a mismatch is
 /// reported as an unsupported header rather than treated as a comment.
-const STOCKHOLM_HEADER_PREFIX: &str = "# STOCKHOLM";
+pub(crate) const STOCKHOLM_HEADER_PREFIX: &str = "# STOCKHOLM";
 
 /// One sequence row of an alignment.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
