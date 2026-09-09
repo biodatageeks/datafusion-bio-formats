@@ -165,15 +165,33 @@ fn split_ws(s: &str) -> (&str, &str) {
     }
 }
 
+/// The four markup kinds this reader understands. Any other `#=G…` label is an
+/// unknown extension, which the parse loop ignores like any other comment.
+const MARKUP_PREFIXES: [&str; 4] = ["#=GF", "#=GS", "#=GC", "#=GR"];
+
+/// Whether `line` ends an alignment. Easel accepts surrounding whitespace, so
+/// `  //` terminates just as `//` does.
+///
+/// Shared with the partition-boundary scan: if planning split on a line the
+/// parse loop read as sequence data, the rows after it would change alignment
+/// with the partition count.
+pub fn is_terminator(line: &str) -> bool {
+    line.trim() == "//"
+}
+
 /// Whether `line` is a comment the start search skips between alignments: a
-/// `#` line that is neither markup (`#=G…`) nor a header (`# STOCKHOLM…`).
+/// `#` line that is neither known markup nor a header (`# STOCKHOLM…`).
+///
+/// Only the four supported markup labels are reserved. An unrecognised one such
+/// as `#=GX` is a comment here because the parse loop treats it as one, and
+/// disagreeing would emit an empty alignment and shift every later ordinal.
 ///
 /// Shared with the partition-boundary scan so the bytes it calls an alignment
 /// and the bytes this reader calls an alignment cannot drift apart.
 pub fn is_skippable_comment(line: &str) -> bool {
     let trimmed = line.trim();
     trimmed.starts_with('#')
-        && !trimmed.starts_with("#=G")
+        && !MARKUP_PREFIXES.iter().any(|p| trimmed.starts_with(p))
         && !trimmed.starts_with(STOCKHOLM_HEADER_PREFIX)
 }
 
@@ -304,7 +322,7 @@ impl StockholmReader {
             if trimmed.is_empty() {
                 continue;
             }
-            if trimmed == "//" {
+            if is_terminator(trimmed) {
                 alignment.terminated = true;
                 break;
             }

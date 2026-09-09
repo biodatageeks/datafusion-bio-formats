@@ -1,7 +1,7 @@
 //! DataFusion table provider for Stockholm files.
 
 use crate::stockholm::physical_exec::{PartitionRange, StockholmExec};
-use crate::stockholm::reader::has_alignment_content;
+use crate::stockholm::reader::{has_alignment_content, is_terminator};
 use crate::storage::{is_local, local_path, resolve_compression};
 use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
@@ -174,18 +174,18 @@ fn alignment_boundaries(path: &str) -> std::io::Result<Vec<(u64, u64)>> {
         offset += n as u64;
         let body = line.strip_suffix(b"\n").unwrap_or(&line);
         let body = body.strip_suffix(b"\r").unwrap_or(body);
-        if body.iter().all(|b| b.is_ascii_whitespace() || *b == b'/') && body.trim_ascii() == b"//"
-        {
-            out.push((start, offset));
-            start = offset;
-            tail_has_content = false;
-        } else if !tail_has_content {
-            // Invalid UTF-8 is content: the reader will raise on it rather
-            // than skip it, so it must not be mistaken for a blank tail.
-            tail_has_content = match std::str::from_utf8(body) {
-                Ok(text) => has_alignment_content(text),
-                Err(_) => true,
-            };
+        // Invalid UTF-8 is never a terminator, and counts as content: the
+        // reader raises on it rather than skipping it, so it must not be
+        // mistaken for a blank tail.
+        match std::str::from_utf8(body) {
+            Ok(text) if is_terminator(text) => {
+                out.push((start, offset));
+                start = offset;
+                tail_has_content = false;
+            }
+            Ok(text) if !tail_has_content => tail_has_content = has_alignment_content(text),
+            Ok(_) => {}
+            Err(_) => tail_has_content = true,
         }
     }
     if offset > start && tail_has_content {

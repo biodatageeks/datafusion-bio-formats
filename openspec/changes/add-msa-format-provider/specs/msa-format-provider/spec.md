@@ -130,6 +130,16 @@ The provider SHALL concatenate sequence lines, `#=GR` values and `#=GC` values t
 - **THEN** it is ignored
 - **AND** it does not consume an alignment ordinal, so a following alignment without `ID` or `AC` keeps the ordinal it would otherwise have had
 
+#### Scenario: Unrecognised markup is a comment
+
+- **WHEN** a `#=G` line carries a label other than `GF`, `GS`, `GC` or `GR`, such as `#=GX`
+- **THEN** it is ignored wherever it appears, and between alignments it consumes no ordinal
+
+#### Scenario: A terminator surrounded by whitespace
+
+- **WHEN** an alignment is terminated by `//` with leading or trailing whitespace
+- **THEN** it ends the alignment, and partition planning splits on the same line the parser ends on, so the rows after it belong to the same alignment at every `target_partitions` value
+
 ### Requirement: Stockholm named annotation promotion
 
 The provider SHALL accept a list of `#=GS` feature names to promote to top-level nullable Utf8 columns, using the first occurrence per sequence, and SHALL keep the full `gs` bag when the list contains the `gs` sentinel.
