@@ -8,6 +8,8 @@ members = [ "datafusion/bio-format-bam", "datafusion/bio-format-bbi", "datafusio
     "datafusion/bio-format-bgen",
     "datafusion/bio-format-cooler",
     "datafusion/bio-format-pgen",
+    "datafusion/bio-format-structure",
+    "datafusion/bio-format-foldcomp",
     "benchmarks/common", "benchmarks/runner",
 ]
 
