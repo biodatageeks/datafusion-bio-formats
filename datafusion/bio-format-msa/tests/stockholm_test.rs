@@ -369,6 +369,80 @@ async fn comment_between_alignments_does_not_consume_an_ordinal() {
 }
 
 #[tokio::test]
+async fn unknown_markup_between_alignments_is_a_comment() {
+    // The body loop ignores any `#` line it does not recognise, and Easel reads
+    // this file as two alignments, so the start search must not mistake an
+    // unknown `#=GX` for the beginning of a headerless one.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unknown.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\nseqA ACGT\n//\n\
+         #=GX ignored\n\
+         # STOCKHOLM 1.0\nseqB ACGT\n//\n",
+    )
+    .unwrap();
+    let ctx = ctx_for(path.to_str().unwrap(), None, 1);
+    let batches = ctx
+        .sql("SELECT alignment_id, name FROM t")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(rows(&batches), 2);
+    assert_eq!(
+        strings(&batches, "alignment_id"),
+        vec![Some("0".into()), Some("1".into())]
+    );
+}
+
+#[tokio::test]
+async fn an_indented_terminator_is_read_the_same_however_the_file_is_split() {
+    // Easel accepts `  //`. Planning and parsing must agree on that, or the
+    // rows after it land in a different alignment depending on the partition
+    // count.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("indented.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\n#=GF ID first\nseqA ACGT\n  //\n\
+         #=GF ID second\nseqB ACGT\n//\n",
+    )
+    .unwrap();
+    let p = path.to_str().unwrap();
+
+    let mut baseline: Vec<(Option<String>, Option<String>)> = Vec::new();
+    for partitions in [1, 2, 4] {
+        let ctx = ctx_for(p, None, partitions);
+        let batches = ctx
+            .sql("SELECT alignment_id, name FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let mut got: Vec<_> = strings(&batches, "alignment_id")
+            .into_iter()
+            .zip(strings(&batches, "name"))
+            .collect();
+        got.sort();
+        if baseline.is_empty() {
+            assert_eq!(
+                got,
+                vec![
+                    (Some("first".into()), Some("seqA".into())),
+                    (Some("second".into()), Some("seqB".into())),
+                ]
+            );
+            baseline = got;
+        } else {
+            assert_eq!(got, baseline, "target_partitions={partitions}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn unsupported_header_versions_are_rejected() {
     // Easel rejects every one of these with "missing Stockholm header".
     let dir = tempfile::tempdir().unwrap();
