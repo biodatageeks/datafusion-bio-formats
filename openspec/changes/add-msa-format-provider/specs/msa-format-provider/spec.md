@@ -82,9 +82,9 @@ The provider SHALL expose a Stockholm input as one row per sequence per alignmen
 
 ### Requirement: Stockholm header validation
 
-The provider SHALL accept `# STOCKHOLM 1.0` — ignoring trailing whitespace — as the first non-blank line of an input, and SHALL reject any other first line, including other version numbers.
+The provider SHALL accept exactly `# STOCKHOLM 1.0` — ignoring trailing whitespace, but requiring the single separating space — as the first non-blank line of an input, and SHALL reject every other first line, including other version numbers and other spellings.
 
-#### Scenario: The supported version
+#### Scenario: The supported header
 
 - **WHEN** an input begins with `# STOCKHOLM 1.0`, with or without trailing whitespace
 - **THEN** the input is parsed
@@ -97,7 +97,7 @@ The provider SHALL accept `# STOCKHOLM 1.0` — ignoring trailing whitespace —
 
 #### Scenario: A malformed header
 
-- **WHEN** an input begins with `# STOCKHOLM garbage`, `# STOCKHOLMX` or a comment line
+- **WHEN** an input begins with `# STOCKHOLM garbage`, `# STOCKHOLMX`, `#STOCKHOLM 1.0`, `# STOCKHOLM1.0`, `# STOCKHOLM  1.0` or a comment line
 - **THEN** the scan fails with an error naming the path and the expected header
 
 ### Requirement: Stockholm block and alignment structure
@@ -141,7 +141,7 @@ The provider SHALL accept a list of `#=GS` feature names to promote to top-level
 
 ### Requirement: Alignment-level annotation reader
 
-The provider SHALL expose the `#=GF` and `#=GC` lines of every alignment in long format — `alignment_id`, `kind`, `feature`, `value`, `n_sequences`, `alignment_length` — preserving repeats and file order, without materialising sequences.
+The provider SHALL expose the `#=GF` and `#=GC` lines of every alignment in long format — `alignment_id`, `kind`, `feature`, `value`, `n_sequences`, `alignment_length` — preserving repeats and file order across both kinds, without materialising sequences.
 
 #### Scenario: Repeated file annotations
 
@@ -152,6 +152,12 @@ The provider SHALL expose the `#=GF` and `#=GC` lines of every alignment in long
 
 - **WHEN** an alignment contains `#=GC RF` and `#=GC SS_cons` lines spread over interleaved blocks
 - **THEN** one row per feature is returned whose `value` length equals `alignment_length`
+
+#### Scenario: Interleaved kinds keep their file order
+
+- **WHEN** an alignment interleaves `#=GF` and `#=GC` lines
+- **THEN** the rows follow the order of the lines in the input rather than being grouped by kind
+- **AND** a `#=GC` feature repeated across blocks is reported once, at the position of its first block
 
 ### Requirement: Storage, compression and local URIs
 
@@ -175,6 +181,12 @@ The provider SHALL build only the projected columns, SHALL serve an empty projec
 
 - **WHEN** a caller counts rows without selecting any column
 - **THEN** the count is returned and no sequence strings are materialised
+
+#### Scenario: Unprojected columns are never built
+
+- **WHEN** a caller selects a subset of the A2M/A3M columns
+- **THEN** only the requested columns are accumulated and finished
+- **AND** sequence text is neither buffered nor decoded when `sequence` is not requested
 
 #### Scenario: Partitioned multi-alignment scan
 

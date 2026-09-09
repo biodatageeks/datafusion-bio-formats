@@ -46,15 +46,13 @@ pub async fn read_stockholm_annotations(
         let id = alignment.id();
         let n = alignment.n_sequences() as u32;
         let len = alignment.alignment_length() as u32;
-        for (k, rows) in [("GF", &alignment.gf), ("GC", &alignment.gc)] {
-            for (f, v) in rows {
-                alignment_id.append_value(&id);
-                kind.append_value(k);
-                feature.append_value(f);
-                value.append_value(v);
-                n_sequences.append_value(n);
-                alignment_length.append_value(len);
-            }
+        for annotation in &alignment.annotations {
+            alignment_id.append_value(&id);
+            kind.append_value(annotation.kind.as_str());
+            feature.append_value(&annotation.feature);
+            value.append_value(&annotation.value);
+            n_sequences.append_value(n);
+            alignment_length.append_value(len);
         }
     }
 

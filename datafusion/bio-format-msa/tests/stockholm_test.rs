@@ -377,6 +377,10 @@ async fn unsupported_header_versions_are_rejected() {
         "# STOCKHOLM garbage",
         "# STOCKHOLMX",
         "#STOCKHOLM 1.0",
+        // Easel requires exactly one space before the version and rejects both
+        // of these, so a trimmed-suffix comparison is not enough.
+        "# STOCKHOLM1.0",
+        "# STOCKHOLM  1.0",
     ] {
         let path = dir.path().join("h.sto");
         std::fs::write(&path, format!("{header}\nseqA ACGT\n//\n")).unwrap();
@@ -617,6 +621,50 @@ async fn annotations_preserve_repeated_gf_features_in_order() {
         .flatten()
         .collect();
     assert_eq!(ids, HashSet::from(["7tm_1".to_string()]));
+}
+
+#[tokio::test]
+async fn annotation_rows_follow_file_order_across_kinds() {
+    // `#=GF` and `#=GC` lines must come back interleaved as they appear, not
+    // grouped by kind, so the long format can reconstruct the alignment header.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mixed.sto");
+    std::fs::write(
+        &path,
+        "# STOCKHOLM 1.0\n\
+         #=GF ID mixed\n\
+         #=GC RF xxxx\n\
+         #=GF DE after a GC line\n\
+         #=GC SS_cons ....\n\
+         #=GF CC trailing\n\
+         seqA ACGT\n\
+         #=GC RF yyyy\n\
+         //\n",
+    )
+    .unwrap();
+    let batch = read_stockholm_annotations(path.to_str().unwrap().to_string(), None)
+        .await
+        .unwrap();
+    let kinds = strings(std::slice::from_ref(&batch), "kind");
+    let features = strings(std::slice::from_ref(&batch), "feature");
+    let values = strings(std::slice::from_ref(&batch), "value");
+    let got: Vec<(String, String, String)> = kinds
+        .into_iter()
+        .zip(features)
+        .zip(values)
+        .map(|((k, f), v)| (k.unwrap(), f.unwrap(), v.unwrap()))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("GF".into(), "ID".into(), "mixed".into()),
+            // Repeated across two blocks, reported at its first position.
+            ("GC".into(), "RF".into(), "xxxxyyyy".into()),
+            ("GF".into(), "DE".into(), "after a GC line".into()),
+            ("GC".into(), "SS_cons".into(), "....".into()),
+            ("GF".into(), "CC".into(), "trailing".into()),
+        ]
+    );
 }
 
 #[tokio::test]

@@ -232,48 +232,75 @@ impl ExecutionPlan for FastaLikeExec {
     }
 }
 
+/// Column indices into [`fasta_like_schema`].
+const COL_NAME: usize = 0;
+const COL_DESCRIPTION: usize = 1;
+const COL_SEQUENCE: usize = 2;
+
 /// Column builders for one batch of FASTA-like records.
+///
+/// Only the projected columns are built. `sequence` in particular is by far the
+/// largest of the three, so a `count(*)` or a `SELECT name` never accumulates
+/// alignment text it is about to discard.
 struct Builders {
-    name: StringBuilder,
-    description: StringBuilder,
-    sequence: LargeStringBuilder,
+    /// Source column indices to emit, in output order; empty for `count(*)`.
+    projection: Vec<usize>,
+    name: Option<StringBuilder>,
+    description: Option<StringBuilder>,
+    sequence: Option<LargeStringBuilder>,
     rows: usize,
 }
 
 impl Builders {
-    fn new() -> Self {
+    fn new(projection: &Option<Vec<usize>>) -> Self {
+        let projection = projection
+            .clone()
+            .unwrap_or_else(|| vec![COL_NAME, COL_DESCRIPTION, COL_SEQUENCE]);
+        let wants = |col: usize| projection.contains(&col);
         Self {
-            name: StringBuilder::new(),
-            description: StringBuilder::new(),
-            sequence: LargeStringBuilder::new(),
+            name: wants(COL_NAME).then(StringBuilder::new),
+            description: wants(COL_DESCRIPTION).then(StringBuilder::new),
+            sequence: wants(COL_SEQUENCE).then(LargeStringBuilder::new),
+            projection,
             rows: 0,
         }
     }
 
+    /// Whether the caller needs to decode sequence bytes at all.
+    fn wants_sequence(&self) -> bool {
+        self.sequence.is_some()
+    }
+
     fn push(&mut self, name: &str, description: Option<&str>, sequence: &str) {
-        self.name.append_value(name);
-        self.description.append_option(description);
-        self.sequence.append_value(sequence);
+        if let Some(b) = self.name.as_mut() {
+            b.append_value(name);
+        }
+        if let Some(b) = self.description.as_mut() {
+            b.append_option(description);
+        }
+        if let Some(b) = self.sequence.as_mut() {
+            b.append_value(sequence);
+        }
         self.rows += 1;
     }
 
-    fn finish(
-        &mut self,
-        schema: &SchemaRef,
-        projection: &Option<Vec<usize>>,
-    ) -> datafusion::common::Result<RecordBatch> {
+    fn finish(&mut self, schema: &SchemaRef) -> datafusion::common::Result<RecordBatch> {
         let rows = self.rows;
         self.rows = 0;
-        let all: [ArrayRef; 3] = [
-            Arc::new(self.name.finish()),
-            Arc::new(self.description.finish()),
-            Arc::new(self.sequence.finish()),
-        ];
-        let arrays: Vec<ArrayRef> = match projection {
-            None => all.to_vec(),
-            Some(idx) if idx.is_empty() => vec![],
-            Some(idx) => idx.iter().map(|&i| all[i].clone()).collect(),
-        };
+        let arrays: Vec<ArrayRef> = self
+            .projection
+            .iter()
+            .map(|&col| match col {
+                COL_NAME => Arc::new(self.name.as_mut().expect("projected").finish()) as ArrayRef,
+                COL_DESCRIPTION => {
+                    Arc::new(self.description.as_mut().expect("projected").finish()) as ArrayRef
+                }
+                COL_SEQUENCE => {
+                    Arc::new(self.sequence.as_mut().expect("projected").finish()) as ArrayRef
+                }
+                other => unreachable!("column {other} is not in the FASTA-like schema"),
+            })
+            .collect();
         let options = RecordBatchOptions::new().with_row_count(Some(rows));
         RecordBatch::try_new_with_options(schema.clone(), arrays, &options)
             .map_err(|e| DataFusionError::Execution(format!("error building batch: {e}")))
@@ -305,7 +332,10 @@ async fn record_batches(
         .map_err(|e| DataFusionError::Execution(format!("failed to open {file_path}: {e}")))?;
     let out_schema = schema.clone();
     let stream = try_stream! {
-        let mut builders = Builders::new();
+        let mut builders = Builders::new(&projection);
+        // Sequence lines are still read — they delimit records — but they are
+        // only accumulated and decoded when the column is actually projected.
+        let want_sequence = builders.wants_sequence();
         let mut line: Vec<u8> = Vec::new();
         let mut line_no: u64 = 0;
         let mut seen_record = false;
@@ -324,14 +354,18 @@ async fn record_batches(
             if at_eof || starts_record {
                 if let Some(h) = header.take() {
                     let (name, description) = split_header(&h);
-                    let seq = std::str::from_utf8(&sequence).map_err(|e| {
-                        DataFusionError::Execution(format!("{file_path}:{line_no}: sequence is not UTF-8: {e}"))
-                    })?;
+                    let seq = if want_sequence {
+                        std::str::from_utf8(&sequence).map_err(|e| {
+                            DataFusionError::Execution(format!("{file_path}:{line_no}: sequence is not UTF-8: {e}"))
+                        })?
+                    } else {
+                        ""
+                    };
                     builders.push(name, description, seq);
                     sequence.clear();
                     emitted += 1;
                     if builders.rows >= batch_size {
-                        yield builders.finish(&out_schema, &projection)?;
+                        yield builders.finish(&out_schema)?;
                     }
                     if limit.is_some_and(|l| emitted >= l) {
                         done = true;
@@ -359,13 +393,13 @@ async fn record_batches(
                 Err(DataFusionError::Execution(format!(
                     "{file_path}:{line_no}: expected a '>' record header before sequence data"
                 )))?;
-            } else {
+            } else if want_sequence {
                 sequence.extend_from_slice(&line);
             }
         }
 
         if builders.rows > 0 {
-            yield builders.finish(&out_schema, &projection)?;
+            yield builders.finish(&out_schema)?;
         }
     };
     Ok(Box::pin(RecordBatchStreamAdapter::new(schema, stream)))
