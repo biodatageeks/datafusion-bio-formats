@@ -53,5 +53,6 @@ pub use fastalike::{FastaLikeExec, FastaLikeTableProvider, MsaFlavor, fasta_like
 pub use stockholm::{
     Alignment, AnnotationKind, Collect, ColumnKind, FileAnnotation, GS_BAG_SENTINEL,
     PartitionRange, SequenceRecord, StockholmExec, StockholmReader, StockholmTableProvider,
-    annotation_bag_type, annotations_schema, is_terminator, read_stockholm_annotations,
+    annotation_bag_type, annotations_schema, is_terminator, opens_alignment,
+    read_stockholm_annotations,
 };

@@ -10,7 +10,7 @@ pub use annotations::{annotations_schema, read_stockholm_annotations};
 pub use physical_exec::{PartitionRange, StockholmExec};
 pub use reader::{
     Alignment, AnnotationKind, Collect, FileAnnotation, SequenceRecord, StockholmReader,
-    has_alignment_content, is_skippable_comment, is_terminator,
+    has_alignment_content, is_skippable_comment, is_terminator, opens_alignment,
 };
 pub use table_provider::{
     ColumnKind, GS_BAG_SENTINEL, StockholmTableProvider, annotation_bag_type,
