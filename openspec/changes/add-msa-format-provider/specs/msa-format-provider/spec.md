@@ -217,8 +217,8 @@ The provider SHALL build only the projected columns, SHALL serve an empty projec
 #### Scenario: A pushed-down limit of zero
 
 - **WHEN** a scan is planned with a limit of zero
-- **THEN** no rows are returned and the input is not opened
-- **AND** this holds however many partitions the scan uses
+- **THEN** no rows are returned and the input is not opened, neither to detect its compression nor to discover partition boundaries
+- **AND** this holds however many partitions the scan targets, and even when the path cannot be read at all
 
 #### Scenario: A positive pushed-down limit under partitioning
 

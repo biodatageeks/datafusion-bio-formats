@@ -255,18 +255,27 @@ impl TableProvider for StockholmTableProvider {
             ),
             None => (self.schema.clone(), self.columns.clone()),
         };
-        let partitions = self
-            .plan_partitions(state.config().target_partitions())
-            .await?;
-        // A per-partition stop is only the global stop when there is one
-        // partition; applying `n` in each of `p` partitions would return up to
-        // `n * p` rows. `Some(0)` is the exception — zero per partition is zero
-        // overall — and DataFusion enforces the real limit above the scan
-        // either way, so dropping the hint only forgoes an early exit.
-        let limit = match limit {
-            Some(0) => Some(0),
-            other if partitions.len() <= 1 => other,
-            _ => None,
+        // A limit of zero asks for nothing, so answer before discovering
+        // partitions: that would sniff the compression and scan the whole input
+        // for `//` boundaries, which both opens the file and reads it.
+        let (partitions, limit) = if limit == Some(0) {
+            (
+                vec![PartitionRange {
+                    range: None,
+                    first_ordinal: 0,
+                }],
+                Some(0),
+            )
+        } else {
+            let partitions = self
+                .plan_partitions(state.config().target_partitions())
+                .await?;
+            // A per-partition stop is only the global stop when there is one
+            // partition; applying `n` in each of `p` partitions would return up
+            // to `n * p` rows. DataFusion enforces the real limit above the
+            // scan either way, so dropping the hint only forgoes an early exit.
+            let limit = if partitions.len() <= 1 { limit } else { None };
+            (partitions, limit)
         };
         debug!(
             "StockholmTableProvider::scan {} partitions={} projection={:?}",
