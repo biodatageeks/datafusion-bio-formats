@@ -102,6 +102,8 @@ encoded["manifest.json"] = (json.dumps(manifest,indent=2) + "\n").encode()
 check = argparse.ArgumentParser()
 check.add_argument("--check",action="store_true")
 args = check.parse_args()
+numeric_differences = {"coordinate": [], "angle": []}
+
 def compare(expected, actual, *, path, coordinate_tolerance, angle_tolerance):
     if isinstance(expected, dict):
         assert isinstance(actual, dict) and expected.keys() == actual.keys(), path
@@ -120,7 +122,8 @@ def compare(expected, actual, *, path, coordinate_tolerance, angle_tolerance):
         if "angles" in path:
             difference = abs((expected - actual + 180) % 360 - 180)
             tolerance = angle_tolerance
-        assert difference <= tolerance, (path, expected, actual, tolerance)
+        numeric_differences["angle" if "angles" in path else "coordinate"].append(
+            (difference, path, tolerance))
     else:
         assert expected == actual and type(expected) is type(actual), (path, expected, actual)
 
@@ -138,6 +141,12 @@ if args.check:
         compare(json.loads(data), regenerated, path=(name,),
                 coordinate_tolerance=frozen["tolerances"]["foldcomp_coordinates_angstrom" if compressed else "text_coordinates_angstrom"],
                 angle_tolerance=frozen["tolerances"]["foldcomp_angles_degrees" if compressed else "angles_circular_degrees"])
+    for kind, differences in numeric_differences.items():
+        largest = sorted(differences, reverse=True)[:10]
+        print(f"Largest regenerated {kind} differences: {largest}", flush=True)
+    failures = [item for differences in numeric_differences.values()
+                for item in differences if item[0] > item[2]]
+    assert not failures, f"{len(failures)} values exceed tolerances; largest: {sorted(failures, reverse=True)[:10]}"
 else:
     for name, data in encoded.items():
         (OUTPUT / name).write_bytes(data)
