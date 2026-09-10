@@ -31,7 +31,13 @@ fn raw_codec_oracle_and_malformed_headers() {
         assert_eq!(a.residue_name, g["residue_name"]);
         assert_eq!(a.auth_seq_id.as_deref(), g["auth_seq_id"].as_str());
         for i in 0..3 {
-            assert!((a.position[i] - g["position"][i].as_f64().unwrap()).abs() < 2e-5);
+            assert!(
+                (a.position[i] - g["position"][i].as_f64().unwrap()).abs() < 1e-4,
+                "coordinate mismatch for {} axis {i}: {} vs {}",
+                a.atom_name,
+                a.position[i],
+                g["position"][i]
+            );
         }
     }
     for (r, g) in residues(&entry, &options)

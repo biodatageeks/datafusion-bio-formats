@@ -29,7 +29,7 @@
   "tolerances": {
     "text_coordinates_angstrom": 1e-09,
     "angles_circular_degrees": 1e-06,
-    "foldcomp_coordinates_angstrom": 2e-05,
+    "foldcomp_coordinates_angstrom": 0.0001,
     "foldcomp_angles_degrees": 0.01
   }
 }

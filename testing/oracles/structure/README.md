@@ -17,7 +17,7 @@ model/TER/label gaps, incomplete backbones, rigid transformations and malformed 
 Foldcomp expectations use direct get_data coordinates and independently parsed
 decoded atom identities. PDB rounding is checked within 0.00051 Angstroms but is
 never the native coordinate oracle. Geometry is independently recomputed from raw
-reconstructions. Raw coordinate tolerance is 2e-5 Angstroms and circular angle
+reconstructions. Raw coordinate tolerance is 1e-4 Angstroms and circular angle
 tolerance 0.01 degrees to permit compiler/platform differences in the upstream
 Float32 codec; schema, identities, counts and null masks must match exactly.
 This tests decoder parity, not fidelity against the original uncompressed model.
@@ -34,3 +34,11 @@ with author/label site identity matching before falling back to chem_comp metada
 counts and null masks. Regenerated numerical values use the manifest tolerances
 to allow platform libm/compiler differences; a final-bit float change does not
 require rewriting the frozen corpus.
+
+Cross-platform calibration: the pinned Foldcomp 1.0.0 Linux x86_64 wheel and
+macOS arm64 golden differ by at most 5.340576171875e-5 Angstroms per coordinate
+and 0.0005305291353181474 degrees over this fixture. The 1e-4 Angstrom absolute
+tolerance covers this measured Float32 accumulation while staying ten times
+smaller than a PDB coordinate decimal place. It is a decoder parity tolerance,
+not a guarantee of reconstruction fidelity. The generator prints its largest
+numeric differences; frozen file hashes are still exact.

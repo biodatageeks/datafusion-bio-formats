@@ -97,7 +97,7 @@ manifest = {"schema_version": 1, "versions": VERSIONS,
     "sources": {"1ubq": "https://files.rcsb.org/download/1UBQ.pdb", "foldcomp_fixture_commit": "89e37195d3c8ade8d40ead91ad82e6cd2964a967"},
     "inputs": {f.name: sha(f.read_bytes()) for f in sorted(DATA.iterdir()) if f.is_file()},
     "outputs": {name: sha(data) for name,data in encoded.items()},
-    "tolerances": {"text_coordinates_angstrom": 1e-9, "angles_circular_degrees": 1e-6, "foldcomp_coordinates_angstrom": 2e-5, "foldcomp_angles_degrees": 0.01}}
+    "tolerances": {"text_coordinates_angstrom": 1e-9, "angles_circular_degrees": 1e-6, "foldcomp_coordinates_angstrom": 1e-4, "foldcomp_angles_degrees": 0.01}}
 encoded["manifest.json"] = (json.dumps(manifest,indent=2) + "\n").encode()
 check = argparse.ArgumentParser()
 check.add_argument("--check",action="store_true")

@@ -4,6 +4,7 @@ fn main() {
         cc::Build::new()
             .cpp(true)
             .std("c++17")
+            .flag_if_supported("/EHsc")
             .warnings(false)
             .include("native/vendor")
             .file("native/cif_bridge.cpp")

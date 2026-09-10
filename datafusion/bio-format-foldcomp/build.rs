@@ -11,6 +11,11 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         build.include("native/vendor/windows");
     }
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // The upstream span header uses std::terminate without <exception>.
+        // Force the standard header first, preserving the vendored source bytes.
+        build.flag("/EHsc").flag("/FIexception");
+    }
     for file in [
         "amino_acid",
         "atom_coordinate",
