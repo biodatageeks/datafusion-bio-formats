@@ -29,3 +29,8 @@ oracle packages are required for ordinary native/Python correctness tests.
 Site-specific modified-residue parents follow the wwPDB
 [pdbx_struct_mod_residue category](https://mmcif.pdb.org/dictionaries/mmcif_ma.dic/Items/_pdbx_struct_mod_residue.parent_comp_id.html),
 with author/label site identity matching before falling back to chem_comp metadata.
+
+`--check` requires exact committed input/output hashes, dependency versions, keys,
+counts and null masks. Regenerated numerical values use the manifest tolerances
+to allow platform libm/compiler differences; a final-bit float change does not
+require rewriting the frozen corpus.

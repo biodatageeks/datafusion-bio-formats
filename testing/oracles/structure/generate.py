@@ -102,10 +102,43 @@ encoded["manifest.json"] = (json.dumps(manifest,indent=2) + "\n").encode()
 check = argparse.ArgumentParser()
 check.add_argument("--check",action="store_true")
 args = check.parse_args()
-for name,data in encoded.items():
-    target = OUTPUT/name
-    if args.check:
-        assert target.read_bytes() == data, f"oracle drift: {name}"
+def compare(expected, actual, *, path, coordinate_tolerance, angle_tolerance):
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict) and expected.keys() == actual.keys(), path
+        for key in expected:
+            compare(expected[key], actual[key], path=(*path, key),
+                    coordinate_tolerance=coordinate_tolerance, angle_tolerance=angle_tolerance)
+    elif isinstance(expected, list):
+        assert isinstance(actual, list) and len(expected) == len(actual), path
+        for index, (left, right) in enumerate(zip(expected, actual)):
+            compare(left, right, path=(*path, index), coordinate_tolerance=coordinate_tolerance,
+                    angle_tolerance=angle_tolerance)
+    elif isinstance(expected, float):
+        assert isinstance(actual, (float, int)) and math.isfinite(actual), path
+        difference = abs(expected - actual)
+        tolerance = coordinate_tolerance
+        if "angles" in path:
+            difference = abs((expected - actual + 180) % 360 - 180)
+            tolerance = angle_tolerance
+        assert difference <= tolerance, (path, expected, actual, tolerance)
     else:
-        target.write_bytes(data)
+        assert expected == actual and type(expected) is type(actual), (path, expected, actual)
+
+if args.check:
+    frozen = json.loads((OUTPUT / "manifest.json").read_text())
+    # The checked-in corpus must match its hashes exactly. Different libm/compiler
+    # builds may regenerate the same scientific result with different last bits.
+    for key in manifest.keys() - {"outputs"}:
+        assert frozen[key] == manifest[key], f"manifest drift: {key}"
+    assert frozen["outputs"].keys() == outputs.keys(), "oracle file set drift"
+    for name, regenerated in outputs.items():
+        data = (OUTPUT / name).read_bytes()
+        assert sha(data) == frozen["outputs"][name], f"stored oracle hash drift: {name}"
+        compressed = name.startswith("1ubq.fcz")
+        compare(json.loads(data), regenerated, path=(name,),
+                coordinate_tolerance=frozen["tolerances"]["foldcomp_coordinates_angstrom" if compressed else "text_coordinates_angstrom"],
+                angle_tolerance=frozen["tolerances"]["foldcomp_angles_degrees" if compressed else "angles_circular_degrees"])
+else:
+    for name, data in encoded.items():
+        (OUTPUT / name).write_bytes(data)
 print(f"{'Verified' if args.check else 'Wrote'} {len(encoded)} pinned oracle files")
