@@ -170,6 +170,11 @@ async fn determine_schema_from_header(
         Field::new("end", DataType::UInt32, false),
         Field::new("id", DataType::Utf8, true),
         Field::new("ref", DataType::Utf8, false),
+        // Non-nullable, so "no alternate allele" cannot be NULL: `ALT=.`
+        // stores the EMPTY STRING, and multiple alleles are joined with `|`
+        // (not the spec's `,`). Pinned by `tests/non_variant_alt_test.rs`; the
+        // VEP engine relies on both halves to tell a non-variant record from a
+        // real one.
         Field::new("alt", DataType::Utf8, false),
         Field::new("qual", DataType::Float64, true),
         Field::new("filter", DataType::Utf8, true),

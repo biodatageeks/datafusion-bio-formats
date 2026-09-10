@@ -1565,6 +1565,72 @@ mod tests {
         assert!(lines[0].line.contains("\t.\t.\t.\t.")); // id, alt, qual, filter, info
     }
 
+    /// The empty-string ALT, which is what the readers actually produce for
+    /// `ALT=.` — noodles erases the dot before the join, so no reader ever
+    /// hands the serializer the literal `"."` that the test above uses. Both
+    /// spellings have to render as `.`, or a non-variant record written back
+    /// out would carry an empty ALT field and be invalid VCF.
+    #[test]
+    fn an_empty_alt_is_written_back_as_a_dot() {
+        let schema = create_test_schema();
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                // The reader's encoding for "no alternate allele".
+                Arc::new(StringArray::from(vec![""])),
+                Arc::new(Float64Array::from(vec![None])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &[], &[], &[], true).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        // CHROM POS ID REF ALT QUAL FILTER INFO
+        let fields: Vec<&str> = lines[0].line.split('\t').collect();
+        assert_eq!(fields[2], ".", "id");
+        assert_eq!(fields[3], "A", "ref");
+        assert_eq!(
+            fields[4], ".",
+            "an empty ALT must be written as `.`, never as an empty field"
+        );
+    }
+
+    /// The multi-allelic encoding, for contrast: `|` is this crate's joined
+    /// separator on the way in and has to become the spec's `,` on the way
+    /// out. Pinned here because a consumer now splits on it to find the first
+    /// ALT (biodatageeks/vepyr#97), so the separator is part of the contract.
+    #[test]
+    fn a_joined_alt_is_written_back_with_comma_separators() {
+        let schema = create_test_schema();
+
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["chr1"])),
+                Arc::new(UInt32Array::from(vec![99u32])),
+                Arc::new(UInt32Array::from(vec![100u32])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+                Arc::new(StringArray::from(vec!["A"])),
+                Arc::new(StringArray::from(vec!["C|."])),
+                Arc::new(Float64Array::from(vec![None])),
+                Arc::new(StringArray::from(vec![None::<&str>])),
+            ],
+        )
+        .unwrap();
+
+        let lines = batch_to_vcf_lines(&batch, &[], &[], &[], true).unwrap();
+        let fields: Vec<&str> = lines[0].line.split('\t').collect();
+        assert_eq!(fields[4], "C,.");
+    }
+
     #[test]
     fn test_batch_to_vcf_lines_multi_sample() {
         // Columnar schema: genotypes: Struct<GT: List<Utf8>, DP: List<Int32>>

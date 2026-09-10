@@ -1,0 +1,10 @@
+##fileformat=VCFv4.3
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Total read depth">
+##contig=<ID=chr1,length=1000>
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+chr1	100	.	G	C	60	PASS	DP=10
+chr1	200	.	G	.	60	PASS	DP=20
+chr1	300	.	G	C,.	60	PASS	DP=30
+chr1	400	.	G	.,C	60	PASS	DP=40
+chr1	500	.	G	*	60	PASS	DP=50
+chr1	600	.	A	G	60	PASS	DP=60
