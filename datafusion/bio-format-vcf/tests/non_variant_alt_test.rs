@@ -21,6 +21,20 @@ use datafusion_bio_format_core::object_storage::{CompressionType, ObjectStorageO
 use datafusion_bio_format_vcf::table_provider::VcfTableProvider;
 use std::sync::Arc;
 
+/// Copy a fixture somewhere with no index beside it.
+///
+/// `VcfTableProvider::new` discovers an adjacent `.tbi` automatically, and a
+/// discovered index routes the scan through `get_indexed_vcf_stream`. So
+/// reading `non_variant_alt.vcf.gz` in place does NOT exercise the unindexed
+/// BGZF branch of `get_local_vcf_sync`, whatever the extension suggests --
+/// copying the data file on its own is what forces that branch. (The gzip
+/// fixture has no sidecar at all, so it is read in place.)
+fn without_index(name: &str, dir: &tempfile::TempDir) -> String {
+    let dest = dir.path().join(name);
+    std::fs::copy(fixture(name), &dest).unwrap();
+    dest.to_string_lossy().into_owned()
+}
+
 fn fixture(name: &str) -> String {
     format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))
 }
@@ -110,10 +124,14 @@ async fn a_plain_reader_encodes_an_absent_alt_as_the_empty_string() {
     assert_eq!(alts, expected());
 }
 
-/// BGZF — the other branch of `get_local_vcf_sync`.
+/// BGZF — the other branch of `get_local_vcf_sync`. Read from a copy with no
+/// `.tbi` beside it, or the provider routes this through the indexed reader
+/// and the unindexed BGZF path goes untested.
 #[tokio::test]
 async fn a_bgzf_reader_encodes_an_absent_alt_as_the_empty_string() {
-    let alts = read_alts(fixture("non_variant_alt.vcf.gz"), CompressionType::BGZF).await;
+    let dir = tempfile::tempdir().unwrap();
+    let path = without_index("non_variant_alt.vcf.gz", &dir);
+    let alts = read_alts(path, CompressionType::BGZF).await;
     assert_eq!(alts, expected());
 }
 
