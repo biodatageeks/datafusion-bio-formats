@@ -152,10 +152,13 @@ async fn a_gzip_reader_encodes_an_absent_alt_as_the_empty_string() {
 /// and it needs its own assertion.
 #[tokio::test]
 async fn an_indexed_read_encodes_an_absent_alt_as_the_empty_string() {
+    // Read the fixture in place, so the adjacent `.tbi` IS discovered: that is
+    // what routes this through the indexed reader. The region query comes from
+    // the `start` predicate below, not from any argument here.
     let table = VcfTableProvider::new(
         fixture("non_variant_alt.vcf.gz"),
         None,
-        Some(vec!["chr1".to_string()]),
+        None,
         Some(storage_options(CompressionType::BGZF)),
         true,
     )
