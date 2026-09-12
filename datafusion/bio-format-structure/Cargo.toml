@@ -1,0 +1,36 @@
+[package]
+name = "datafusion-bio-format-structure"
+version = "0.1.0"
+description = "Protein structure atom and residue table providers for DataFusion"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+edition.workspace = true
+
+[dependencies]
+datafusion.workspace = true
+async-trait.workspace = true
+async-stream.workspace = true
+futures.workspace = true
+datafusion-bio-format-core = { path = "../bio-format-core", version = "1.12.1" }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tokio.workspace = true
+tempfile = "3"
+serde_json.workspace = true
+
+[features]
+default = ["text-formats"]
+text-formats = ["dep:flate2", "dep:glob"]
+
+[dependencies.flate2]
+workspace = true
+optional = true
+
+[dependencies.glob]
+version = "0.3"
+optional = true

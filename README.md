@@ -669,3 +669,7 @@ This project builds upon:
 - [Apache DataFusion](https://datafusion.apache.org/) - Fast, extensible query engine
 - [noodles](https://github.com/zaeleus/noodles) - Bioinformatics I/O library
 - [OpenDAL](https://opendal.apache.org/) - Unified data access layer
+
+### Protein structures
+
+The [structure provider](datafusion/bio-format-structure/README.md) reads PDB/mmCIF collections at atom or residue level. The [Foldcomp provider](datafusion/bio-format-foldcomp/README.md) selects indexed database entries and shares the same residue geometry.
