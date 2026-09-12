@@ -65,7 +65,10 @@ previous/next peptide residues in the ordered chain; interleaved water or ligand
 sites are skipped rather than treated as breaks.
 
 Local lists retain occurrence order; globs expand in sorted order. Explicit HTTP,
-S3, GCS and Azure URLs use core OpenDAL options. Gzip is detected by magic bytes.
+S3, GCS and Azure URLs use core OpenDAL options; an HTTP endpoint that refuses
+HEAD (a GET-only pre-signed URL) is read with one sequential GET. Gzip is
+detected by magic bytes. A PDB source with no ATOM/HETATM record and a CIF source
+with no `atom_site` category are errors, not empty tables.
 Remote globs, BinaryCIF, PDBXML, assembly expansion, atom repair and inferred bonds
 are outside this reader. PDB serial/residue fields may contain hybrid-36 text;
 coordinates must be finite decimal numbers. Unsupported/malformed coordinate

@@ -143,6 +143,9 @@ pub fn parse(data: &str, options: &StructureOptions) -> Result<Vec<NormalizedEnt
     if in_model {
         return Err(error("unclosed MODEL"));
     }
+    if entry.atoms.is_empty() {
+        return Err(error("PDB contains no ATOM/HETATM records"));
+    }
     entry.normalize(options)?;
     Ok(vec![entry])
 }

@@ -225,6 +225,77 @@ fn pdb_models_ter_blank_fields_charge_and_limits() {
         .is_err()
     );
     assert!(pdb::parse("ATOM      1", &StructureOptions::default()).is_err());
+    for no_atoms in ["", "HEADER    HYDROLASE\nEND\n", "data_x\n_entry.id x\n"] {
+        let error = pdb::parse(no_atoms, &StructureOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no ATOM/HETATM"), "{no_atoms:?}: {error}");
+    }
+}
+/// Minimal HTTP/1.1 server that refuses HEAD and serves one body for GET.
+fn get_only_http_server(body: Vec<u8>) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/structure.pdb", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let response = if request.starts_with(b"GET ") {
+                    let mut r = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    r.extend_from_slice(&body);
+                    r
+                } else {
+                    b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+                };
+                let _ = stream.write_all(&response);
+                let _ = stream.flush();
+            });
+        }
+    });
+    url
+}
+#[tokio::test]
+async fn http_source_without_head_support_is_read_and_bounded() {
+    let body = std::fs::read(fixture("1ubq.pdb")).unwrap();
+    let url = get_only_http_server(body.clone());
+    let ctx = SessionContext::new();
+    let table =
+        StructureTableProvider::new(vec![url.clone()], None, StructureOptions::default(), None)
+            .unwrap();
+    let df = ctx.read_table(Arc::new(table)).unwrap();
+    assert_eq!(df.count().await.unwrap(), 660);
+    let table = StructureTableProvider::new(
+        vec![url],
+        None,
+        StructureOptions {
+            max_input_bytes: body.len() - 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .unwrap();
+    let error = ctx
+        .read_table(Arc::new(table))
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("max_input_bytes"), "{error}");
 }
 #[tokio::test]
 async fn gzip_lists_globs_and_input_limits() {
