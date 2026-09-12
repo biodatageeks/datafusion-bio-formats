@@ -164,6 +164,43 @@ async fn schema_is_lazy_and_error_has_source() {
     assert_eq!(df.schema().fields().len(), 37);
     let error = df.collect().await.unwrap_err().to_string();
     assert!(error.contains(path), "{error}");
+    let dir = tempfile::tempdir().unwrap();
+    let malformed = dir.path().join("broken.cif");
+    std::fs::write(&malformed, "data_x\nloop_\n_a.x\n_a.y\n1").unwrap();
+    let malformed = malformed.to_string_lossy().into_owned();
+    let table = StructureTableProvider::new(
+        vec![malformed.clone()],
+        None,
+        StructureOptions::default(),
+        None,
+    )
+    .unwrap();
+    let error = ctx
+        .read_table(Arc::new(table))
+        .unwrap()
+        .collect()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(&malformed), "{error}");
+}
+#[test]
+fn cif_standardized_label_names_drive_backbone_assembly() {
+    let text = "data_x\nloop_\n_atom_site.id\n_atom_site.auth_atom_id\n_atom_site.label_atom_id\n_atom_site.auth_comp_id\n_atom_site.label_comp_id\n_atom_site.auth_asym_id\n_atom_site.auth_seq_id\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n1 XN N ALX ALA A 1 0 0 0\n2 XCA CA ALX ALA A 1 1 0 0\n3 XC C ALX ALA A 1 1 1 0\n";
+    let options = StructureOptions {
+        level: StructureLevel::Residue,
+        ..Default::default()
+    };
+    let entry = mmcif::parse(text.as_bytes(), &options).unwrap().remove(0);
+    assert_eq!(entry.atoms[1].atom_name, "CA");
+    assert_eq!(entry.atoms[1].auth_atom_id.as_deref(), Some("XCA"));
+    assert_eq!(entry.atoms[1].residue_name, "ALA");
+    assert_eq!(entry.atoms[1].auth_comp_id.as_deref(), Some("ALX"));
+    let r = residues(&entry, &options);
+    assert_eq!(r.len(), 1);
+    assert!(r[0].backbone_complete);
+    assert!(r[0].angles[3].is_some());
+    assert_eq!(r[0].one_letter_code.as_deref(), Some("A"));
 }
 #[test]
 fn pdb_models_ter_blank_fields_charge_and_limits() {

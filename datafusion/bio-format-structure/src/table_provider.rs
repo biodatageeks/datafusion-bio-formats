@@ -99,20 +99,23 @@ impl EntrySource for TextSource {
             crate::manifest::TextFormat::Mmcif => {
                 // The native document copies the text, so the input buffer is released before
                 // any block decodes; blocks are decoded one at a time as the stream is polled.
-                let blocks = crate::mmcif::Blocks::parse(&data)?;
+                let blocks = crate::mmcif::Blocks::parse(&data).map_err(with_path.clone())?;
                 drop(data);
                 Box::pin(async_stream::try_stream! {
-                    let mut blocks = Some(blocks);
-                    let count = blocks.as_ref().map_or(0, crate::mmcif::Blocks::len);
+                    let count = blocks.len();
                     let mut emitted = 0;
-                    for index in 0..count {
-                        let Some(document) = blocks.as_ref() else { break };
-                        let Some(entry) = document.entry(index, &options)? else { continue };
-                        if index + 1 == count {
-                            blocks = None; // release the native document before the last yield
-                        }
+                    for index in 0..count.saturating_sub(1) {
+                        let Some(entry) = blocks.entry(index, &options)? else { continue };
                         emitted += 1;
                         yield stamp(entry, &source, encoded_bytes, emitted == 1);
+                    }
+                    if count > 0 {
+                        let last = blocks.entry(count - 1, &options)?;
+                        drop(blocks); // release the native document before the last yield
+                        if let Some(entry) = last {
+                            emitted += 1;
+                            yield stamp(entry, &source, encoded_bytes, emitted == 1);
+                        }
                     }
                     if emitted == 0 {
                         Err(crate::error("mmCIF contains no atom_site category"))?;

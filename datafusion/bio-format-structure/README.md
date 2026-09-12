@@ -26,7 +26,10 @@ level uses best-backbone selection. The Python API makes that default explicit.
 **Schema version 1:** `schema::schema()` returns the complete fixed schema without
 opening coordinate payloads. Common columns preserve source occurrences, CIF data
 blocks, entry/model/chain/segment/residue ordinals, and separate author/label IDs.
-Author residue IDs are strings; PDB label IDs stay null. Blank PDB chains stay empty
+Author residue IDs are strings; PDB label IDs stay null. `atom_name` and
+`residue_name` are the standardized `label_atom_id`/`label_comp_id` when a CIF
+provides them (author spellings stay in `auth_atom_id`/`auth_comp_id`), and the
+author names otherwise, as in PDB. Blank PDB chains stay empty
 strings. CIF unquoted `.` and `?` are null; quoted versions remain literal strings.
 Atom columns retain all atom records, alternate sites, coordinates, occupancy,
 B factors and charge. Atom indices retain the original entry row ordering.

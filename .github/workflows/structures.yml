@@ -18,9 +18,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v1 # toolchain from rust-toolchain.toml
         with:
-          toolchain: "1.91.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp

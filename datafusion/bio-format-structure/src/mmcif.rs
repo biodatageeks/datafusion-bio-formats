@@ -93,12 +93,14 @@ fn decode(
         let result = (|| -> Result<Atom> {
             let get = |tag: &str| value(b, tag, row);
             let owned = |tag: &str| get(tag).map(str::to_owned);
-            let atom_name = get("_atom_site.auth_atom_id")
-                .or_else(|| get("_atom_site.label_atom_id"))
+            // Normalized names prefer the standardized label namespace, which residue assembly
+            // and component lookups match against; author spellings stay in their own columns.
+            let atom_name = get("_atom_site.label_atom_id")
+                .or_else(|| get("_atom_site.auth_atom_id"))
                 .ok_or_else(|| error("missing atom name"))?
                 .to_owned();
-            let comp = get("_atom_site.auth_comp_id")
-                .or_else(|| get("_atom_site.label_comp_id"))
+            let comp = get("_atom_site.label_comp_id")
+                .or_else(|| get("_atom_site.auth_comp_id"))
                 .ok_or_else(|| error("missing residue name"))?
                 .to_owned();
             let entity = get("_atom_site.label_entity_id").or_else(|| {
