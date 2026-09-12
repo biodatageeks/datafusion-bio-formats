@@ -1,5 +1,7 @@
+#include "amino_acid.h"
 #include "foldcomp.h"
 #include "utility.h"
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <sstream>
@@ -33,8 +35,9 @@ static void validate(const char *data, size_t len, size_t max_atoms) {
           "invalid FCZ magic/header");
   CompressedFileHeader h;
   std::memcpy(&h, data + 4, sizeof h);
-  require(h.nResidue >= 2 && h.nAtom >= 3 * h.nResidue && h.nAtom <= max_atoms,
+  require(h.nResidue >= 2 && h.nAtom >= 3 * h.nResidue,
           "unsupported FCZ residue/atom count");
+  require(h.nAtom <= max_atoms, "FCZ header atom count exceeds max_atoms");
   require(h.nAnchor >= 2 && h.nAnchor <= h.nResidue,
           "invalid FCZ anchor count");
   const size_t coordinate_start = 76 + 4 * size_t(h.nAnchor) + h.lenTitle;
@@ -70,12 +73,20 @@ static void validate(const char *data, size_t len, size_t max_atoms) {
     std::memcpy(&v, data + oxt + 1 + 4 * i, 4);
     require(std::isfinite(v), "non-finite FCZ OXT");
   }
+  // The decoder rebuilds every residue from its code (backbone N/CA/C plus the
+  // table's remaining atoms, e.g. UNK keeps only the backbone), so the output
+  // size follows the codes and OXT flag, not the header's nAtom, which the
+  // compressor sets from its input and the decoder never consumes.
   size_t sidechains = 0;
+  size_t reconstructed = data[oxt] == 1 ? 1 : 0;
   for (size_t i = 0; i < h.nResidue; ++i) {
     unsigned code =
         static_cast<unsigned char>(data[backbone_start + 8 * i]) >> 3;
-    require(code < 20, "unsupported FCZ residue code");
-    sidechains += getSideChainTorsionNum(convertIntToThreeLetterCode(code));
+    const std::string residue = convertIntToThreeLetterCode(code);
+    const auto entry = Foldcomp::AAS.find(residue);
+    require(entry != Foldcomp::AAS.end(), "unsupported FCZ residue code");
+    sidechains += getSideChainTorsionNum(residue);
+    reconstructed += std::max<size_t>(3, entry->second.atoms.size());
     if (i == 0)
       require(convertIntToOneLetterCode(code) == h.firstResidue,
               "inconsistent FCZ first residue");
@@ -84,6 +95,8 @@ static void validate(const char *data, size_t len, size_t max_atoms) {
               "inconsistent FCZ last residue");
   }
   require(sidechains == h.nSideChainTorsion, "invalid FCZ sidechain count");
+  require(reconstructed <= max_atoms,
+          "FCZ reconstructed atom count exceeds max_atoms");
   for (size_t i = 0; i < 2; ++i) {
     float v;
     std::memcpy(&v,

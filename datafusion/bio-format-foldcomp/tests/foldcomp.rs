@@ -324,3 +324,88 @@ async fn empty_id_selector_needs_no_lookup() {
     assert_eq!(df.schema().fields().len(), 37);
     assert_eq!(df.count().await.unwrap(), 0);
 }
+#[tokio::test]
+async fn unknown_residue_codes_decode_as_backbone_only_unk() {
+    // Key 1 (d1b0ba_) starts with an UNK residue (code 23), which upstream reconstructs as N/CA/C.
+    let ctx = SessionContext::new();
+    let all =
+        FoldcompTableProvider::new(fixture("example_db"), FoldcompOptions::default()).unwrap();
+    assert!(
+        ctx.read_table(Arc::new(all))
+            .unwrap()
+            .count()
+            .await
+            .unwrap()
+            > 24 * 1000
+    );
+    let one = FoldcompTableProvider::new(
+        fixture("example_db"),
+        FoldcompOptions {
+            entry_keys: Some(vec![1]),
+            structure: StructureOptions {
+                level: StructureLevel::Residue,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let df = ctx
+        .read_table(Arc::new(one))
+        .unwrap()
+        .filter(col("residue_name").eq(lit("UNK")))
+        .unwrap();
+    let batches = df
+        .select_columns(&["one_letter_code", "backbone_complete", "o_x"])
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert!(rows > 0);
+    for b in &batches {
+        let code = b
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StringArray>()
+            .unwrap();
+        let complete = b
+            .column(1)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+            .unwrap();
+        let o = b.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        for i in 0..b.num_rows() {
+            assert_eq!(code.value(i), "X");
+            assert!(complete.value(i));
+            assert!(o.is_null(i));
+        }
+    }
+}
+#[test]
+fn header_atom_count_cannot_bypass_max_atoms() {
+    let mut data = std::fs::read(fixture("1ubq.fcz")).unwrap();
+    let residues = u16::from_le_bytes([data[4], data[5]]) as usize;
+    assert_eq!(u16::from_le_bytes([data[6], data[7]]), 602);
+    data[6..8].copy_from_slice(&((3 * residues) as u16).to_le_bytes());
+    let limited = StructureOptions {
+        max_atoms: 300,
+        ..Default::default()
+    };
+    let error = codec::decode(&data, &limited).unwrap_err().to_string();
+    assert!(
+        error.contains("reconstructed atom count exceeds max_atoms"),
+        "{error}"
+    );
+    assert_eq!(
+        codec::decode(&data, &StructureOptions::default())
+            .unwrap()
+            .atoms
+            .len(),
+        602
+    );
+    let error = codec::decode(&std::fs::read(fixture("1ubq.fcz")).unwrap(), &limited)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("max_atoms"), "{error}");
+}

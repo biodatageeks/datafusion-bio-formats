@@ -43,7 +43,10 @@ Selected bounds, terminators, header sizes, residue/sidechain counts, anchor
 indices and finite coordinates are checked before entering the upstream codec.
 Metadata lines are capped at 1 MiB. Source/sidecar size and modification time are
 checked again at execution; modify the database only after its scans finish.
-Encoded entry size and reconstructed atom count use the shared input/atom limits.
+Encoded entry size and reconstructed atom count use the shared input/atom limits;
+the reconstructed count is derived from the residue codes and OXT flag before the
+codec runs, so a header cannot understate it. Unknown residue codes decode as
+backbone-only `UNK` residues, as in the upstream codec.
 
 The pinned MIT Foldcomp codec returns arrays directly, without a CLI, Python
 runtime, PDB text round-trip, OpenMP or Gemmi dependency. Coordinates are lossy
