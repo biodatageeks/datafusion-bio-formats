@@ -308,3 +308,19 @@ async fn dbtype_trailing_bytes_and_blank_metadata_lines_are_tolerated() {
         assert!(FoldcompTableProvider::new(path.clone(), FoldcompOptions::default()).is_err());
     }
 }
+#[tokio::test]
+async fn empty_id_selector_needs_no_lookup() {
+    let (_dir, path) = copy_database();
+    std::fs::remove_file(format!("{path}.lookup")).unwrap();
+    let table = FoldcompTableProvider::new(
+        path,
+        FoldcompOptions {
+            ids: Some(vec![]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let df = SessionContext::new().read_table(Arc::new(table)).unwrap();
+    assert_eq!(df.schema().fields().len(), 37);
+    assert_eq!(df.count().await.unwrap(), 0);
+}

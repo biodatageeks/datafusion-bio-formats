@@ -122,7 +122,10 @@ pub fn select(path: &str, options: &FoldcompOptions) -> Result<Vec<SelectedEntry
         .as_ref()
         .map(|v| v.iter().copied().collect::<BTreeSet<_>>());
     let mut names = BTreeMap::new();
-    if let Some(wanted) = &requested_names {
+    if requested_names.as_ref().is_some_and(BTreeSet::is_empty) {
+        // An empty selector means zero entries and needs no name resolution metadata.
+        keys = Some(BTreeSet::new());
+    } else if let Some(wanted) = &requested_names {
         if !Path::new(&lookup).exists() {
             return Err(error("name selection requires .lookup"));
         }

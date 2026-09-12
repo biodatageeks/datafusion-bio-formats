@@ -69,6 +69,28 @@ fn coherent_conformers_completeness_occupancy_ties_and_shared_atoms() {
     );
     assert!(b[0].backbone[1].is_none());
     assert!(b[0].backbone[2].is_some());
+    // A requested alternate that this residue lacks keeps the shared blank sites.
+    let e = entry(vec![
+        atom(0, "N", None, [0., 0., 0.]),
+        atom(0, "CA", Some("A"), [1., 0., 0.]),
+        atom(0, "C", Some("A"), [1., 1., 0.]),
+    ]);
+    let want_b = StructureOptions {
+        altloc: AltlocSelection::Id("B".into()),
+        ..Default::default()
+    };
+    let r = residues(&e, &want_b);
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].selected_alt_id, None);
+    assert!(r[0].backbone[0].is_some() && r[0].backbone[1].is_none());
+    assert!(!r[0].backbone_complete);
+    assert_eq!(selected_atoms(&e, &want_b).len(), 1);
+    let want_a = StructureOptions {
+        altloc: AltlocSelection::Id("A".into()),
+        ..Default::default()
+    };
+    assert!(residues(&e, &want_a)[0].backbone_complete);
+    assert_eq!(selected_atoms(&e, &want_a).len(), 3);
 }
 #[test]
 fn label_gaps_author_gaps_ter_models_cutoff_and_alt_conflicts() {

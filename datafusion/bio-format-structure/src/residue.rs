@@ -72,13 +72,21 @@ fn candidates<'a>(atoms: &[&'a Atom], options: &StructureOptions) -> Vec<&'a Ato
         .map(|a| (a.residue_name.as_str(), a.alt_id.as_deref()))
         .collect();
     let mut best: Option<Candidate<'_>> = None;
+    let eligible = |alt: &str| match &options.altloc {
+        AltlocSelection::Id(wanted) => alt == wanted,
+        _ => true,
+    };
     for (comp, alt) in groups.iter().copied() {
-        if alt.is_none() && groups.iter().any(|(c, a)| *c == comp && a.is_some()) {
+        // Shared blank sites merge into each named candidate, so the blank-only candidate is
+        // redundant when an eligible named alternate exists; otherwise it stays available.
+        if alt.is_none()
+            && groups
+                .iter()
+                .any(|(c, a)| *c == comp && a.is_some_and(eligible))
+        {
             continue;
         }
-        if let AltlocSelection::Id(wanted) = &options.altloc
-            && alt.is_some_and(|a| a != wanted)
-        {
+        if alt.is_some_and(|a| !eligible(a)) {
             continue;
         }
         // A named site supersedes a shared blank site of the same atom name.
