@@ -1527,7 +1527,6 @@ dependencies = [
 name = "datafusion-bio-format-foldcomp"
 version = "0.1.0"
 dependencies = [
- "async-stream",
  "async-trait",
  "cc",
  "datafusion",

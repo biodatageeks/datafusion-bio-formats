@@ -33,8 +33,11 @@ impl Drop for Handle {
         unsafe { bio_fc_free(self.0.as_ptr()) }
     }
 }
-// SAFETY: caller supplies a NUL-terminated string belonging to the live native handle.
+// SAFETY: caller supplies a NUL-terminated string belonging to the live native handle, or null.
 unsafe fn string(p: *const c_char) -> Result<String> {
+    if p.is_null() {
+        return Err(error("unexpected null string from FCZ codec"));
+    }
     unsafe { CStr::from_ptr(p) }
         .to_str()
         .map(str::to_owned)

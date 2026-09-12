@@ -35,6 +35,10 @@ little-endian targets and at least two residues, matching the checked codec path
 
 Selection scans metadata in O(N) time with O(K) retained selection state. Only K
 selected payloads decode, partitioned across the configured DataFusion workers.
+Selection happens through `ids`/`entry_keys` only: SQL predicates such as
+`WHERE entry_key = 7` or `WHERE entry_name = 'd1it2a_'` are evaluated by DataFusion
+after every unselected payload has been decoded. Blank metadata lines are skipped
+and do not count toward `entry_index`.
 Selected bounds, terminators, header sizes, residue/sidechain counts, anchor
 indices and finite coordinates are checked before entering the upstream codec.
 Metadata lines are capped at 1 MiB. Source/sidecar size and modification time are

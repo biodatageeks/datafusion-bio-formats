@@ -250,3 +250,105 @@ fn cif_site_specific_modified_residue_parent() {
     assert_eq!(result[0].one_letter_code.as_deref(), Some("S"));
     assert_eq!(result[0].parent_residue_name.as_deref(), Some("SER"));
 }
+fn atom_block(name: &str, atoms: usize) -> String {
+    let mut s = format!(
+        "data_{name}\nloop_\n_atom_site.id\n_atom_site.auth_atom_id\n_atom_site.auth_comp_id\n_atom_site.auth_asym_id\n_atom_site.auth_seq_id\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\n"
+    );
+    for i in 0..atoms {
+        s.push_str(&format!("{i} CA ALA A {i} 1 2 3\n"));
+    }
+    s
+}
+#[test]
+fn cif_blocks_decode_one_at_a_time() {
+    let text = format!(
+        "{}data_meta\n_entry.id only\n{}",
+        atom_block("first", 2),
+        atom_block("third", 3)
+    );
+    let options = StructureOptions::default();
+    let blocks = mmcif::Blocks::parse(text.as_bytes()).unwrap();
+    assert_eq!(blocks.len(), 3);
+    assert!(blocks.entry(1, &options).unwrap().is_none());
+    let first = blocks.entry(0, &options).unwrap().unwrap();
+    assert_eq!((first.entry_index, first.atoms.len()), (0, 2));
+    let third = blocks.entry(2, &options).unwrap().unwrap();
+    assert_eq!((third.entry_index, third.atoms.len()), (2, 3));
+    assert_eq!(third.data_block.as_deref(), Some("third"));
+    // The atom limit is enforced per block, and a later oversized block fails only when reached.
+    let small = StructureOptions {
+        max_atoms: 2,
+        ..Default::default()
+    };
+    assert!(blocks.entry(0, &small).unwrap().is_some());
+    assert!(blocks.entry(2, &small).is_err());
+    assert!(
+        mmcif::Blocks::parse(b"data_x\n_a.b 1\n")
+            .unwrap()
+            .entry(0, &options)
+            .unwrap()
+            .is_none()
+    );
+    assert!(mmcif::parse(b"data_x\n_a.b 1\n", &options).is_err());
+}
+#[tokio::test]
+async fn multi_block_cif_streams_entries_before_a_later_block_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.cif");
+    std::fs::write(
+        &good,
+        format!("{}{}", atom_block("a", 2), atom_block("b", 4)),
+    )
+    .unwrap();
+    let bad = dir.path().join("bad.cif");
+    std::fs::write(
+        &bad,
+        format!("{}{}", atom_block("a", 2), atom_block("b", 4))
+            .replace("3 CA ALA A 3 1 2 3", "3 CA ALA A 3 x 2 3"),
+    )
+    .unwrap();
+    let ctx = SessionContext::new_with_config(SessionConfig::new().with_batch_size(3));
+    let table = StructureTableProvider::new(
+        vec![good.to_string_lossy().into_owned()],
+        None,
+        StructureOptions::default(),
+        None,
+    )
+    .unwrap();
+    let batches = ctx
+        .read_table(Arc::new(table))
+        .unwrap()
+        .select_columns(&["entry_index", "data_block"])
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let mut indices = vec![];
+    for b in &batches {
+        let col = b.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
+        indices.extend(col.values().iter().copied());
+    }
+    assert_eq!(indices, [0, 0, 1, 1, 1, 1]);
+    let table = StructureTableProvider::new(
+        vec![bad.to_string_lossy().into_owned()],
+        None,
+        StructureOptions::default(),
+        None,
+    )
+    .unwrap();
+    let plan = ctx
+        .read_table(Arc::new(table))
+        .unwrap()
+        .create_physical_plan()
+        .await
+        .unwrap();
+    let mut stream = plan.execute(0, ctx.task_ctx()).unwrap();
+    use futures::StreamExt;
+    let first = stream.next().await.unwrap().unwrap();
+    assert_eq!(first.num_rows(), 2);
+    let error = stream.next().await.unwrap().unwrap_err().to_string();
+    assert!(
+        error.contains("block \"b\"") && error.contains(&bad.to_string_lossy().into_owned()),
+        "{error}"
+    );
+}

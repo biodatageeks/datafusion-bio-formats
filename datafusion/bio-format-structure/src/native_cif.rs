@@ -31,6 +31,9 @@ unsafe extern "C" {
     fn bio_cif_free(h: *mut c_void);
 }
 pub struct Document(NonNull<c_void>);
+// SAFETY: the handle is a uniquely owned heap object with no thread affinity; it is only
+// dereferenced through `&self` by its single owner, so moving it between threads is sound.
+unsafe impl Send for Document {}
 impl Drop for Document {
     fn drop(&mut self) {
         // SAFETY: sole owner of the handle returned by bio_cif_read.
@@ -75,25 +78,30 @@ impl Document {
         }
         Ok(doc)
     }
-    pub fn blocks(&self) -> Result<Vec<CategoryBlock<'_>>> {
+    fn raw_blocks(&self) -> &[Block] {
         let mut len = 0; // SAFETY: handle is valid and C++ fills length for its block span.
-        let blocks = unsafe { span(bio_cif_blocks(self.0.as_ptr(), &mut len), len) };
-        blocks
-            .iter()
-            .map(|b| {
-                let mut columns = HashMap::new(); // SAFETY: all column/cell spans belong to self.
-                for col in unsafe { span(b.columns, b.len) } {
-                    let values = unsafe { span(col.cells, col.len) }
-                        .iter()
-                        .map(Cell::text)
-                        .collect::<Result<Vec<_>>>()?;
-                    columns.insert(col.name.text()?.unwrap_or(""), values);
-                }
-                Ok(CategoryBlock {
-                    name: b.name.text()?.unwrap_or(""),
-                    columns,
-                })
-            })
-            .collect()
+        unsafe { span(bio_cif_blocks(self.0.as_ptr(), &mut len), len) }
+    }
+    pub fn block_count(&self) -> usize {
+        self.raw_blocks().len()
+    }
+    /// Materialize one data block's columns; other blocks stay in native storage only.
+    pub fn block(&self, index: usize) -> Result<CategoryBlock<'_>> {
+        let b = self
+            .raw_blocks()
+            .get(index)
+            .ok_or_else(|| error("CIF block index out of range"))?;
+        let mut columns = HashMap::new(); // SAFETY: all column/cell spans belong to self.
+        for col in unsafe { span(b.columns, b.len) } {
+            let values = unsafe { span(col.cells, col.len) }
+                .iter()
+                .map(Cell::text)
+                .collect::<Result<Vec<_>>>()?;
+            columns.insert(col.name.text()?.unwrap_or(""), values);
+        }
+        Ok(CategoryBlock {
+            name: b.name.text()?.unwrap_or(""),
+            columns,
+        })
     }
 }

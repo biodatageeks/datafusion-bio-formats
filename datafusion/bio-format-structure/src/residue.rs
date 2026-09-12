@@ -188,12 +188,16 @@ pub fn residues(entry: &NormalizedEntry, options: &StructureOptions) -> Vec<Resi
             r.atom.residue_index,
         )
     });
-    for i in 0..result.len().saturating_sub(1) {
+    // Neighbors come from the peptide subsequence: an interleaved water/ligand site must not
+    // sever a covalent link, and non-peptide rows are only retained for optional output.
+    let peptides: Vec<usize> = (0..result.len())
+        .filter(|&i| result[i].atom.peptide)
+        .collect();
+    for pair in peptides.windows(2) {
+        let (i, j) = (pair[0], pair[1]);
         let a = &result[i];
-        let b = &result[i + 1];
-        let compatible = a.atom.peptide
-            && b.atom.peptide
-            && a.atom.model_index == b.atom.model_index
+        let b = &result[j];
+        let compatible = a.atom.model_index == b.atom.model_index
             && a.atom.chain_index == b.atom.chain_index
             && a.atom.segment_index == b.atom.segment_index
             && a.atom.label_entity_id == b.atom.label_entity_id
@@ -208,20 +212,18 @@ pub fn residues(entry: &NormalizedEntry, options: &StructureOptions) -> Vec<Resi
         let linked = compatible
             && matches!((a.backbone[2],b.backbone[0]),(Some(c),Some(n)) if distance(c,n)>1e-12&&distance(c,n)<=options.max_peptide_bond);
         result[i].peptide_link_next = linked;
-        result[i + 1].peptide_link_prev = linked;
+        result[j].peptide_link_prev = linked;
     }
-    for i in 0..result.len() {
-        if !result[i].atom.peptide {
-            continue;
-        }
+    for (k, &i) in peptides.iter().enumerate() {
         let [n, ca, c, _] = result[i].backbone;
         let prev = if result[i].peptide_link_prev {
-            result[i - 1].backbone[2]
+            result[peptides[k - 1]].backbone[2]
         } else {
             None
         };
         let (next_n, next_ca) = if result[i].peptide_link_next {
-            (result[i + 1].backbone[0], result[i + 1].backbone[1])
+            let next = &result[peptides[k + 1]];
+            (next.backbone[0], next.backbone[1])
         } else {
             (None, None)
         };

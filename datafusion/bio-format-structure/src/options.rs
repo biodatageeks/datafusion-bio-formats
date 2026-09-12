@@ -26,6 +26,8 @@ pub enum AltlocSelection {
 pub struct StructureOptions {
     pub level: StructureLevel,
     pub model: ModelSelection,
+    /// Atom level emits every site for `All`. Residue level must pick one coherent conformer,
+    /// so `All` behaves as `BestBackbone` there and the schema metadata reports `BestBackbone`.
     pub altloc: AltlocSelection,
     pub include_non_peptide: bool,
     pub max_peptide_bond: f64,

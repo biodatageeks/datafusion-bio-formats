@@ -265,3 +265,46 @@ async fn execution_metrics_count_only_selected_payloads() {
         assert_eq!(decodes(&plan), expected);
     }
 }
+#[tokio::test]
+async fn dbtype_trailing_bytes_and_blank_metadata_lines_are_tolerated() {
+    use std::io::Write;
+    let (_dir, path) = copy_database();
+    std::fs::write(format!("{path}.dbtype"), [12u8, 0, 0, 0, b'\n']).unwrap();
+    let mut index = std::fs::read_to_string(format!("{path}.index")).unwrap();
+    index.insert(0, '\n');
+    index.push_str("\n  \n");
+    std::fs::write(format!("{path}.index"), index).unwrap();
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(format!("{path}.lookup"))
+        .unwrap()
+        .write_all(b"\n\n")
+        .unwrap();
+    let ctx = SessionContext::new();
+    let table = FoldcompTableProvider::new(
+        path.clone(),
+        FoldcompOptions {
+            ids: Some(vec!["d1it2a_".into()]),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let batches = ctx
+        .read_table(Arc::new(table))
+        .unwrap()
+        .select_columns(&["entry_index", "entry_key", "entry_name"])
+        .unwrap()
+        .limit(0, Some(1))
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let b = &batches[0];
+    let index = b.column(0).as_any().downcast_ref::<UInt64Array>().unwrap();
+    let key = b.column(1).as_any().downcast_ref::<UInt64Array>().unwrap();
+    assert_eq!((index.value(0), key.value(0)), (7, 7));
+    for bad in [vec![13u8, 0, 0, 0], vec![12u8, 0, 0]] {
+        std::fs::write(format!("{path}.dbtype"), bad).unwrap();
+        assert!(FoldcompTableProvider::new(path.clone(), FoldcompOptions::default()).is_err());
+    }
+}

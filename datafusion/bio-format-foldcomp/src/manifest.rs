@@ -2,7 +2,7 @@ use crate::{FoldcompOptions, codec};
 use async_trait::async_trait;
 use datafusion::common::Result;
 use datafusion_bio_format_structure::{
-    EntrySource, StructureOptions, error, model::NormalizedEntry,
+    EntrySource, StructureOptions, error, table_provider::EntryStream,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -38,10 +38,12 @@ pub struct SelectedEntry {
 fn identity(path: &str) -> Result<Identity> {
     Ok(std::fs::metadata(path)?.into())
 }
+/// Visit non-blank lines as `(ordinal, text)`; `ordinal` counts only visited lines.
 fn each_line(path: &str, mut visit: impl FnMut(usize, &str) -> Result<()>) -> Result<()> {
     let mut input = BufReader::new(File::open(path)?);
     let mut bytes = Vec::new();
     let mut row = 0;
+    let mut ordinal = 0;
     loop {
         bytes.clear();
         let n = input
@@ -56,7 +58,12 @@ fn each_line(path: &str, mut visit: impl FnMut(usize, &str) -> Result<()>) -> Re
         }
         row += 1;
         let line = std::str::from_utf8(&bytes).map_err(|e| error(format!("{path}:{row}: {e}")))?;
-        visit(row, line.trim_end()).map_err(|e| error(format!("{path}:{row}: {e}")))?;
+        let line = line.trim_end();
+        if line.trim_start().is_empty() {
+            continue;
+        }
+        ordinal += 1;
+        visit(ordinal, line).map_err(|e| error(format!("{path}:{row}: {e}")))?;
     }
     Ok(())
 }
@@ -93,8 +100,9 @@ pub fn select(path: &str, options: &FoldcompOptions) -> Result<Vec<SelectedEntry
             identities,
         }]);
     }
-    let mut kind = Vec::new();
-    File::open(&dbtype)?.take(5).read_to_end(&mut kind)?;
+    // MMseqs2-style `.dbtype` files are a little-endian i32; anything after it is ignored.
+    let mut kind = [0u8; 4];
+    File::open(&dbtype)?.read_exact(&mut kind)?;
     if kind != 12u32.to_le_bytes() {
         return Err(error(
             "unsupported Foldcomp dbtype (expected uncompressed type 12)",
@@ -217,7 +225,7 @@ pub fn select(path: &str, options: &FoldcompOptions) -> Result<Vec<SelectedEntry
 }
 #[async_trait]
 impl EntrySource for SelectedEntry {
-    async fn load(&self, options: &StructureOptions) -> Result<Vec<NormalizedEntry>> {
+    async fn load(&self, options: &StructureOptions) -> Result<EntryStream> {
         let result = (|| {
             for (path, expected) in &self.identities {
                 if identity(path)? != *expected {
@@ -243,10 +251,12 @@ impl EntrySource for SelectedEntry {
             entry.entry_index = self.ordinal;
             entry.entry_key = self.key;
             entry.entry_name = self.name.clone();
-            Ok(vec![entry])
+            Ok(entry)
         })();
-        result.map_err(|e: datafusion::common::DataFusionError| {
-            error(format!("{} key {:?}: {e}", self.path, self.key))
-        })
+        result
+            .map(|entry| Box::pin(futures::stream::iter([Ok(entry)])) as EntryStream)
+            .map_err(|e: datafusion::common::DataFusionError| {
+                error(format!("{} key {:?}: {e}", self.path, self.key))
+            })
     }
 }

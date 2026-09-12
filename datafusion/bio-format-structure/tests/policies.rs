@@ -187,3 +187,47 @@ fn model_ordinals_interleaved_rows_duplicate_sites_and_rigid_motion() {
     assert_eq!(models.atoms.len(), 3);
     assert_eq!(models.atoms[0].model_index, 1);
 }
+#[test]
+fn peptide_neighbors_skip_interleaved_non_peptide_sites() {
+    // A water listed between two bonded residues (no TER, same chain) must not sever the link.
+    let mut atoms = chain();
+    let mut water = atom(0, "O", None, [5., 5., 5.]);
+    water.peptide = false;
+    water.residue_name = "HOH".into();
+    water.auth_seq_id = Some("300".into());
+    atoms.atoms.insert(3, water);
+    let e = entry(atoms.atoms);
+    for include_non_peptide in [false, true] {
+        let opts = StructureOptions {
+            include_non_peptide,
+            ..Default::default()
+        };
+        let r = residues(&e, &opts);
+        let peptides: Vec<_> = r.iter().filter(|r| r.atom.peptide).collect();
+        assert_eq!(r.len(), if include_non_peptide { 3 } else { 2 });
+        assert_eq!(peptides.len(), 2);
+        assert!(peptides[0].peptide_link_next, "{include_non_peptide}");
+        assert!(peptides[1].peptide_link_prev);
+        assert!(peptides[0].angles[1].is_some(), "psi needs N(i+1)");
+        assert!(peptides[1].angles[0].is_some(), "phi needs C(i-1)");
+        assert!(peptides[1].angles[5].is_some());
+        if include_non_peptide {
+            assert_eq!(r[1].residue_kind, "water");
+            assert!(!r[1].peptide_link_prev && !r[1].peptide_link_next);
+            assert!(r[1].angles.iter().all(Option::is_none));
+        }
+    }
+    // A genuinely distant peptide pair across a ligand is still a break.
+    let mut far = chain();
+    for a in &mut far.atoms[3..] {
+        a.position[2] += 10.;
+    }
+    let mut ligand = atom(0, "ZN", None, [9., 9., 9.]);
+    ligand.peptide = false;
+    ligand.residue_name = "ZN".into();
+    ligand.auth_seq_id = Some("301".into());
+    far.atoms.insert(3, ligand);
+    let r = residues(&entry(far.atoms), &StructureOptions::default());
+    assert_eq!(r.len(), 2);
+    assert!(!r[0].peptide_link_next && !r[1].peptide_link_prev);
+}

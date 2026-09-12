@@ -129,6 +129,7 @@ pub fn parse(data: &str, options: &StructureOptions) -> Result<Vec<NormalizedEnt
                         ..Default::default()
                     };
                     entry.atoms.push(a);
+                    // `normalize` re-checks this bound; failing here stops parsing early.
                     if entry.atoms.len() > options.max_atoms {
                         return Err(error("atom count exceeds max_atoms"));
                     }

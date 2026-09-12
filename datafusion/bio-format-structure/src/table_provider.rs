@@ -16,11 +16,15 @@ use datafusion::{
         stream::RecordBatchStreamAdapter,
     },
 };
+use futures::{StreamExt, stream::BoxStream};
 use std::{any::Any, fmt, sync::Arc};
-/// A bounded source of whole entries. Implementations must reopen resources on every call.
+/// Entries of one source, decoded one at a time as the consumer polls.
+pub type EntryStream = BoxStream<'static, Result<NormalizedEntry>>;
+/// A bounded source of whole entries. Implementations must reopen resources on every call and
+/// must not decode more than one entry ahead of the consumer.
 #[async_trait]
 pub trait EntrySource: fmt::Debug + Send + Sync {
-    async fn load(&self, options: &StructureOptions) -> Result<Vec<NormalizedEntry>>;
+    async fn load(&self, options: &StructureOptions) -> Result<EntryStream>;
 }
 #[derive(Debug, Clone)]
 pub struct StructureTableProvider {
@@ -69,37 +73,73 @@ struct TextSource {
 #[cfg(feature = "text-formats")]
 #[async_trait]
 impl EntrySource for TextSource {
-    async fn load(&self, options: &StructureOptions) -> Result<Vec<NormalizedEntry>> {
-        let result = async {
-            let (data, encoded_bytes) =
-                crate::storage::read(&self.source.path, options, self.storage.clone()).await?;
-            let (mut entries, format) = match self.source.format {
-                crate::manifest::TextFormat::Pdb => (
-                    crate::pdb::parse(
-                        std::str::from_utf8(&data).map_err(|e| crate::error(e.to_string()))?,
-                        options,
-                    )?,
-                    "pdb",
-                ),
-                crate::manifest::TextFormat::Mmcif => {
-                    (crate::mmcif::parse(&data, options)?, "mmcif")
-                }
-            };
-            if let Some(first) = entries.first_mut() {
-                first.encoded_bytes = encoded_bytes;
+    async fn load(&self, options: &StructureOptions) -> Result<EntryStream> {
+        let path = self.source.path.clone();
+        let with_path =
+            move |e: datafusion::common::DataFusionError| crate::error(format!("{path}: {e}"));
+        let (data, encoded_bytes) =
+            crate::storage::read(&self.source.path, options, self.storage.clone())
+                .await
+                .map_err(with_path.clone())?;
+        let source = self.source.clone();
+        let options = options.clone();
+        let stream: EntryStream = match self.source.format {
+            crate::manifest::TextFormat::Pdb => {
+                let text = std::str::from_utf8(&data).map_err(|e| crate::error(e.to_string()));
+                let entries = text.and_then(|text| crate::pdb::parse(text, &options));
+                Box::pin(futures::stream::iter(match entries {
+                    Ok(entries) => entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, e)| Ok(stamp(e, &source, encoded_bytes, i == 0)))
+                        .collect::<Vec<_>>(),
+                    Err(e) => vec![Err(e)],
+                }))
             }
-            for e in &mut entries {
-                e.source_path = self.source.path.clone();
-                e.source_index = self.source.source_index;
-                e.source_format = format.into();
+            crate::manifest::TextFormat::Mmcif => {
+                // The native document copies the text, so the input buffer is released before
+                // any block decodes; blocks are decoded one at a time as the stream is polled.
+                let blocks = crate::mmcif::Blocks::parse(&data)?;
+                drop(data);
+                Box::pin(async_stream::try_stream! {
+                    let mut blocks = Some(blocks);
+                    let count = blocks.as_ref().map_or(0, crate::mmcif::Blocks::len);
+                    let mut emitted = 0;
+                    for index in 0..count {
+                        let Some(document) = blocks.as_ref() else { break };
+                        let Some(entry) = document.entry(index, &options)? else { continue };
+                        if index + 1 == count {
+                            blocks = None; // release the native document before the last yield
+                        }
+                        emitted += 1;
+                        yield stamp(entry, &source, encoded_bytes, emitted == 1);
+                    }
+                    if emitted == 0 {
+                        Err(crate::error("mmCIF contains no atom_site category"))?;
+                    }
+                })
             }
-            Ok(entries)
-        }
-        .await;
-        result.map_err(|e: datafusion::common::DataFusionError| {
-            crate::error(format!("{}: {e}", self.source.path))
-        })
+        };
+        Ok(Box::pin(stream.map(move |r| r.map_err(with_path.clone()))))
     }
+}
+/// Attach source provenance; encoded bytes are counted once per source, on its first entry.
+#[cfg(feature = "text-formats")]
+fn stamp(
+    mut e: NormalizedEntry,
+    source: &crate::manifest::Source,
+    encoded_bytes: usize,
+    first: bool,
+) -> NormalizedEntry {
+    e.encoded_bytes = if first { encoded_bytes } else { 0 };
+    e.source_path = source.path.clone();
+    e.source_index = source.source_index;
+    e.source_format = match source.format {
+        crate::manifest::TextFormat::Pdb => "pdb",
+        crate::manifest::TextFormat::Mmcif => "mmcif",
+    }
+    .into();
+    e
 }
 #[async_trait]
 impl TableProvider for StructureTableProvider {
@@ -218,7 +258,9 @@ impl ExecutionPlan for StructureExec {
         let stream = async_stream::try_stream! {
             for source in sources {
                 opened.add(1);
-                for entry in source.load(&options).await? {
+                let mut entries = source.load(&options).await?;
+                while let Some(entry) = entries.next().await {
+                    let entry = entry?;
                     decoded.add(1);
                     bytes.add(entry.encoded_bytes);
                     let batch = batch_builder::build(&entry, &options, schema.clone(), &projection)?;

@@ -57,7 +57,9 @@ alternate/component. Blank sites are shared; a named site supersedes a blank of
 the same name. It never combines mutually exclusive alternate backbone atoms.
 Connectivity requires compatible entry/model/chain/TER segment/entity/alternate,
 adjacent label sequence numbers where available, and C–N distance <= 1.8 Angstroms
-(configurable). Author numbering gaps alone do not break links.
+(configurable). Author numbering gaps alone do not break links. Neighbors are the
+previous/next peptide residues in the ordered chain; interleaved water or ligand
+sites are skipped rather than treated as breaks.
 
 Local lists retain occurrence order; globs expand in sorted order. Explicit HTTP,
 S3, GCS and Azure URLs use core OpenDAL options. Gzip is detected by magic bytes.
@@ -67,15 +69,21 @@ coordinates must be finite decimal numbers. Unsupported/malformed coordinate
 records raise contextual errors; duplicate atom sites are rejected.
 
 The execution plan partitions whole files, bounded by DataFusion target partitions.
-Each active worker holds a complete file/entry model and its projected Arrow batch;
-CIF additionally needs parser DOM storage. Defaults are 256 MiB encoded text input,
-512 MiB decompressed text, and 5 million atoms per entry. This is bounded by the
-largest active structures, not constant memory within an arbitrary file. Output
-batches respect the session batch size. No nested decoder thread pool is created.
+Each active worker holds one decoded entry and its projected Arrow batch. PDB holds
+the file text while parsing its single entry. CIF holds the native parser document
+for the whole file (the text buffer is released once parsed) and decodes data
+blocks one at a time as the stream is polled, so a multi-block file never retains
+more than one normalized entry. Defaults are 256 MiB encoded text input, 512 MiB
+decompressed text, and 5 million atoms per entry (per data block). This is bounded
+by the largest active structures, not constant memory within an arbitrary file.
+Output batches respect the session batch size. No nested decoder thread pool is
+created.
 
 Projection builds only requested Arrow columns. Residue grouping/geometry is
 computed with the original neighbors before row filters and limits. Row filters
-remain in DataFusion; global limits remain above the provider. Repeated and
+remain in DataFusion and never prune parsing: a `WHERE` on `source_path`,
+`entry_index` or `data_block` still decodes every entry. Global limits remain
+above the provider. Repeated and
 concurrent collections open fresh cursors. Plan metrics expose sources opened,
 entries decoded, encoded bytes read, and output rows. Counts still decode entries.
 

@@ -126,7 +126,7 @@ See `openspec/changes/refactor-single-thread-partition-reads/`.
 
 ## Development Environment
 
-- Rust toolchain: 1.88.0 (specified in rust-toolchain.toml)
+- Rust toolchain: 1.91.0 (specified in rust-toolchain.toml)
 - The CI workflow runs formatting checks, so ensure code is properly formatted before committing
 
 ## File Format Schemas
