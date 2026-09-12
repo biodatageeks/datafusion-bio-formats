@@ -357,6 +357,13 @@ fn cif_site_specific_modified_residue_parent() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].one_letter_code.as_deref(), Some("S"));
     assert_eq!(result[0].parent_residue_name.as_deref(), Some("SER"));
+    // Label-keyed rows resolve too, and an unrelated row does not leak its parent.
+    let text = "data_modified\nloop_\n_pdbx_struct_mod_residue.label_seq_id\n_pdbx_struct_mod_residue.label_asym_id\n_pdbx_struct_mod_residue.label_comp_id\n_pdbx_struct_mod_residue.parent_comp_id\n9 A ZZZ TYR\n2 A ZZZ THR\nloop_\n_atom_site.label_atom_id\n_atom_site.label_comp_id\n_atom_site.label_asym_id\n_atom_site.label_seq_id\n_atom_site.Cartn_x\n_atom_site.Cartn_y\n_atom_site.Cartn_z\nCA ZZZ A 2 1 2 3\nCA ZZZ A 3 4 5 6\n";
+    let entry = mmcif::parse(text.as_bytes(), &options).unwrap().remove(0);
+    let result = residues(&entry, &options);
+    assert_eq!(result.len(), 1, "unmodified ZZZ is not a peptide");
+    assert_eq!(result[0].parent_residue_name.as_deref(), Some("THR"));
+    assert_eq!(result[0].one_letter_code.as_deref(), Some("T"));
 }
 fn atom_block(name: &str, atoms: usize) -> String {
     let mut s = format!(

@@ -7,6 +7,7 @@ use crate::{
     residue::amino_acid,
 };
 use datafusion::common::Result;
+use std::collections::{HashMap, HashSet};
 fn value<'a>(b: &'a CategoryBlock<'a>, tag: &str, row: usize) -> Option<&'a str> {
     b.columns
         .get(tag)
@@ -63,6 +64,86 @@ pub fn parse(data: &[u8], options: &StructureOptions) -> Result<Vec<NormalizedEn
     }
     Ok(entries)
 }
+#[derive(Default)]
+struct Component<'a> {
+    parent: Option<&'a str>,
+    peptide: bool,
+}
+/// Per-block lookup tables built once, so each atom row resolves its metadata in O(1).
+#[derive(Default)]
+struct BlockMetadata<'a> {
+    asym_entity: HashMap<&'a str, &'a str>,
+    polypeptide_entities: HashSet<&'a str>,
+    components: HashMap<&'a str, Component<'a>>,
+    author_site_parent: HashMap<AuthorSite<'a>, &'a str>,
+    label_site_parent: HashMap<LabelSite<'a>, &'a str>,
+}
+type AuthorSite<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+);
+type LabelSite<'a> = (Option<&'a str>, Option<&'a str>, Option<&'a str>);
+impl<'a> BlockMetadata<'a> {
+    fn index(b: &'a CategoryBlock<'a>) -> Self {
+        let mut m = Self::default();
+        let rows = |tag: &str| b.columns.get(tag).map_or(0, Vec::len);
+        for i in 0..rows("_struct_asym.id") {
+            if let (Some(id), Some(entity)) = (
+                value(b, "_struct_asym.id", i),
+                value(b, "_struct_asym.entity_id", i),
+            ) {
+                m.asym_entity.entry(id).or_insert(entity);
+            }
+        }
+        for i in 0..rows("_entity_poly.entity_id") {
+            if let Some(entity) = value(b, "_entity_poly.entity_id", i)
+                && value(b, "_entity_poly.type", i)
+                    .is_some_and(|s| s.to_ascii_lowercase().starts_with("polypeptide"))
+            {
+                m.polypeptide_entities.insert(entity);
+            }
+        }
+        for i in 0..rows("_chem_comp.id") {
+            if let Some(id) = value(b, "_chem_comp.id", i) {
+                m.components.entry(id).or_insert(Component {
+                    parent: value(b, "_chem_comp.mon_nstd_parent_comp_id", i),
+                    peptide: value(b, "_chem_comp.type", i)
+                        .is_some_and(|s| s.to_ascii_lowercase().contains("peptide")),
+                });
+            }
+        }
+        // First matching row wins, as a linear scan would.
+        for i in 0..rows("_pdbx_struct_mod_residue.parent_comp_id") {
+            let Some(parent) = value(b, "_pdbx_struct_mod_residue.parent_comp_id", i) else {
+                continue;
+            };
+            let auth_seq = value(b, "_pdbx_struct_mod_residue.auth_seq_id", i);
+            if auth_seq.is_some() {
+                m.author_site_parent
+                    .entry((
+                        auth_seq,
+                        value(b, "_pdbx_struct_mod_residue.auth_asym_id", i),
+                        value(b, "_pdbx_struct_mod_residue.auth_comp_id", i),
+                        value(b, "_pdbx_struct_mod_residue.pdb_ins_code", i),
+                    ))
+                    .or_insert(parent);
+            }
+            let label_seq = value(b, "_pdbx_struct_mod_residue.label_seq_id", i);
+            if label_seq.is_some() {
+                m.label_site_parent
+                    .entry((
+                        label_seq,
+                        value(b, "_pdbx_struct_mod_residue.label_asym_id", i),
+                        value(b, "_pdbx_struct_mod_residue.label_comp_id", i),
+                    ))
+                    .or_insert(parent);
+            }
+        }
+        m
+    }
+}
 fn decode(
     b: &CategoryBlock<'_>,
     block_index: usize,
@@ -89,6 +170,7 @@ fn decode(
         entry_id: value(b, "_entry.id", 0).map(str::to_owned),
         ..Default::default()
     };
+    let metadata = BlockMetadata::index(b);
     for row in 0..n {
         let result = (|| -> Result<Atom> {
             let get = |tag: &str| value(b, tag, row);
@@ -105,60 +187,30 @@ fn decode(
                 .to_owned();
             let entity = get("_atom_site.label_entity_id").or_else(|| {
                 let asym = get("_atom_site.label_asym_id")?;
-                let row = b
-                    .columns
-                    .get("_struct_asym.id")?
-                    .iter()
-                    .position(|id| *id == Some(asym))?;
-                value(b, "_struct_asym.entity_id", row)
+                metadata.asym_entity.get(asym).copied()
             });
-            let peptide_entity = b
-                .columns
-                .get("_entity_poly.entity_id")
-                .and_then(|c| c.iter().position(|v| v.is_some() && *v == entity))
-                .and_then(|r| value(b, "_entity_poly.type", r))
-                .is_some_and(|s| s.to_ascii_lowercase().starts_with("polypeptide"));
-            let comp_row = b
-                .columns
-                .get("_chem_comp.id")
-                .and_then(|c| c.iter().position(|v| *v == Some(comp.as_str())));
-            let component_parent = comp_row
-                .and_then(|r| value(b, "_chem_comp.mon_nstd_parent_comp_id", r))
-                .map(str::to_owned);
+            let peptide_entity = entity.is_some_and(|e| metadata.polypeptide_entities.contains(e));
+            let component = metadata.components.get(comp.as_str());
+            let component_parent = component.and_then(|c| c.parent).map(str::to_owned);
             // wwPDB site-specific modifications can supply a parent absent from chem_comp.
-            let site_parent = b
-                .columns
-                .get("_pdbx_struct_mod_residue.parent_comp_id")
-                .and_then(|parents| {
-                    parents.iter().enumerate().find_map(|(i, parent)| {
-                        let auth_seq = value(b, "_pdbx_struct_mod_residue.auth_seq_id", i);
-                        let same_author = auth_seq.is_some()
-                            && auth_seq == get("_atom_site.auth_seq_id")
-                            && value(b, "_pdbx_struct_mod_residue.auth_asym_id", i)
-                                == get("_atom_site.auth_asym_id")
-                            && value(b, "_pdbx_struct_mod_residue.auth_comp_id", i)
-                                == get("_atom_site.auth_comp_id")
-                            && value(b, "_pdbx_struct_mod_residue.pdb_ins_code", i)
-                                == get("_atom_site.pdbx_pdb_ins_code");
-                        let label_seq = value(b, "_pdbx_struct_mod_residue.label_seq_id", i);
-                        let same_label = label_seq.is_some()
-                            && label_seq == get("_atom_site.label_seq_id")
-                            && value(b, "_pdbx_struct_mod_residue.label_asym_id", i)
-                                == get("_atom_site.label_asym_id")
-                            && value(b, "_pdbx_struct_mod_residue.label_comp_id", i)
-                                == get("_atom_site.label_comp_id");
-                        if same_author || same_label {
-                            *parent
-                        } else {
-                            None
-                        }
-                    })
+            let site_parent = metadata
+                .author_site_parent
+                .get(&(
+                    get("_atom_site.auth_seq_id"),
+                    get("_atom_site.auth_asym_id"),
+                    get("_atom_site.auth_comp_id"),
+                    get("_atom_site.pdbx_pdb_ins_code"),
+                ))
+                .or_else(|| {
+                    metadata.label_site_parent.get(&(
+                        get("_atom_site.label_seq_id"),
+                        get("_atom_site.label_asym_id"),
+                        get("_atom_site.label_comp_id"),
+                    ))
                 })
-                .map(str::to_owned);
+                .map(|parent| (*parent).to_owned());
             let parent = site_parent.or(component_parent);
-            let peptide_comp = comp_row
-                .and_then(|r| value(b, "_chem_comp.type", r))
-                .is_some_and(|s| s.to_ascii_lowercase().contains("peptide"));
+            let peptide_comp = component.is_some_and(|c| c.peptide);
             let coord =
                 |tag: &str| float(get(tag), tag)?.ok_or_else(|| error(format!("missing {tag}")));
             Ok(Atom {
