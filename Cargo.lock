@@ -1573,6 +1573,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-bio-format-msa"
+version = "1.12.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "datafusion",
+ "datafusion-bio-format-core",
+ "futures",
+ "futures-util",
+ "log",
+ "memchr",
+ "noodles-bgzf",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "datafusion-bio-format-pairs"
 version = "1.12.1"
 dependencies = [
