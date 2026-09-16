@@ -596,7 +596,10 @@ pub async fn get_remote_stream(
     let object = RemoteObject::open(file_path, object_storage_options).await?;
     match byte_limit {
         Some(limit) => object.stream_range(0..limit as u64).await,
-        None => object.stream().await,
+        // Chunked concurrent reads need the object size (a HEAD). A backend
+        // that refuses it, such as a pre-signed GET-only URL, drops to one
+        // sequential request instead of failing the scan.
+        None => object.stream_with_size_preflight_fallback().await,
     }
 }
 
