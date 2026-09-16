@@ -8,9 +8,11 @@ use noodles_bgzf::r#async::io::Reader as AsyncReader;
 use opendal::layers::{LoggingLayer, RetryLayer, TimeoutLayer};
 use opendal::services::{Azblob, Gcs, Http, S3};
 use opendal::{FuturesBytesStream, Operator};
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::ops::Range;
+use std::sync::{Mutex, OnceLock};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
 use url::Url;
@@ -663,6 +665,50 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
 }
 
+/// The region the environment configures, `AWS_REGION` first, then
+/// `AWS_DEFAULT_REGION`; an empty value counts as unset.
+fn configured_s3_region(region: Option<String>, default_region: Option<String>) -> Option<String> {
+    region
+        .filter(|r| !r.is_empty())
+        .or(default_region.filter(|r| !r.is_empty()))
+}
+
+/// Buckets whose region has already been detected in this process.
+static S3_REGION_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+/// Resolves the bucket's region without a network round trip when the
+/// environment names one, and detects it at most once per bucket otherwise.
+///
+/// The previous code nested `detect_region(..).await` inside `unwrap_or`,
+/// which Rust evaluates eagerly, so the detection request ran on every open
+/// even with `AWS_REGION` set. Every scan opens twice (compression sniff,
+/// then data), each on a fresh connection, so that was two extra round trips
+/// per file before the first byte of content arrived.
+async fn resolve_s3_region(bucket: &str) -> String {
+    if let Some(region) = configured_s3_region(
+        env::var("AWS_REGION").ok(),
+        env::var("AWS_DEFAULT_REGION").ok(),
+    ) {
+        return region;
+    }
+    let cache = S3_REGION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(region) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(bucket)
+    {
+        return region.clone();
+    }
+    let region = S3::detect_region("https://s3.amazonaws.com", bucket)
+        .await
+        .unwrap_or_else(|| "us-east-1".to_string());
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(bucket.to_string(), region.clone());
+    region
+}
+
 /// Reader settings for S3 as `(chunk size in bytes, concurrent fetches)`.
 ///
 /// One fetch keeps a single streaming GET: opendal needs no chunk size for
@@ -724,16 +770,9 @@ impl RemoteObject {
                 max_retries: {max_retries}, \
                 timeout: {timeout}"
                 );
+                let region = resolve_s3_region(bucket_name.as_str()).await;
                 let mut builder = S3::default()
-                    .region(
-                        &env::var("AWS_REGION").unwrap_or(
-                            env::var("AWS_DEFAULT_REGION").unwrap_or(
-                                S3::detect_region("https://s3.amazonaws.com", bucket_name.as_str())
-                                    .await
-                                    .unwrap_or("us-east-1".to_string()),
-                            ),
-                        ),
-                    )
+                    .region(&region)
                     .bucket(bucket_name.as_str())
                     .endpoint(&env::var("AWS_ENDPOINT_URL").unwrap_or_default());
                 if allow_anonymous {
@@ -1197,5 +1236,36 @@ mod s3_reader_settings_tests {
     #[test]
     fn a_zero_chunk_size_falls_back_to_the_default_chunk() {
         assert_eq!(s3_reader_settings(0, 4), (Some(8 * 1024 * 1024), 4));
+    }
+}
+
+#[cfg(test)]
+mod s3_region_tests {
+    use super::configured_s3_region;
+
+    #[test]
+    fn aws_region_wins_over_default_region() {
+        assert_eq!(
+            configured_s3_region(Some("eu-west-1".into()), Some("us-east-1".into())),
+            Some("eu-west-1".into())
+        );
+    }
+
+    #[test]
+    fn default_region_is_used_when_region_is_unset() {
+        assert_eq!(
+            configured_s3_region(None, Some("us-east-1".into())),
+            Some("us-east-1".into())
+        );
+    }
+
+    #[test]
+    fn empty_values_count_as_unset() {
+        assert_eq!(configured_s3_region(Some(String::new()), None), None);
+        assert_eq!(configured_s3_region(None, Some(String::new())), None);
+        assert_eq!(
+            configured_s3_region(Some(String::new()), Some("us-east-1".into())),
+            Some("us-east-1".into())
+        );
     }
 }
