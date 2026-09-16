@@ -663,6 +663,27 @@ fn percent_decode(value: &str) -> String {
     String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
 }
 
+/// Reader settings for S3 as `(chunk size in bytes, concurrent fetches)`.
+///
+/// One fetch keeps a single streaming GET: opendal needs no chunk size for
+/// that, so it also issues no HEAD preflight, which pre-signed URLs and
+/// buckets without HEAD rights depend on. Sequential chunked reads were
+/// measured slower than one stream, so chunking is only worth enabling
+/// together with concurrency; that is what the AWS CLI does. A chunk size
+/// of zero falls back to the 8 MiB default rather than producing empty
+/// range requests.
+fn s3_reader_settings(chunk_size_mib: usize, concurrent_fetches: usize) -> (Option<usize>, usize) {
+    if concurrent_fetches <= 1 {
+        return (None, 1);
+    }
+    let chunk_mib = if chunk_size_mib == 0 {
+        8
+    } else {
+        chunk_size_mib
+    };
+    (Some(chunk_mib * 1024 * 1024), concurrent_fetches)
+}
+
 /// A remotely stored immutable object with bounded read primitives.
 #[derive(Clone, Debug)]
 pub struct RemoteObject {
@@ -696,6 +717,8 @@ impl RemoteObject {
                 log::info!(
                     "Using S3 storage type with parameters: \
                 bucket_name: {bucket_name}, \
+                chunk_size: {chunk_size}, \
+                concurrent_fetches: {concurrent_fetches}, \
                 allow_anonymous: {allow_anonymous}, \
                 enable_request_payer: {enable_request_payer}, \
                 max_retries: {max_retries}, \
@@ -727,7 +750,14 @@ impl RemoteObject {
                     .layer(RetryLayer::new().with_max_times(max_retries)) // Retry up to 5 times
                     .layer(LoggingLayer::default())
                     .finish();
-                (operator, relative_file_path, None, 1)
+                let (reader_chunk, reader_concurrency) =
+                    s3_reader_settings(chunk_size, concurrent_fetches);
+                (
+                    operator,
+                    relative_file_path,
+                    reader_chunk,
+                    reader_concurrency,
+                )
             }
             //FIXME: Currently, Azure Blob Storage does not support anonymous access
             StorageType::AZBLOB => {
@@ -1144,5 +1174,28 @@ mod preflight_tests {
                 "{kind:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod s3_reader_settings_tests {
+    use super::s3_reader_settings;
+
+    #[test]
+    fn a_single_fetch_keeps_one_streaming_get() {
+        // No chunk size => opendal StreamingReader: one GET, no HEAD preflight.
+        assert_eq!(s3_reader_settings(8, 1), (None, 1));
+        assert_eq!(s3_reader_settings(8, 0), (None, 1));
+    }
+
+    #[test]
+    fn concurrent_fetches_enable_chunked_ranged_reads() {
+        assert_eq!(s3_reader_settings(8, 8), (Some(8 * 1024 * 1024), 8));
+        assert_eq!(s3_reader_settings(64, 2), (Some(64 * 1024 * 1024), 2));
+    }
+
+    #[test]
+    fn a_zero_chunk_size_falls_back_to_the_default_chunk() {
+        assert_eq!(s3_reader_settings(0, 4), (Some(8 * 1024 * 1024), 4));
     }
 }
