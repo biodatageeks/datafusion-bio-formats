@@ -702,14 +702,16 @@ async fn resolve_s3_region(bucket: &str) -> String {
     {
         return region.clone();
     }
-    let region = S3::detect_region("https://s3.amazonaws.com", bucket)
-        .await
-        .unwrap_or_else(|| "us-east-1".to_string());
-    cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(bucket.to_string(), region.clone());
-    region
+    // Only a successful detection is remembered: a transient failure must
+    // not pin the fallback region for the rest of the process.
+    let detected = S3::detect_region("https://s3.amazonaws.com", bucket).await;
+    if let Some(region) = &detected {
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(bucket.to_string(), region.clone());
+    }
+    detected.unwrap_or_else(|| "us-east-1".to_string())
 }
 
 /// Reader settings for S3 as `(chunk size in bytes, concurrent fetches)`.
