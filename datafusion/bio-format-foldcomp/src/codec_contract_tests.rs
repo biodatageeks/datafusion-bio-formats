@@ -1,5 +1,5 @@
 //! Offline full-array/identity checks captured by the separate pinned oracle.
-use super::decode;
+use super::decode_native;
 use datafusion_bio_format_structure::StructureOptions;
 use serde_json::Value;
 
@@ -19,7 +19,23 @@ fn float(value: &Value) -> f64 {
 }
 
 #[test]
-fn fcz_matches_pinned_atoms_and_rejections() {
+fn native_fcz_matches_pinned_atoms_and_rejections() {
+    check_contract(decode_native);
+}
+
+#[test]
+fn rust_fcz_matches_pinned_atoms_and_rejections() {
+    check_contract(crate::fcz::decode);
+}
+
+fn check_contract(
+    decode: fn(
+        &[u8],
+        &StructureOptions,
+    ) -> datafusion::common::Result<
+        datafusion_bio_format_structure::model::NormalizedEntry,
+    >,
+) {
     let inputs: Vec<Value> = serde_json::from_str(include_str!(
         "../../../testing/oracles/structure-codecs/inputs.json"
     ))

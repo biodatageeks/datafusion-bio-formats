@@ -27,3 +27,10 @@ pub use table_provider::{EntrySource, StructureTableProvider};
 pub fn error(message: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(message.into())
 }
+
+// Exercise the shared integration suite with Rust Blocks in unit-test builds.
+#[cfg(all(test, feature = "text-formats"))]
+extern crate self as datafusion_bio_format_structure;
+#[cfg(all(test, feature = "text-formats"))]
+#[path = "../tests/structures.rs"]
+mod rust_provider_tests;

@@ -85,8 +85,8 @@ cross-thread movement, deferred per-block UTF-8 errors, contextual syntax errors
 truncations, delimiter mutations and 4,096 deterministic arbitrary-byte inputs
 are tested. These short mutation runs are not the planned sustained fuzz gate.
 
-R1.1/R1.2 are implemented. R1.3/R1.4 retain open provider-routing/integration
-work; R1.5/R1.6 retain the production switch/removal gates.
+At this checkpoint R1.1/R1.2 were implemented. The next checkpoint below
+completes candidate provider routing; R1.5/R1.6 retain switch/removal gates.
 
 ## 2026-09-20: Checked Rust FCZ reader and inverse discretization
 
@@ -111,14 +111,71 @@ Both crate suites now pass 40 tests. Clippy with all targets/features and denied
 warnings, formatting, the structure feature-off test, and Foldcomp with text
 formats also pass locally. R2.1–R2.4 and R3.1 are implemented.
 
+## 2026-09-20: Full Rust reconstruction and candidate provider integration
+
+Implemented forward backbone NeRF, anchor segmentation, reverse correction,
+weighted joins, all 20 residue side chains plus UNK, OXT and normalized atom
+mapping. The implementation preserves legacy ordering, Float32-to-Float64
+widening, numbering and the preceding-residue proline bond-length rule.
+The residue geometry generator reads an immutable upstream header through Git,
+exports exact Float32 bits, and records its source hash. Translated algorithms
+and constants retain Foldcomp's MIT license and attribution.
+
+Compiler inspection also establishes the norm's Float64 intermediates, Float32
+`acos`, and contraction order in cross/dot products. Explicit Rust operations
+reproduce the reference without introducing fast-math or changing tolerances.
+Both debug tests and the native optimized reference execute on macOS arm64;
+Rust release/platform characterization remains pending.
+
+The same 11 structure and 10 Foldcomp provider tests now run twice: ordinary
+integration builds retain native backends, and unit-test builds route through the
+Rust candidates. This covers lazy blocks, late block errors, metadata, input
+bounds, projections, selectors, repeated execution, zero/K decoded payloads and
+corrupt unselected records. No public backend option or fallback is introduced.
+
+Local reconstruction evidence:
+
+| Input/check | Result |
+| --- | --- |
+| 275 frozen small/1UBQ cases | Acceptance/errors, full identities, coordinates and exact B factors pass |
+| 24 database entries (131–157 residues) | 27,131 atoms / 81,393 components; median/p95/p99/max coordinate error all 0 |
+| 1,040-residue mixed chain, 18 anchors | 8,685 atoms; median/p95/p99/max coordinate error all 0 |
+| 4,096-residue single segment | 16,384 atoms; median/p95/p99/max coordinate error all 0 |
+| Residue geometry | Angle tolerances, null masks, completeness and connectivity pass |
+| Degenerate/extreme fields | Collinear/coincident frames and overflow reject; finite extreme minima retain native acceptance |
+| Deterministic FCZ mutations | 4,096 three-byte mutations; no panic or non-finite accepted output |
+| Generated tables and stress fixtures | Reproduced from pinned source; hashes verified |
+
+Database/stress comparisons use the retained native adapter, whose vendored
+source is unchanged from the pinned baseline. The separate process reproduces
+frozen full-output hashes for database/stress fixtures; large decoded arrays
+are not duplicated in Git. The two stress inputs total about 57 KB. These
+bounded mutation runs are not sustained fuzzing.
+
+R1.3/R1.4 and R3.2–R3.5 now have candidate implementation and local acceptance
+evidence. Final checks on this host:
+
+| Check | Result |
+| --- | --- |
+| Combined structure/Foldcomp suites | 66 passed |
+| Structure without default features | 6 passed |
+| Foldcomp alone, with/without text formats | 32 passed in each configuration |
+| Both crates, all targets/features, Clippy with denied warnings | Passed |
+| Rust formatting, Python Ruff, diff whitespace | Passed |
+| Generated residue table and long-chain fixture verification | Passed |
+| Strict OpenSpec validation | Passed |
+
+Full workspace, Rust release, supported-platform and consumer wheel checks
+remain outside this local candidate checkpoint.
+
 ## Remaining work
 
 R0.7 is open: platform reference characterization, release benchmark cases and
 noise/repetition budgets, a cross-platform B-factor ceiling, and re-estimation.
-Both production backends still use the existing C++ implementations. The CIF
-candidate is implemented and tested but not switched on. No CI workflow,
+Both production backends still use the existing C++ implementations. Both
+Rust candidates are implemented and exercised through test-only provider routing. No CI workflow,
 polars-bio pin, PR #461, published artifact or remote branch is changed.
 
-Next implementation unit: full FCZ reconstruction,
-followed by production integration after the acceptance gates pass.
+Next stages are sustained robustness testing, release performance/RSS, supported
+platform verification, then production cutover/removal and consumer integration.
 Do not equate local oracle success with full fuzz/performance/platform gates.

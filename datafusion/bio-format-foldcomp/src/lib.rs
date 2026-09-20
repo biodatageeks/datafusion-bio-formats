@@ -64,3 +64,10 @@ impl TableProvider for FoldcompTableProvider {
         self.inner.scan(state, projection, filters, limit).await
     }
 }
+
+// Reuse the exact integration suite against the test-only Rust provider path.
+#[cfg(test)]
+extern crate self as datafusion_bio_format_foldcomp;
+#[cfg(test)]
+#[path = "../tests/foldcomp.rs"]
+mod rust_provider_tests;

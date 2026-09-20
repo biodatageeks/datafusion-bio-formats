@@ -45,6 +45,18 @@ unsafe fn string(p: *const c_char) -> Result<String> {
 }
 /// Decode validated FCZ bytes directly into the common model; no PDB rounding step.
 pub fn decode(data: &[u8], options: &StructureOptions) -> Result<NormalizedEntry> {
+    // Run shared provider tests through Rust while production cutover is gated.
+    #[cfg(test)]
+    {
+        crate::fcz::decode(data, options)
+    }
+    #[cfg(not(test))]
+    {
+        decode_native(data, options)
+    }
+}
+
+pub(crate) fn decode_native(data: &[u8], options: &StructureOptions) -> Result<NormalizedEntry> {
     // SAFETY: valid borrowed byte slice; the synchronous adapter catches C++ exceptions.
     let h = Handle(
         NonNull::new(unsafe { bio_fc_decode(data.as_ptr(), data.len(), options.max_atoms) })

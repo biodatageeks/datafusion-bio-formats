@@ -46,8 +46,8 @@ fn atom_and_residue_batches_match_retained_mapping_exactly() {
                 level,
                 ..Default::default()
             };
-            let native = mmcif::parse(data, &options).unwrap();
-            let rust = mmcif::parse_rust_candidate(data, &options).unwrap();
+            let native = mmcif::parse_native_reference(data, &options).unwrap();
+            let rust = mmcif::parse(data, &options).unwrap();
             assert_eq!(native.len(), rust.len());
             let schema = schema::schema(&options);
             let projection = (0..schema.fields().len()).collect::<Vec<_>>();

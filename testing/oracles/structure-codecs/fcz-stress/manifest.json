@@ -1,0 +1,49 @@
+{
+  "formats_revision": "fd17754c55c63394717967c18b7a45cf8aeb48ee",
+  "native_archive_sha256": "ae0fd5043ffaf9925c391d90977f8aa25713ab5feb0799addb86b699345973a6",
+  "driver_sha256": "109a446521deb686187e2d328d540608c9ef8d96321821dd9a451c6ad5a52150",
+  "generator_sha256": "2620232a32792fa105dc81cdfbf6513e269d725fc93846c5a33d7070815e4e84",
+  "corpus_sha256": "2b79f22a33bcc52a15b07f68d8a6eae9eb48108978a96edf5e58462c90c42480",
+  "cases": [
+    {
+      "name": "long_mixed",
+      "input_sha256": "e7c7cfdfd260d9df548aa3dda3749d926c3efb9abbf1220ea55d5c8409947d74",
+      "output_sha256": "f7079181f43ba12b4e8d85705c4ad1c28a6815670c13c6d2f02c69fa3f469a6a",
+      "atoms_sha256": "80c9e27468417a32a9f919f750c722f3b0445f14d595f4e80992ace6faf2e39b",
+      "residues": 1040,
+      "anchors": [
+        0,
+        64,
+        128,
+        192,
+        256,
+        320,
+        384,
+        448,
+        512,
+        576,
+        640,
+        704,
+        768,
+        832,
+        896,
+        960,
+        1024,
+        1039
+      ],
+      "atoms": 8685
+    },
+    {
+      "name": "long_segment",
+      "input_sha256": "f3e6a7ae5e904b40a386f863a30966bd790423679067759cdef5caa278f45992",
+      "output_sha256": "9a3e96cebd79443e877f404f689c4df7d9241fcc2151fcbb89622e20a5209f47",
+      "atoms_sha256": "660a7832fef0e23f0db6e406c84d6e13e18da581ab5bcefdea9139b26ae5cfe3",
+      "residues": 4096,
+      "anchors": [
+        0,
+        4095
+      ],
+      "atoms": 16384
+    }
+  ]
+}

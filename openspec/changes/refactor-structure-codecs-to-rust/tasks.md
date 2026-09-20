@@ -21,14 +21,15 @@ Gate: reproducible baseline, concrete internal module designs and explicit accep
 
 - [x] R1.1 Add repository-owned Rust tokenizer/document modules with raw string/null provenance, original block labels and bounded storage.
 - [x] R1.2 Implement quoted/multiline values, loops/scalars, case-insensitive tags, multiple blocks, comments, syntax errors and measured baseline extensions.
-- [ ] R1.3 Adapt `mmcif::Blocks` and category views while retaining the existing identifier, metadata, atom and residue mapping.
-- [ ] R1.4 Pass raw-parser differential tests, existing structure/policy tests, metadata-after-atoms cases and independent numerical/identity checks.
+- [x] R1.3 Adapt `mmcif::Blocks` and category views while retaining the existing identifier, metadata, atom and residue mapping.
+- [x] R1.4 Pass raw-parser differential tests, existing structure/policy tests, metadata-after-atoms cases and independent numerical/identity checks.
 - [ ] R1.5 Verify feature-off/shared-model builds, input limits, contextual errors and resource release; switch production mmCIF parsing only after its gate passes.
 - [ ] R1.6 Remove the Gemmi bridge/vendor build and unused direct build dependency; update source/provenance documentation without discarding applicable notices.
 
-R1.3/R1.4 have partial evidence: a test-only adapter uses the existing mmCIF
-mapping; all raw observations and complete atom/residue Arrow tables match.
-Production `Blocks`/provider routing and its full integration gate remain open.
+R1.3/R1.4 are verified in the candidate configuration: unit-test providers use
+Rust `Blocks`, while ordinary builds retain native parsing until R1.5/R1.6.
+The same provider suite runs against both configurations, including block-at-a-time
+errors, input limits, identifiers, metadata, Arrow mapping and independent geometry.
 
 ## R2. Parse FCZ bytes safely
 
@@ -40,11 +41,17 @@ Production `Blocks`/provider routing and its full integration gate remain open.
 ## R3. Reconstruct full Foldcomp output
 
 - [x] R3.1 Port inverse discretization with baseline Float32 semantics and unit-test all decoded parameter arrays.
-- [ ] R3.2 Port backbone NeRF construction, anchor segmentation, reverse correction and segment joins; pass short/long/multi-anchor fixtures.
-- [ ] R3.3 Port residue tables and full side-chain reconstruction with attribution; preserve unknown-residue behavior, atom ordering, OXT, numbering, chain and B factors.
-- [ ] R3.4 Return the existing `NormalizedEntry` through `codec::decode`; retain common Float64 widening, normalization and residue/geometry behavior.
-- [ ] R3.5 Pass full decoded-array parity, coordinate/angle/null/connectivity gates and all database selector tests, including zero/K decode counts and corrupt unselected records.
+- [x] R3.2 Port backbone NeRF construction, anchor segmentation, reverse correction and segment joins; pass short/long/multi-anchor fixtures.
+- [x] R3.3 Port residue tables and full side-chain reconstruction with attribution; preserve unknown-residue behavior, atom ordering, OXT, numbering, chain and B factors.
+- [x] R3.4 Return the existing `NormalizedEntry` through `codec::decode`; retain common Float64 widening, normalization and residue/geometry behavior.
+- [x] R3.5 Pass full decoded-array parity, coordinate/angle/null/connectivity gates and all database selector tests, including zero/K decode counts and corrupt unselected records.
 - [ ] R3.6 Switch the production codec after acceptance and remove the Foldcomp FFI/bridge/vendor build; preserve applicable translated-code and fixture notices.
+
+R3.2–R3.5 are verified locally with test-only Rust provider routing. Coverage
+includes the frozen small corpus, all 24 database records, 1,040-/4,096-residue
+stress fixtures, all residue tables, selectors and decode-count metrics. The
+production switch remains gated by R0.7/R4; these checkmarks do not claim platform,
+sustained fuzz, release-performance or wheel acceptance.
 
 ## R4. Harden and validate both production paths
 
@@ -72,6 +79,8 @@ cargo test -p datafusion-bio-format-foldcomp --features text-formats
 cargo fmt --all -- --check
 cargo clippy -p datafusion-bio-format-structure -p datafusion-bio-format-foldcomp --all-targets --all-features -- -D warnings
 python testing/oracles/structure/generate.py --check
+python3 testing/oracles/structure-codecs/foldcomp_tables.py --check
+python3 testing/oracles/structure-codecs/foldcomp_stress.py --check
 openspec validate refactor-structure-codecs-to-rust --strict
 ```
 

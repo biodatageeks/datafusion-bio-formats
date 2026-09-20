@@ -1,8 +1,11 @@
 //! Raw mmCIF categories preserve label/auth namespaces and quoted missing tokens.
+#[cfg(test)]
+use crate::cif::{CategoryBlock, Document};
+#[cfg(not(test))]
+use crate::native_cif::{CategoryBlock, Document};
 use crate::{
     error,
     model::{Atom, NormalizedEntry},
-    native_cif::{CategoryBlock, Document},
     options::StructureOptions,
     residue::amino_acid,
 };
@@ -30,7 +33,7 @@ fn float(s: Option<&str>, tag: &str) -> Result<Option<f64>> {
     Ok(v)
 }
 /// A parsed document whose data blocks decode one at a time, so a multi-block source never
-/// holds more than one normalized entry alongside the native document.
+/// holds more than one normalized entry alongside the parsed document.
 pub struct Blocks(Document);
 impl Blocks {
     pub fn parse(data: &[u8]) -> Result<Self> {
@@ -256,14 +259,13 @@ fn decode(
     Ok(Some(entry))
 }
 
-/// Exercise the candidate parser with the retained mapping without changing
-/// the provider's production backend during migration.
+/// Retain native mapping comparisons while unit-test providers use Rust.
 #[cfg(test)]
-pub(crate) fn parse_rust_candidate(
+pub(crate) fn parse_native_reference(
     data: &[u8],
     options: &StructureOptions,
 ) -> Result<Vec<NormalizedEntry>> {
-    let document = crate::cif::Document::parse(data)?;
+    let document = crate::native_cif::Document::parse(data)?;
     let mut entries = Vec::new();
     for index in 0..document.block_count() {
         let view = document.block(index)?;

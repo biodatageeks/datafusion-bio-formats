@@ -215,3 +215,13 @@ The Rust candidate therefore explicitly uses `mul_add`; all captured restored
 parameter arrays match bit-for-bit. The earlier warning about incidental fusion
 remains applicable: contraction decisions must follow measured reference
 behavior. This observation does not establish other-platform compatibility.
+
+### Reconstruction numeric evidence (2026-09-20)
+
+The reference `norm` uses separate Float64 squares/additions/square root and
+narrows once; `angle` uses Float32 dot/square root/acos followed by Float64
+conversion to degrees. Clang arm64 fuses the first dot-product pair as
+`x.mul_add(x, y*y)`, then adds the z product with fusion. Cross products and
+NeRF matrix accumulation also contract. The candidate encodes these decisions
+explicitly, matching all 24 database records and both long-chain probes with
+zero measured coordinate drift locally. This is not a cross-platform promise.

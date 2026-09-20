@@ -14,6 +14,8 @@ installation are needed. Run from the repository root:
 ```sh
 python3 testing/oracles/structure-codecs/capture.py --check
 python3 testing/oracles/structure-codecs/cif_probes.py --check
+python3 testing/oracles/structure-codecs/foldcomp_tables.py --check
+python3 testing/oracles/structure-codecs/foldcomp_stress.py --check
 python3 testing/oracles/structure-codecs/reference.py cif testing/data/structure/1ubq.cif
 python3 testing/oracles/structure-codecs/reference.py fcz testing/data/structure/1ubq.fcz
 python3 testing/oracles/structure-codecs/reference.py tables
@@ -54,6 +56,13 @@ check does not replace the migration's numerical-tolerance/platform gates.
   cases, including keyword-adjacent comments, context-sensitive save-frame
   endings, quoted/unquoted control and UTF-8 bytes. Both the native and Rust
   candidate parsers run these observations in offline tests.
+- `foldcomp_tables.py` / `export_foldcomp_tables.cpp`: export exact residue
+  geometry bits and predecessor indices from the immutable Foldcomp header,
+  generating `src/fcz/tables.rs`; `--check` also requires rustfmt on PATH.
+- `foldcomp_stress.py` / `fcz-stress/`: 1,040 mixed residues with 18 anchors and
+  a 4,096-residue single segment. The independent packer constructs the inputs;
+  the pinned process freezes full-output/atom hashes and small summaries.
+  Rust tests compare complete arrays with the retained native adapter.
 - `check_contract.py`: compares handwritten nulls, packed integers, residue
   identities, counts, numbering and analytical B factors. It also checks all
   602 1UBQ decoded atom identities/coordinates against the pre-existing,
@@ -91,7 +100,9 @@ The repository-owned parser candidates are compiled only in unit tests during
 migration; they do not yet replace either production backend.
 The concrete interfaces, measured compatibility rules, layout and algorithm
 mapping are in [BASELINE.md](../../../openspec/changes/refactor-structure-codecs-to-rust/BASELINE.md).
-Long-chain/degenerate-geometry coverage, fuzz budgets, release performance,
-other platforms, consumer wheels and a cross-platform B-factor tolerance
-remain open. The captured error strings document the reference; future Rust
+Long-chain and degenerate-frame regressions now supplement the small corpus.
+Sustained fuzz budgets, release performance/RSS, other platforms, consumer wheels
+and a cross-platform B-factor tolerance remain open. Shared provider suites also
+run in unit-test builds with candidate routing; ordinary integration builds keep
+the native backends until the cutover gate. The captured error strings document the reference; future Rust
 errors must retain useful source/block context but need not copy Gemmi wording.
