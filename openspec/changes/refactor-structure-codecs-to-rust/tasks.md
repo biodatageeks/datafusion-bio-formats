@@ -3,7 +3,7 @@
 The design defines stage gates and the immutable baseline. Completed local
 work is checked below; [IMPLEMENTATION.md](IMPLEMENTATION.md) records measured
 evidence and [BASELINE.md](BASELINE.md) records the concrete contract/design.
-R0.7 and the production replacement stages remain open.
+Baseline characterization is complete; production replacement stages remain open.
 
 ## R0. Freeze the contract and internal Rust design
 
@@ -13,7 +13,7 @@ R0.7 and the production replacement stages remain open.
 - [x] R0.4 Expand the small hashed corpus to cover quoting/nulls/blocks/models/metadata and all supported residue codes, multi-anchor chains, OXT, B factors and malformed FCZ fields. Document coverage gaps explicitly.
 - [x] R0.5 Design the repository-owned CIF tokenizer/document API, raw-value representation, contextual errors and bounded storage; validate the design against syntax/metadata fixtures and record source provenance.
 - [x] R0.6 Map the required upstream Foldcomp algorithms and residue constants to internal Rust modules, including anchor correction, side chains and numeric semantics; record attribution for translated portions.
-- [ ] R0.7 Capture supported-platform reference results, current numerical tolerances including B factors, release benchmarks and budgets; re-estimate the remaining work.
+- [x] R0.7 Capture supported-platform reference results, current numerical tolerances including B factors, release benchmarks and budgets; re-estimate the remaining work.
 
 Gate: reproducible baseline, concrete internal module designs and explicit acceptance criteria.
 
@@ -63,9 +63,11 @@ sustained fuzz, release-performance or wheel acceptance.
 - [ ] R4.6 Update `.github/workflows/structures.yml` for Rust robustness checks and retained independent oracles; retire obsolete C++ sanitizer jobs only after replacement coverage exists.
 
 R4 now has source-identical ASan/libFuzzer targets, separate-process comparisons
-on four targets, a 93-case paired release benchmark and a five-platform CI matrix.
+on all five targets, 93-case paired release measurements on macOS/Linux, and a
+five-platform CI matrix. R0.7 freezes the baseline and budgets; it does not claim
+that noisy or regressing benchmark cases passed their R4 acceptance gate.
 These tasks stay open: smoke runs do not meet the 24-CPU-hour decoder budgets,
-most local benchmark cases are noisy, Windows/full hosted suites are pending,
+the isolated Arrow regression and some benchmark cases remain unresolved,
 and native production paths have not been retired. See the latest checkpoint
 in [IMPLEMENTATION.md](IMPLEMENTATION.md) for evidence and scope.
 

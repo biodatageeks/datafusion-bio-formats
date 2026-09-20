@@ -1,7 +1,7 @@
 # R0 contract and internal design
 
 Recorded 2026-09-20 on branch `feat/rust-structure-codecs`. This document closes
-the local source/design/fixture work and identifies the remaining R0 gate.
+the source/design/fixture and platform/measurement baseline work.
 Actual runs are recorded separately in [IMPLEMENTATION.md](IMPLEMENTATION.md).
 
 ## Revisions and inherited requirements
@@ -191,16 +191,21 @@ Retain applicable Foldcomp MIT copyright/license notices for translated
 algorithms/constants. The upstream sources remain the attribution authority;
 changing language does not remove attribution obligations.
 
-## Remaining gate
+## Remaining acceptance gates
 
 The local reproducible harness, corpus and internal interfaces are in place.
-R0.7 remains open for completing the release baseline measurements.
-The four measured Linux/macOS targets now match their own reference with zero
-coordinate and B-factor drift over 769 cases. Intel runs on this ARM host use
-emulation, and the probes do not substitute for full provider/wheel tests.
+R0.7 now has five-platform reference observations, release measurements and
+frozen budgets. The four measured Linux/macOS targets match their own reference
+with zero coordinate and B-factor drift over 769 cases. Windows stays below the
+same ceilings, as recorded below. The initial Intel runs on this ARM host use
+emulation; the subsequent hosted probes use the supported runner architectures.
+Core probes do not substitute for full provider/wheel tests.
 Exact B-factor comparison is retained per target; cross-target bitwise equality
 is not required. Benchmark inputs/repetitions/noise budgets are frozen in the
 [benchmark protocol](../../../testing/benchmarks/structure-codecs/README.md).
+Linux completes all 28 CIF cases within budget; FCZ has an isolated Arrow timing
+regression and noisy query cases requiring further investigation. Recording these
+observations completes baseline characterization, not performance acceptance.
 
 Uncovered before production cutover: broader realistic long-chain and
 threshold-sensitive peptide-link cases, sustained fuzz budgets,

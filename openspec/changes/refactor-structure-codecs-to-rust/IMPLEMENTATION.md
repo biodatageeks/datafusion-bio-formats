@@ -236,14 +236,70 @@ OpenSpec validation pass.
 
 ## Remaining work
 
-Both production backends still use C++. R0.7/R4 remain open for Windows and full
-hosted results, stable performance/RSS including storage/consumer cases, sustained
-fuzz campaigns and broader workspace/distribution checks. The new CI is ready
-to gather hosted evidence. No polars-bio pin, PR #461 or published package is
-changed by this checkpoint.
+Both production backends still use C++. R4 remains open for complete hosted and
+workspace/distribution checks, stable performance/RSS including storage/consumer
+cases, and sustained fuzz campaigns. No polars-bio pin, PR #461 or published
+package is changed by these checkpoints.
 
 Re-estimate after the implemented candidates: allow roughly 3–6 engineering days
 for remaining validation, numerical/performance findings and cutover, then 2–4
 for consumer/wheel integration, plus review and campaign wall time. This estimate
 assumes no new format or numerical failure; the 24-CPU-hour decoder budgets still
 have to be measured, and noisy benchmarks cannot be counted as acceptance.
+
+## 2026-09-20: Hosted reference profiles and Linux release measurements
+
+R0.7 baseline characterization is complete. All five
+[hosted core comparisons](../../../testing/oracles/structure-codecs/platform-results/2026-09-20-hosted.json)
+pass 769 cases: Linux/macOS coordinate drift is zero, Windows x64/MSVC reaches
+1.1444091796875e-5 angstrom, and B factors match exactly on all targets. The
+1e-4 coordinate ceiling remains unchanged. Native Intel runners supplement
+the earlier emulated measurements.
+
+The first full Linux ARM64 job identified a legacy build-mode difference: GCC's
+unoptimized C++ adapter does not contract the same expressions as the optimized
+reference. The candidate matched the pinned reference, but the unoptimized native
+adapter differed in B-factor bits and by 0.01792 angstrom on the mixed long chain.
+Commit `1be733a` pins only Foldcomp's test profile to optimization level 2 while
+retaining debug assertions and overflow checks. Production dev/release profiles
+and the Rust numerical implementation are unchanged. The temporary override is
+documented in [BASELINE.md](BASELINE.md) and must be removed with the native
+test adapter. The corrected Linux x86_64/ARM64 full jobs pass, including release,
+provider, feature and Clippy checks; other hosted jobs were still finishing when
+this checkpoint was recorded.
+
+[Linux ARM64 release samples](../../../testing/benchmarks/structure-codecs/results/2026-09-20-linux-arm64.json)
+cover the same 93 cases and nine-sample protocol. Eighty-five cases are within the
+local budget, seven are noisy, and one isolated residue-to-Arrow case after mixed
+long-chain decoding regresses by 17.7%. All 28 CIF cases are within budget. The
+[one-second diagnostic](../../../testing/benchmarks/structure-codecs/results/2026-09-20-linux-arm64-arrow-diagnostic.json)
+repeats that isolated finding at 10.6%; corresponding full pipeline/query cases
+remain within budget. These observations do not close the whole performance
+gate. Measurements are from a Linux ARM64 Docker VM; image/core-array provenance
+and all samples are retained.
+
+Broader local checks now include whole-workspace Clippy with all targets/features
+and denied warnings, 32 Foldcomp tests with the corrected test profile, and the
+40 release library tests executed directly in Linux ARM64. All pass. The default
+`cargo test --workspace` run also passes: 1,982 tests across 126 suites, with ten
+ignored tests. Optional external oracles for unrelated formats were not forced
+on in this local run; it does not substitute for the repository CI's required
+external-oracle environment.
+
+The new sustained runner executes prebuilt ASan binaries directly and measures
+only child fuzzer CPU. Corpus/report work and compilation are excluded. It records
+source/binary/lock hashes, seeds, actual executions and per-segment CPU time.
+Aggregation requires every decoder/shard, matching source/compiler/revision and
+the requested measured CPU budgets. Local short checks demonstrate successful
+aggregation and rejection of insufficient CPU or absent fuzzer statistics.
+The optional workflow campaign uses eight three-CPU-hour shards per decoder;
+short harness checks never count as the 24-hour acceptance run.
+
+The [hosted campaign smoke](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35519673026)
+passes two ten-CPU-second shards per target and the aggregation check: 26.27
+measured CIF CPU seconds / 68,532 executions and 26.99 FCZ CPU seconds / 9,591
+executions. The full [sustained campaign](https://github.com/biodatageeks/datafusion-bio-formats/actions/runs/35519841823)
+has been dispatched against `f96d1b0d82b709f161196c3b426f09bdc3d2b0f1`, requesting
+eight 10,800-CPU-second shards per decoder. It remains pending until every shard
+and the final measured-budget aggregation succeed. No sustained acceptance is
+claimed by dispatching it.
